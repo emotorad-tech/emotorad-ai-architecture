@@ -1,0 +1,14 @@
+id: battery-wont-power-on
+title: Bike will not power on
+topic: battery
+symptoms: [wont_turn_on, no_power, dead, display blank, nothing happens]
+applies_to: {}
+source: Battery care manual §4.2
+media:
+  - url: https://cdn.emotorad.test/kb/battery-seating.png
+    caption: Battery seated in the frame mount with the latch closed
+steps:
+  - Turn the battery key to ON, then press and hold the display power button for three seconds.
+  - Check the battery is seated in the frame mount and the latch is fully closed.
+  - Charge for thirty minutes and try again. A deeply discharged pack will not wake instantly.
+escalate_when: The display stays blank after charging for thirty minutes.

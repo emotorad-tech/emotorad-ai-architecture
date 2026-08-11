@@ -1,0 +1,16 @@
+id: motor-no-assist
+title: No pedal assist
+topic: motor
+symptoms: [no_assist, pas not working, no power assist, motor not running, pedal assist dead,
+           chal nahi rahi, मोटर नहीं चल]
+applies_to: {}
+source: Drive system manual §3.1
+media:
+  - url: https://cdn.emotorad.test/kb/pas-sensor.png
+    caption: Pedal assist sensor and magnet ring alignment at the crank
+steps:
+  - Check the assist level on the display is not set to zero.
+  - Confirm the battery has charge and the display is powered.
+  - Check the pedal assist sensor magnet ring at the crank has not slipped out of alignment.
+  - Check the brake levers are fully released. Both brakes cut motor power by design, and a sticking lever cuts it permanently.
+escalate_when: Assist is still absent with charge, a non-zero assist level and both brake levers free.

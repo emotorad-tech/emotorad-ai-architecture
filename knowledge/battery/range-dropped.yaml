@@ -1,0 +1,14 @@
+id: battery-range-dropped
+title: Range has dropped
+topic: battery
+symptoms: [degraded_range, low_range, drains_fast, less backup, battery draining quickly,
+           backup kam ho gaya, kam chal rahi, बैकअप कम]
+applies_to: {}
+source: Battery care manual §4.3
+media: []
+steps:
+  - Compare against the rated range at the same assist level. Range quoted on the spec sheet is measured at the lowest assist level, on flat ground, with a 70kg rider.
+  - Check tyre pressure. Under-inflated tyres are the most common cause of sudden range loss and cost nothing to fix.
+  - Note the weather. Cold weather reduces usable capacity temporarily and it returns as it warms.
+  - A gradual decline over years is normal cell ageing, not a fault.
+escalate_when: Range has halved suddenly with no change in terrain, load or weather.

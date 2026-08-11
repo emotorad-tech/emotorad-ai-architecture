@@ -1,0 +1,12 @@
+id: motor-cuts-out
+title: Motor cuts out while riding
+topic: motor
+symptoms: [cuts_out, power cuts, motor stops, jerking, intermittent power, cutting off]
+applies_to: {}
+source: Drive system manual §3.4
+media: []
+steps:
+  - Check the battery is latched firmly in the frame mount. Vibration on a rough road can break the contact intermittently, which is by far the most common cause.
+  - Note whether it cuts on bumps specifically — that points at the connector rather than the motor.
+  - Check whether it happens as the battery gets low. The BMS cuts power to protect the cells near empty, which is by design.
+escalate_when: Power cuts on smooth road with a well-charged, firmly latched battery.

@@ -1,0 +1,16 @@
+id: battery-wont-charge
+title: Battery will not charge
+topic: battery
+symptoms: [wont_charge, not_charging, no_charge, charger light not coming on, charger not working,
+           charge nahi ho rahi, charger laga diya, चार्ज नहीं, बैटरी चार्ज]
+applies_to: {}
+source: Battery care manual §4.1
+media:
+  - url: https://cdn.emotorad.test/kb/charger-seating.png
+    caption: Charger barrel fully seated in the battery port
+steps:
+  - Confirm the wall socket works by plugging in another appliance.
+  - Check the charger barrel is pushed fully into the battery port until it stops.
+  - Turn the battery key to the ON position.
+  - Charge somewhere between 10C and 40C. The BMS blocks charging outside that band, which is the single most common cause of "it just will not charge" in summer.
+escalate_when: The charger LED still does not turn red after all four steps.

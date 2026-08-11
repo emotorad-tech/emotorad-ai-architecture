@@ -1,0 +1,34 @@
+{
+  "message": "Order data fetched successfully.",
+  "orders": [
+    {
+      "id": "9A99AAA9-99A9-99AA-99AA-99AAAAA9999A",
+      "order_code": "AAA/9999/999/9/9",
+      "invoice_code": "99-AA-9999-99999",
+      "customer_name": "AAAAA AAAAA AAAAAA",
+      "mobile": "9999999999",
+      "email": "AAAAAAAAAAA.AAA@AAAAA.AAA",
+      "docket_number": "999999999999999",
+      "courier_name": "AAAAAAAAAA AAAAAAAAA (AAAAAAAA)",
+      "awb_number": "None",
+      "dispatch_date": "9999-99-99",
+      "delivered_date": "9999-99-99",
+      "invoice_at": "9999-99-99 99:99:99.999999+99:99",
+      "order_at": "9999-99-99 99:99:99.999999+99:99",
+      "oms_status": "DELIVERED",
+      "order_status": "Delivered",
+      "customer_identity": "999",
+      "order_items": [
+        {
+          "id": "999A9999-9999-9A99-AAAA-99AAA99A9999",
+          "price": 999.0,
+          "order_id": "9A99AAA9-99A9-99AA-99AA-99AAAAA9999A",
+          "product_name": "AAAA - AAAAA AAA - AA99AA99A99",
+          "qty": "9"
+        }
+      ],
+      "tracking_link": "<url>"
+    },
+    "<+46 more>"
+  ]
+}

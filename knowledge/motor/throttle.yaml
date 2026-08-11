@@ -1,0 +1,13 @@
+id: motor-throttle
+title: Throttle not responding
+topic: motor
+symptoms: [throttle, throttle not working, accelerator dead, twist grip not working]
+applies_to: {throttle: "yes"}
+source: Drive system manual §3.3
+media: []
+steps:
+  - Confirm your model has a throttle. Not every EMotorad model ships with one, and several markets do not permit it.
+  - Check the assist level is not zero. On most models the throttle is disabled at zero assist.
+  - Release both brake levers fully.
+  - Check the throttle connector at the handlebar is seated.
+escalate_when: The throttle is fitted, assist is non-zero, brakes are free and it still does nothing.

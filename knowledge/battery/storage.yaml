@@ -1,0 +1,13 @@
+id: battery-storage
+title: Storing the bike for a long period
+topic: battery
+symptoms: [storage, not using for months, long time no use, winter storage]
+applies_to: {}
+source: Battery care manual §6.1
+media: []
+steps:
+  - Store the pack at roughly 60 percent charge, not full and not empty. Both extremes age cells faster.
+  - Top up to about 60 percent every two months.
+  - Store indoors, out of direct sun, ideally between 10C and 25C.
+  - Never store a fully discharged pack. It can fall below the point where the BMS will allow a recharge at all.
+escalate_when: The pack has been stored fully discharged for more than a month and will not now accept a charge.

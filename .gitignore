@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+logs/
+.DS_Store
+.pytest_cache/
+*.egg-info/
+
+# Never commit real customer data. Fixtures must be synthetic.
+# API *shapes* (docs/api-shapes/) are masked and safe — real exports are not.
+*.xlsx
+*.xls
+*.csv
+*.sql
+*.dump
+# ...except the dealer flow spec, which is documentation, not data.
+!docs/dealer-whatsapp-flows/*.xlsx
+
+# Never commit credentials.
+.env
+.env.*
+*.pem
+*secret*
+*credential*

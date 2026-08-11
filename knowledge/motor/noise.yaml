@@ -1,0 +1,14 @@
+id: motor-noise
+title: Motor is making a noise
+topic: motor
+symptoms: [noise, noisy, grinding, whining, clicking, awaz, sound from motor,
+           awaz aa rahi, आवाज आ रही, मोटर आवाज]
+applies_to: {}
+source: Drive system manual §3.2
+media: []
+steps:
+  - Note when it happens — only under power, only while pedalling, or all the time. That one detail separates a motor fault from a drivetrain one.
+  - A faint electrical whine under load is normal on a hub motor and is not a fault.
+  - Check nothing is rubbing — mudguard, brake pad, or a loose spoke will make a rhythmic sound that rises with speed.
+  - Clicking that matches your pedalling cadence is usually the chain or crank, not the motor.
+escalate_when: Grinding or knocking that rises with motor power rather than pedalling cadence.

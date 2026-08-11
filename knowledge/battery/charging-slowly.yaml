@@ -1,0 +1,12 @@
+id: battery-charging-slowly
+title: Battery charges very slowly
+topic: battery
+symptoms: [slow_charging, takes too long to charge, charging slow]
+applies_to: {}
+source: Battery care manual §4.4
+media: []
+steps:
+  - Check you are using the charger supplied with the bike. A lower-rated charger will work but takes far longer.
+  - Charge at room temperature. The BMS deliberately slows charging when the pack is cold.
+  - Expect the last ten percent to be slow. Constant-voltage tapering at the top of the charge is normal and protects the cells.
+escalate_when: A full charge from empty takes more than twice the time stated in the manual, at room temperature, on the supplied charger.
