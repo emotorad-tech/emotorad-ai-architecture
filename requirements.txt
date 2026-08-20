@@ -1,1 +1,6 @@
 pyyaml>=6.0
+
+# Prompt-tuning playground (src/emotorad_ai/playground.py) — not needed by the
+# core skeleton or its tests, only by `streamlit run` for local prompt tuning.
+streamlit>=1.38
+anthropic>=0.40

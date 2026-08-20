@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+src/env/
 logs/
 .DS_Store
 .pytest_cache/
@@ -23,3 +24,7 @@ logs/
 *.pem
 *secret*
 *credential*
+
+# Prompt-tuning playground output (diffs against agents/*.py — reviewed by hand,
+# never applied automatically, and never a place API keys should land).
+.playground/
