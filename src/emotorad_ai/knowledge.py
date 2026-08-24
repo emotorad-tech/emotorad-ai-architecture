@@ -157,7 +157,7 @@ def load_records(directory: Optional[Path] = None) -> List[KnowledgeRecord]:
     records: List[KnowledgeRecord] = []
     seen: Dict[str, Path] = {}
     for path in sorted(root.rglob("*.yaml")):
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         _validate(raw, str(path))
 
         record_id = raw["id"]

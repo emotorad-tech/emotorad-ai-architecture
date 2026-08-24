@@ -1,0 +1,98 @@
+name: Deploy to staging (EC2)
+
+# Manual only, on purpose: pushing to any branch never deploys by itself.
+# Push normally, then come here (Actions tab -> this workflow -> Run workflow)
+# and pick the branch/ref you want live.
+on:
+  workflow_dispatch: {}
+
+env:
+  AWS_REGION: ap-south-1
+  S3_BUCKET: emotorad-ai-stage-851725486214
+  INSTANCE_ID: i-02e7dc2874e0fdacb
+
+permissions:
+  id-token: write   # required for OIDC role assumption below
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The test suite is the deploy gate, not an afterthought — see
+      # CLAUDE.md/docs/Emotorad_Testing_Strategy.md on why these tests are
+      # the spec. Nothing gets packaged if this fails.
+      - name: Run test suite
+        run: python -m unittest discover -s tests -t .
+
+      - name: Assume the deploy role (OIDC, no stored AWS keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Same exclude list as .dockerignore / the manual deploy that first
+      # stood this environment up — keep them in sync if either changes.
+      # playground.py ships now: api.py reverse-proxies /playground to it
+      # (see docs/Emotorad_AWS_Deployment_Plan.md) so the internal team can
+      # reach it without a new open port.
+      - name: Package deploy artifact
+        run: |
+          tar --exclude='.git' --exclude='tests' --exclude='docs' --exclude='logs' \
+              --exclude='.playground' --exclude='requirements-dev.txt' --exclude='__pycache__' \
+              -czf app.tar.gz Dockerfile docker requirements.txt src knowledge
+
+      - name: Upload to S3 (versioned by commit, plus a "latest" pointer)
+        run: |
+          aws s3 cp app.tar.gz "s3://$S3_BUCKET/deploy/app-${GITHUB_SHA}.tar.gz"
+          aws s3 cp app.tar.gz "s3://$S3_BUCKET/deploy/app.tar.gz"
+
+      - name: Rebuild and restart the container on the instance (via SSM)
+        # PLAYGROUND_BASIC_AUTH_USER/PASSWORD are GitHub Actions repo secrets
+        # (Settings -> Environments -> staging), the same trust boundary as
+        # AWS_DEPLOY_ROLE_ARN. Caveat: passed as -e flags, they land in the
+        # SSM command's own parameters — visible via ssm:GetCommandInvocation
+        # to anyone with that IAM permission on the account, not just this
+        # workflow. Fine for a staging credential; harden later by moving
+        # them to SSM Parameter Store SecureStrings fetched by-instance-role
+        # inside the command (docs/Emotorad_AWS_Deployment_Plan.md §2.4) if
+        # that visibility ever stops being acceptable.
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"cd /opt/emotorad-ai\",
+              \"aws s3 cp s3://$S3_BUCKET/deploy/app.tar.gz app.tar.gz --region $AWS_REGION\",
+              \"tar xzf app.tar.gz\",
+              \"docker build -t emotorad-ai:stage .\",
+              \"docker rm -f emotorad-ai || true\",
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e EMOTORAD_AI_MODE=offline -e EMOTORAD_AI_PLAYGROUND_USER='${{ secrets.PLAYGROUND_BASIC_AUTH_USER }}' -e EMOTORAD_AI_PLAYGROUND_PASSWORD='${{ secrets.PLAYGROUND_BASIC_AUTH_PASSWORD }}' emotorad-ai:stage\"
+            ]" \
+            --query 'Command.CommandId' --output text)
+          echo "command_id=$CMD_ID" >> "$GITHUB_ENV"
+
+          # Poll rather than `ssm wait command-executed`, which doesn't
+          # reliably report shell-script exit codes as command failure.
+          for _ in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text)
+            [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
+            sleep 5
+          done
+
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Err:StandardErrorContent}'
+
+          [ "$STATUS" = "Success" ]
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -sf https://ai-release-stage.emotorad.com/health

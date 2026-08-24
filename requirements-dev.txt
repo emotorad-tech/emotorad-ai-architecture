@@ -1,0 +1,2 @@
+# Local-only tooling — never installed in the deployed container.
+-r requirements.txt

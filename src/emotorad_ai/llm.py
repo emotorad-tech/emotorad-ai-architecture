@@ -8,6 +8,8 @@ runs the identical loop against Bedrock.
 
 from __future__ import annotations
 
+import itertools
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -130,3 +132,49 @@ def call_tool(name: str, arguments: Dict[str, Any], tool_use_id: str = "toolu_te
         tool_uses=[ToolUse(id=tool_use_id, name=name, arguments=arguments)],
         api_content=content,
     )
+
+
+class OfflinePlanner:
+    """A fixed, non-model stand-in that always grounds its answer in the manual.
+
+    It exists so the whole path — CLI or HTTP — can run without AWS or a Bedrock
+    approval. It is not a model and makes no attempt to be one: it retrieves once,
+    then answers from what it got. This is the deployed default until real Bedrock
+    access is wired up (see docs/Emotorad_AWS_Deployment_Plan.md).
+    """
+
+    def __init__(self) -> None:
+        # Imported lazily to avoid a runtime.py <-> llm.py <-> tools.mocks cycle
+        # at module load time (tools.mocks does not import llm, but keeping the
+        # import local here keeps this class's only special dependency contained).
+        from .tools.mocks import SEARCH_BATTERY_KNOWLEDGE
+
+        self._search_tool = SEARCH_BATTERY_KNOWLEDGE
+        self._ids = itertools.count(1)
+        self.requests: List[Dict[str, Any]] = []
+
+    def create(self, system: str, messages: Sequence[Dict[str, Any]], tools: Sequence[Dict[str, Any]]) -> LLMResponse:
+        self.requests.append({"system": system, "messages": list(messages), "tools": list(tools)})
+        last = messages[-1]
+        content = last.get("content")
+
+        if isinstance(content, list) and content and content[0].get("type") == "tool_result":
+            envelope = json.loads(content[0]["content"])
+            passages = envelope.get("data", {}).get("passages", [])
+            if not passages:
+                return say(
+                    "I could not find anything specific on that in the battery manual. "
+                    "Could you describe what happens when you plug the charger in?"
+                )
+            passage = passages[0]
+            return say(
+                "%s. %s\n\nDoes any of that change what you are seeing?"
+                % (passage["title"], " ".join(passage["steps"]))
+            )
+
+        query = content if isinstance(content, str) else ""
+        return call_tool(
+            self._search_tool,
+            {"query": query},
+            tool_use_id="toolu_offline_%d" % next(self._ids),
+        )
