@@ -26,6 +26,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       # The test suite is the deploy gate, not an afterthought — see
       # CLAUDE.md/docs/Emotorad_Testing_Strategy.md on why these tests are
       # the spec. Nothing gets packaged if this fails.
