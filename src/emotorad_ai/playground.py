@@ -12,6 +12,14 @@ tuned without touching code. Reuses each agent's real ``build_system_prompt``
 playground never re-implements — and cannot drift from — the prompt-assembly
 logic those functions already encode.
 
+Two ways to pick who the "customer" is for a turn:
+  - Preset riders — named fixtures from tools/fixtures.py, the same data the
+    automated test suite runs against.
+  - Custom rider — typed in on the spot. Bike coverage is still computed by the
+    real ``_coverage()`` helper from tools/mocks.py (never re-implemented here),
+    so a hand-typed purchase date produces the same in/out-of-warranty math a
+    real fixture would.
+
 What this is not: a way to create new agents, edit tool registries, or change
 production behaviour. "Save" never touches ``agents/*.py`` — it only produces a
 diff for a human to review and apply the normal way (a PR), matching the
@@ -47,7 +55,7 @@ if _SRC not in sys.path:
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Identity, InboundMessage
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.tools import fixtures
-from emotorad_ai.tools.mocks import build_registry
+from emotorad_ai.tools.mocks import _coverage, build_registry
 
 MODELS = {
     "Haiku 4.5 (cheap, fast — bulk iteration)": "claude-haiku-4-5",
@@ -99,10 +107,56 @@ def _scenarios_for(agent_name: str) -> List[Scenario]:
     return DEALER_SCENARIOS if agent_name == "dealer_orders" else CUSTOMER_SCENARIOS
 
 
-def _build_resolved_identity(scenario: Scenario, message: InboundMessage) -> ResolvedIdentity:
+def _resolved_for_preset(scenario: Scenario) -> ResolvedIdentity:
+    """Preset riders go through the real hydration path — registry + IdentityResolver
+    — exactly like a live conversation would, so they stay honest as the mocks evolve."""
+    identity = Identity(strength=scenario.strength, phone=scenario.phone)
+    message = InboundMessage(
+        conversation_id="preview",
+        persona=scenario.persona,
+        identity=identity,
+        channel=scenario.channel,
+        message_text="",
+    )
     registry = build_registry(oms_available=scenario.oms_available, today=date.today())
     resolver = IdentityResolver(registry)
     return resolver.hydrate(message)
+
+
+def _resolved_for_custom_customer(
+    name: str, phone: Optional[str], verified: bool, bike_rows: List[Dict[str, Any]]
+) -> ResolvedIdentity:
+    """A hand-typed customer. Coverage is still computed by the real `_coverage()`
+    helper (tools/mocks.py) — never re-implemented here — so a typed purchase date
+    produces the same in/out-of-warranty math a real fixture would."""
+    identity = Identity(strength=VERIFIED if verified else ANONYMOUS, phone=phone if verified else None)
+    if not verified:
+        return ResolvedIdentity(persona="customer", method="unverified", identity=identity)
+    if not bike_rows:
+        return ResolvedIdentity(
+            persona="customer", method="no_warranty_record", identity=identity, error="no_warranty_record"
+        )
+    bikes = [_coverage(row, date.today()) for row in bike_rows]
+    return ResolvedIdentity(
+        persona="customer", method="verified", identity=identity, profile={"name": name}, bikes=bikes
+    )
+
+
+def _resolved_for_custom_dealer(
+    name: str, phone: str, city: str, credit_limit: int, credit_used: int, overdue: int, terms_days: int
+) -> ResolvedIdentity:
+    identity = Identity(strength=VERIFIED, phone=phone)
+    profile = {
+        "dealer_id": "CUSTOM-%s" % phone[-4:],
+        "name": name,
+        "city": city,
+        "credit_limit": credit_limit,
+        "credit_used": credit_used,
+        "payment_terms_days": terms_days,
+        "overdue_amount": overdue,
+        "status": "active",
+    }
+    return ResolvedIdentity(persona="dealer", method="verified", identity=identity, profile=profile)
 
 
 def _tuned_system_prompt(module: Any, message: InboundMessage, resolved: ResolvedIdentity, edited_prompt: str) -> str:
@@ -135,6 +189,48 @@ def _save_diff(agent_name: str, original_prompt: str, edited_prompt: str) -> Pat
     return path
 
 
+def _custom_customer_form() -> ResolvedIdentity:
+    name = st.text_input("Name", "Test Customer")
+    phone = st.text_input("Phone", "+919999999999")
+    verified = st.checkbox("Verified (signed in)", value=True)
+    bike_rows: List[Dict[str, Any]] = []
+    if verified:
+        bike_count = st.number_input("Bikes owned", min_value=0, max_value=5, value=1, step=1)
+        for i in range(int(bike_count)):
+            with st.expander("Bike %d" % (i + 1), expanded=(bike_count == 1)):
+                product_name = st.text_input("Model", "EMX Plus", key="custom_bike_model_%d" % i)
+                purchase_date = st.date_input(
+                    "Purchase date", value=date(2025, 6, 1), key="custom_bike_date_%d" % i
+                )
+                frame_number = st.text_input(
+                    "Frame number", "CUSTOM%03d" % i, key="custom_bike_frame_%d" % i
+                )
+                battery_variant = st.text_input(
+                    "Battery variant (optional)", "", key="custom_bike_batt_%d" % i
+                )
+                bike_rows.append(
+                    {
+                        "frame_number": frame_number,
+                        "product_name": product_name,
+                        "purchase_date": purchase_date.isoformat(),
+                        "battery_variant": battery_variant,
+                        "product_color": "",
+                    }
+                )
+    return _resolved_for_custom_customer(name, phone, verified, bike_rows)
+
+
+def _custom_dealer_form() -> ResolvedIdentity:
+    name = st.text_input("Dealer name", "Test Cycle Stores")
+    phone = st.text_input("Phone", "+919999999999")
+    city = st.text_input("City", "Pune")
+    credit_limit = st.number_input("Credit limit (₹)", min_value=0, value=500000, step=10000)
+    credit_used = st.number_input("Credit used (₹)", min_value=0, value=100000, step=10000)
+    overdue = st.number_input("Overdue amount (₹)", min_value=0, value=0, step=1000)
+    terms_days = st.number_input("Payment terms (days)", min_value=0, value=30, step=5)
+    return _resolved_for_custom_dealer(name, phone, city, int(credit_limit), int(credit_used), int(overdue), int(terms_days))
+
+
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
     st.title("Prompt-tuning playground")
@@ -156,11 +252,34 @@ def main() -> None:
             help="Session-only — never written to disk. Falls back to ANTHROPIC_API_KEY if set.",
         )
 
-        scenarios = _scenarios_for(agent_name)
-        scenario_label = st.selectbox("Test customer/dealer scenario", [s.label for s in scenarios])
-        scenario = next(s for s in scenarios if s.label == scenario_label)
-
         module = importlib.import_module(AGENT_MODULES[agent_name])
+
+        st.divider()
+        st.subheader("Rider")
+        rider_mode = st.radio("Rider source", ["Preset rider", "Custom rider"], horizontal=True)
+
+        if rider_mode == "Preset rider":
+            scenarios = _scenarios_for(agent_name)
+            scenario_label = st.selectbox("Test customer/dealer scenario", [s.label for s in scenarios])
+            scenario = next(s for s in scenarios if s.label == scenario_label)
+            resolved = _resolved_for_preset(scenario)
+            persona, channel = scenario.persona, scenario.channel
+            rider_display = scenario.label
+        else:
+            st.caption(
+                "Type in your own rider. Bike coverage still runs through the same "
+                "coverage math the real tools use — just fed a typed purchase date "
+                "instead of a fixture."
+            )
+            if agent_name == "dealer_orders":
+                resolved = _custom_dealer_form()
+                persona, channel = "dealer", "dealer_app"
+            else:
+                resolved = _custom_customer_form()
+                persona, channel = "customer", "website_chat"
+            rider_display = "Custom: %s" % (resolved.profile or {}).get("name", "unnamed")
+
+        st.divider()
         st.caption("Tools this agent has (not called in this playground): " + ", ".join(module.TOOL_NAMES))
 
     session_key = "chat_%s" % agent_name
@@ -189,7 +308,7 @@ def main() -> None:
 
     with col_chat:
         st.subheader("Test conversation")
-        st.caption("Scenario: %s" % scenario.label)
+        st.caption("Rider: %s" % rider_display)
 
         for turn in st.session_state[session_key]:
             with st.chat_message(turn["role"]):
@@ -199,15 +318,13 @@ def main() -> None:
         if user_text:
             st.session_state[session_key].append({"role": "user", "content": user_text})
 
-            identity = Identity(strength=scenario.strength, phone=scenario.phone)
             message = InboundMessage(
                 conversation_id=str(uuid.uuid4()),
-                persona=scenario.persona,
-                identity=identity,
-                channel=scenario.channel,
+                persona=persona,
+                identity=resolved.identity,
+                channel=channel,
                 message_text=user_text,
             )
-            resolved = _build_resolved_identity(scenario, message)
             system_prompt = _tuned_system_prompt(module, message, resolved, edited_prompt)
 
             if not api_key:
@@ -241,29 +358,14 @@ def main() -> None:
             st.rerun()
 
         with st.expander("System prompt sent to the model (this turn)"):
-            st.text(
-                _tuned_system_prompt(
-                    module,
-                    InboundMessage(
-                        conversation_id="preview",
-                        persona=scenario.persona,
-                        identity=Identity(strength=scenario.strength, phone=scenario.phone),
-                        channel=scenario.channel,
-                        message_text="",
-                    ),
-                    _build_resolved_identity(
-                        scenario,
-                        InboundMessage(
-                            conversation_id="preview",
-                            persona=scenario.persona,
-                            identity=Identity(strength=scenario.strength, phone=scenario.phone),
-                            channel=scenario.channel,
-                            message_text="",
-                        ),
-                    ),
-                    edited_prompt,
-                )
+            preview_message = InboundMessage(
+                conversation_id="preview",
+                persona=persona,
+                identity=resolved.identity,
+                channel=channel,
+                message_text="",
             )
+            st.text(_tuned_system_prompt(module, preview_message, resolved, edited_prompt))
 
 
 if __name__ == "__main__":

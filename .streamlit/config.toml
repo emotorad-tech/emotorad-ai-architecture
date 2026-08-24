@@ -1,0 +1,6 @@
+# Hides Streamlit's default "Deploy" button (it points at Streamlit Community
+# Cloud, which is not where this app is hosted) while keeping the rest of the
+# toolbar. Applies to anyone running `streamlit run` in this repo — no per-run
+# flag needed.
+[client]
+toolbarMode = "viewer"
