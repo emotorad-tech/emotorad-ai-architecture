@@ -1,6 +1,18 @@
 pyyaml>=6.0
 
-# Prompt-tuning playground (src/emotorad_ai/playground.py) — not needed by the
-# core skeleton or its tests, only by `streamlit run` for local prompt tuning.
-streamlit>=1.38
+# HTTP entrypoint (src/emotorad_ai/api.py) — what actually ships in the
+# deployed container. Offline mode needs none of this; only serving it over
+# HTTP does.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
+websockets>=12.0
+
+# Claude on Bedrock, once EMOTORAD_AI_MODE=bedrock is set (see api.py).
 anthropic>=0.40
+
+# Prompt-tuning playground (src/emotorad_ai/playground.py). Ships in the
+# deployed container too — api.py reverse-proxies /playground to it so the
+# internal team can reach it through the one port that's exposed, rather
+# than it needing its own open port.
+streamlit>=1.38

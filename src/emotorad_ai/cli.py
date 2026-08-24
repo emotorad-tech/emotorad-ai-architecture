@@ -14,57 +14,17 @@ path, because neither of those calls the model at all.
 from __future__ import annotations
 
 import argparse
-import itertools
-import json
 import sys
-from typing import Any, Dict, List, Sequence
+from typing import Sequence
 
 from .adapters import WebsiteChatAdapter
 from .config import load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
-from .llm import LLMResponse, call_tool, say
+from .llm import OfflinePlanner
 from .observability import EventLog
 from .runtime import Runtime
-from .tools.mocks import SEARCH_BATTERY_KNOWLEDGE, build_registry
-
-
-class OfflinePlanner:
-    """A fixed, non-model stand-in that always grounds its answer in the manual.
-
-    It exists so the whole path can be run without AWS. It is not a model and
-    makes no attempt to be one: it retrieves once, then answers from what it got.
-    """
-
-    def __init__(self) -> None:
-        self._ids = itertools.count(1)
-        self.requests: List[Dict[str, Any]] = []
-
-    def create(self, system: str, messages: Sequence[Dict[str, Any]], tools: Sequence[Dict[str, Any]]) -> LLMResponse:
-        self.requests.append({"system": system, "messages": list(messages), "tools": list(tools)})
-        last = messages[-1]
-        content = last.get("content")
-
-        if isinstance(content, list) and content and content[0].get("type") == "tool_result":
-            envelope = json.loads(content[0]["content"])
-            passages = envelope.get("data", {}).get("passages", [])
-            if not passages:
-                return say(
-                    "I could not find anything specific on that in the battery manual. "
-                    "Could you describe what happens when you plug the charger in?"
-                )
-            passage = passages[0]
-            return say(
-                "%s. %s\n\nDoes any of that change what you are seeing?"
-                % (passage["title"], " ".join(passage["steps"]))
-            )
-
-        query = content if isinstance(content, str) else ""
-        return call_tool(
-            SEARCH_BATTERY_KNOWLEDGE,
-            {"query": query},
-            tool_use_id="toolu_offline_%d" % next(self._ids),
-        )
+from .tools.mocks import build_registry
 
 
 def main(argv: Sequence[str] = ()) -> int:
