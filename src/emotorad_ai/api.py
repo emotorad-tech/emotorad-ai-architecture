@@ -207,7 +207,19 @@ async def playground_ws_proxy(websocket: WebSocket, rest: str) -> None:
 
     # Streamlit's live-reactivity channel — without this it loads once and
     # never updates, which looks like a working page until you click anything.
-    await websocket.accept(subprotocol=websocket.headers.get("sec-websocket-protocol"))
+    #
+    # The browser's Streamlit client always offers a Sec-WebSocket-Protocol
+    # value, and RFC 6455 requires the response to echo back exactly one of
+    # them when the client offers any — silently dropping the header (as an
+    # earlier version of this function did) makes Chrome reject the upgrade
+    # ("sent non-empty header but no response was received"). Echoing the
+    # *raw* header back verbatim is the other failure mode: some
+    # uvicorn/websockets version combinations then emit the header twice in
+    # the same response ("must not appear more than once"). Splitting off
+    # just the first offered value avoids both.
+    requested_protocol = websocket.headers.get("sec-websocket-protocol")
+    subprotocol = requested_protocol.split(",")[0].strip() if requested_protocol else None
+    await websocket.accept(subprotocol=subprotocol)
     upstream_url = "ws://%s/playground/%s" % (PLAYGROUND_UPSTREAM, rest)
     async with websockets.connect(upstream_url) as upstream:
 
