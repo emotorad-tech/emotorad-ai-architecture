@@ -31,8 +31,10 @@ tone/behaviour tuning, not full conversational-flow testing.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import importlib
+import mimetypes
 import os
 import sys
 import uuid
@@ -52,7 +54,7 @@ _SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from emotorad_ai.contract import ANONYMOUS, VERIFIED, Identity, InboundMessage
+from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import _coverage, build_registry
@@ -231,6 +233,43 @@ def _custom_dealer_form() -> ResolvedIdentity:
     return _resolved_for_custom_dealer(name, phone, city, int(credit_limit), int(credit_used), int(overdue), int(terms_days))
 
 
+def _serialise_uploaded_file(uploaded: Any) -> Dict[str, Any]:
+    name = uploaded.name or "upload"
+    content = uploaded.getvalue()
+    mime_type = uploaded.type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return {
+        "name": name,
+        "kind": "image" if mime_type.startswith("image/") else "document",
+        "mime_type": mime_type,
+        "data": base64.b64encode(content).decode("utf-8"),
+    }
+
+
+def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        mime_type = attachment.get("mime_type") or "application/octet-stream"
+        data = attachment.get("data")
+        if not data:
+            continue
+        if mime_type.startswith("image/"):
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mime_type, "data": data},
+                }
+            )
+        elif mime_type.lower() == "application/pdf" or attachment.get("name", "").lower().endswith(".pdf"):
+            blocks.append(
+                {
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": data},
+                    "title": attachment.get("name", "document.pdf"),
+                }
+            )
+    return blocks
+
+
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
     st.title("Prompt-tuning playground")
@@ -312,18 +351,42 @@ def main() -> None:
 
         for turn in st.session_state[session_key]:
             with st.chat_message(turn["role"]):
+                attachments = turn.get("attachments") or []
+                if attachments:
+                    for attachment in attachments:
+                        st.caption("📎 %s" % attachment["name"])
                 st.write(turn["content"])
 
+        upload_key = "upload_%s" % agent_name
+        uploaded_files = st.file_uploader(
+            "📎 Attach image or PDF",
+            type=["png", "jpg", "jpeg", "pdf"],
+            accept_multiple_files=True,
+            key=upload_key,
+            help="Upload JPG, JPEG, PNG, or PDF files to test multimodal prompts.",
+        )
+        if uploaded_files:
+            st.caption("Attached: %s" % ", ".join(file.name for file in uploaded_files))
+
         user_text = st.chat_input("Type a test customer message…")
-        if user_text:
-            st.session_state[session_key].append({"role": "user", "content": user_text})
+        if user_text or uploaded_files:
+            attachments = [_serialise_uploaded_file(file) for file in uploaded_files]
+            st.session_state[session_key].append({
+                "role": "user",
+                "content": user_text.strip() if user_text else "(Uploaded file(s) for review)",
+                "attachments": attachments,
+            })
 
             message = InboundMessage(
                 conversation_id=str(uuid.uuid4()),
                 persona=persona,
                 identity=resolved.identity,
                 channel=channel,
-                message_text=user_text,
+                message_text=user_text.strip() if user_text else "",
+                attachments=[
+                    Attachment(kind=item["kind"], url="data:%s;base64,%s" % (item["mime_type"], item["data"]), mime_type=item["mime_type"])
+                    for item in attachments
+                ],
             )
             system_prompt = _tuned_system_prompt(module, message, resolved, edited_prompt)
 
@@ -338,11 +401,18 @@ def main() -> None:
                 import anthropic
 
                 client = anthropic.Anthropic(api_key=api_key)
-                anthropic_messages: List[Dict[str, str]] = [
-                    {"role": t["role"], "content": t["content"]}
-                    for t in st.session_state[session_key]
-                    if t["role"] in ("user", "assistant")
-                ]
+                anthropic_messages: List[Dict[str, Any]] = []
+                for turn in st.session_state[session_key]:
+                    if turn["role"] not in ("user", "assistant"):
+                        continue
+                    blocks: List[Dict[str, Any]] = []
+                    content = turn.get("content") or ""
+                    if content:
+                        blocks.append({"type": "text", "text": content})
+                    for attachment in turn.get("attachments") or []:
+                        blocks.extend(_attachment_blocks([attachment]))
+                    anthropic_messages.append({"role": turn["role"], "content": blocks})
+
                 try:
                     response = client.messages.create(
                         model=model_id,
@@ -355,6 +425,7 @@ def main() -> None:
                     text = "API error: %s" % exc.message
                 st.session_state[session_key].append({"role": "assistant", "content": text})
 
+            st.session_state[upload_key] = []
             st.rerun()
 
         with st.expander("System prompt sent to the model (this turn)"):
