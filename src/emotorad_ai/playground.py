@@ -33,16 +33,24 @@ What this is not: a way to create new agents, edit tool registries, or change
 production behaviour. Neither save button touches ``agents/*.py``: versions are
 tester-local, and "Save diff for review" only produces a diff for a human to
 review and apply the normal way (a PR), matching the knowledge-base content
-convention already used elsewhere in this repo. There is
-also no tool-execution loop here (see the module docstring on `Agent.run` in
-`agents/base.py` for what that looks like in production) — this is for
-tone/behaviour tuning, not full conversational-flow testing.
+convention already used elsewhere in this repo.
+
+Tools do run. The loop mirrors `Agent.run` (agents/base.py) — same iteration cap,
+same repeat-call detection — and slices tools by the selected agent's own
+`TOOL_NAMES`, so a dealer agent is never offered the customer warranty table.
+Every call and its result is shown inline, because "why did it say that" is the
+question this page exists to answer. Reads go to the mocks; writes land in the
+in-memory mock ticket/booking systems and never touch a real one. What is still
+absent is the rest of `runtime.handle()` — the safety gate, the coverage
+post-check and the disclosure wrapper — so this tests an agent, not the pipeline
+that wraps it.
 """
 
 from __future__ import annotations
 
 import base64
 import difflib
+import hashlib
 import importlib
 import json
 import mimetypes
@@ -69,6 +77,7 @@ from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, Inbo
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import _coverage, build_registry
+from emotorad_ai.tools.registry import ToolContext, ToolRegistry, is_error
 
 MODELS = {
     "Haiku 4.5 (cheap, fast — bulk iteration)": "claude-haiku-4-5",
@@ -471,6 +480,133 @@ def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return blocks
 
 
+# Matches config.Settings.max_agent_iterations. A cap exists because a model that
+# keeps asking for tools without answering will otherwise loop on a customer's time.
+MAX_TOOL_ITERATIONS = 6
+
+# Writes are backstopped with a derived idempotency key, exactly as Agent.run does:
+# the registry refuses a write without one, and a model that forgot should not
+# surface to the tester as a broken ticket tool.
+_WRITE_KEY_FIELD = "idempotency_key"
+
+
+def _tool_context(conversation_id: str, resolved: ResolvedIdentity) -> ToolContext:
+    """The trusted facts tools are given behind the model's back.
+
+    Same construction as `Agent.run`. `dealer_id` comes off the resolved profile
+    so the dealer tools scope to the right account — the model never supplies it.
+    """
+    profile = resolved.profile or {}
+    return ToolContext(
+        conversation_id=conversation_id,
+        phone=resolved.identity.phone,
+        cluster_id=resolved.cluster_id,
+        customer_id=resolved.customer_id,
+        dealer_id=profile.get("dealer_id"),
+    )
+
+
+def _with_idempotency_key(
+    registry: ToolRegistry, name: str, arguments: Dict[str, Any], conversation_id: str, iteration: int
+) -> Dict[str, Any]:
+    arguments = dict(arguments or {})
+    spec = registry.specs.get(name)
+    if spec is None or not spec.write or arguments.get(_WRITE_KEY_FIELD):
+        return arguments
+    payload = json.dumps(arguments, sort_keys=True, default=str)
+    arguments[_WRITE_KEY_FIELD] = hashlib.sha256(
+        ("%s|%s|%s|%d" % (conversation_id, name, payload, iteration)).encode()
+    ).hexdigest()[:32]
+    return arguments
+
+
+def _run_agent_turn(
+    client: Any,
+    model_id: str,
+    system_prompt: str,
+    messages: List[Dict[str, Any]],
+    registry: ToolRegistry,
+    tool_names: Any,
+    context: ToolContext,
+) -> Dict[str, Any]:
+    """Ask the model, run whatever tools it asks for, ask again. Return the reply.
+
+    This mirrors `Agent.run` (agents/base.py) rather than inventing a second
+    conversational loop: same iteration cap, same repeat-call detection, same
+    "all results for one assistant turn go back in a single user message" rule —
+    splitting them teaches the model to stop batching its calls.
+
+    What it deliberately does *not* mirror: the production loop's observability,
+    the coverage post-check and the disclosure wrapper, which live in
+    `runtime.handle()`. This is a prompt-tuning harness, so what it adds instead
+    is a trace of every call and result for the tester to read.
+
+    Tools are sliced by the agent's own `TOOL_NAMES`, which is what keeps persona
+    isolation honest here: `lookup_warranty_record` is simply absent from the
+    dealer slice, so a dealer agent is never even offered the customer's
+    warranty table.
+    """
+    tools = registry.schemas_for([name for name in tool_names if name in registry.specs])
+    trace: List[Dict[str, Any]] = []
+    seen_calls: set = set()
+
+    for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
+        response = client.messages.create(
+            model=model_id,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=messages,
+            tools=tools,
+        )
+        api_content = [block.model_dump(exclude_none=True) for block in response.content]
+        messages.append({"role": "assistant", "content": api_content})
+
+        tool_uses = [block for block in response.content if block.type == "tool_use"]
+        if not tool_uses:
+            text = "\n".join(block.text for block in response.content if block.type == "text")
+            return {"text": text, "trace": trace, "iterations": iteration}
+
+        results: List[Dict[str, Any]] = []
+        for tool_use in tool_uses:
+            arguments = _with_idempotency_key(
+                registry, tool_use.name, dict(tool_use.input or {}), context.conversation_id, iteration
+            )
+            signature = (tool_use.name, json.dumps(arguments, sort_keys=True, default=str))
+            if signature in seen_calls:
+                # The model is stuck; further iterations reach the same place.
+                trace.append({"tool": tool_use.name, "arguments": arguments, "result": None, "stuck": True})
+                return {
+                    "text": (
+                        "(Stopped: the model asked for %s with identical arguments twice. In "
+                        "production this hands over to a human.)" % tool_use.name
+                    ),
+                    "trace": trace,
+                    "iterations": iteration,
+                }
+            seen_calls.add(signature)
+
+            envelope = registry.call(tool_use.name, arguments, context)
+            trace.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": json.dumps(envelope, default=str),
+                    "is_error": is_error(envelope),
+                }
+            )
+        messages.append({"role": "user", "content": results})
+
+    return {
+        "text": (
+            "(Stopped after %d tool rounds without an answer. In production this hands over "
+            "to a human.)" % MAX_TOOL_ITERATIONS
+        ),
+        "trace": trace,
+        "iterations": MAX_TOOL_ITERATIONS,
+    }
+
+
 def _should_submit_chat(user_text: Optional[str], pending_files: List[Any]) -> bool:
     """Only send after the user explicitly submits a chat turn.
 
@@ -623,6 +759,22 @@ def main() -> None:
                 if attachments:
                     for attachment in attachments:
                         st.caption("📎 %s" % attachment["name"])
+                # Shown before the reply, in the order they happened: the reply
+                # only makes sense against what the tools actually returned, and
+                # "why did it say that" is the whole question when tuning.
+                for call in turn.get("tool_calls") or []:
+                    if call.get("stuck"):
+                        st.caption("🔁 %s — asked twice with the same arguments" % call["tool"])
+                        continue
+                    envelope = call.get("result") or {}
+                    failed = is_error(envelope)
+                    label = "%s %s" % ("🔴" if failed else "🔧", call["tool"])
+                    with st.expander(label, expanded=failed):
+                        if call.get("arguments"):
+                            st.caption("arguments")
+                            st.json(call["arguments"])
+                        st.caption("result")
+                        st.json(envelope)
                 st.write(turn["content"])
 
         # The uploader keeps its files until the user clears it, so a sent file
@@ -691,17 +843,25 @@ def main() -> None:
                         blocks.extend(_attachment_blocks([attachment]))
                     anthropic_messages.append({"role": turn["role"], "content": blocks})
 
+                # Writes land in the in-memory mocks, never a real system — the
+                # point of tuning a prompt is not to create real Zoho tickets.
+                registry = build_registry(today=date.today())
+                trace: List[Dict[str, Any]] = []
                 try:
-                    response = client.messages.create(
-                        model=model_id,
-                        max_tokens=1024,
-                        system=system_prompt,
-                        messages=anthropic_messages,
-                    )
-                    text = "\n".join(block.text for block in response.content if block.type == "text")
+                    with st.spinner("Thinking, and calling tools…"):
+                        outcome = _run_agent_turn(
+                            client,
+                            model_id,
+                            system_prompt,
+                            anthropic_messages,
+                            registry,
+                            module.TOOL_NAMES,
+                            _tool_context(chat["chat_id"], resolved),
+                        )
+                    text, trace = outcome["text"], outcome["trace"]
                 except anthropic.APIStatusError as exc:
                     text = "API error: %s" % exc.message
-                chat["turns"].append({"role": "assistant", "content": text})
+                chat["turns"].append({"role": "assistant", "content": text, "tool_calls": trace})
 
             _save_chat(agent_name, chat)
             st.session_state[nonce_key] = nonce + 1
