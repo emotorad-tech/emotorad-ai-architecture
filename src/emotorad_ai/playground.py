@@ -357,12 +357,12 @@ def main() -> None:
                         st.caption("📎 %s" % attachment["name"])
                 st.write(turn["content"])
 
-        upload_key = "upload_%s" % agent_name
+        uploader_key = "uploader_%s" % agent_name
         uploaded_files = st.file_uploader(
             "📎 Attach image or PDF",
             type=["png", "jpg", "jpeg", "pdf"],
             accept_multiple_files=True,
-            key=upload_key,
+            key=uploader_key,
             help="Upload JPG, JPEG, PNG, or PDF files to test multimodal prompts.",
         )
         if uploaded_files:
@@ -425,7 +425,6 @@ def main() -> None:
                     text = "API error: %s" % exc.message
                 st.session_state[session_key].append({"role": "assistant", "content": text})
 
-            st.session_state[upload_key] = []
             st.rerun()
 
         with st.expander("System prompt sent to the model (this turn)"):
