@@ -306,6 +306,7 @@ def _clear_custom_rider() -> None:
 
 CHAT_DIR = PLAYGROUND_DIR / "chats"
 PROMPT_DIR = PLAYGROUND_DIR / "prompts"
+BLOB_DIR = PLAYGROUND_DIR / "attachments"
 
 
 def _new_chat_id() -> str:
@@ -321,32 +322,161 @@ def _blank_chat() -> Dict[str, Any]:
     }
 
 
-def _chat_path(agent_name: str) -> Path:
-    return CHAT_DIR / ("%s.json" % agent_name)
+# --- attachment blobs -------------------------------------------------------
+# Attachment bytes live once, in a file named for their own hash, and turns
+# reference them by id. They used to be inlined as base64 in the chat JSON,
+# which meant a three-screenshot turn rewrote ~4.7MB of base64 to disk on every
+# subsequent turn of that conversation. Content-addressed, so the same photo
+# uploaded twice is stored once.
 
 
-def _load_chat(agent_name: str) -> Dict[str, Any]:
-    """The open chat for this agent, so a refresh does not end the conversation.
+def _blob_path(blob_id: str) -> Path:
+    return BLOB_DIR / ("%s.b64" % blob_id)
 
-    One live chat per agent: "Start new chat" is the only thing that retires it.
-    Kept under .playground/ (gitignored) — note this does put the test transcript,
-    and any attachment bytes, on local disk.
+
+def _put_blob(data_b64: str) -> str:
+    blob_id = hashlib.sha256(data_b64.encode("utf-8")).hexdigest()[:32]
+    path = _blob_path(blob_id)
+    if not path.exists():
+        BLOB_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(data_b64)
+    return blob_id
+
+
+def _get_blob(attachment: Dict[str, Any]) -> str:
+    """Base64 for an attachment, whether it is stored inline or by reference.
+
+    Inline `data` is still read so chats written before blobs existed keep
+    working — a saved transcript is test material, not something to invalidate.
     """
+    inline = attachment.get("data")
+    if inline:
+        return inline
+    blob_id = attachment.get("blob_id")
+    if not blob_id:
+        return ""
     try:
-        loaded = json.loads(_chat_path(agent_name).read_text())
+        return _blob_path(blob_id).read_text()
+    except OSError:
+        return ""
+
+
+def _externalise_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        record = {k: v for k, v in attachment.items() if k != "data"}
+        data = attachment.get("data")
+        if data:
+            record["blob_id"] = _put_blob(data)
+        out.append(record)
+    return out
+
+
+# --- chats ------------------------------------------------------------------
+# One file per chat, under chats/<agent>/, plus a pointer to the open one.
+# Previously this was a single chats/<agent>.json that "Start new chat"
+# overwrote, which destroyed the transcript it replaced. Those transcripts are
+# the test corpus: comparing how v1 and v2 of a prompt answer the same question
+# is the whole point, and that is impossible if starting the v2 run deletes the
+# v1 run.
+
+
+def _agent_chat_dir(agent_name: str) -> Path:
+    return CHAT_DIR / agent_name
+
+
+def _chat_path(agent_name: str, chat_id: str) -> Path:
+    return _agent_chat_dir(agent_name) / ("%s.json" % chat_id)
+
+
+def _pointer_path(agent_name: str) -> Path:
+    return _agent_chat_dir(agent_name) / "current.txt"
+
+
+def _list_chats(agent_name: str) -> List[Dict[str, Any]]:
+    """Every saved chat for this agent, newest first."""
+    summaries: List[Dict[str, Any]] = []
+    try:
+        paths = sorted(_agent_chat_dir(agent_name).glob("*.json"))
+    except OSError:
+        return []
+    for path in paths:
+        try:
+            loaded = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        summaries.append(
+            {
+                "chat_id": loaded.get("chat_id") or path.stem,
+                "started_at": loaded.get("started_at") or "",
+                "turns": len(loaded.get("turns") or []),
+            }
+        )
+    return sorted(summaries, key=lambda s: s["started_at"], reverse=True)
+
+
+def _read_chat(agent_name: str, chat_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        loaded = json.loads(_chat_path(agent_name, chat_id).read_text())
     except (OSError, ValueError):
-        return _blank_chat()
+        return None
     if not isinstance(loaded, dict) or not isinstance(loaded.get("turns"), list):
-        return _blank_chat()
-    loaded.setdefault("chat_id", _new_chat_id())
+        return None
+    loaded.setdefault("chat_id", chat_id)
     loaded.setdefault("started_at", "")
     return loaded
 
 
+def _migrate_legacy_chat(agent_name: str) -> None:
+    """Move a pre-archive chats/<agent>.json into the per-chat layout."""
+    legacy = CHAT_DIR / ("%s.json" % agent_name)
+    if not legacy.is_file():
+        return
+    try:
+        loaded = json.loads(legacy.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("turns"), list):
+        return
+    loaded.setdefault("chat_id", _new_chat_id())
+    loaded.setdefault("started_at", "")
+    loaded["turns"] = [
+        dict(turn, attachments=_externalise_attachments(turn.get("attachments") or []))
+        for turn in loaded["turns"]
+    ]
+    _save_chat(agent_name, loaded)
+    try:
+        legacy.unlink()
+    except OSError:
+        pass
+
+
+def _load_chat(agent_name: str) -> Dict[str, Any]:
+    """The open chat for this agent, so a refresh does not end the conversation."""
+    _migrate_legacy_chat(agent_name)
+    try:
+        chat_id = _pointer_path(agent_name).read_text().strip()
+    except OSError:
+        chat_id = ""
+    if chat_id:
+        existing = _read_chat(agent_name, chat_id)
+        if existing is not None:
+            return existing
+    recent = _list_chats(agent_name)
+    if recent:
+        restored = _read_chat(agent_name, recent[0]["chat_id"])
+        if restored is not None:
+            return restored
+    return _blank_chat()
+
+
 def _save_chat(agent_name: str, chat: Dict[str, Any]) -> None:
     try:
-        CHAT_DIR.mkdir(parents=True, exist_ok=True)
-        _chat_path(agent_name).write_text(json.dumps(chat, indent=2))
+        _agent_chat_dir(agent_name).mkdir(parents=True, exist_ok=True)
+        _chat_path(agent_name, chat["chat_id"]).write_text(json.dumps(chat, indent=2))
+        _pointer_path(agent_name).write_text(chat["chat_id"])
     except OSError:
         pass  # a convenience, never worth breaking the page over
 
@@ -459,7 +589,7 @@ def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]
     blocks: List[Dict[str, Any]] = []
     for attachment in attachments:
         mime_type = attachment.get("mime_type") or "application/octet-stream"
-        data = attachment.get("data")
+        data = _get_blob(attachment)
         if not data:
             continue
         if mime_type.startswith("image/"):
@@ -483,6 +613,12 @@ def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]
 # Matches config.Settings.max_agent_iterations. A cap exists because a model that
 # keeps asking for tools without answering will otherwise loop on a customer's time.
 MAX_TOOL_ITERATIONS = 6
+
+# The playground used to hardcode 1024, which is small enough to be a bug: a
+# knowledge passage plus a few screenshots can exhaust it before the model writes
+# a single word, and the turn then renders as an empty bubble. Production's
+# default (config.Settings.max_tokens) is 16000; match it and let it be tuned.
+DEFAULT_MAX_TOKENS = 16000
 
 # Writes are backstopped with a derived idempotency key, exactly as Agent.run does:
 # the registry refuses a write without one, and a model that forgot should not
@@ -528,6 +664,7 @@ def _run_agent_turn(
     registry: ToolRegistry,
     tool_names: Any,
     context: ToolContext,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Dict[str, Any]:
     """Ask the model, run whatever tools it asks for, ask again. Return the reply.
 
@@ -553,7 +690,7 @@ def _run_agent_turn(
     for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
         response = client.messages.create(
             model=model_id,
-            max_tokens=1024,
+            max_tokens=max_tokens,
             system=system_prompt,
             messages=messages,
             tools=tools,
@@ -561,10 +698,22 @@ def _run_agent_turn(
         api_content = [block.model_dump(exclude_none=True) for block in response.content]
         messages.append({"role": "assistant", "content": api_content})
 
+        stop_reason = getattr(response, "stop_reason", None)
         tool_uses = [block for block in response.content if block.type == "tool_use"]
         if not tool_uses:
             text = "\n".join(block.text for block in response.content if block.type == "text")
-            return {"text": text, "trace": trace, "iterations": iteration}
+            if not text.strip():
+                # A blank bubble tells the tester nothing. This happens for real:
+                # a `max_tokens` cut can end a turn with no text block at all, and
+                # silently rendering "" reads as the bot ignoring the customer.
+                text = (
+                    "(No text returned — stop_reason=%s. If this is max_tokens, raise the "
+                    "output cap in the sidebar; a long knowledge passage plus images can "
+                    "exhaust a small one before the model writes anything.)" % stop_reason
+                )
+            elif stop_reason == "max_tokens":
+                text += "\n\n(Truncated — hit the output token cap. Raise it in the sidebar.)"
+            return {"text": text, "trace": trace, "iterations": iteration, "stop_reason": stop_reason}
 
         results: List[Dict[str, Any]] = []
         for tool_use in tool_uses:
@@ -635,6 +784,17 @@ def main() -> None:
             value=os.environ.get("ANTHROPIC_API_KEY", ""),
             type="password",
             help="Session-only — never written to disk. Falls back to ANTHROPIC_API_KEY if set.",
+        )
+        max_tokens = st.number_input(
+            "Max output tokens",
+            min_value=256,
+            max_value=32000,
+            value=DEFAULT_MAX_TOKENS,
+            step=1000,
+            help=(
+                "Per model reply. Too low and a turn can end with no text at all — a long "
+                "knowledge passage plus screenshots eats the budget before the model writes."
+            ),
         )
 
         module = importlib.import_module(AGENT_MODULES[agent_name])
@@ -748,10 +908,32 @@ def main() -> None:
             )
         with head_right:
             if st.button("➕ Start new chat", use_container_width=True):
+                # The chat being replaced stays on disk under its own id — it is
+                # test material, and the whole point of prompt versions is being
+                # able to compare a v1 run against a v2 run of the same questions.
                 st.session_state[session_key] = _blank_chat()
                 _save_chat(agent_name, st.session_state[session_key])
                 st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
                 st.rerun()
+
+        saved_chats = _list_chats(agent_name)
+        if len(saved_chats) > 1:
+            with st.expander("Past chats — %d saved" % len(saved_chats)):
+                labels = [
+                    "%s · %d turns%s"
+                    % (c["chat_id"], c["turns"], "  ← open" if c["chat_id"] == chat["chat_id"] else "")
+                    for c in saved_chats
+                ]
+                picked = st.selectbox("Reopen a chat", labels, key="chat_pick_%s" % agent_name)
+                chosen = saved_chats[labels.index(picked)]
+                if chosen["chat_id"] != chat["chat_id"] and st.button(
+                    "Reopen %s" % chosen["chat_id"], key="chat_open_%s" % agent_name
+                ):
+                    reopened = _read_chat(agent_name, chosen["chat_id"])
+                    if reopened is not None:
+                        st.session_state[session_key] = reopened
+                        _save_chat(agent_name, reopened)
+                        st.rerun()
 
         for turn in chat["turns"]:
             with st.chat_message(turn["role"]):
@@ -800,7 +982,8 @@ def main() -> None:
             chat["turns"].append({
                 "role": "user",
                 "content": user_text.strip() if user_text else "(Uploaded file(s) for review)",
-                "attachments": attachments,
+                # Bytes go to the blob store; the turn keeps only a reference.
+                "attachments": _externalise_attachments(attachments),
                 "prompt_version": _prompt_version_label(agent_name, edited_prompt),
             })
 
@@ -857,6 +1040,7 @@ def main() -> None:
                             registry,
                             module.TOOL_NAMES,
                             _tool_context(chat["chat_id"], resolved),
+                            max_tokens=int(max_tokens),
                         )
                     text, trace = outcome["text"], outcome["trace"]
                 except anthropic.APIStatusError as exc:
