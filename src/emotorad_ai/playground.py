@@ -1024,6 +1024,13 @@ def main() -> None:
                         blocks.append({"type": "text", "text": content})
                     for attachment in turn.get("attachments") or []:
                         blocks.extend(_attachment_blocks([attachment]))
+                    if not blocks:
+                        # The API rejects an empty content list on any message but
+                        # the last, so a turn that produced no text — the blank
+                        # replies the old 1024-token cap caused — would make every
+                        # later message in that chat fail. Drop it instead of
+                        # letting one bad turn condemn the whole transcript.
+                        continue
                     anthropic_messages.append({"role": turn["role"], "content": blocks})
 
                 # Writes land in the in-memory mocks, never a real system — the
