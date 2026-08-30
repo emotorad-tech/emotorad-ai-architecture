@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..knowledge import BatteryKnowledgeBase
 from . import fixtures
+from .verification import VerificationStore, register_verification_tools
 from .registry import ToolError, ToolRegistry, ok
 
 # Customer-facing tool names, so agents and tests refer to one spelling.
@@ -52,14 +53,34 @@ def _clean(value: Any) -> Any:
     return None if value in ("", "None", "null") else value
 
 
+def _date_only(value: Any) -> Optional[str]:
+    """Upstream's dates, whatever shape they arrive in, as plain ``YYYY-MM-DD``.
+
+    The OMS is not consistent with itself: `purchase_date` comes back as
+    ``2026-07-12T00:00:00Z`` and `created_at` as
+    ``2025-09-05 04:43:48.345000+00:00``, while the recorded fixtures carry bare
+    dates. Coverage is a whole-day comparison, so the time and offset are noise —
+    but noise that raises rather than degrades if it reaches `parse_date`.
+    Translated once, at the boundary, per the same rule as `_clean()`.
+    """
+    cleaned = _clean(value)
+    if cleaned is None:
+        return None
+    text = str(cleaned).strip()
+    # Both separators appear in live payloads, from the same endpoint.
+    head = text.replace("T", " ").split(" ", 1)[0]
+    return head or None
+
+
 def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
     """One bike, with coverage computed rather than read.
 
     The OMS carries no warranty dates at all — verified against the real 60-field
-    response — so start and end are derived from `purchase_date` here. Coverage is
-    resolved per bike, not per call: on a three-bike number one row can be missing
-    its purchase date while the others are fine, and failing the whole lookup for
-    that would deny the customer help with bikes we can answer for.
+    response — so start and end are derived here, from `purchase_date` when it is
+    present and `created_at` when it is not (see below). Coverage is resolved per
+    bike, not per call: on a three-bike number one row can be missing its dates
+    while the others are fine, and failing the whole lookup for that would deny
+    the customer help with bikes we can answer for.
     """
     bike = {
         "frame_number": record["frame_number"],
@@ -67,7 +88,7 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         "product_color": _clean(record.get("product_color")),
         "battery_variant": _clean(record.get("battery_variant")),
         "franchise_name": _clean(record.get("franchise_name")),
-        "purchase_date": _clean(record.get("purchase_date")),
+        "purchase_date": _date_only(record.get("purchase_date")),
     }
 
     # `purchase_date` is the right answer and `created_at` is the available one.
@@ -83,7 +104,7 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
     # gains five months. That is a real liability, which is why the fallback is
     # never silent. `warranty_start_source` and the note say where the date came
     # from so the agent can hedge and a human can settle a disputed claim.
-    started = bike["purchase_date"] or _clean(record.get("created_at"))
+    started = bike["purchase_date"] or _date_only(record.get("created_at"))
     if not started:
         bike.update(
             {
@@ -290,6 +311,12 @@ def build_registry(
     oms_available: bool = True,
     knowledge_bike: Optional[Dict[str, Any]] = None,
     today: Optional[date] = None,
+    # Where registered bikes come from. Defaults to the fixtures; the playground
+    # passes a reader backed by the live OMS. The seam is deliberately a plain
+    # callable so the tool's contract, its four outcomes and the coverage math
+    # stay identical whichever side of the swap you are on.
+    warranty_source: Optional[Callable[[str], Optional[List[Dict[str, Any]]]]] = None,
+    verification: Optional["VerificationStore"] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -307,6 +334,13 @@ def build_registry(
     registry.tickets = tickets  # type: ignore[attr-defined]  # test/inspection handle
     registry.bookings = bookings  # type: ignore[attr-defined]
     registry.orders = orders  # type: ignore[attr-defined]
+
+    # Only offered when a store is supplied. An agent that cannot verify anyone
+    # should not be told it can — an absent tool is a fact the model can reason
+    # about, a present one that never works invites it to keep trying.
+    if verification is not None:
+        register_verification_tools(registry, verification)
+        registry.verification = verification  # type: ignore[attr-defined]
 
     @registry.register(
         LOOKUP_WARRANTY_RECORD,
@@ -331,7 +365,7 @@ def build_registry(
                 retryable=True,
             )
 
-        records = fixtures.WARRANTY_RECORDS.get(phone)
+        records = warranty_source(phone) if warranty_source else fixtures.WARRANTY_RECORDS.get(phone)
         if not records:
             raise ToolError(
                 "no_warranty_record",

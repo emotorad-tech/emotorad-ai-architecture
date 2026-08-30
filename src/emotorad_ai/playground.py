@@ -77,7 +77,9 @@ from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, Inbo
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import _coverage, build_registry
-from emotorad_ai.tools.registry import ToolContext, ToolRegistry, is_error
+from emotorad_ai.tools.oms import OMSClient, OMSConfigError, OMSNoRecord, OMSUnavailable
+from emotorad_ai.tools.registry import ToolContext, ToolError, ToolRegistry, is_error
+from emotorad_ai.tools.verification import VerificationStore
 
 MODELS = {
     "Haiku 4.5 (cheap, fast — bulk iteration)": "claude-haiku-4-5",
@@ -626,6 +628,52 @@ DEFAULT_MAX_TOKENS = 16000
 _WRITE_KEY_FIELD = "idempotency_key"
 
 
+def _live_warranty_source(client: Any) -> Any:
+    """Registered bikes from the real OMS, mapped onto the tool's own outcomes.
+
+    The mapping is the point. `no rows` is a customer who never registered and
+    routes to Late Warranty Registration; everything else — a rejected key, a
+    timeout, a 500 — is our outage and must say so. Reporting an outage as "no
+    record" would tell a registered owner to re-register.
+    """
+
+    def source(phone: str) -> Optional[List[Dict[str, Any]]]:
+        try:
+            return client.get_warranties_by_mobile(phone)
+        except OMSNoRecord:
+            return None
+        except (OMSUnavailable, OMSConfigError) as exc:
+            raise ToolError(
+                "oms_unavailable",
+                "The warranty system is not responding (%s)." % type(exc).__name__,
+                retryable=True,
+            )
+
+    return source
+
+
+def _resolved_for_live(agent_name: str, verified_phone: Optional[str], registry: ToolRegistry) -> ResolvedIdentity:
+    """Anonymous until the customer proves a number, then hydrated from the OMS.
+
+    This is the whole point of the live mode: nothing is known at "hi". The
+    disclosure gate (`Identity.may_disclose`) stays shut on its own, in code,
+    until `verify_identity` succeeds — no prompt wording can open it early.
+    """
+    if not verified_phone:
+        return ResolvedIdentity(
+            persona="customer", method="unverified", identity=Identity(strength=ANONYMOUS)
+        )
+    identity = Identity(strength=VERIFIED, phone=verified_phone)
+    message = InboundMessage(
+        conversation_id="hydrate",
+        persona="customer",
+        identity=identity,
+        channel="website_chat",
+        message_text="",
+    )
+    return IdentityResolver(registry).hydrate(message)
+
+
 def _tool_context(conversation_id: str, resolved: ResolvedIdentity) -> ToolContext:
     """The trusted facts tools are given behind the model's back.
 
@@ -801,9 +849,22 @@ def main() -> None:
 
         st.divider()
         st.subheader("Rider")
-        rider_mode = st.radio("Rider source", ["Preset rider", "Custom rider"], horizontal=True)
+        rider_mode = st.radio(
+            "Rider source", ["Preset rider", "Custom rider", "Live customer"], horizontal=True
+        )
 
-        if rider_mode == "Preset rider":
+        if rider_mode == "Live customer":
+            st.caption(
+                "Nothing is known at 'hi'. The bot has to ask for a number, send a code and "
+                "verify it before it may name a bike — exactly as a real website chat would. "
+                "Bikes come from the live OMS."
+            )
+            # Resolution needs the chat id (verification is per conversation), and
+            # that is not known until the chat loads below.
+            resolved = None  # type: ignore[assignment]
+            persona, channel = "customer", "website_chat"
+            rider_display = "Live customer"
+        elif rider_mode == "Preset rider":
             scenarios = _scenarios_for(agent_name)
             scenario_label = st.selectbox("Test customer/dealer scenario", [s.label for s in scenarios])
             scenario = next(s for s in scenarios if s.label == scenario_label)
@@ -850,6 +911,23 @@ def main() -> None:
         st.session_state[session_key] = _load_chat(agent_name)
 
     chat = st.session_state[session_key]
+
+    # One registry per run, shared by identity hydration and the tool loop, so the
+    # verification a tool records is the verification the next turn reads.
+    verification: VerificationStore = st.session_state.setdefault("verification_store", VerificationStore())
+    if rider_mode == "Live customer":
+        registry = build_registry(
+            today=date.today(),
+            verification=verification,
+            warranty_source=_live_warranty_source(OMSClient()),
+        )
+        verified_phone = verification.verified_phone(chat["chat_id"])
+        resolved = _resolved_for_live(agent_name, verified_phone, registry)
+        rider_display = (
+            "Live — verified %s" % verified_phone if verified_phone else "Live — not yet verified"
+        )
+    else:
+        registry = build_registry(today=date.today())
 
     col_prompt, col_chat = st.columns([1, 1])
 
@@ -914,6 +992,24 @@ def main() -> None:
                 st.session_state[session_key] = _blank_chat()
                 _save_chat(agent_name, st.session_state[session_key])
                 st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
+                st.rerun()
+
+        if rider_mode == "Live customer":
+            # Stands in for the SMS. Shown to the tester only — the model never
+            # receives it, which is the property test_verification asserts.
+            pending_code = verification.pending_code(chat["chat_id"])
+            if verified_phone:
+                st.success("Verified as %s — the bot may now name bikes and coverage." % verified_phone)
+            elif pending_code:
+                st.info(
+                    "📱 SMS code for this conversation: **%s** — type it into the chat as the "
+                    "customer would. %d attempt(s) left."
+                    % (pending_code, verification.attempts_left(chat["chat_id"]))
+                )
+            else:
+                st.caption("Anonymous. The bot cannot name a bike or state coverage until verified.")
+            if (verified_phone or pending_code) and st.button("Reset verification"):
+                verification.reset(chat["chat_id"])
                 st.rerun()
 
         saved_chats = _list_chats(agent_name)
@@ -1033,9 +1129,9 @@ def main() -> None:
                         continue
                     anthropic_messages.append({"role": turn["role"], "content": blocks})
 
-                # Writes land in the in-memory mocks, never a real system — the
-                # point of tuning a prompt is not to create real Zoho tickets.
-                registry = build_registry(today=date.today())
+                # Reads may be live; writes always land in the in-memory mocks,
+                # never a real system — tuning a prompt must not create real Zoho
+                # tickets or book real service slots.
                 trace: List[Dict[str, Any]] = []
                 try:
                     with st.spinner("Thinking, and calling tools…"):

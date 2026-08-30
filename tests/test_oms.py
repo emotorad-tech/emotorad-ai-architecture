@@ -138,5 +138,44 @@ class OrderReadTests(unittest.TestCase):
             client.get_orders_by_identifiers("+919876543210")
 
 
+
+
+class DateNormalisationTests(unittest.TestCase):
+    """The OMS is not consistent with itself, and parse_date raises on the difference."""
+
+    def test_both_live_timestamp_shapes_reduce_to_a_date(self):
+        from emotorad_ai.tools.mocks import _date_only
+
+        # Left column is what the live endpoint actually returned on 2026-08-29.
+        cases = {
+            "2025-09-05 04:43:48.345000+00:00": "2025-09-05",  # created_at
+            "2026-07-12T00:00:00Z": "2026-07-12",              # purchase_date
+            "2024-08-19": "2024-08-19",                        # fixtures
+            "": None,
+            "None": None,
+            None: None,
+        }
+        for supplied, expected in cases.items():
+            self.assertEqual(_date_only(supplied), expected, supplied)
+
+    def test_a_live_timestamp_produces_real_coverage_rather_than_raising(self):
+        from datetime import date
+
+        from emotorad_ai.tools.mocks import _coverage
+
+        bike = _coverage(
+            {
+                "frame_number": "F1",
+                "product_name": "Doodle Black",
+                "purchase_date": None,
+                "created_at": "2025-09-05 04:43:48.345000+00:00",
+            },
+            date(2026, 8, 30),
+        )
+        self.assertEqual(bike["warranty_start"], "2025-09-05")
+        self.assertEqual(bike["warranty_start_source"], "registration_date")
+        self.assertTrue(bike["in_warranty"])
+
+
 if __name__ == "__main__":
     unittest.main()
