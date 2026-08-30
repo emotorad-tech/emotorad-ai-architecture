@@ -76,10 +76,15 @@ if _SRC not in sys.path:
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.tools import fixtures
-from emotorad_ai.tools.mocks import _coverage, build_registry
+from emotorad_ai.tools.mocks import RAISE_INTAKE_TICKET, _coverage, build_registry
 from emotorad_ai.tools.oms import OMSClient, OMSConfigError, OMSNoRecord, OMSUnavailable
 from emotorad_ai.tools.registry import ToolContext, ToolError, ToolRegistry, is_error
-from emotorad_ai.tools.verification import VerificationStore
+from emotorad_ai.tools.verification import (
+    FIND_ACCOUNT_BY_CODE,
+    REQUEST_IDENTITY_VERIFICATION,
+    VERIFY_IDENTITY,
+    VerificationStore,
+)
 
 MODELS = {
     "Haiku 4.5 (cheap, fast — bulk iteration)": "claude-haiku-4-5",
@@ -652,6 +657,50 @@ def _live_warranty_source(client: Any) -> Any:
     return source
 
 
+def _live_account_finder(client: Any) -> Any:
+    """Order or invoice code -> the phone the warranty is registered on, or None.
+
+    Returns the number to the *registry*, never to the model: the tool that uses
+    this hands back only a masked form. An order code is printed on paper, so
+    treating it as identification would make an invoice enough to read someone's
+    contact details.
+    """
+
+    def finder(code: str) -> Optional[str]:
+        try:
+            rows = client.get_orders_by_code(code)
+        except (OMSNoRecord, OMSConfigError):
+            return None
+        except OMSUnavailable:
+            raise ToolError(
+                "oms_unavailable", "The order system is not responding.", retryable=True
+            )
+        for row in rows:
+            phone = (row.get("mobile") or "").strip()
+            if phone and phone not in ("None", "null"):
+                return phone if phone.startswith("+") else "+91%s" % phone.lstrip("0")
+        return None
+
+    return finder
+
+
+def _live_tool_names(module: Any, registry: ToolRegistry) -> List[str]:
+    """The agent's own tools, plus the identity tools the live channel needs.
+
+    Production never needs these: identity is resolved upstream by the channel,
+    so `battery_support.TOOL_NAMES` is right to omit them. Live mode is the one
+    place the agent has to establish identity itself, and slicing strictly by
+    TOOL_NAMES left the verification tools registered but unreachable — the model
+    was told to ask for a phone number and then had no way to do anything with
+    it. Added here rather than in the agent so production stays as designed.
+    """
+    names = list(module.TOOL_NAMES)
+    for extra in (REQUEST_IDENTITY_VERIFICATION, VERIFY_IDENTITY, FIND_ACCOUNT_BY_CODE, RAISE_INTAKE_TICKET):
+        if extra in registry.specs and extra not in names:
+            names.append(extra)
+    return names
+
+
 def _resolved_for_live(agent_name: str, verified_phone: Optional[str], registry: ToolRegistry) -> ResolvedIdentity:
     """Anonymous until the customer proves a number, then hydrated from the OMS.
 
@@ -916,10 +965,12 @@ def main() -> None:
     # verification a tool records is the verification the next turn reads.
     verification: VerificationStore = st.session_state.setdefault("verification_store", VerificationStore())
     if rider_mode == "Live customer":
+        client = OMSClient()
         registry = build_registry(
             today=date.today(),
             verification=verification,
-            warranty_source=_live_warranty_source(OMSClient()),
+            warranty_source=_live_warranty_source(client),
+            account_finder=_live_account_finder(client),
         )
         verified_phone = verification.verified_phone(chat["chat_id"])
         resolved = _resolved_for_live(agent_name, verified_phone, registry)
@@ -1141,7 +1192,9 @@ def main() -> None:
                             system_prompt,
                             anthropic_messages,
                             registry,
-                            module.TOOL_NAMES,
+                            _live_tool_names(module, registry)
+                            if rider_mode == "Live customer"
+                            else module.TOOL_NAMES,
                             _tool_context(chat["chat_id"], resolved),
                             max_tokens=int(max_tokens),
                         )

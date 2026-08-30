@@ -29,6 +29,9 @@ CREATE_SUPPORT_TICKET = "create_support_ticket"
 FIND_SERVICE_SLOTS = "find_service_slots"
 BOOK_SERVICE_SLOT = "book_service_slot"
 SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
+# The unverified counterpart of create_support_ticket. Separate on purpose:
+# see its registration below for why the two must not be one tool.
+RAISE_INTAKE_TICKET = "raise_intake_ticket"
 
 # --- dealer tools (W2) -------------------------------------------------------
 # Split into quote / place deliberately. Quoting is a read and can be repeated
@@ -317,6 +320,9 @@ def build_registry(
     # stay identical whichever side of the swap you are on.
     warranty_source: Optional[Callable[[str], Optional[List[Dict[str, Any]]]]] = None,
     verification: Optional["VerificationStore"] = None,
+    # Order/invoice code -> registered phone, for a customer who cannot recall
+    # their number. Absent unless a real orders API is wired.
+    account_finder: Optional[Callable[[str], Optional[str]]] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -339,8 +345,81 @@ def build_registry(
     # should not be told it can — an absent tool is a fact the model can reason
     # about, a present one that never works invites it to keep trying.
     if verification is not None:
-        register_verification_tools(registry, verification)
+        register_verification_tools(registry, verification, account_finder=account_finder)
         registry.verification = verification  # type: ignore[attr-defined]
+
+        @registry.register(
+            RAISE_INTAKE_TICKET,
+            "Raise a ticket for a customer whose identity could NOT be confirmed — they could "
+            "not complete the one-time code, or could not give a number or order number at "
+            "all. Use it so the conversation still ends with the case in a human's queue "
+            "rather than nowhere. Everything you pass is what the customer TOLD you, not "
+            "anything the system confirmed: pass their words. Do not state or imply any "
+            "warranty outcome to the customer — a person verifies who they are before anyone "
+            "acts on this.",
+            parameters={
+                "stated_name": {"type": "string", "description": "Name as the customer gave it."},
+                "stated_contact": {
+                    "type": "string",
+                    "description": "Any phone or email they offered, unverified, exactly as given.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "The fault, what was already tried, and what the customer is asking for.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "Order or invoice number they read out, files they sent, anything else "
+                        "a human can use to find them. Say so plainly if there is none."
+                    ),
+                },
+                "idempotency_key": {"type": "string", "description": "Stable key for this request."},
+            },
+            required=("summary", "idempotency_key"),
+            injects=("conversation_id",),
+            write=True,
+        )
+        def raise_intake_ticket(
+            conversation_id: str,
+            summary: str,
+            idempotency_key: str,
+            stated_name: str = "",
+            stated_contact: str = "",
+            evidence: str = "",
+        ) -> Dict[str, Any]:
+            """A ticket that records claims, deliberately kept apart from the verified one.
+
+            `create_support_ticket` injects a phone from a resolved identity and
+            refuses without one, which is right: a ticket carrying a frame number
+            and a coverage claim should only exist for someone we know. But that
+            left an unverified customer with no path at all — the agent would
+            promise to raise something and then raise nothing, which is worse
+            than saying no.
+
+            So this is a second, weaker ticket, and the weakness is the point. It
+            asserts nothing. Every field is what the customer said, labelled as
+            such, and `identity: unverified` travels with it so triage cannot
+            mistake it for a confirmed case.
+            """
+            ticket = tickets.create(
+                category="intake_unverified",
+                severity="normal",
+                identity="unverified",
+                conversation_id=conversation_id,
+                stated_name=_clean(stated_name) or "not given",
+                stated_contact=_clean(stated_contact) or "not given",
+                evidence=_clean(evidence) or "none offered",
+                description=summary,
+            )
+            return ok(
+                {
+                    "ticket_id": ticket["ticket_id"],
+                    "status": ticket["status"],
+                    "identity": "unverified",
+                    "expected_response": "a person will verify the customer before acting on this",
+                }
+            )
 
     @registry.register(
         LOOKUP_WARRANTY_RECORD,

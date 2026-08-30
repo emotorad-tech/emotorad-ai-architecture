@@ -143,3 +143,31 @@ class OMSClient:
     def get_orders_by_identifiers(self, phone: str) -> List[Dict[str, Any]]:
         """OMS orders for a number. Raises OMSNoRecord for a franchise walk-in."""
         return self._rows("get_orders_by_identifiers", phone, "orders")
+
+    def get_orders_by_code(self, code: str) -> List[Dict[str, Any]]:
+        """Orders for an order code or an invoice code, whichever the customer read out.
+
+        Both are printed on the invoice and a customer will not know which is
+        which, so both are tried. Verified 2026-08-29: ``order_code`` and
+        ``invoice_code`` are accepted parameters; ``invoice_no`` and
+        ``docket_number`` are not.
+
+        This exists to recover the registered phone for someone who cannot recall
+        it. An order code is **not a secret** — it is printed on paper and
+        emailed — so what the caller does with the result matters more than this
+        lookup: it must never be treated as proof of identity.
+        """
+        code = (code or "").strip()
+        if not code:
+            raise OMSConfigError("no order or invoice code supplied")
+        last: Exception = OMSNoRecord("no rows")
+        for param in ("order_code", "invoice_code"):
+            try:
+                payload = self._get("get_orders_by_identifiers", {param: code})
+            except OMSNoRecord as exc:
+                last = exc
+                continue
+            rows = payload.get("orders")
+            if isinstance(rows, list) and rows:
+                return [row for row in rows if isinstance(row, dict)]
+        raise last

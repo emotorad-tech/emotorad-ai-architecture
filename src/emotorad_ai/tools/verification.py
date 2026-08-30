@@ -41,11 +41,28 @@ from .registry import ToolError, ToolRegistry, ok
 
 REQUEST_IDENTITY_VERIFICATION = "request_identity_verification"
 VERIFY_IDENTITY = "verify_identity"
+FIND_ACCOUNT_BY_CODE = "find_account_by_code"
 
 # Enough attempts for a mistyped digit, few enough that a six-digit code cannot
 # be guessed. The counter is per conversation and is never reset by asking for a
 # new code, or requesting one would be a way to buy more guesses.
 MAX_ATTEMPTS = 5
+
+
+def mask_phone(phone: str) -> str:
+    """A number the owner will recognise and a stranger cannot reconstruct.
+
+    Three digits. Someone holding an invoice they did not pay for learns almost
+    nothing; the person whose number it is knows immediately whether to expect
+    the code.
+    """
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    # Normalise to the ten national digits first. Masking "+919876543210" and
+    # "9876543210" differently would show two dot counts for one number, which
+    # reads as two different numbers to the person being asked to confirm it.
+    if len(digits) > 10 and digits.startswith("91"):
+        digits = digits[-10:]
+    return ("•" * max(len(digits) - 3, 0)) + digits[-3:] if digits else ""
 
 
 @dataclass
@@ -54,6 +71,19 @@ class _Pending:
     code: str
     attempts: int = 0
     verified: bool = False
+
+
+@dataclass
+class _Candidate:
+    """A number recovered from an order code, held back from the model.
+
+    The model asks for a code to be sent to "the number on file" without ever
+    learning what it is — otherwise recovering an account from a printed invoice
+    would hand out a phone number, which is the leak this whole flow exists to
+    avoid.
+    """
+
+    phone: str
 
 
 @dataclass
@@ -67,7 +97,17 @@ class VerificationStore:
     """
 
     _pending: Dict[str, _Pending] = field(default_factory=dict)
+    _candidates: Dict[str, _Candidate] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def remember_candidate(self, conversation_id: str, phone: str) -> None:
+        with self._lock:
+            self._candidates[conversation_id] = _Candidate(phone=phone)
+
+    def candidate_phone(self, conversation_id: str) -> Optional[str]:
+        with self._lock:
+            candidate = self._candidates.get(conversation_id)
+            return candidate.phone if candidate else None
 
     def issue(self, conversation_id: str, phone: str, code: str) -> None:
         with self._lock:
@@ -120,8 +160,15 @@ def register_verification_tools(
     store: VerificationStore,
     code_factory: Callable[[], str] = _six_digits,
     send: Optional[Callable[[str, str], None]] = None,
+    account_finder: Optional[Callable[[str], Optional[str]]] = None,
 ) -> None:
-    """Add the two identity tools to a registry."""
+    """Add the identity tools to a registry.
+
+    ``account_finder`` takes an order or invoice code and returns the registered
+    phone, or None. Supplied only when there is something to look it up in; the
+    recovery tool is absent otherwise, so an agent that cannot recover an account
+    is never told that it can.
+    """
 
     @registry.register(
         REQUEST_IDENTITY_VERIFICATION,
@@ -133,13 +180,28 @@ def register_verification_tools(
         parameters={
             "phone": {
                 "type": "string",
-                "description": "The mobile number the customer gave you, digits as they said them.",
+                "description": (
+                    "The mobile number the customer gave you, digits as they said them. Omit "
+                    "this entirely to send the code to the number already found from their "
+                    "order or invoice code — you are not told that number, and you do not "
+                    "need it."
+                ),
             }
         },
-        required=("phone",),
+        required=(),
         injects=("conversation_id",),
     )
-    def request_identity_verification(conversation_id: str, phone: str) -> Dict[str, Any]:
+    def request_identity_verification(conversation_id: str, phone: Optional[str] = None) -> Dict[str, Any]:
+        if not phone:
+            # Recovered from an order code and deliberately never shown to the
+            # model; sending to it is the only thing the model may do with it.
+            phone = store.candidate_phone(conversation_id)
+            if not phone:
+                raise ToolError(
+                    "no_number_on_file",
+                    "No number has been established for this conversation. Ask the customer for "
+                    "their registered mobile number, or for their order or invoice number.",
+                )
         try:
             normalised = normalise_mobile(phone)
         except OMSConfigError:
@@ -153,7 +215,10 @@ def register_verification_tools(
         if send is not None:
             send(normalised, code)
         # Deliberately identical whether or not the number is registered.
-        return ok({"sent": True, "phone_ending": normalised[-4:]})
+        # Masked the same way everywhere. Returning four digits here while
+        # find_account_by_code returns three would hand back, on the recovery
+        # path, a digit more of a number the model was never given.
+        return ok({"sent": True, "phone_masked": mask_phone(normalised)})
 
     @registry.register(
         VERIFY_IDENTITY,
@@ -183,3 +248,38 @@ def register_verification_tools(
             "That code is not correct. %d attempt(s) remain. Ask the customer to check the SMS "
             "and read the code again." % remaining,
         )
+
+    if account_finder is None:
+        return
+
+    @registry.register(
+        FIND_ACCOUNT_BY_CODE,
+        "Find which registered mobile number an order belongs to, using the order number or "
+        "invoice number printed on the customer's invoice. Use this only when the customer "
+        "cannot recall the number their warranty is registered on. It returns the number "
+        "MASKED — you are not told the full number and do not need it: call "
+        "request_identity_verification with no phone argument to send the code there. A code "
+        "printed on an invoice is not proof of identity, so this confirms nothing on its own; "
+        "the customer still has to enter the one-time code before you may discuss their bike.",
+        parameters={
+            "code": {
+                "type": "string",
+                "description": "The order number or invoice number, exactly as the customer read it out.",
+            }
+        },
+        required=("code",),
+        injects=("conversation_id",),
+    )
+    def find_account_by_code(conversation_id: str, code: str) -> Dict[str, Any]:
+        phone = account_finder(code)
+        if not phone:
+            raise ToolError(
+                "order_not_found",
+                "No order matches that number. Ask the customer to read it out again — the "
+                "order number and the invoice number are both printed on the invoice, and "
+                "either will do.",
+            )
+        store.remember_candidate(conversation_id, phone)
+        # Masked, and nothing else. No name, no address, no bike: the person
+        # holding the invoice has proved nothing yet.
+        return ok({"found": True, "phone_masked": mask_phone(phone)})
