@@ -25,3 +25,15 @@ streamlit>=1.38
 # be read" on its own, and the page keeps working.
 imageio>=2.34
 imageio-ffmpeg>=0.5
+
+# Speech-to-text for a video's audio track: the customer's narration ("listen,
+# it wheezes when I start it") is often the whole diagnosis, and frames throw
+# the audio away. Runs locally and offline, so prompt tuning needs no extra
+# credentials. Set EMOTORAD_WHISPER_MODEL=small (or medium) for noticeably
+# better Hindi / Marathi / Hinglish, at the cost of a larger model download.
+#
+# For production prefer AWS Transcribe, which keeps this traffic inside the AWS
+# boundary CLAUDE.md sets out; _transcribe_audio is the single seam to swap.
+# Droppable like the imageio lines above: without it, videos still send frames
+# and the narration is simply absent.
+faster-whisper>=1.0

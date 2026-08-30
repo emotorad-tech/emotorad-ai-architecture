@@ -141,5 +141,123 @@ class FrameExtractionTests(unittest.TestCase):
         self.assertEqual(blocks[0]["source"]["media_type"], "image/png")
 
 
+def _clip_with_speech(path, words="my motor is making a wheezing sound"):
+    """A clip carrying real speech, built with the bundled ffmpeg and macOS `say`."""
+    import subprocess, tempfile, os
+    import imageio_ffmpeg
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    with tempfile.TemporaryDirectory() as folder:
+        aiff = os.path.join(folder, "s.aiff")
+        if subprocess.run(["say", "-o", aiff, words], capture_output=True).returncode != 0:
+            return False
+        return subprocess.run(
+            [exe, "-y", "-i", aiff, "-f", "lavfi", "-i", "color=c=black:s=160x120",
+             "-shortest", "-pix_fmt", "yuv420p", str(path)],
+            capture_output=True,
+        ).returncode == 0
+
+
+class AudioTests(unittest.TestCase):
+    """Frames answer what it looks like; the narration answers what to notice."""
+
+    def test_a_silent_clip_yields_no_audio_rather_than_an_empty_wav(self):
+        import os, subprocess, tempfile
+        import imageio_ffmpeg
+
+        from emotorad_ai.playground import _extract_audio
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "silent.mp4")
+            subprocess.run(
+                [exe, "-y", "-f", "lavfi", "-i", "color=c=blue:s=160x120:d=1", "-pix_fmt", "yuv420p", path],
+                capture_output=True,
+            )
+            data = base64.b64encode(open(path, "rb").read()).decode()
+        self.assertIsNone(_extract_audio(data, ".mp4"))
+
+    def test_garbage_yields_no_audio_rather_than_raising(self):
+        from emotorad_ai.playground import _extract_audio
+
+        self.assertIsNone(_extract_audio(base64.b64encode(b"junk").decode(), ".mp4"))
+
+    def test_transcribing_nothing_returns_nothing(self):
+        from emotorad_ai.playground import _transcribe_audio
+
+        self.assertIsNone(_transcribe_audio(b""))
+
+    def test_a_video_with_no_speech_still_sends_its_frames(self):
+        # Absent narration must not cost the customer the visual evidence.
+        from emotorad_ai.playground import _attachment_blocks
+
+        blocks = _attachment_blocks(
+            [{"name": "c.mp4", "mime_type": "video/mp4", "kind": "video",
+              "data": "x", "frame_blob_ids": [], "transcript": None}]
+        )
+        self.assertEqual([b["type"] for b in blocks], ["text"])
+
+    def test_a_transcript_is_labelled_as_narration_not_as_the_bikes_sound(self):
+        # The failure this prevents: the customer says "listen to this wheeze",
+        # the model reads that sentence and reports back on a sound it never
+        # heard. Whisper transcribes speech; nothing here hears the bike.
+        from emotorad_ai.playground import _attachment_blocks
+
+        blocks = _attachment_blocks(
+            [{
+                "name": "c.mp4", "mime_type": "video/mp4", "kind": "video", "data": "x",
+                "frame_blob_ids": [],
+                "transcript": {"text": "listen to this wheezing", "language": "en"},
+            }]
+        )
+        note = blocks[0]["text"]
+        self.assertIn("listen to this wheezing", note)
+        self.assertIn("narration only", note)
+        self.assertIn("cannot hear", note)
+
+    def test_the_detected_language_travels_with_the_transcript(self):
+        # The testing strategy reports per language and never averages; a
+        # Hinglish transcript scored silently as English would hide the weakness.
+        from emotorad_ai.playground import _attachment_blocks
+
+        blocks = _attachment_blocks(
+            [{"name": "c.mp4", "mime_type": "video/mp4", "kind": "video", "data": "x",
+              "frame_blob_ids": [],
+              "transcript": {"text": "battery kharab hai", "language": "hi"}}]
+        )
+        self.assertIn("detected language hi", blocks[0]["text"])
+
+
+@unittest.skipUnless(VIDEO_TOOLING, "imageio/ffmpeg not installed")
+class SpeechToTextTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+
+        try:
+            import faster_whisper  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("faster-whisper not installed")
+        cls._dir = tempfile.TemporaryDirectory()
+        cls.path = cls._dir.name + "/speech.mp4"
+        if not _clip_with_speech(cls.path):
+            raise unittest.SkipTest("could not synthesise a speech clip on this machine")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._dir.cleanup()
+
+    def test_speech_in_a_clip_comes_back_as_text(self):
+        from emotorad_ai.playground import _extract_audio, _transcribe_audio
+
+        data = base64.b64encode(open(self.path, "rb").read()).decode()
+        wav = _extract_audio(data, ".mp4")
+        self.assertIsNotNone(wav)
+        result = _transcribe_audio(wav)
+        self.assertIsNotNone(result)
+        self.assertIn("wheezing", result["text"].lower())
+        self.assertIn("language", result)
+
+
 if __name__ == "__main__":
     unittest.main()

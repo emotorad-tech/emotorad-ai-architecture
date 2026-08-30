@@ -382,6 +382,8 @@ def _externalise_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str
                 name = attachment.get("name") or "video.mp4"
                 suffix = "." + name.rsplit(".", 1)[-1] if "." in name else ".mp4"
                 record["frame_blob_ids"] = [_put_blob(f) for f in _extract_frames(data, suffix)]
+                wav = _extract_audio(data, suffix)
+                record["transcript"] = _transcribe_audio(wav) if wav else None
         out.append(record)
     return out
 
@@ -620,6 +622,100 @@ VIDEO_FRAMES = 8
 FRAME_MAX_EDGE = 1024
 
 
+# Speech-to-text for the video's audio track. Frames answer "what does it look
+# like"; the customer's own narration answers "what am I meant to be noticing" —
+# and on a video of a motor, that sentence is usually the entire diagnosis
+# ("listen, it wheezes when I start it"). Whisper transcribes *speech*: it will
+# not characterise a mechanical noise, and nothing here should imply it can.
+#
+# Local and offline by design, so prompt tuning needs no extra credentials. For
+# production, AWS Transcribe is the architecturally consistent choice — CLAUDE.md
+# keeps this traffic inside Emotorad's AWS boundary — and _transcribe_audio is
+# the single seam to swap.
+#
+# "base" is what has been tested here. Indian-accented Hinglish, Hindi and
+# Marathi are noticeably better on "small" or "medium"; set the env var to
+# upgrade, at the cost of a larger one-off model download.
+WHISPER_MODEL = os.environ.get("EMOTORAD_WHISPER_MODEL", "base")
+_whisper_cache: Dict[str, Any] = {}
+
+
+def _ffmpeg_exe() -> Optional[str]:
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _extract_audio(data_b64: str, suffix: str) -> Optional[bytes]:
+    """The video's audio track as 16kHz mono WAV, or None if it has none.
+
+    16kHz mono is what speech models want; anything richer is discarded on the
+    way in, so sending more is wasted decode time.
+    """
+    import subprocess
+    import tempfile
+
+    exe = _ffmpeg_exe()
+    if not exe:
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "in%s" % (suffix or ".mp4"))
+            target = os.path.join(folder, "out.wav")
+            with open(source, "wb") as handle:
+                handle.write(base64.b64decode(data_b64))
+            result = subprocess.run(
+                [exe, "-y", "-i", source, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", target],
+                capture_output=True,
+                timeout=120,
+            )
+            if result.returncode != 0 or not os.path.exists(target):
+                return None  # silent clip, or no audio stream at all
+            data = open(target, "rb").read()
+            # A WAV header alone is ~44 bytes; anything near that is not audio.
+            return data if len(data) > 1024 else None
+    except Exception:
+        return None
+
+
+def _transcribe_audio(wav: bytes) -> Optional[Dict[str, Any]]:
+    """Speech in the clip, as text plus the language it was spoken in.
+
+    Language is reported rather than assumed: the testing strategy requires
+    results per language and never averaged, and a Hinglish transcript that
+    silently scored as English would hide exactly the weakness that matters.
+    """
+    import tempfile
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        return None
+    try:
+        model = _whisper_cache.get(WHISPER_MODEL)
+        if model is None:
+            # First call downloads the model; later ones are cheap.
+            model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+            _whisper_cache[WHISPER_MODEL] = model
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as handle:
+            handle.write(wav)
+            handle.flush()
+            segments, info = model.transcribe(handle.name, beam_size=1)
+            text = " ".join(segment.text.strip() for segment in segments).strip()
+        if not text:
+            return None
+        return {
+            "text": text,
+            "language": info.language,
+            "language_probability": round(float(info.language_probability), 2),
+        }
+    except Exception:
+        return None
+
+
 def _is_video(attachment: Dict[str, Any]) -> bool:
     mime = (attachment.get("mime_type") or "").lower()
     name = (attachment.get("name") or "").lower()
@@ -687,6 +783,27 @@ def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if _is_video(attachment):
             name = attachment.get("name") or "video"
             suffix = "." + name.rsplit(".", 1)[-1] if "." in name else ".mp4"
+            # The transcript is emitted first and independently of the frames.
+            # Audio and video fail separately — a stream we cannot decode often
+            # still carries usable sound — and on a motor fault the customer's own
+            # sentence is worth more than the pictures. Emitting it inside the
+            # frames branch discarded it exactly when it mattered most.
+            transcript = attachment.get("transcript")
+            if transcript and transcript.get("text"):
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "[What the customer says in the video '%s' (transcribed speech, "
+                            "detected language %s): \"%s\"  — this is their narration only. "
+                            "It is not a description of any sound the bike makes; you cannot "
+                            "hear the bike. If the fault is something they are asking you to "
+                            "listen to, say you cannot hear it and ask them to describe it.]"
+                            % (name, transcript.get("language", "unknown"), transcript["text"])
+                        ),
+                    }
+                )
+
             cached = attachment.get("frame_blob_ids")
             if cached is not None:
                 frames = [_blob_path(b).read_text() for b in cached if _blob_path(b).exists()]
@@ -1214,13 +1331,17 @@ def main() -> None:
                     for attachment in attachments:
                         if _is_video(attachment):
                             n = len(attachment.get("frame_blob_ids") or [])
+                            said = (attachment.get("transcript") or {}).get("text")
                             st.caption(
-                                "🎬 %s — %s"
+                                "🎬 %s — %s%s"
                                 % (
                                     attachment["name"],
                                     "%d frames sent as stills" % n if n else "could not be read",
+                                    " · speech transcribed" if said else " · no speech found",
                                 )
                             )
+                            if said:
+                                st.caption("🗣️ “%s”" % said)
                         else:
                             st.caption("📎 %s" % attachment["name"])
                 # Shown before the reply, in the order they happened: the reply
