@@ -70,33 +70,46 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         "purchase_date": _clean(record.get("purchase_date")),
     }
 
-    if not bike["purchase_date"]:
-        # Never fall back to `created_at`: that is when the customer *registered*,
-        # so a January purchase registered in June would gain five months of free
-        # coverage. Undeterminable is the honest answer, and it has a fix — the
-        # customer has the date on their invoice.
+    # `purchase_date` is the right answer and `created_at` is the available one.
+    # Verified against live OMS 2026-08-29: purchase_date and ocr_date were null
+    # on every row returned, and docs/api-shapes/warranty.json (recorded
+    # 2026-08-01) is null too. Refusing to compute without a purchase date
+    # therefore dead-ends essentially every real conversation into "send us your
+    # invoice", which is not support.
+    #
+    # So we fall back — and label it. created_at is when the customer
+    # *registered*, always at or after the purchase, so coverage derived from it
+    # runs LONGER than policy: a bike bought in January and registered in June
+    # gains five months. That is a real liability, which is why the fallback is
+    # never silent. `warranty_start_source` and the note say where the date came
+    # from so the agent can hedge and a human can settle a disputed claim.
+    started = bike["purchase_date"] or _clean(record.get("created_at"))
+    if not started:
         bike.update(
             {
                 "in_warranty": None,
                 "coverage_status": "purchase_date_missing",
                 "remedy": "collect_purchase_proof",
                 "note": (
-                    "This bike is registered but has no recorded purchase date, so coverage "
-                    "cannot be computed. Ask for the invoice or any proof of purchase showing "
-                    "the date it was bought. Do not state or estimate a coverage date."
+                    "This bike is registered but has no recorded purchase or registration "
+                    "date, so coverage cannot be computed. Ask for the invoice or any proof "
+                    "of purchase showing the date it was bought. Do not state or estimate a "
+                    "coverage date."
                 ),
             }
         )
         return bike
 
+    from_registration = not bike["purchase_date"]
     term_months = fixtures.warranty_term_months("battery", bike["product_name"])
-    purchased = fixtures.parse_date(bike["purchase_date"])
+    purchased = fixtures.parse_date(started)
     elapsed = fixtures.months_between(purchased, today or date.today())
     bike.update(
         {
             "in_warranty": elapsed < term_months,
-            "coverage_status": "computed",
-            "warranty_start": bike["purchase_date"],
+            "coverage_status": "computed_from_registration" if from_registration else "computed",
+            "warranty_start": purchased.isoformat(),
+            "warranty_start_source": "registration_date" if from_registration else "purchase_date",
             "warranty_end": fixtures.add_months(purchased, term_months).isoformat(),
             "term_months": term_months,
             # Flags a date we derived rather than one an authoritative system gave
@@ -105,6 +118,13 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
             "months_remaining": max(term_months - elapsed, 0),
         }
     )
+    if from_registration:
+        bike["note"] = (
+            "No purchase date on record, so coverage is measured from the registration "
+            "date instead. Treat it as provisional: say it is based on when the bike was "
+            "registered, and that the exact date can be confirmed from their invoice. Do "
+            "not refuse a claim on this basis alone."
+        )
     return bike
 
 

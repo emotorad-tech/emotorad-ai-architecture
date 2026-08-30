@@ -300,11 +300,19 @@ class PromptDisclosureTests(unittest.TestCase):
         self.assertIn("owns 3 bikes", prompt)
         self.assertIn("Do NOT assume", prompt)
 
-    def test_a_bike_with_no_purchase_date_never_gets_a_coverage_claim(self):
-        prompt = self._prompt(self.resolver, "919700000002")
+    def test_a_bike_with_no_date_at_all_never_gets_a_coverage_claim(self):
+        prompt = self._prompt(self.resolver, "919700000003")
         self.assertIn("Coverage: UNKNOWN", prompt)
         self.assertIn("invoice", prompt)
         self.assertNotIn("in warranty", prompt)
+
+    def test_coverage_from_a_registration_date_is_never_stated_as_final(self):
+        # The figure is generous by construction — registration is at or after
+        # purchase — so the prompt must mark it provisional, not assert it.
+        prompt = self._prompt(self.resolver, "919700000002")
+        self.assertIn("REGISTRATION date", prompt)
+        self.assertIn("do not present this as final", prompt.lower())
+        self.assertIn("invoice", prompt)
 
 
 if __name__ == "__main__":

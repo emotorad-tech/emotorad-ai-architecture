@@ -112,8 +112,10 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "created_at": "2021-10-02",
         },
     ],
-    # Registered, but the purchase date was never captured. Real rows look like
-    # this: coverage is undeterminable and the customer is asked for their invoice.
+    # Registered, but the purchase date was never captured — which live OMS rows
+    # overwhelmingly are. Coverage falls back to `created_at` and is reported as
+    # provisional; the customer still gets an answer, flagged as measured from
+    # registration rather than purchase.
     "+919700000002": [
         {
             "customer_name": "Imran Shaikh",
@@ -128,7 +130,31 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "created_at": "2024-08-19",
         }
     ],
+    # Neither date present. Rare, but it is the only remaining route into
+    # "coverage is undeterminable, ask for the invoice" — the path that keeps
+    # Late Warranty Registration's date-collection flow alive now that
+    # `created_at` covers the common case.
+    "+919700000003": [
+        {
+            "customer_name": "Farida Begum",
+            "mobile": "+919700000003",
+            "frame_number": "DDL32023550188",
+            "product_name": "Doodle V3",
+            "product_color": "",
+            "purchase_date": None,
+            "franchise_name": "Hyderabad Cycle Mart",
+            "pin_code": "500032",
+            "battery_variant": "36V 12.75Ah removable",
+            "created_at": None,
+        }
+    ],
 }
+
+# Registered bike, no purchase date — coverage answered provisionally from the
+# registration date.
+PHONE_REGISTRATION_DATE_ONLY = "+919700000002"
+# Registered bike with no date of any kind — the only true "undeterminable" case.
+PHONE_WITH_NO_DATES = "+919700000003"
 
 # A phone with no record at all — a real customer who never registered. Not
 # "not a customer": this is the Late Warranty Registration path. Present here as
