@@ -16,3 +16,12 @@ anthropic>=0.40
 # internal team can reach it through the one port that's exposed, rather
 # than it needing its own open port.
 streamlit>=1.38
+
+# Video attachments in the playground. Claude has no video block, so a customer's
+# clip is sampled into still frames and sent as images; imageio-ffmpeg ships a
+# static ffmpeg binary (~50MB) so no system package is needed. Drop both lines if
+# you would rather the container stay small and videos be collected for a human
+# to watch rather than assessed in chat — _extract_frames degrades to "could not
+# be read" on its own, and the page keeps working.
+imageio>=2.34
+imageio-ffmpeg>=0.5

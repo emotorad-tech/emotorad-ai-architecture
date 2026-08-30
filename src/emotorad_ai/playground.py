@@ -375,6 +375,13 @@ def _externalise_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str
         data = attachment.get("data")
         if data:
             record["blob_id"] = _put_blob(data)
+            if _is_video(attachment):
+                # Sampled once, here, and stored by reference. Decoding is slow
+                # and deterministic, and the alternative is re-running ffmpeg on
+                # every rerun of every later turn in the conversation.
+                name = attachment.get("name") or "video.mp4"
+                suffix = "." + name.rsplit(".", 1)[-1] if "." in name else ".mp4"
+                record["frame_blob_ids"] = [_put_blob(f) for f in _extract_frames(data, suffix)]
         out.append(record)
     return out
 
@@ -586,10 +593,87 @@ def _serialise_uploaded_file(uploaded: Any) -> Dict[str, Any]:
     mime_type = uploaded.type or mimetypes.guess_type(name)[0] or "application/octet-stream"
     return {
         "name": name,
-        "kind": "image" if mime_type.startswith("image/") else "document",
+        "kind": (
+            "image"
+            if mime_type.startswith("image/")
+            else "video"
+            if mime_type.startswith("video/")
+            else "document"
+        ),
         "mime_type": mime_type,
         "data": base64.b64encode(content).decode("utf-8"),
     }
+
+
+# --- video ------------------------------------------------------------------
+# Claude has no video block: the Messages API takes images and PDFs. A model
+# cannot watch an mp4, so "support video" means sampling frames and sending
+# those as images, labelled honestly as frames rather than passed off as the
+# video itself. The customer's original file is kept whole for the human who
+# picks up the ticket — they can watch it, and it is the evidence.
+VIDEO_TYPES = ("mp4", "mov", "webm", "m4v")
+# Eight is a compromise. Each frame costs roughly as much as a photo, so a video
+# is already the most expensive thing in a conversation; too few and a two-second
+# flicker on a battery indicator falls between samples.
+VIDEO_FRAMES = 8
+# Long edge. Above this the extra pixels buy no accuracy and cost tokens.
+FRAME_MAX_EDGE = 1024
+
+
+def _is_video(attachment: Dict[str, Any]) -> bool:
+    mime = (attachment.get("mime_type") or "").lower()
+    name = (attachment.get("name") or "").lower()
+    return mime.startswith("video/") or name.rsplit(".", 1)[-1] in VIDEO_TYPES
+
+
+def _extract_frames(data_b64: str, suffix: str, count: int = VIDEO_FRAMES) -> List[str]:
+    """Evenly spaced frames from a video, as base64 JPEGs.
+
+    Evenly spaced rather than the first N: a customer filming a battery indicator
+    holds the camera still for a while and the informative moment is usually in
+    the middle, so the opening second tells you nothing.
+
+    Returns [] on any failure — a codec we cannot read, a corrupt upload, a
+    missing decoder. The caller says so plainly rather than the model silently
+    receiving nothing and assuming it has seen the video.
+    """
+    import io
+    import tempfile
+
+    try:
+        import imageio
+        from PIL import Image
+    except ImportError:
+        return []
+
+    frames: List[str] = []
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix or ".mp4", delete=True) as handle:
+            handle.write(base64.b64decode(data_b64))
+            handle.flush()
+            reader = imageio.get_reader(handle.name, "ffmpeg")
+            try:
+                meta = reader.get_meta_data()
+                # Estimated from duration × fps rather than count_frames(), which
+                # decodes the whole file to answer. Seeking to an index past the
+                # end raises, and that is caught per frame below.
+                total = int((meta.get("duration") or 0) * (meta.get("fps") or 0)) or 0
+                step = max(total // count, 1) if total else 1
+                for i in range(count):
+                    try:
+                        frame = reader.get_data(i * step)
+                    except (IndexError, StopIteration, RuntimeError):
+                        break
+                    image = Image.fromarray(frame)
+                    image.thumbnail((FRAME_MAX_EDGE, FRAME_MAX_EDGE))
+                    buffer = io.BytesIO()
+                    image.convert("RGB").save(buffer, format="JPEG", quality=80)
+                    frames.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
+            finally:
+                reader.close()
+    except Exception:
+        return []
+    return frames
 
 
 def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -598,6 +682,47 @@ def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]
         mime_type = attachment.get("mime_type") or "application/octet-stream"
         data = _get_blob(attachment)
         if not data:
+            continue
+
+        if _is_video(attachment):
+            name = attachment.get("name") or "video"
+            suffix = "." + name.rsplit(".", 1)[-1] if "." in name else ".mp4"
+            cached = attachment.get("frame_blob_ids")
+            if cached is not None:
+                frames = [_blob_path(b).read_text() for b in cached if _blob_path(b).exists()]
+            else:
+                frames = _extract_frames(data, suffix)
+            if not frames:
+                # Never let an unreadable video look like one that was watched.
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "[The customer sent a video (%s) that could not be read here. Do "
+                            "not describe or assess it. Say you could not open it and ask for "
+                            "a photo of the same thing instead.]" % name
+                        ),
+                    }
+                )
+                continue
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "[%d still frames sampled evenly from the customer's video '%s', in "
+                        "order. You are seeing stills, not the video: judge only what is "
+                        "visible in them, and say so if the moment that matters falls between "
+                        "frames.]" % (len(frames), name)
+                    ),
+                }
+            )
+            for frame in frames:
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": frame},
+                    }
+                )
             continue
         if mime_type.startswith("image/"):
             blocks.append(
@@ -1087,7 +1212,17 @@ def main() -> None:
                 attachments = turn.get("attachments") or []
                 if attachments:
                     for attachment in attachments:
-                        st.caption("📎 %s" % attachment["name"])
+                        if _is_video(attachment):
+                            n = len(attachment.get("frame_blob_ids") or [])
+                            st.caption(
+                                "🎬 %s — %s"
+                                % (
+                                    attachment["name"],
+                                    "%d frames sent as stills" % n if n else "could not be read",
+                                )
+                            )
+                        else:
+                            st.caption("📎 %s" % attachment["name"])
                 # Shown before the reply, in the order they happened: the reply
                 # only makes sense against what the tools actually returned, and
                 # "why did it say that" is the whole question when tuning.
@@ -1112,11 +1247,15 @@ def main() -> None:
         # (Assigning [] to a file_uploader's own key raises instead of clearing it.)
         nonce = st.session_state.setdefault(nonce_key, 0)
         uploaded_files = st.file_uploader(
-            "📎 Attach image or PDF",
-            type=["png", "jpg", "jpeg", "pdf"],
+            "📎 Attach image, video or PDF",
+            type=["png", "jpg", "jpeg", "pdf"] + list(VIDEO_TYPES),
             accept_multiple_files=True,
             key="uploader_%s_%d" % (agent_name, nonce),
-            help="Upload JPG, JPEG, PNG, or PDF files to test multimodal prompts.",
+            help=(
+                "JPG, PNG, PDF, or video (MP4/MOV/WEBM/M4V). Claude cannot watch video, "
+                "so %d frames are sampled and sent as stills; the original is kept for "
+                "the human who picks up the ticket." % VIDEO_FRAMES
+            ),
         )
 
         pending_files = list(uploaded_files or [])
