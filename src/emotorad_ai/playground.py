@@ -1002,7 +1002,7 @@ def _run_agent_turn(
     messages: List[Dict[str, Any]],
     registry: ToolRegistry,
     tool_names: Any,
-    context: ToolContext,
+    context_factory: Any,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Dict[str, Any]:
     """Ask the model, run whatever tools it asks for, ask again. Return the reply.
@@ -1022,6 +1022,13 @@ def _run_agent_turn(
     dealer slice, so a dealer agent is never even offered the customer's
     warranty table.
     """
+    # Re-derived before every tool call, not once per turn. A model that verifies
+    # an identity and then immediately reads the warranty record does both inside
+    # one assistant turn, and a context captured up front still says "anonymous" —
+    # so the lookup failed with missing_identity on the very turn the customer
+    # had just proved who they were.
+    context = context_factory() if callable(context_factory) else context_factory
+
     tools = registry.schemas_for([name for name in tool_names if name in registry.specs])
     trace: List[Dict[str, Any]] = []
     seen_calls: set = set()
@@ -1073,6 +1080,8 @@ def _run_agent_turn(
                 }
             seen_calls.add(signature)
 
+            if callable(context_factory):
+                context = context_factory()
             envelope = registry.call(tool_use.name, arguments, context)
             trace.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})
             results.append(
@@ -1455,7 +1464,12 @@ def main() -> None:
                             _live_tool_names(module, registry)
                             if rider_mode == "Live customer"
                             else module.TOOL_NAMES,
-                            _tool_context(chat["chat_id"], resolved),
+                            (
+                                (lambda: _tool_context(chat["chat_id"], _resolved_for_live(
+                                    agent_name, verification.verified_phone(chat["chat_id"]), registry)))
+                                if rider_mode == "Live customer"
+                                else (lambda: _tool_context(chat["chat_id"], resolved))
+                            ),
                             max_tokens=int(max_tokens),
                         )
                     text, trace = outcome["text"], outcome["trace"]
