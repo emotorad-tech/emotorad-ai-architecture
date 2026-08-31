@@ -172,11 +172,13 @@ def register_verification_tools(
 
     @registry.register(
         REQUEST_IDENTITY_VERIFICATION,
-        "Send a one-time code by SMS to a phone number the customer has given you, so their "
-        "identity can be confirmed. Use this when you need their bike, warranty or order "
-        "details and the customer context says identity is not available. Ask for the number "
-        "in their own words first; do not guess it. This returns no customer information and "
-        "does not say whether the number is registered — it only sends the code.",
+        "START HERE when the customer context says identity is not available. Ask the customer "
+        "for the mobile number their warranty is registered against — that is the first and "
+        "best way to find anyone — and pass it here to send them a one-time code. Never guess "
+        "the number, and do not offer an order number as an equal alternative; it is only for "
+        "customers who cannot recall their mobile. Omit the phone argument entirely to send the "
+        "code to a number already recovered by find_account_by_code. This returns no customer "
+        "information and does not say whether the number is registered — it only sends a code.",
         parameters={
             "phone": {
                 "type": "string",
@@ -254,13 +256,16 @@ def register_verification_tools(
 
     @registry.register(
         FIND_ACCOUNT_BY_CODE,
-        "Find which registered mobile number an order belongs to, using the order number or "
-        "invoice number printed on the customer's invoice. Use this only when the customer "
-        "cannot recall the number their warranty is registered on. It returns the number "
-        "MASKED — you are not told the full number and do not need it: call "
-        "request_identity_verification with no phone argument to send the code there. A code "
-        "printed on an invoice is not proof of identity, so this confirms nothing on its own; "
-        "the customer still has to enter the one-time code before you may discuss their bike.",
+        "FALLBACK ONLY — ask for the registered mobile number first and use "
+        "request_identity_verification with it. Reach for this tool solely when the customer "
+        "has said they cannot recall that number. It takes the order number or invoice number "
+        "printed on their invoice and finds which mobile the warranty sits against, returned "
+        "MASKED: you are not told the full number and do not need it — call "
+        "request_identity_verification with no phone argument to send the code there. A number "
+        "printed on an invoice proves nothing about who is holding it, so this confirms no "
+        "identity on its own; the customer still has to enter the one-time code before you may "
+        "name their bike or state any coverage. Marketplace order numbers (Amazon, Flipkart) "
+        "are not in our system and will not match.",
         parameters={
             "code": {
                 "type": "string",
