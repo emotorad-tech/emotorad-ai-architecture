@@ -39,6 +39,12 @@ class KnowledgeIdValidationTests(unittest.TestCase):
             with self.assertRaises(KnowledgeError):
                 load_records(directory)
 
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write(directory, dict(VALID_RECORD, id="abc\n"))
+            with self.assertRaises(KnowledgeError):
+                load_records(directory)
+
     def test_an_id_that_looks_like_a_path_traversal_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

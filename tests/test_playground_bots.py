@@ -80,6 +80,56 @@ class DraftTests(unittest.TestCase):
                 "deleting a draft must not leave its knowledge/<topic>/ behind",
             )
 
+    def test_delete_draft_keeps_shared_topic_knowledge_until_the_last_claimant_is_gone(self):
+        """Topic uniqueness is per persona, so a customer and a dealer draft can
+        share a topic (and its knowledge/<topic>/ directory) — deleting one must
+        not destroy knowledge the other still needs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            save_draft(BRAKES, drafts)
+            save_draft(
+                {
+                    "name": "brakes_dealer",
+                    "persona": "dealer",
+                    "topic": "brakes",
+                    "keywords": ["pad_stock", "rotor_stock"],
+                    "tools": ["get_dealer_account", "search_knowledge"],
+                    "prompt": "You are the dealer brake support assistant.\n",
+                },
+                drafts,
+            )
+            save_draft_knowledge("brakes", [RECORD], drafts)
+
+            delete_draft("brakes_support", drafts)
+
+            self.assertFalse((drafts / "bots" / "brakes_support.yaml").exists())
+            self.assertTrue(
+                load_catalogue(drafts).get("brakes_dealer"),
+                "the dealer draft that still claims the topic must survive",
+            )
+            self.assertTrue(
+                (drafts / "knowledge" / "brakes").exists(),
+                "knowledge shared with the surviving dealer draft must not be removed",
+            )
+
+            delete_draft("brakes_dealer", drafts)
+
+            self.assertFalse(
+                (drafts / "knowledge" / "brakes").exists(),
+                "once nothing claims the topic, its knowledge must be removed",
+            )
+
+    def test_delete_draft_deletes_a_malformed_spec_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            broken = drafts / "bots"
+            broken.mkdir(parents=True)
+            (broken / "broken.yaml").write_text("not: [valid, yaml: at all\n", encoding="utf-8")
+
+            delete_draft("broken", drafts)  # must not raise
+
+            self.assertFalse((broken / "broken.yaml").exists())
+
     def test_delete_draft_is_a_no_op_when_the_spec_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             delete_draft("no_such_bot", Path(tmp))  # must not raise

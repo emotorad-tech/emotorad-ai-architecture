@@ -130,7 +130,7 @@ def _validate(raw: Mapping[str, Any], where: str) -> None:
     if missing:
         raise KnowledgeError("%s is missing required field(s): %s" % (where, ", ".join(missing)))
     record_id = raw.get("id")
-    if not isinstance(record_id, str) or not ID_PATTERN.match(record_id):
+    if not isinstance(record_id, str) or not ID_PATTERN.fullmatch(record_id):
         raise KnowledgeError(
             "%s: id %r must match %s (lowercase letters, digits, '-' and '_', "
             "starting with a letter or digit)" % (where, record_id, ID_PATTERN.pattern)

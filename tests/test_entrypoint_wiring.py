@@ -123,6 +123,40 @@ class EntrypointWiringTests(unittest.TestCase):
 
         self.assertIn("handled_by=brakes_support", out.getvalue())
 
+    def test_the_cli_builds_its_registry_with_the_catalogues_topics(self):
+        # The test above only checks that triage still resolves to
+        # brakes_support, which happens on keyword matching alone and would
+        # pass even against the pre-fix cli.py that built the registry
+        # before catalogue.topics() was known. Capture the registry
+        # build_registry actually returns and inspect its search_knowledge
+        # enum directly, so a regression to that construction order fails
+        # here even when triage still "works".
+        import emotorad_ai.bots as bots
+        from emotorad_ai import cli
+        from emotorad_ai.tools.mocks import build_registry as real_build_registry
+
+        captured = []
+
+        def wrapper(*args, **kwargs):
+            registry = real_build_registry(*args, **kwargs)
+            captured.append(registry)
+            return registry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "brakes_support.yaml").write_text(BRAKES_YAML, encoding="utf-8")
+            log_path = str(Path(tmpdir) / "conversations.jsonl")
+            with patch.object(bots, "BOTS_DIR", Path(tmpdir)), patch.object(
+                cli, "build_registry", side_effect=wrapper
+            ), patch.dict(os.environ, {"EMOTORAD_AI_LOG_PATH": log_path}):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    cli.main(["--offline", "brake", "squeaks"])
+
+        self.assertEqual(len(captured), 1)
+        schema = captured[0].schemas_for([SEARCH_KNOWLEDGE])[0]
+        enum = schema["input_schema"]["properties"]["topic"]["enum"]
+        self.assertIn("brakes", enum)
+
 
 if __name__ == "__main__":
     unittest.main()

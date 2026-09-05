@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import yaml
 
-from .bots import BOTS_DIR, DRAFT, BotCatalogue, BotSpecError, spec_from_dict
+from .bots import BOTS_DIR, DRAFT, BotCatalogue, BotSpecError, load_specs, spec_from_dict
 from .knowledge import ID_PATTERN, KnowledgeError, load_records
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -110,22 +110,36 @@ def save_draft(raw: Mapping[str, Any], drafts_dir: Path) -> Path:
 
 
 def delete_draft(name: str, drafts_dir: Path) -> None:
-    """Delete the draft spec and the knowledge it authored for its topic.
+    """Delete the draft spec and, if no other draft still claims the topic,
+    the knowledge it authored.
 
     Without this, deleting a draft leaves `knowledge/<topic>/` behind — an
     orphaned directory `export_for_review` would happily copy into a PR for
-    a bot that no longer exists.
+    a bot that no longer exists. But topic uniqueness is per persona, so a
+    customer draft and a dealer draft can share a topic (and its knowledge
+    directory) — only remove the directory once nothing else claims it.
+
+    A hand-edited or partial draft that fails to parse is deleted anyway; we
+    just cannot know its topic, so we leave any knowledge directory alone.
     """
     path = Path(drafts_dir) / "bots" / ("%s.yaml" % name)
     if not path.exists():
         return
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    spec = spec_from_dict(raw, DRAFT, path)
+    topic: Optional[str] = None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        topic = spec_from_dict(raw, DRAFT, path).topic
+    except (BotSpecError, yaml.YAMLError):
+        pass
     path.unlink()
-    if spec.topic:
-        knowledge_dir = Path(drafts_dir) / "knowledge" / spec.topic
-        if knowledge_dir.exists():
-            shutil.rmtree(knowledge_dir)
+    if not topic:
+        return
+    remaining = load_specs(Path(drafts_dir) / "bots", DRAFT)
+    if any(s.topic == topic for s in remaining):
+        return
+    knowledge_dir = Path(drafts_dir) / "knowledge" / topic
+    if knowledge_dir.exists():
+        shutil.rmtree(knowledge_dir)
 
 
 def save_draft_knowledge(topic: str, records: Sequence[Mapping[str, Any]], drafts_dir: Path) -> List[Path]:
@@ -152,7 +166,7 @@ def save_draft_knowledge(topic: str, records: Sequence[Mapping[str, Any]], draft
             }
             if not payload["id"]:
                 raise KnowledgeError("a knowledge record needs an id")
-            if not isinstance(payload["id"], str) or not ID_PATTERN.match(payload["id"]):
+            if not isinstance(payload["id"], str) or not ID_PATTERN.fullmatch(payload["id"]):
                 raise KnowledgeError(
                     "id %r must match %s (lowercase letters, digits, '-' and '_', starting "
                     "with a letter or digit)" % (payload["id"], ID_PATTERN.pattern)

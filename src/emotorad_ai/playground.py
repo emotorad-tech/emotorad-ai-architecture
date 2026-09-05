@@ -353,10 +353,16 @@ def _new_bot_mode(catalogue: Any) -> None:
                 st.error("Save the draft first: %s" % exc)
     with col_delete:
         if st.button("Delete draft"):
-            delete_draft(name.strip(), DRAFTS_DIR)
-            st.session_state.pop("session_key", None)
-            st.success("Deleted.")
-            st.rerun()
+            try:
+                delete_draft(name.strip(), DRAFTS_DIR)
+            except (BotSpecError, KnowledgeError, OSError) as exc:
+                st.error(str(exc))
+            else:
+                # st.rerun() raises to unwind the script, so it must stay out
+                # of the try — otherwise it would be caught as a failure.
+                st.session_state.pop("session_key", None)
+                st.success("Deleted.")
+                st.rerun()
 
     st.divider()
     st.subheader("Bots in the catalogue")
