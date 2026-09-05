@@ -26,6 +26,21 @@ from .blocks import _context_block, _entry_block, _facts_block
 
 AGENT_NAME = "battery_support"
 
+TOPIC = "battery"
+
+# Triage keywords: the cheap, deterministic path. English plus the Hindi and
+# Hinglish terms that actually appear in support traffic — a Devanagari-script
+# message must not be a silent miss. Note what is NOT here: bare "power". It
+# appears in both "won't power on" (battery) and "power cuts out while riding"
+# (drive), so on its own it classifies nothing; the phrases below carry the
+# discrimination instead.
+KEYWORDS = (
+    "battery", "charge", "charging", "charger", "range", "backup",
+    "discharge", "drain", "drains", "draining", "not turning on",
+    "won't start", "wont start", "dead", "power on", "powering on",
+    "no power at all", "बैटरी", "चार्ज", "batri", "charj",
+)
+
 # get_battery_diagnostics is listed but only reaches the model if it was
 # registered — i.e. if battery telematics actually exist (build plan §8).
 TOOL_NAMES = (

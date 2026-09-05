@@ -31,6 +31,14 @@ from .base import AgentDefinition
 AGENT_NAME = "motor_support"
 TOPIC = "motor"
 
+KEYWORDS = (
+    "motor", "noise", "noisy", "sound", "grinding", "jerk", "jerking",
+    "pedal assist", "pas", "throttle", "speed", "vibration",
+    "cuts out", "cutting out", "cuts off", "cutting off", "power cut",
+    "stops while riding", "while riding",
+    "मोटर", "आवाज", "awaz",
+)
+
 # No diagnostics tool: there is no motor telematics either, and an absent tool is
 # a fact the model can reason about where an empty one invites a guess.
 TOOL_NAMES = (
