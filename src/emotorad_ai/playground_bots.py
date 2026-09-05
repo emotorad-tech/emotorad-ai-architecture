@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import yaml
 
 from .bots import BOTS_DIR, DRAFT, BotCatalogue, BotSpecError, spec_from_dict
-from .knowledge import KnowledgeError, load_records
+from .knowledge import ID_PATTERN, KnowledgeError, load_records
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DRAFTS_DIR = Path(os.environ.get("EMOTORAD_AI_BOT_DRAFTS", str(REPO_ROOT / ".playground" / "drafts")))
@@ -139,7 +139,14 @@ def save_draft_knowledge(topic: str, records: Sequence[Mapping[str, Any]], draft
             }
             if not payload["id"]:
                 raise KnowledgeError("a knowledge record needs an id")
+            if not isinstance(payload["id"], str) or not ID_PATTERN.match(payload["id"]):
+                raise KnowledgeError(
+                    "id %r must match %s (lowercase letters, digits, '-' and '_', starting "
+                    "with a letter or digit)" % (payload["id"], ID_PATTERN.pattern)
+                )
             path = directory / ("%s.yaml" % payload["id"])
+            if not path.resolve().is_relative_to(directory.resolve()):
+                raise KnowledgeError("id %r escapes the knowledge directory" % payload["id"])
             if path not in snapshots:
                 snapshots[path] = path.read_bytes() if path.exists() else None
             path.write_text(_dump(payload), encoding="utf-8")

@@ -51,6 +51,12 @@ _STOPWORDS = frozenset(
 
 REQUIRED_FIELDS = ("id", "title", "topic", "symptoms", "steps")
 
+# An id becomes a filename (`<id>.yaml`) wherever a record is written — the
+# playground drafts one, `export_for_review` copies it. Anything outside this
+# shape (e.g. `../../bots/x`) is a path segment wearing an id's clothes, so it
+# is rejected here once rather than trusted by every writer.
+ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
 
 class KnowledgeError(Exception):
     """A record is malformed. Raised at load time, never at retrieval time.
@@ -123,6 +129,12 @@ def _validate(raw: Mapping[str, Any], where: str) -> None:
     missing = [name for name in REQUIRED_FIELDS if not raw.get(name)]
     if missing:
         raise KnowledgeError("%s is missing required field(s): %s" % (where, ", ".join(missing)))
+    record_id = raw.get("id")
+    if not isinstance(record_id, str) or not ID_PATTERN.match(record_id):
+        raise KnowledgeError(
+            "%s: id %r must match %s (lowercase letters, digits, '-' and '_', "
+            "starting with a letter or digit)" % (where, record_id, ID_PATTERN.pattern)
+        )
     if not isinstance(raw.get("steps"), list) or not all(
         isinstance(step, str) for step in raw["steps"]
     ):

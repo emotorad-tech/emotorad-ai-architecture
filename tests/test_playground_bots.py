@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -77,6 +78,21 @@ class DraftTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(KnowledgeError):
                 save_draft_knowledge("brakes", [dict(RECORD, steps=[])], Path(tmp))
+
+    def test_a_path_traversing_id_is_rejected_and_nothing_is_written_outside_its_topic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            with self.assertRaises(KnowledgeError):
+                save_draft_knowledge("brakes", [dict(RECORD, id="../../escape")], drafts)
+
+            allowed = (drafts / "knowledge" / "brakes").resolve()
+            for root, _dirs, files in os.walk(tmp):
+                for name in files:
+                    written = Path(root, name).resolve()
+                    self.assertTrue(
+                        written.is_relative_to(allowed),
+                        "%s was written outside knowledge/brakes/" % written,
+                    )
 
     def test_a_failed_save_restores_previously_valid_records(self):
         with tempfile.TemporaryDirectory() as tmp:
