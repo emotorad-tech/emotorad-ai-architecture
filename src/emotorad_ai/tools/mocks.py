@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..knowledge import BatteryKnowledgeBase
 from . import fixtures
@@ -270,6 +270,7 @@ def build_registry(
     oms_available: bool = True,
     knowledge_bike: Optional[Dict[str, Any]] = None,
     today: Optional[date] = None,
+    topics: Optional[Sequence[str]] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -284,6 +285,10 @@ def build_registry(
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
     registry = ToolRegistry()
+    # The knowledge topics the model may narrow to. Runtime passes the bot
+    # catalogue's list; a topic that has no bot is not an enum value, so the
+    # model cannot search for a component nothing here can help with.
+    topic_enum = list(topics) if topics else ["battery", "motor"]
     registry.tickets = tickets  # type: ignore[attr-defined]  # test/inspection handle
     registry.bookings = bookings  # type: ignore[attr-defined]
     registry.orders = orders  # type: ignore[attr-defined]
@@ -364,7 +369,7 @@ def build_registry(
             },
             "topic": {
                 "type": "string",
-                "enum": ["battery", "motor"],
+                "enum": topic_enum,
                 "description": "Narrows the search. Omit only if the symptom genuinely spans both.",
             },
         },
