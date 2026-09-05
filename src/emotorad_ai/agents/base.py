@@ -10,10 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from ..config import Settings
-from ..contract import InboundMessage
+from ..contract import Attachment, InboundMessage
 from ..identity import ResolvedIdentity
 from ..observability import EventLog
 from ..tools.registry import ToolContext, ToolRegistry, is_error
@@ -25,6 +25,43 @@ HANDOVER_TEXT = (
 
 # Tool names whose successful result carries a ticket the customer must be told about.
 TICKET_PRODUCING_TOOLS = ("create_support_ticket",)
+
+
+def user_content(message: InboundMessage) -> Union[str, List[Dict[str, Any]]]:
+    """What this turn contributes to the model history.
+
+    A plain string when there are no attachments — unchanged from before, so
+    text-only conversations keep their exact history shape. Otherwise a list of
+    blocks with the text last, so the model reads the picture before the
+    question about it.
+    """
+    blocks: List[Dict[str, Any]] = []
+    for attachment in message.attachments:
+        block = _attachment_block(attachment)
+        if block is not None:
+            blocks.append(block)
+    if not blocks:
+        return message.message_text
+    # The API rejects an empty text block.
+    blocks.append({"type": "text", "text": message.message_text or "(attachment)"})
+    return blocks
+
+
+def _attachment_block(attachment: Attachment) -> Optional[Dict[str, Any]]:
+    mime_type = attachment.mime_type or ""
+    if attachment.url.startswith("data:"):
+        header, _, data = attachment.url.partition(",")
+        mime_type = mime_type or header[len("data:"):].split(";")[0]
+        source: Dict[str, Any] = {"type": "base64", "media_type": mime_type, "data": data}
+    else:
+        source = {"type": "url", "url": attachment.url}
+
+    if mime_type.startswith("image/"):
+        return {"type": "image", "source": source}
+    if mime_type == "application/pdf":
+        return {"type": "document", "source": source}
+    # Anything else is not something the model can read; dropping it beats a 400.
+    return None
 
 
 @dataclass(frozen=True)
@@ -80,7 +117,7 @@ class Agent:
             cluster_id=resolved.cluster_id,
         )
 
-        history.append({"role": "user", "content": message.message_text})
+        history.append({"role": "user", "content": user_content(message)})
 
         turn = AgentTurn(text="", agent=self.definition.name)
         # Same tool, same arguments, twice: the model is stuck, and the remaining
