@@ -147,7 +147,7 @@ SDK directly.
 
 ## 6. Persistence and deploy
 
-- Drafts directory from `EMOTORAD_AI_BOT_DRAFTS`, default `.playground/bots` locally.
+- Drafts directory from `EMOTORAD_AI_BOT_DRAFTS`, default `.playground/drafts` locally (holding `bots/` and `knowledge/`).
 - `deploy-staging.yml`: bind-mount `/opt/emotorad-ai/playground` to `/app/.playground` in the
   `docker run` command so drafts survive a redeploy (the tarball excludes `.playground` and
   the container is rebuilt every deploy).
