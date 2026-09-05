@@ -41,7 +41,10 @@ regression set gets built from.
 | `adapters/website_chat.py` | §3.3 | The one adapter use case #1 needs |
 | `tools/registry.py` | §3.4 | Envelope, identity injection, idempotency, error containment |
 | `tools/mocks.py` | §5.2 | The seven mocked tools, with real shapes |
-| `router.py` | §3.5 | Stub router — records why, so classification slots in later |
+| `triage.py` | §3.5 | Conversational triage: bike selection, keyword classification, hand-off |
+| `bots.py` | — | The bot catalogue: built-ins plus `bots/*.yaml`, validated at load |
+| `agents/generic.py` | — | A sub-agent from a spec, with the shared blocks from `agents/blocks.py` |
+| `playground_runtime.py` | — | The playground's `Runtime` per session, with a trace |
 | `agents/battery_support.py` | §4 | System prompt and tool set for the first sub-agent |
 | `agents/base.py` | — | The persona-agnostic tool-calling loop |
 | `guardrails.py` | §4 | Safety branch and human handoff, matched in code |
@@ -49,6 +52,15 @@ regression set gets built from.
 | `observability.py` | §3.6 | JSONL event log with PII redaction |
 | `runtime.py` | — | The wiring, in the order the design requires |
 | `llm.py` | §6 | Claude on Bedrock, plus scripted stand-ins for tests |
+
+## Adding a bot
+
+A bot is a YAML file (see `bots/README.md`): name, persona, topic, triage
+keywords, a tool slice from the registry, and a prompt. Draft one in the
+playground ("New bot"), test it in Chat — every turn runs this runtime, guardrails
+included — then "Export for review" and move the files into `bots/` and
+`knowledge/` in a PR. Persona tool allowlists are in `bots.py` and cannot be
+widened from a spec.
 
 ## Guardrails that are code, not prompt
 
