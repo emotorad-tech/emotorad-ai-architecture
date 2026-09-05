@@ -307,5 +307,20 @@ class PromptDisclosureTests(unittest.TestCase):
         self.assertNotIn("in warranty", prompt)
 
 
+class StaticResolverTests(unittest.TestCase):
+    def test_it_returns_the_identity_it_was_given_for_any_message(self):
+        from emotorad_ai.contract import VERIFIED, Identity, InboundMessage
+        from emotorad_ai.identity import ResolvedIdentity, StaticResolver
+
+        pinned = ResolvedIdentity(
+            persona="customer", method="verified",
+            identity=Identity(strength=VERIFIED, phone="+919999999999"),
+            profile={"name": "Test Customer"}, bikes=[],
+        )
+        resolver = StaticResolver(pinned)
+        message = InboundMessage("c1", "customer", Identity(), "website_chat", "hi")
+        self.assertIs(resolver.hydrate(message), pinned)
+
+
 if __name__ == "__main__":
     unittest.main()

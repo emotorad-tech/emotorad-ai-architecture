@@ -482,6 +482,22 @@ class IdentityResolver:
         )
 
 
+class StaticResolver:
+    """Returns one pre-built ResolvedIdentity for every message.
+
+    For the playground: the rider is chosen in the sidebar, not resolved from a
+    session token, so hydration is a lookup of what was chosen. Presets still go
+    through the real IdentityResolver *once* to build that value, so they stay
+    honest as the mocks evolve; this only pins the answer for the session.
+    """
+
+    def __init__(self, resolved: ResolvedIdentity) -> None:
+        self._resolved = resolved
+
+    def hydrate(self, message: InboundMessage) -> ResolvedIdentity:
+        return self._resolved
+
+
 def replace_customer_id(identity: Identity, customer_id: str) -> Identity:
     """Attach the OMS record key, preserving everything else.
 
