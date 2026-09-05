@@ -18,6 +18,7 @@ import sys
 from typing import Sequence
 
 from .adapters import WebsiteChatAdapter
+from .bots import BotCatalogue
 from .config import load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
@@ -37,7 +38,8 @@ def main(argv: Sequence[str] = ()) -> int:
     args = parser.parse_args(list(argv) or sys.argv[1:])
 
     settings = load_settings()
-    registry = build_registry(diagnostics_available=args.diagnostics)
+    catalogue = BotCatalogue.load()
+    registry = build_registry(diagnostics_available=args.diagnostics, topics=catalogue.topics())
     log = EventLog(path=settings.log_path, to_stdout=False)
     runtime = Runtime(
         settings=settings,
@@ -45,6 +47,7 @@ def main(argv: Sequence[str] = ()) -> int:
         llm=OfflinePlanner() if args.offline else None,
         log=log,
         resolver=IdentityResolver(registry),
+        catalogue=catalogue,
     )
     adapter = WebsiteChatAdapter(runtime.resolver)
     conversation_id = new_conversation_id()

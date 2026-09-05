@@ -370,7 +370,7 @@ def build_registry(
             "topic": {
                 "type": "string",
                 "enum": topic_enum,
-                "description": "Narrows the search. Omit only if the symptom genuinely spans both.",
+                "description": "Narrows the search. Omit only if the symptom genuinely spans more than one topic.",
             },
         },
         required=("query",),
