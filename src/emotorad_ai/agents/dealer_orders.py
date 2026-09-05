@@ -14,8 +14,6 @@ than trusting the number the model has been carrying across turns.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
-
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..tools.mocks import (
@@ -25,6 +23,7 @@ from ..tools.mocks import (
     QUOTE_ORDER,
 )
 from .base import AgentDefinition
+from .blocks import _account_block
 
 AGENT_NAME = "dealer_orders"
 
@@ -66,32 +65,6 @@ get a fresh confirmation rather than arguing with the tool.
 Style: short plain sentences suited to WhatsApp. Indian English. No headings, no markdown, \
 no emoji. Dealers are working — be brief and specific.
 """
-
-
-def _account_block(resolved: ResolvedIdentity) -> str:
-    profile = resolved.profile or {}
-    if not profile:
-        return (
-            "\nDealer context: unavailable. Do not quote or place anything until "
-            "get_dealer_account succeeds."
-        )
-
-    available = max(profile.get("credit_limit", 0) - profile.get("credit_used", 0), 0)
-    lines = [
-        "\nDealer context (verified — treat as fact):",
-        "- Dealer: %s (%s), %s" % (profile.get("name"), profile.get("dealer_id"), profile.get("city")),
-        "- Credit available: %d of %d" % (available, profile.get("credit_limit", 0)),
-        "- Payment terms: %d days" % profile.get("payment_terms_days", 0),
-    ]
-    if profile.get("overdue_amount"):
-        lines.append(
-            "- OVERDUE: %d. New orders are blocked until this is cleared. Say so early rather "
-            "than after quoting, so the dealer is not led on."
-            % profile["overdue_amount"]
-        )
-    if profile.get("status") != "active":
-        lines.append("- Account status: %s. Orders are blocked." % profile.get("status"))
-    return "\n".join(lines)
 
 
 def build_system_prompt(
