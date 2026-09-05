@@ -110,9 +110,22 @@ def save_draft(raw: Mapping[str, Any], drafts_dir: Path) -> Path:
 
 
 def delete_draft(name: str, drafts_dir: Path) -> None:
+    """Delete the draft spec and the knowledge it authored for its topic.
+
+    Without this, deleting a draft leaves `knowledge/<topic>/` behind — an
+    orphaned directory `export_for_review` would happily copy into a PR for
+    a bot that no longer exists.
+    """
     path = Path(drafts_dir) / "bots" / ("%s.yaml" % name)
-    if path.exists():
-        path.unlink()
+    if not path.exists():
+        return
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    spec = spec_from_dict(raw, DRAFT, path)
+    path.unlink()
+    if spec.topic:
+        knowledge_dir = Path(drafts_dir) / "knowledge" / spec.topic
+        if knowledge_dir.exists():
+            shutil.rmtree(knowledge_dir)
 
 
 def save_draft_knowledge(topic: str, records: Sequence[Mapping[str, Any]], drafts_dir: Path) -> List[Path]:

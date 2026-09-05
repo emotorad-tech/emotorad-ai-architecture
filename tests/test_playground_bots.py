@@ -65,6 +65,25 @@ class DraftTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 load_catalogue(drafts).get("brakes_support")
 
+    def test_delete_draft_also_removes_its_knowledge_topic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            save_draft(BRAKES, drafts)
+            save_draft_knowledge("brakes", [RECORD], drafts)
+            self.assertTrue((drafts / "knowledge" / "brakes").exists())
+
+            delete_draft("brakes_support", drafts)
+
+            self.assertFalse((drafts / "bots" / "brakes_support.yaml").exists())
+            self.assertFalse(
+                (drafts / "knowledge" / "brakes").exists(),
+                "deleting a draft must not leave its knowledge/<topic>/ behind",
+            )
+
+    def test_delete_draft_is_a_no_op_when_the_spec_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            delete_draft("no_such_bot", Path(tmp))  # must not raise
+
     def test_draft_knowledge_is_written_in_the_repo_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             drafts = Path(tmp)

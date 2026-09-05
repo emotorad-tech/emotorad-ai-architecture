@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import hashlib
 import importlib
 import mimetypes
 import os
@@ -176,8 +177,12 @@ def _chat_mode(catalogue: Any) -> None:
         st.caption("Tools this bot may call: " + ", ".join(spec.tools))
 
     # One Runtime per (bot, rider, model). Changing any of them starts a fresh
-    # conversation; editing the prompt does not.
-    session_key = (bot_name, rider_display, repr(resolved), model_id, bool(api_key))
+    # conversation; editing the prompt does not. A short digest of the key
+    # (not bool(api_key)) so correcting a typo'd key also starts a fresh
+    # session — a wrong-then-right key would otherwise hash to the same
+    # `True` and the client would never be rebuilt.
+    api_key_digest = hashlib.sha256(api_key.encode()).hexdigest()[:16] if api_key else ""
+    session_key = (bot_name, rider_display, repr(resolved), model_id, api_key_digest)
     if st.session_state.get("session_key") != session_key or "session" not in st.session_state:
         if model_id is not None and not api_key:
             st.session_state["session"] = None
@@ -335,6 +340,7 @@ def _new_bot_mode(catalogue: Any) -> None:
                 path = save_draft(raw, DRAFTS_DIR)
                 written = save_draft_knowledge(topic.strip(), records, DRAFTS_DIR) if records and topic.strip() else []
                 st.success("Draft saved to %s%s. Switch to Chat to test it." % (path, " (+%d knowledge records)" % len(written) if written else ""))
+                st.rerun()
             except (BotSpecError, KnowledgeError) as exc:
                 st.error(str(exc))
     with col_export:
@@ -350,6 +356,7 @@ def _new_bot_mode(catalogue: Any) -> None:
             delete_draft(name.strip(), DRAFTS_DIR)
             st.session_state.pop("session_key", None)
             st.success("Deleted.")
+            st.rerun()
 
     st.divider()
     st.subheader("Bots in the catalogue")
