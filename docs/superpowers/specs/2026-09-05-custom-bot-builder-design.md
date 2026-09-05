@@ -27,7 +27,7 @@ One YAML file per bot under `bots/`, committed and reviewed like knowledge recor
 ```yaml
 name: brakes_support        # snake_case, unique; the handled_by value in logs and replies
 persona: customer           # customer | dealer
-topic: brakes               # knowledge topic AND triage topic; unique across the catalogue
+topic: brakes               # knowledge topic AND triage topic; unique per persona
 keywords:                   # triage; English plus the Hindi/Hinglish forms seen in traffic
   - brake
   - braking
@@ -45,11 +45,11 @@ prompt: |
 
 | Rule | Why |
 |---|---|
-| `name` and `topic` unique across built-ins, published and drafts | duplicate names would silently shadow a bot |
+| `name` unique across built-ins, published and drafts; `topic` unique per persona (a customer bot and a dealer bot may share a topic name and its `knowledge/<topic>/` directory) | duplicate names would silently shadow a bot |
 | `persona` in `{customer, dealer}` | the runtime only has hydration paths for these two |
 | every `tools` entry exists in the registry | an absent tool must be a load failure, not a runtime 500 |
 | `tools` within the persona allowlist | codifies the `dealer_orders.py` rule: a dealer bot must never reach `lookup_warranty_record` |
-| `keywords` disjoint from every other bot of the same persona | overlapping keywords make `classify_issue` return None for both, and neither bot is ever reached |
+| `keywords` disjoint from every other bot of the same persona | overlapping keywords make `classify_issue` return None for both, and neither bot is ever reached — checked for containment in either direction, because classification matches by substring |
 | `prompt` non-empty | |
 
 Persona allowlists live in code (`bots.py`), not in the spec, so a spec cannot widen them.
@@ -88,7 +88,9 @@ Persona allowlists live in code (`bots.py`), not in the spec, so a spec cannot w
   `supported_summary`.
 - Dealer path in `runtime.handle` — classify the message against dealer-persona keywords;
   route to the match, else `dealer_orders`. No bike selection, no triage conversation:
-  dealers keep today's straight-to-agent behaviour.
+  dealers keep today's straight-to-agent behaviour. The route is sticky for the
+  conversation, as on the customer path; switching topic mid-conversation is a follow-up
+  (wire `ConversationState.hand_back`).
 - `tools/mocks.build_registry(topics=...)` — the `topic` enum on `search_knowledge` comes from
   the catalogue. Default remains `("battery", "motor")`.
 - Safety, handoff, coverage post-check and disclosure are untouched. They run in code before
