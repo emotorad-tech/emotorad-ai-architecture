@@ -130,6 +130,25 @@ class DraftTests(unittest.TestCase):
 
             self.assertFalse((broken / "broken.yaml").exists())
 
+    def test_delete_draft_tolerates_a_malformed_sibling_draft(self):
+        """An unrelated sibling draft that fails to parse must not crash the
+        delete, and its unknown topic must be treated as still claimed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            save_draft(BRAKES, drafts)
+            save_draft_knowledge("brakes", [RECORD], drafts)
+            (drafts / "bots" / "garbage.yaml").write_text(
+                "not: [valid, yaml: at all\n", encoding="utf-8"
+            )
+
+            delete_draft("brakes_support", drafts)  # must not raise
+
+            self.assertFalse((drafts / "bots" / "brakes_support.yaml").exists())
+            self.assertTrue(
+                (drafts / "knowledge" / "brakes").exists(),
+                "ownership could not be determined, so the knowledge directory is kept",
+            )
+
     def test_delete_draft_is_a_no_op_when_the_spec_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             delete_draft("no_such_bot", Path(tmp))  # must not raise

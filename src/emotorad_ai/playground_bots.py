@@ -134,7 +134,11 @@ def delete_draft(name: str, drafts_dir: Path) -> None:
     path.unlink()
     if not topic:
         return
-    remaining = load_specs(Path(drafts_dir) / "bots", DRAFT)
+    try:
+        remaining = load_specs(Path(drafts_dir) / "bots", DRAFT)
+    except (BotSpecError, yaml.YAMLError):
+        # A sibling we cannot parse might own this topic; keeping the knowledge is the safe default.
+        return
     if any(s.topic == topic for s in remaining):
         return
     knowledge_dir = Path(drafts_dir) / "knowledge" / topic

@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+import yaml
 
 # `streamlit run` executes this file as a script, so `src/` is never on sys.path
 # the way an installed package would be — same bootstrap tests/__init__.py uses.
@@ -355,7 +356,7 @@ def _new_bot_mode(catalogue: Any) -> None:
         if st.button("Delete draft"):
             try:
                 delete_draft(name.strip(), DRAFTS_DIR)
-            except (BotSpecError, KnowledgeError, OSError) as exc:
+            except (BotSpecError, KnowledgeError, OSError, yaml.YAMLError) as exc:
                 st.error(str(exc))
             else:
                 # st.rerun() raises to unwind the script, so it must stay out
