@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -49,18 +50,32 @@ def user_content(message: InboundMessage) -> Union[str, List[Dict[str, Any]]]:
 
 def _attachment_block(attachment: Attachment) -> Optional[Dict[str, Any]]:
     mime_type = attachment.mime_type or ""
-    if attachment.url.startswith("data:"):
+    is_data_url = attachment.url.startswith("data:")
+    if is_data_url:
         header, _, data = attachment.url.partition(",")
         mime_type = mime_type or header[len("data:"):].split(";")[0]
         source: Dict[str, Any] = {"type": "base64", "media_type": mime_type, "data": data}
     else:
         source = {"type": "url", "url": attachment.url}
+        # Every adapter builds its default payload with mime_type=None, so an
+        # ordinary http image or document link would otherwise vanish from the
+        # model's history for no reason but a missing header. Guess from the
+        # URL before giving up on it.
+        mime_type = mime_type or mimetypes.guess_type(attachment.url)[0] or ""
 
     if mime_type.startswith("image/"):
         return {"type": "image", "source": source}
     if mime_type == "application/pdf":
         return {"type": "document", "source": source}
-    # Anything else is not something the model can read; dropping it beats a 400.
+    if not mime_type and not is_data_url:
+        # Still nothing to go on — trust what the adapter said this attachment
+        # is, rather than dropping a photo it never had a chance to describe.
+        if attachment.kind == "image":
+            return {"type": "image", "source": source}
+        if attachment.kind == "document":
+            return {"type": "document", "source": source}
+    # A known-but-unsupported mime type (e.g. text/csv) is dropped — sending it
+    # beats nothing, but a 400 from the API beats sending it.
     return None
 
 

@@ -50,6 +50,21 @@ class UserContentTests(unittest.TestCase):
         content = user_content(message("hi", [Attachment(kind="document", url="data:text/csv;base64,QQ==", mime_type="text/csv")]))
         self.assertEqual(content, "hi")
 
+    def test_an_image_attachment_with_no_mime_type_falls_back_to_its_kind(self):
+        # This is every adapter's actual default payload: kind="image",
+        # mime_type=None, an http URL with no recognisable extension. Without
+        # the kind fallback this photo silently vanishes from the history.
+        content = user_content(message("see", [Attachment(kind="image", url="https://cdn.test/photo")]))
+        self.assertEqual(content[0], {"type": "image", "source": {"type": "url", "url": "https://cdn.test/photo"}})
+
+    def test_an_image_url_with_no_mime_type_is_guessed_from_its_extension(self):
+        content = user_content(message("see", [Attachment(kind="image", url="https://cdn.test/a.jpg")]))
+        self.assertEqual(content[0], {"type": "image", "source": {"type": "url", "url": "https://cdn.test/a.jpg"}})
+
+    def test_a_document_url_with_no_mime_type_is_guessed_from_its_extension(self):
+        content = user_content(message("see", [Attachment(kind="document", url="https://cdn.test/warranty.pdf")]))
+        self.assertEqual(content[0], {"type": "document", "source": {"type": "url", "url": "https://cdn.test/warranty.pdf"}})
+
 
 if __name__ == "__main__":
     unittest.main()
