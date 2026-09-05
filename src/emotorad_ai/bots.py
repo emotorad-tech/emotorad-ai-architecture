@@ -249,22 +249,30 @@ class BotCatalogue:
                 seen_topics[key] = spec
 
     def _check_keywords_disjoint(self) -> None:
-        # Two bots of one persona sharing a keyword makes classify_issue return
-        # None for both, and neither is ever reached. Across personas it is fine:
-        # the tables are never consulted together.
+        # classify_issue matches by substring (`word in lowered`), not equality
+        # — so two bots of one persona whose keywords merely overlap, not just
+        # match exactly, both stop being reachable: "charger cable" contains
+        # "charge", so a message with either word matches both bots' tables and
+        # classify_issue returns None for both. Checked in both directions,
+        # since it does not matter which keyword is the longer one. Across
+        # personas it is fine: the tables are never consulted together.
         for persona in PERSONAS:
-            owner: Dict[str, BotSpec] = {}
+            seen: List[Any] = []  # (lowered, original_word, spec), other personas excluded
             for spec in self._specs:
                 if spec.persona != persona:
                     continue
                 for word in spec.keywords:
                     lowered = word.lower()
-                    if lowered in owner and owner[lowered].name != spec.name:
-                        raise BotSpecError(
-                            "keyword %r is used by both %s and %s"
-                            % (word, owner[lowered].name, spec.name)
-                        )
-                    owner[lowered] = spec
+                    for other_lowered, other_word, other_spec in seen:
+                        if other_spec.name == spec.name:
+                            continue
+                        if lowered == other_lowered or lowered in other_lowered or other_lowered in lowered:
+                            raise BotSpecError(
+                                "keyword %r (%s) overlaps with keyword %r (%s) — classify_issue "
+                                "matches by substring, so one would swallow the other"
+                                % (word, spec.name, other_word, other_spec.name)
+                            )
+                    seen.append((lowered, word, spec))
 
     def validate(self, registry: Any) -> None:
         """Every tool a YAML bot names must exist in this registry.

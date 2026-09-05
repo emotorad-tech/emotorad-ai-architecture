@@ -129,6 +129,22 @@ class CatalogueTests(unittest.TestCase):
     def test_the_same_keyword_across_personas_is_fine(self):
         BotCatalogue(builtin_specs() + [spec_from_dict(dict(STOCK, keywords=["battery"]), DRAFT)])
 
+    def test_a_keyword_that_contains_a_built_in_keyword_is_rejected(self):
+        # "charger cable" contains battery_support's "charge", so
+        # classify_issue("my charger cable is frayed") would match both
+        # bots' tables and return None for both — silently unreachable.
+        with self.assertRaises(BotSpecError) as caught:
+            BotCatalogue(builtin_specs() + [spec_from_dict(dict(BRAKES, keywords=["charger cable"]), DRAFT)])
+        self.assertIn("charge", str(caught.exception))
+
+    def test_a_keyword_contained_by_a_built_in_keyword_is_also_rejected(self):
+        # The reverse direction: "pedal" is a substring of motor_support's
+        # "pedal assist", so it is rejected too, not just the longer-in-shorter
+        # case above.
+        with self.assertRaises(BotSpecError) as caught:
+            BotCatalogue(builtin_specs() + [spec_from_dict(dict(BRAKES, keywords=["pedal"]), DRAFT)])
+        self.assertIn("pedal assist", str(caught.exception))
+
     def test_validate_rejects_a_tool_the_registry_does_not_have(self):
         catalogue = BotCatalogue(builtin_specs() + [spec_from_dict(dict(BRAKES, tools=["get_battery_diagnostics"]), DRAFT)])
         with self.assertRaises(BotSpecError):
