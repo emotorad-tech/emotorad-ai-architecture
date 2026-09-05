@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import yaml
 
@@ -121,6 +121,9 @@ def save_draft_knowledge(topic: str, records: Sequence[Mapping[str, Any]], draft
     directory = Path(drafts_dir) / "knowledge" / topic
     directory.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
+    # Pre-call bytes for paths this call overwrites (None means the path was new),
+    # so a mid-call failure can restore the directory exactly, not just delete what we wrote.
+    snapshots: Dict[Path, Optional[bytes]] = {}
     try:
         for record in records:
             payload: Dict[str, Any] = {
@@ -137,12 +140,17 @@ def save_draft_knowledge(topic: str, records: Sequence[Mapping[str, Any]], draft
             if not payload["id"]:
                 raise KnowledgeError("a knowledge record needs an id")
             path = directory / ("%s.yaml" % payload["id"])
+            if path not in snapshots:
+                snapshots[path] = path.read_bytes() if path.exists() else None
             path.write_text(_dump(payload), encoding="utf-8")
             written.append(path)
         load_records(Path(drafts_dir) / "knowledge")
     except KnowledgeError:
-        for path in written:
-            path.unlink(missing_ok=True)
+        for path, previous in snapshots.items():
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(previous)
         raise
     return written
 

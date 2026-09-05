@@ -78,6 +78,38 @@ class DraftTests(unittest.TestCase):
             with self.assertRaises(KnowledgeError):
                 save_draft_knowledge("brakes", [dict(RECORD, steps=[])], Path(tmp))
 
+    def test_a_failed_save_restores_previously_valid_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            save_draft_knowledge("brakes", [RECORD], drafts)
+            with self.assertRaises(KnowledgeError):
+                save_draft_knowledge(
+                    "brakes",
+                    [RECORD, dict(RECORD, id="brakes-noise", steps=[])],
+                    drafts,
+                )
+            squeak_path = drafts / "knowledge" / "brakes" / "brakes-squeak.yaml"
+            self.assertTrue(squeak_path.exists(), "the previously valid record must survive rollback")
+            records = load_records(drafts / "knowledge")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].id, "brakes-squeak")
+            self.assertFalse((drafts / "knowledge" / "brakes" / "brakes-noise.yaml").exists())
+
+    def test_a_failed_save_restores_the_pre_call_bytes_of_an_overwritten_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = Path(tmp)
+            save_draft_knowledge("brakes", [RECORD], drafts)
+            with self.assertRaises(KnowledgeError):
+                save_draft_knowledge(
+                    "brakes",
+                    [dict(RECORD, title="Changed"), dict(RECORD, id="brakes-noise", steps=[])],
+                    drafts,
+                )
+            records = load_records(drafts / "knowledge")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].id, "brakes-squeak")
+            self.assertEqual(records[0].title, "Brakes squeak")
+
     def test_export_copies_spec_and_knowledge_into_the_export_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             drafts = Path(tmp) / "drafts"
