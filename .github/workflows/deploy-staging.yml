@@ -50,13 +50,17 @@ jobs:
         run: |
           tar --exclude='.git' --exclude='tests' --exclude='docs' --exclude='logs' \
               --exclude='.playground' --exclude='requirements-dev.txt' --exclude='__pycache__' \
-              -czf app.tar.gz Dockerfile docker requirements.txt src knowledge
+              -czf app.tar.gz Dockerfile docker requirements.txt src knowledge bots
 
       - name: Upload to S3 (versioned by commit, plus a "latest" pointer)
         run: |
           aws s3 cp app.tar.gz "s3://$S3_BUCKET/deploy/app-${GITHUB_SHA}.tar.gz"
           aws s3 cp app.tar.gz "s3://$S3_BUCKET/deploy/app.tar.gz"
 
+      # /opt/emotorad-ai/playground is bind-mounted so playground drafts and
+      # exports survive a redeploy — the tarball excludes .playground and the
+      # container is rebuilt every time. The deployed API never loads drafts;
+      # only the playground does (EMOTORAD_AI_BOT_DRAFTS).
       - name: Rebuild and restart the container on the instance (via SSM)
         # PLAYGROUND_BASIC_AUTH_USER/PASSWORD are GitHub Actions repo secrets
         # (Settings -> Environments -> staging), the same trust boundary as
@@ -73,11 +77,12 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --parameters commands="[
               \"cd /opt/emotorad-ai\",
+              \"mkdir -p /opt/emotorad-ai/playground\",
               \"aws s3 cp s3://$S3_BUCKET/deploy/app.tar.gz app.tar.gz --region $AWS_REGION\",
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e EMOTORAD_AI_MODE=offline -e EMOTORAD_AI_PLAYGROUND_USER='${{ secrets.PLAYGROUND_BASIC_AUTH_USER }}' -e EMOTORAD_AI_PLAYGROUND_PASSWORD='${{ secrets.PLAYGROUND_BASIC_AUTH_PASSWORD }}' emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -v /opt/emotorad-ai/playground:/app/.playground -e EMOTORAD_AI_BOT_DRAFTS=/app/.playground/drafts -e EMOTORAD_AI_MODE=offline -e EMOTORAD_AI_PLAYGROUND_USER='${{ secrets.PLAYGROUND_BASIC_AUTH_USER }}' -e EMOTORAD_AI_PLAYGROUND_PASSWORD='${{ secrets.PLAYGROUND_BASIC_AUTH_PASSWORD }}' emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"

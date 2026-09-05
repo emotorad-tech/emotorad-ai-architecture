@@ -38,6 +38,28 @@ class LLMResponse:
         return self.stop_reason == "tool_use"
 
 
+def response_to_llm(response: Any) -> LLMResponse:
+    """The SDK message -> our LLMResponse. One mapping for both clients, so the
+    playground and production cannot disagree about what a tool call looks like."""
+    api_content: List[Dict[str, Any]] = []
+    text_parts: List[str] = []
+    tool_uses: List[ToolUse] = []
+    for block in response.content:
+        api_content.append(block.model_dump(exclude_none=True))
+        if block.type == "text":
+            text_parts.append(block.text)
+        elif block.type == "tool_use":
+            tool_uses.append(ToolUse(id=block.id, name=block.name, arguments=dict(block.input or {})))
+
+    return LLMResponse(
+        stop_reason=response.stop_reason or "end_turn",
+        text="\n".join(part for part in text_parts if part).strip(),
+        tool_uses=tool_uses,
+        api_content=api_content,
+        usage=response.usage.model_dump() if response.usage else None,
+    )
+
+
 class BedrockClaude:
     """Claude via Bedrock, in Emotorad's own AWS account and region."""
 
@@ -67,24 +89,50 @@ class BedrockClaude:
             thinking={"type": "adaptive"},
             output_config={"effort": self.settings.effort},
         )
+        return response_to_llm(response)
 
-        api_content: List[Dict[str, Any]] = []
-        text_parts: List[str] = []
-        tool_uses: List[ToolUse] = []
-        for block in response.content:
-            api_content.append(block.model_dump(exclude_none=True))
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_uses.append(ToolUse(id=block.id, name=block.name, arguments=dict(block.input or {})))
 
-        return LLMResponse(
-            stop_reason=response.stop_reason or "end_turn",
-            text="\n".join(part for part in text_parts if part).strip(),
-            tool_uses=tool_uses,
-            api_content=api_content,
-            usage=response.usage.model_dump() if response.usage else None,
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
+
+
+class AnthropicClaude:
+    """Claude via the first-party Anthropic API — the playground's path.
+
+    Production stays on Bedrock. This exists so an internal user with an API key
+    can drive a bot through the identical agent loop without AWS credentials.
+    Same request shape as BedrockClaude on purpose: a bot tuned here must behave
+    the same once it is served from Bedrock. The key is held for the session and
+    never logged.
+    """
+
+    def __init__(
+        self, settings: Settings, api_key: str, model: Optional[str] = None, client: Any = None
+    ) -> None:
+        self.settings = settings
+        self.model = model or DEFAULT_ANTHROPIC_MODEL
+        if client is not None:
+            self._client = client
+        else:
+            import anthropic  # imported lazily: tests never need it
+
+            self._client = anthropic.Anthropic(api_key=api_key)
+
+    def create(
+        self,
+        system: str,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+    ) -> LLMResponse:
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=self.settings.max_tokens,
+            system=system,
+            messages=list(messages),
+            tools=list(tools),
+            thinking={"type": "adaptive"},
+            output_config={"effort": self.settings.effort},
         )
+        return response_to_llm(response)
 
 
 class ScriptedClaude:

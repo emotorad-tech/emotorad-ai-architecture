@@ -41,6 +41,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
+from .bots import BotCatalogue
 from .config import load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
@@ -52,7 +53,8 @@ from .tools.mocks import build_registry
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 
 settings = load_settings()
-registry = build_registry()
+catalogue = BotCatalogue.load()
+registry = build_registry(topics=catalogue.topics())
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 runtime = Runtime(
@@ -61,6 +63,7 @@ runtime = Runtime(
     llm=OfflinePlanner() if MODE == "offline" else None,
     log=log,
     resolver=resolver,
+    catalogue=catalogue,
 )
 adapter = WebsiteChatAdapter(resolver)
 

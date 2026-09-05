@@ -197,6 +197,14 @@ than a transfer request.
 Still not built: real integrations behind the mocks, and a vector index — retrieval is still keyword
 scoring over the authored records (`_score` is the single seam).
 
+**Bot catalogue (2026-09):** sub-agents are entries in `bots.py`'s catalogue —
+the four Python agents plus `bots/*.yaml`. Runtime, triage keywords, the
+`search_knowledge` topic enum and the "I can help with …" reply derive from it.
+The playground's Chat mode runs the real `Runtime` (offline planner or the
+Anthropic API via `AnthropicClaude`; production stays on Bedrock) and its New
+bot mode writes drafts under `EMOTORAD_AI_BOT_DRAFTS`. Design:
+`docs/superpowers/specs/2026-09-05-custom-bot-builder-design.md`.
+
 ## How to work in this repo
 
 1. Read this file and `docs/Emotorad_Platform_Build_Plan.md` before writing code.

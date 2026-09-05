@@ -1,183 +1,87 @@
-"""Prompt-tuning playground for the sub-agents ("AIRO v0" — build plan context in
-the repo README/CLAUDE.md; this is a deliberately small slice of that idea).
+"""The playground: add a bot, tune its prompt, and test it through the real
+runtime ("AIRO v0" — the deferred agent-builder, at the size the build plan
+said to start with).
 
 Run locally:
 
     streamlit run src/emotorad_ai/playground.py
 
-What this is: a page where someone edits a sub-agent's system prompt, sends test
-customer messages, and sees a real Claude response — so tone/behaviour can be
-tuned without touching code. Reuses each agent's real ``build_system_prompt``
-(via a temporary monkey-patch of its module-level ``_BASE_PROMPT``), so the
-playground never re-implements — and cannot drift from — the prompt-assembly
-logic those functions already encode.
+Two modes:
 
-Two ways to pick who the "customer" is for a turn:
-  - Preset riders — named fixtures from tools/fixtures.py, the same data the
-    automated test suite runs against.
-  - Custom rider — typed in on the spot. Bike coverage is still computed by the
-    real ``_coverage()`` helper from tools/mocks.py (never re-implemented here),
-    so a hand-typed purchase date produces the same in/out-of-warranty math a
-    real fixture would.
+  Chat     — pick any bot (built-in, published, or draft), a rider and a model,
+             and talk to it. Every turn runs production's `Runtime`: identity,
+             enrichment, the safety and handoff guardrails, triage with bike
+             selection, the sub-agent tool loop against the mocked tools, the
+             coverage post-check and the AI disclosure. The prompt editor
+             changes the bot's base prompt from the next turn on.
+  New bot  — a form that writes a draft spec (and optional knowledge records)
+             into the drafts directory. The draft is immediately selectable in
+             Chat. "Export for review" copies it into `.playground/export/` for
+             an engineer to move into `bots/` and `knowledge/` via PR.
 
-What this is not: a way to create new agents, edit tool registries, or change
-production behaviour. "Save" never touches ``agents/*.py`` — it only produces a
-diff for a human to review and apply the normal way (a PR), matching the
-knowledge-base content convention already used elsewhere in this repo. There is
-also no tool-execution loop here (see the module docstring on `Agent.run` in
-`agents/base.py` for what that looks like in production) — this is for
-tone/behaviour tuning, not full conversational-flow testing.
+What this is not: a way to add tools, guardrails or ticket categories, or to
+change production behaviour. Nothing here writes to a tracked file.
 """
 
 from __future__ import annotations
 
 import base64
 import difflib
+import hashlib
 import importlib
 import mimetypes
 import os
 import sys
-import uuid
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+import yaml
 
-# `streamlit run` executes this file as a standalone script, so `src/` is never
-# put on sys.path automatically the way an installed package would be. Same
-# bootstrap tests/__init__.py already uses to import emotorad_ai without an
-# install step — this file just needs its own copy, since Streamlit never
-# imports the `tests` package.
+# `streamlit run` executes this file as a script, so `src/` is never on sys.path
+# the way an installed package would be — same bootstrap tests/__init__.py uses.
 _SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
-from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
-from emotorad_ai.tools import fixtures
-from emotorad_ai.tools.mocks import _coverage, build_registry
+from emotorad_ai.bots import BUILTIN, DRAFT, PERSONA_TOOLS, BotSpecError
+from emotorad_ai.config import Settings
+from emotorad_ai.contract import Attachment
+from emotorad_ai.knowledge import KnowledgeError
+from emotorad_ai.llm import AnthropicClaude, OfflinePlanner
+from emotorad_ai.playground_bots import (
+    DRAFTS_DIR,
+    EXPORT_DIR,
+    delete_draft,
+    export_for_review,
+    load_catalogue,
+    prompt_template,
+    save_draft,
+    save_draft_knowledge,
+)
+from emotorad_ai.playground_riders import (
+    custom_customer_form,
+    custom_dealer_form,
+    resolved_for_preset,
+    scenarios_for,
+)
+from emotorad_ai.playground_runtime import PlaygroundSession
 
+# Both support adaptive thinking and effort, which the runtime always sends.
 MODELS = {
-    "Haiku 4.5 (cheap, fast — bulk iteration)": "claude-haiku-4-5",
-    "Sonnet 5": "claude-sonnet-5",
-    "Opus 5 (production model — final validation pass)": "claude-opus-5",
-}
-
-AGENT_MODULES = {
-    "battery_support": "emotorad_ai.agents.battery_support",
-    "motor_support": "emotorad_ai.agents.motor_support",
-    "late_warranty_registration": "emotorad_ai.agents.late_warranty",
-    "dealer_orders": "emotorad_ai.agents.dealer_orders",
+    "Opus 5 (production model)": "claude-opus-5",
+    "Sonnet 5 (faster iteration)": "claude-sonnet-5",
+    "Offline planner (no model, no key)": None,
 }
 
 PLAYGROUND_DIR = Path(__file__).resolve().parent.parent.parent / ".playground"
 
 
-@dataclass(frozen=True)
-class Scenario:
-    label: str
-    persona: str
-    channel: str
-    phone: Optional[str]
-    strength: str
-    oms_available: bool = True
+# --- helpers -------------------------------------------------------------------
 
 
-CUSTOMER_SCENARIOS = [
-    Scenario("Single bike, in warranty (Ananya)", "customer", "website_chat", "+919876543210", VERIFIED),
-    Scenario("Single bike, out of warranty (Rohit)", "customer", "website_chat", "+919812345678", VERIFIED),
-    Scenario("Multi-bike customer (Priya, 3 bikes)", "customer", "whatsapp", "+919700000001", VERIFIED),
-    Scenario(
-        "Unregistered — no warranty record",
-        "customer",
-        "website_chat",
-        fixtures.PHONE_WITH_NO_RECORD,
-        VERIFIED,
-    ),
-    Scenario("OMS system down (outage)", "customer", "website_chat", "+919876543210", VERIFIED, oms_available=False),
-    Scenario("Anonymous / not signed in", "customer", "website_chat", None, ANONYMOUS),
-]
-
-DEALER_SCENARIOS = [
-    Scenario("Dealer, healthy credit (Royal Cycle Stores)", "dealer", "dealer_app", "+919000000001", VERIFIED),
-]
-
-
-def _scenarios_for(agent_name: str) -> List[Scenario]:
-    return DEALER_SCENARIOS if agent_name == "dealer_orders" else CUSTOMER_SCENARIOS
-
-
-def _resolved_for_preset(scenario: Scenario) -> ResolvedIdentity:
-    """Preset riders go through the real hydration path — registry + IdentityResolver
-    — exactly like a live conversation would, so they stay honest as the mocks evolve."""
-    identity = Identity(strength=scenario.strength, phone=scenario.phone)
-    message = InboundMessage(
-        conversation_id="preview",
-        persona=scenario.persona,
-        identity=identity,
-        channel=scenario.channel,
-        message_text="",
-    )
-    registry = build_registry(oms_available=scenario.oms_available, today=date.today())
-    resolver = IdentityResolver(registry)
-    return resolver.hydrate(message)
-
-
-def _resolved_for_custom_customer(
-    name: str, phone: Optional[str], verified: bool, bike_rows: List[Dict[str, Any]]
-) -> ResolvedIdentity:
-    """A hand-typed customer. Coverage is still computed by the real `_coverage()`
-    helper (tools/mocks.py) — never re-implemented here — so a typed purchase date
-    produces the same in/out-of-warranty math a real fixture would."""
-    identity = Identity(strength=VERIFIED if verified else ANONYMOUS, phone=phone if verified else None)
-    if not verified:
-        return ResolvedIdentity(persona="customer", method="unverified", identity=identity)
-    if not bike_rows:
-        return ResolvedIdentity(
-            persona="customer", method="no_warranty_record", identity=identity, error="no_warranty_record"
-        )
-    bikes = [_coverage(row, date.today()) for row in bike_rows]
-    return ResolvedIdentity(
-        persona="customer", method="verified", identity=identity, profile={"name": name}, bikes=bikes
-    )
-
-
-def _resolved_for_custom_dealer(
-    name: str, phone: str, city: str, credit_limit: int, credit_used: int, overdue: int, terms_days: int
-) -> ResolvedIdentity:
-    identity = Identity(strength=VERIFIED, phone=phone)
-    profile = {
-        "dealer_id": "CUSTOM-%s" % phone[-4:],
-        "name": name,
-        "city": city,
-        "credit_limit": credit_limit,
-        "credit_used": credit_used,
-        "payment_terms_days": terms_days,
-        "overdue_amount": overdue,
-        "status": "active",
-    }
-    return ResolvedIdentity(persona="dealer", method="verified", identity=identity, profile=profile)
-
-
-def _tuned_system_prompt(module: Any, message: InboundMessage, resolved: ResolvedIdentity, edited_prompt: str) -> str:
-    """Call the agent's real ``build_system_prompt`` with the edited base text.
-
-    Monkey-patches the module-level ``_BASE_PROMPT`` for the duration of the
-    call so the agent's own ``_facts_block``/``_context_block``/``_entry_block``
-    helpers still run — this is the whole point: the playground never
-    re-implements prompt assembly, it just substitutes the editable part.
-    """
-    original = module._BASE_PROMPT
-    module._BASE_PROMPT = edited_prompt
-    try:
-        return module.DEFINITION.build_system_prompt(message, resolved, "")
-    finally:
-        module._BASE_PROMPT = original
-
-
-def _save_diff(agent_name: str, original_prompt: str, edited_prompt: str) -> Path:
+def _save_prompt_diff(agent_name: str, original_prompt: str, edited_prompt: str) -> Path:
     diff_lines = difflib.unified_diff(
         original_prompt.splitlines(keepends=True),
         edited_prompt.splitlines(keepends=True),
@@ -191,251 +95,307 @@ def _save_diff(agent_name: str, original_prompt: str, edited_prompt: str) -> Pat
     return path
 
 
-def _custom_customer_form() -> ResolvedIdentity:
-    name = st.text_input("Name", "Test Customer")
-    phone = st.text_input("Phone", "+919999999999")
-    verified = st.checkbox("Verified (signed in)", value=True)
-    bike_rows: List[Dict[str, Any]] = []
-    if verified:
-        bike_count = st.number_input("Bikes owned", min_value=0, max_value=5, value=1, step=1)
-        for i in range(int(bike_count)):
-            with st.expander("Bike %d" % (i + 1), expanded=(bike_count == 1)):
-                product_name = st.text_input("Model", "EMX Plus", key="custom_bike_model_%d" % i)
-                purchase_date = st.date_input(
-                    "Purchase date", value=date(2025, 6, 1), key="custom_bike_date_%d" % i
-                )
-                frame_number = st.text_input(
-                    "Frame number", "CUSTOM%03d" % i, key="custom_bike_frame_%d" % i
-                )
-                battery_variant = st.text_input(
-                    "Battery variant (optional)", "", key="custom_bike_batt_%d" % i
-                )
-                bike_rows.append(
-                    {
-                        "frame_number": frame_number,
-                        "product_name": product_name,
-                        "purchase_date": purchase_date.isoformat(),
-                        "battery_variant": battery_variant,
-                        "product_color": "",
-                    }
-                )
-    return _resolved_for_custom_customer(name, phone, verified, bike_rows)
-
-
-def _custom_dealer_form() -> ResolvedIdentity:
-    name = st.text_input("Dealer name", "Test Cycle Stores")
-    phone = st.text_input("Phone", "+919999999999")
-    city = st.text_input("City", "Pune")
-    credit_limit = st.number_input("Credit limit (₹)", min_value=0, value=500000, step=10000)
-    credit_used = st.number_input("Credit used (₹)", min_value=0, value=100000, step=10000)
-    overdue = st.number_input("Overdue amount (₹)", min_value=0, value=0, step=1000)
-    terms_days = st.number_input("Payment terms (days)", min_value=0, value=30, step=5)
-    return _resolved_for_custom_dealer(name, phone, city, int(credit_limit), int(credit_used), int(overdue), int(terms_days))
-
-
-def _serialise_uploaded_file(uploaded: Any) -> Dict[str, Any]:
+def _attachment_from_upload(uploaded: Any) -> Attachment:
     name = uploaded.name or "upload"
-    content = uploaded.getvalue()
     mime_type = uploaded.type or mimetypes.guess_type(name)[0] or "application/octet-stream"
-    return {
-        "name": name,
-        "kind": "image" if mime_type.startswith("image/") else "document",
-        "mime_type": mime_type,
-        "data": base64.b64encode(content).decode("utf-8"),
-    }
-
-
-def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    blocks: List[Dict[str, Any]] = []
-    for attachment in attachments:
-        mime_type = attachment.get("mime_type") or "application/octet-stream"
-        data = attachment.get("data")
-        if not data:
-            continue
-        if mime_type.startswith("image/"):
-            blocks.append(
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": mime_type, "data": data},
-                }
-            )
-        elif mime_type.lower() == "application/pdf" or attachment.get("name", "").lower().endswith(".pdf"):
-            blocks.append(
-                {
-                    "type": "document",
-                    "source": {"type": "base64", "media_type": "application/pdf", "data": data},
-                    "title": attachment.get("name", "document.pdf"),
-                }
-            )
-    return blocks
-
-
-def main() -> None:
-    st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
-    st.title("Prompt-tuning playground")
-    st.caption(
-        "Edit a sub-agent's system prompt, chat-test it against a real Claude model, "
-        "and save a diff for review. Nothing here writes to production code."
+    data = base64.b64encode(uploaded.getvalue()).decode("utf-8")
+    return Attachment(
+        kind="image" if mime_type.startswith("image/") else "document",
+        url="data:%s;base64,%s" % (mime_type, data),
+        mime_type=mime_type,
     )
 
+
+def _make_llm(model_id: Optional[str], api_key: str) -> Any:
+    if model_id is None:
+        return OfflinePlanner()
+    return AnthropicClaude(Settings(), api_key=api_key, model=model_id)
+
+
+def _new_session(bot: str, resolved: Any, channel: str, oms_available: bool, llm: Any) -> PlaygroundSession:
+    return PlaygroundSession(
+        bot=bot,
+        resolved=resolved,
+        channel=channel,
+        catalogue=load_catalogue(DRAFTS_DIR),
+        llm=llm,
+        oms_available=oms_available,
+        drafts_dir=DRAFTS_DIR,
+    )
+
+
+def _source_tag(source: str) -> str:
+    return {"builtin": "built-in", "published": "published", "draft": "draft"}[source]
+
+
+# --- Chat mode -------------------------------------------------------------------
+
+
+def _chat_mode(catalogue: Any) -> None:
     with st.sidebar:
-        st.subheader("Setup")
-        agent_name = st.selectbox("Agent", list(AGENT_MODULES.keys()))
+        labels = {"%s  [%s]" % (s.name, _source_tag(s.source)): s.name for s in catalogue.specs}
+        bot_name = labels[st.selectbox("Bot", list(labels.keys()))]
+        spec = catalogue.get(bot_name)
+
         model_label = st.selectbox("Model", list(MODELS.keys()))
         model_id = MODELS[model_label]
-
-        api_key = st.text_input(
-            "Anthropic API key",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""),
-            type="password",
-            help="Session-only — never written to disk. Falls back to ANTHROPIC_API_KEY if set.",
-        )
-
-        module = importlib.import_module(AGENT_MODULES[agent_name])
+        api_key = ""
+        if model_id is not None:
+            api_key = st.text_input(
+                "Anthropic API key",
+                value=os.environ.get("ANTHROPIC_API_KEY", ""),
+                type="password",
+                help="Session-only — never written to disk. Falls back to ANTHROPIC_API_KEY if set.",
+            )
 
         st.divider()
         st.subheader("Rider")
         rider_mode = st.radio("Rider source", ["Preset rider", "Custom rider"], horizontal=True)
-
+        oms_available = True
         if rider_mode == "Preset rider":
-            scenarios = _scenarios_for(agent_name)
-            scenario_label = st.selectbox("Test customer/dealer scenario", [s.label for s in scenarios])
+            scenarios = scenarios_for(spec.persona)
+            scenario_label = st.selectbox("Scenario", [s.label for s in scenarios])
             scenario = next(s for s in scenarios if s.label == scenario_label)
-            resolved = _resolved_for_preset(scenario)
-            persona, channel = scenario.persona, scenario.channel
+            resolved = resolved_for_preset(scenario)
+            channel = scenario.channel
+            oms_available = scenario.oms_available
             rider_display = scenario.label
         else:
-            st.caption(
-                "Type in your own rider. Bike coverage still runs through the same "
-                "coverage math the real tools use — just fed a typed purchase date "
-                "instead of a fixture."
-            )
-            if agent_name == "dealer_orders":
-                resolved = _custom_dealer_form()
-                persona, channel = "dealer", "dealer_app"
+            if spec.persona == "dealer":
+                resolved = custom_dealer_form()
+                channel = "dealer_app"
             else:
-                resolved = _custom_customer_form()
-                persona, channel = "customer", "website_chat"
+                resolved = custom_customer_form()
+                channel = "website_chat"
             rider_display = "Custom: %s" % (resolved.profile or {}).get("name", "unnamed")
 
-        st.divider()
-        st.caption("Tools this agent has (not called in this playground): " + ", ".join(module.TOOL_NAMES))
+        pill: Optional[str] = None
+        if spec.topic and spec.persona == "customer":
+            if st.checkbox("Arrive via the '%s' pill" % spec.topic, value=False):
+                pill = spec.topic
 
-    session_key = "chat_%s" % agent_name
-    prompt_key = "prompt_%s" % agent_name
+        st.divider()
+        st.caption("Tools this bot may call: " + ", ".join(spec.tools))
+
+    # One Runtime per (bot, rider, model). Changing any of them starts a fresh
+    # conversation; editing the prompt does not. A short digest of the key
+    # (not bool(api_key)) so correcting a typo'd key also starts a fresh
+    # session — a wrong-then-right key would otherwise hash to the same
+    # `True` and the client would never be rebuilt.
+    api_key_digest = hashlib.sha256(api_key.encode()).hexdigest()[:16] if api_key else ""
+    session_key = (bot_name, rider_display, repr(resolved), model_id, api_key_digest)
+    if st.session_state.get("session_key") != session_key or "session" not in st.session_state:
+        if model_id is not None and not api_key:
+            st.session_state["session"] = None
+        else:
+            st.session_state["session"] = _new_session(
+                bot_name, resolved, channel, oms_available, _make_llm(model_id, api_key)
+            )
+        st.session_state["session_key"] = session_key
+        st.session_state["transcript"] = []
+    session: Optional[PlaygroundSession] = st.session_state["session"]
+
+    prompt_key = "prompt_%s" % bot_name
     if prompt_key not in st.session_state:
-        st.session_state[prompt_key] = module._BASE_PROMPT
-    if session_key not in st.session_state:
-        st.session_state[session_key] = []  # type: ignore[assignment]
+        st.session_state[prompt_key] = spec.prompt
 
     col_prompt, col_chat = st.columns([1, 1])
 
     with col_prompt:
-        st.subheader("System prompt (%s)" % agent_name)
+        st.subheader("System prompt (%s)" % bot_name)
         edited_prompt = st.text_area(
-            "Edit and test — nothing is saved until you click Save below",
+            "Applies from the next turn. Nothing is saved until you click a Save button.",
             value=st.session_state[prompt_key],
-            height=500,
-            key="textarea_%s" % agent_name,
+            height=480,
+            key="textarea_%s" % bot_name,
         )
         st.session_state[prompt_key] = edited_prompt
+        if session is not None and edited_prompt != spec.prompt and session.prompt_override != edited_prompt:
+            session.set_prompt(edited_prompt)
 
-        if st.button("Save diff for review"):
-            path = _save_diff(agent_name, module._BASE_PROMPT, edited_prompt)
-            st.success("Diff written to %s — review and apply it as a normal reviewed change." % path)
-            st.code(path.read_text(), language="diff")
+        if spec.source == DRAFT:
+            if st.button("Save prompt to draft"):
+                try:
+                    save_draft(dict(spec.to_dict(), prompt=edited_prompt), DRAFTS_DIR)
+                    st.success("Draft updated.")
+                    st.rerun()
+                except BotSpecError as exc:
+                    st.error(str(exc))
+        else:
+            if st.button("Save diff for review"):
+                path = _save_prompt_diff(bot_name, spec.prompt, edited_prompt)
+                st.success("Diff written to %s — review and apply it as a normal PR." % path)
+                st.code(path.read_text(), language="diff")
+
+        if session is not None:
+            with st.expander("System prompt as the model will see it"):
+                st.text(session.system_prompt_preview(pill))
 
     with col_chat:
         st.subheader("Test conversation")
-        st.caption("Rider: %s" % rider_display)
+        st.caption("Rider: %s · Channel: %s" % (rider_display, channel))
+        if st.button("Reset conversation"):
+            st.session_state.pop("session_key", None)
+            st.rerun()
 
-        for turn in st.session_state[session_key]:
+        if session is None:
+            st.info("Enter an API key in the sidebar, or pick the offline planner, to start.")
+            return
+
+        for turn in st.session_state["transcript"]:
             with st.chat_message(turn["role"]):
-                attachments = turn.get("attachments") or []
-                if attachments:
-                    for attachment in attachments:
-                        st.caption("📎 %s" % attachment["name"])
+                for name in turn.get("attachments", []):
+                    st.caption("📎 %s" % name)
                 st.write(turn["content"])
+                if turn["role"] == "assistant":
+                    st.caption(turn["summary"])
+                    if turn["events"]:
+                        with st.expander("Trace"):
+                            st.json(turn["events"])
 
-        uploader_key = "uploader_%s" % agent_name
         uploaded_files = st.file_uploader(
             "📎 Attach image or PDF",
             type=["png", "jpg", "jpeg", "pdf"],
             accept_multiple_files=True,
-            key=uploader_key,
-            help="Upload JPG, JPEG, PNG, or PDF files to test multimodal prompts.",
+            key="uploader_%s" % bot_name,
         )
-        if uploaded_files:
-            st.caption("Attached: %s" % ", ".join(file.name for file in uploaded_files))
 
-        user_text = st.chat_input("Type a test customer message…")
+        user_text = st.chat_input("Type a test message…")
         if user_text or uploaded_files:
-            attachments = [_serialise_uploaded_file(file) for file in uploaded_files]
-            st.session_state[session_key].append({
-                "role": "user",
-                "content": user_text.strip() if user_text else "(Uploaded file(s) for review)",
-                "attachments": attachments,
-            })
-
-            message = InboundMessage(
-                conversation_id=str(uuid.uuid4()),
-                persona=persona,
-                identity=resolved.identity,
-                channel=channel,
-                message_text=user_text.strip() if user_text else "",
-                attachments=[
-                    Attachment(kind=item["kind"], url="data:%s;base64,%s" % (item["mime_type"], item["data"]), mime_type=item["mime_type"])
-                    for item in attachments
-                ],
+            attachments = [_attachment_from_upload(f) for f in (uploaded_files or [])]
+            text = (user_text or "").strip()
+            st.session_state["transcript"].append(
+                {"role": "user", "content": text or "(uploaded file)", "attachments": [f.name for f in uploaded_files or []]}
             )
-            system_prompt = _tuned_system_prompt(module, message, resolved, edited_prompt)
-
-            if not api_key:
-                st.session_state[session_key].append(
-                    {
-                        "role": "assistant",
-                        "content": "(No API key entered — add one in the sidebar to get a real response.)",
-                    }
+            try:
+                result = session.send(text, pill=pill, attachments=attachments)
+                reply = result.reply
+                summary = "handled_by=%s · tools=%s%s%s" % (
+                    reply.handled_by,
+                    ", ".join(reply.metadata.get("tool_calls", [])) or "none",
+                    " · ESCALATED" if reply.escalated else "",
+                    " · ticket %s" % reply.ticket_id if reply.ticket_id else "",
                 )
-            else:
-                import anthropic
-
-                client = anthropic.Anthropic(api_key=api_key)
-                anthropic_messages: List[Dict[str, Any]] = []
-                for turn in st.session_state[session_key]:
-                    if turn["role"] not in ("user", "assistant"):
-                        continue
-                    blocks: List[Dict[str, Any]] = []
-                    content = turn.get("content") or ""
-                    if content:
-                        blocks.append({"type": "text", "text": content})
-                    for attachment in turn.get("attachments") or []:
-                        blocks.extend(_attachment_blocks([attachment]))
-                    anthropic_messages.append({"role": turn["role"], "content": blocks})
-
-                try:
-                    response = client.messages.create(
-                        model=model_id,
-                        max_tokens=1024,
-                        system=system_prompt,
-                        messages=anthropic_messages,
-                    )
-                    text = "\n".join(block.text for block in response.content if block.type == "text")
-                except anthropic.APIStatusError as exc:
-                    text = "API error: %s" % exc.message
-                st.session_state[session_key].append({"role": "assistant", "content": text})
-
+                st.session_state["transcript"].append(
+                    {"role": "assistant", "content": reply.text, "summary": summary, "events": result.events}
+                )
+            except Exception as exc:  # surfaced, not swallowed: this is a test bench
+                st.session_state["transcript"].append(
+                    {"role": "assistant", "content": "Error: %s" % exc, "summary": "error", "events": []}
+                )
             st.rerun()
 
-        with st.expander("System prompt sent to the model (this turn)"):
-            preview_message = InboundMessage(
-                conversation_id="preview",
-                persona=persona,
-                identity=resolved.identity,
-                channel=channel,
-                message_text="",
+
+# --- New bot mode -------------------------------------------------------------
+
+
+def _new_bot_mode(catalogue: Any) -> None:
+    st.subheader("New bot")
+    st.caption(
+        "Saves a draft spec into %s. Drafts are testable in Chat immediately and are never "
+        "loaded by the deployed API." % DRAFTS_DIR
+    )
+
+    persona = st.radio("Persona", ["customer", "dealer"], horizontal=True)
+    name = st.text_input("Name (snake_case)", "brakes_support")
+    topic = st.text_input("Topic (snake_case; the knowledge topic and the triage topic)", "brakes")
+    keywords_text = st.text_area(
+        "Keywords, one per line (English plus Hindi/Hinglish as customers actually type them)",
+        "brake\nbraking\nब्रेक\nbrek",
+        height=120,
+    )
+    tools = st.multiselect(
+        "Tools", sorted(PERSONA_TOOLS[persona]),
+        default=[t for t in ("lookup_warranty_record", "search_knowledge", "create_support_ticket") if t in PERSONA_TOOLS[persona]],
+    )
+    prompt = st.text_area("Prompt", prompt_template(persona, topic or "<topic>"), height=420)
+
+    with st.expander("Knowledge records for this topic (optional)"):
+        st.caption("One record per sub-issue, in the knowledge/README.md format. Symptoms and steps one per line.")
+        record_count = st.number_input("Records", min_value=0, max_value=10, value=0, step=1)
+        records: List[Dict[str, Any]] = []
+        for i in range(int(record_count)):
+            st.markdown("**Record %d**" % (i + 1))
+            records.append(
+                {
+                    "id": st.text_input("id", "%s-%d" % (topic or "topic", i + 1), key="kb_id_%d" % i),
+                    "title": st.text_input("title", "", key="kb_title_%d" % i),
+                    "symptoms": [s.strip() for s in st.text_area("symptoms", "", key="kb_sym_%d" % i).splitlines() if s.strip()],
+                    "steps": [s.strip() for s in st.text_area("steps", "", key="kb_steps_%d" % i).splitlines() if s.strip()],
+                    "escalate_when": st.text_input("escalate_when", "", key="kb_esc_%d" % i),
+                }
             )
-            st.text(_tuned_system_prompt(module, preview_message, resolved, edited_prompt))
+
+    col_save, col_export, col_delete = st.columns(3)
+    with col_save:
+        if st.button("Save draft"):
+            raw = {
+                "name": name.strip(),
+                "persona": persona,
+                "topic": topic.strip() or None,
+                "keywords": [k.strip() for k in keywords_text.splitlines() if k.strip()],
+                "tools": tools,
+                "prompt": prompt,
+            }
+            try:
+                path = save_draft(raw, DRAFTS_DIR)
+                written = save_draft_knowledge(topic.strip(), records, DRAFTS_DIR) if records and topic.strip() else []
+                st.success("Draft saved to %s%s. Switch to Chat to test it." % (path, " (+%d knowledge records)" % len(written) if written else ""))
+                st.rerun()
+            except (BotSpecError, KnowledgeError) as exc:
+                st.error(str(exc))
+    with col_export:
+        if st.button("Export for review"):
+            try:
+                paths = export_for_review(name.strip(), DRAFTS_DIR, EXPORT_DIR)
+                st.success("Exported:\n" + "\n".join("- %s" % p for p in paths))
+                st.caption("Move these into bots/ and knowledge/ in the repo and open a PR.")
+            except (BotSpecError, KeyError) as exc:
+                st.error("Save the draft first: %s" % exc)
+    with col_delete:
+        if st.button("Delete draft"):
+            try:
+                delete_draft(name.strip(), DRAFTS_DIR)
+            except (BotSpecError, KnowledgeError, OSError, yaml.YAMLError) as exc:
+                st.error(str(exc))
+            else:
+                # st.rerun() raises to unwind the script, so it must stay out
+                # of the try — otherwise it would be caught as a failure.
+                st.session_state.pop("session_key", None)
+                st.success("Deleted.")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Bots in the catalogue")
+    rows = [
+        {"name": s.name, "persona": s.persona, "topic": s.topic or "", "source": _source_tag(s.source),
+         "keywords": ", ".join(s.keywords), "tools": ", ".join(s.tools)}
+        for s in catalogue.specs
+    ]
+    st.dataframe(rows, use_container_width=True)
+
+
+# --- main ---------------------------------------------------------------------
+
+
+def main() -> None:
+    st.set_page_config(page_title="Emotorad AI — playground", layout="wide")
+    st.title("Bot playground")
+
+    try:
+        catalogue = load_catalogue(DRAFTS_DIR)
+    except BotSpecError as exc:
+        st.error("A draft failed to load: %s\n\nFix or delete it under %s." % (exc, DRAFTS_DIR))
+        return
+
+    with st.sidebar:
+        mode = st.radio("Mode", ["Chat", "New bot"], horizontal=True)
+        st.divider()
+
+    if mode == "Chat":
+        _chat_mode(catalogue)
+    else:
+        _new_bot_mode(catalogue)
 
 
 if __name__ == "__main__":

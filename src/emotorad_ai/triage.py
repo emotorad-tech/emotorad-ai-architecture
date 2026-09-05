@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from .agents import battery_support, motor_support
 from .conversation import (
     AWAITING_BIKE_SELECTION,
     AWAITING_ISSUE,
@@ -28,29 +29,16 @@ from .conversation import (
 from .contract import InboundMessage
 from .identity import ResolvedIdentity
 
-# Deterministic issue classification. Keywords are the cheap path; anything they
-# do not catch falls through to the model rather than being force-fitted here.
-# English plus the Hindi/Hinglish terms that actually appear in support traffic —
-# a Devanagari-script message must not be a silent miss.
+# The built-in table. Runtime passes the catalogue's table instead, so a bot
+# added as configuration is routable without this file changing; the default
+# keeps `classify_issue("...")` working for callers and tests that want today's
+# behaviour.
 TOPIC_KEYWORDS: Dict[str, Sequence[str]] = {
-    # Note what is NOT here: bare "power". It appears in both "won't power on"
-    # (battery) and "power cuts out while riding" (drive), so on its own it
-    # classifies nothing — it just makes every drive complaint look like a
-    # battery one. The phrases below carry the discrimination instead.
-    "battery": (
-        "battery", "charge", "charging", "charger", "range", "backup",
-        "discharge", "drain", "drains", "draining", "not turning on",
-        "won't start", "wont start", "dead", "power on", "powering on",
-        "no power at all", "बैटरी", "चार्ज", "batri", "charj",
-    ),
-    "motor": (
-        "motor", "noise", "noisy", "sound", "grinding", "jerk", "jerking",
-        "pedal assist", "pas", "throttle", "speed", "vibration",
-        "cuts out", "cutting out", "cuts off", "cutting off", "power cut",
-        "stops while riding", "while riding",
-        "मोटर", "आवाज", "awaz",
-    ),
+    battery_support.TOPIC: battery_support.KEYWORDS,
+    motor_support.TOPIC: motor_support.KEYWORDS,
 }
+
+DEFAULT_SUPPORTED_SUMMARY = "battery and motor problems"
 
 # Checked in two passes. "the second one" contains the word "one", so a bare
 # cardinal must never outrank a true ordinal — that phrasing is common enough
@@ -77,16 +65,19 @@ class TriageOutcome:
         return self.agent is not None
 
 
-def classify_issue(text: str) -> Optional[str]:
+def classify_issue(
+    text: str, keywords: Optional[Mapping[str, Sequence[str]]] = None
+) -> Optional[str]:
     """Topic from keywords, or None when the model needs to decide.
 
     Returning None is a real answer, not a failure: forcing a guess here is how a
     motor complaint ends up in a battery agent, which then troubleshoots the
     wrong component confidently and at length.
     """
+    table = keywords if keywords is not None else TOPIC_KEYWORDS
     lowered = text.lower()
     matched = [
-        topic for topic, words in TOPIC_KEYWORDS.items()
+        topic for topic, words in table.items()
         if any(word in lowered for word in words)
     ]
     if len(matched) != 1:
@@ -98,7 +89,9 @@ def classify_issue(text: str) -> Optional[str]:
     return matched[0]
 
 
-def topic_from_pill(pill: Optional[str]) -> Optional[str]:
+def topic_from_pill(
+    pill: Optional[str], keywords: Optional[Mapping[str, Sequence[str]]] = None
+) -> Optional[str]:
     """Canonical topic for a channel's own pill vocabulary.
 
     Every channel names its entry points differently — a WhatsApp template
@@ -110,11 +103,12 @@ def topic_from_pill(pill: Optional[str]) -> Optional[str]:
     covers most of them without a table entry; anything left returns None and is
     resolved from the message text instead of being force-fitted.
     """
+    table = keywords if keywords is not None else TOPIC_KEYWORDS
     if not pill:
         return None
-    if pill in TOPIC_KEYWORDS:
+    if pill in table:
         return pill
-    return classify_issue(pill.replace("_", " "))
+    return classify_issue(pill.replace("_", " "), table)
 
 
 def match_bike(text: str, bikes: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -190,9 +184,18 @@ def describe_bike(bike: Dict[str, Any]) -> str:
 class TriageAgent:
     """Greets, narrows to one bike, captures the issue, hands off."""
 
-    def __init__(self, topic_agents: Dict[str, str]) -> None:
+    def __init__(
+        self,
+        topic_agents: Dict[str, str],
+        keywords: Optional[Mapping[str, Sequence[str]]] = None,
+        supported_summary: Optional[str] = None,
+    ) -> None:
         # topic -> sub-agent name, e.g. {"battery": "battery_support"}.
         self.topic_agents = topic_agents
+        self.keywords = keywords if keywords is not None else TOPIC_KEYWORDS
+        # What the unsupported-topic reply says we *can* do. Derived from the
+        # catalogue in production so a new bot is named without editing a string.
+        self.supported_summary = supported_summary or DEFAULT_SUPPORTED_SUMMARY
 
     def handle(
         self,
@@ -209,8 +212,9 @@ class TriageAgent:
         # through bike selection — knowing they tapped "Battery issue" does not
         # say which of three bikes it is about.
         pill = message.pill_clicked
-        topic = topic_from_pill(pill) or classify_issue(text)
-        source = "pill:%s" % pill if pill and topic_from_pill(pill) else "text"
+        pill_topic = topic_from_pill(pill, self.keywords)
+        topic = pill_topic or classify_issue(text, self.keywords)
+        source = "pill:%s" % pill if pill_topic else "text"
 
         if state.selected_frame is None:
             bikes = resolved.bikes
@@ -277,8 +281,8 @@ class TriageAgent:
             state.move_to(AWAITING_ISSUE, "unsupported_topic")
             return TriageOutcome(
                 reply=(
-                    "I can help with battery and motor problems from here. For anything else, "
-                    "let me put you through to the support team."
+                    "I can help with %s from here. For anything else, "
+                    "let me put you through to the support team." % self.supported_summary
                 ),
                 reason="unsupported_topic:%s" % topic,
             )

@@ -16,8 +16,6 @@ are stop-riding advice, not troubleshooting.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
-
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..tools.mocks import (
@@ -27,11 +25,19 @@ from ..tools.mocks import (
     LOOKUP_WARRANTY_RECORD,
     SEARCH_KNOWLEDGE,
 )
-from .battery_support import _context_block, _entry_block, _facts_block
+from .blocks import _context_block, _entry_block, _facts_block
 from .base import AgentDefinition
 
 AGENT_NAME = "motor_support"
 TOPIC = "motor"
+
+KEYWORDS = (
+    "motor", "noise", "noisy", "sound", "grinding", "jerk", "jerking",
+    "pedal assist", "pas", "throttle", "speed", "vibration",
+    "cuts out", "cutting out", "cuts off", "cutting off", "power cut",
+    "stops while riding", "while riding",
+    "मोटर", "आवाज", "awaz",
+)
 
 # No diagnostics tool: there is no motor telematics either, and an absent tool is
 # a fact the model can reason about where an empty one invites a guess.
@@ -88,7 +94,7 @@ symbols, no markdown, no emoji. Indian English. If you do not know something, sa
 def build_system_prompt(
     message: InboundMessage, resolved: ResolvedIdentity, context: str = ""
 ) -> str:
-    # Deliberately reuses the battery agent's context blocks. The customer facts,
+    # Deliberately reuses the shared context blocks. The customer facts,
     # the multi-bike warning and the four coverage states are persona-level
     # concerns, not battery-specific ones — a second copy would drift, and the
     # copy that drifts is the one that starts stating coverage it should not.

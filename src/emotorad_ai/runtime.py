@@ -22,15 +22,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from .agents.base import Agent, AgentDefinition
+from .agents.base import Agent
 from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
-from .agents.battery_support import DEFINITION as BATTERY_SUPPORT_DEFINITION
 from .agents.dealer_orders import AGENT_NAME as DEALER_ORDERS
-from .agents.dealer_orders import DEFINITION as DEALER_ORDERS_DEFINITION
 from .agents.late_warranty import AGENT_NAME as LATE_WARRANTY
-from .agents.late_warranty import DEFINITION as LATE_WARRANTY_DEFINITION
-from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
-from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
+from .bots import BotCatalogue
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import ConversationState, ConversationStore
@@ -49,18 +45,12 @@ from .llm import BedrockClaude
 from .observability import EventLog
 from .tools.mocks import CREATE_SUPPORT_TICKET, build_registry
 from .tools.registry import ToolContext, ToolRegistry, is_error
-from .triage import TriageAgent
+from .triage import TriageAgent, classify_issue
 
 UNSUPPORTED_MESSAGE = (
     "I am not able to help with this from here. Let me pass you to a member of our support "
     "team who can."
 )
-
-# Topic -> sub-agent, **scoped per persona**. Never one router over everything:
-# a dealer and a customer asking the same words mean different things, and a
-# shared agent set is how a dealer reaches a customer-only tool.
-TOPIC_AGENTS = {"battery": BATTERY_SUPPORT, "motor": MOTOR_SUPPORT}
-DEALER_AGENTS = {"order": DEALER_ORDERS}
 
 
 class Runtime:
@@ -72,25 +62,37 @@ class Runtime:
         log: Optional[EventLog] = None,
         resolver: Optional[IdentityResolver] = None,
         diagnostics_available: bool = False,
+        catalogue: Optional[BotCatalogue] = None,
     ) -> None:
         self.settings = settings or load_settings()
-        self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
+        # Built-ins plus bots/*.yaml. Drafts are never loaded here — the
+        # playground passes its own catalogue.
+        self.catalogue = catalogue or BotCatalogue.load()
+        self.registry = registry or build_registry(
+            diagnostics_available=diagnostics_available, topics=self.catalogue.topics()
+        )
+        self.catalogue.validate(self.registry)
         self.log = log or EventLog(path=self.settings.log_path, to_stdout=self.settings.log_to_stdout)
         self.llm = llm if llm is not None else BedrockClaude(self.settings)
         self.resolver = resolver or IdentityResolver(self.registry)
         self.conversations = ConversationStore()
         self.enricher = ContextEnricher()
-        self.triage = TriageAgent(TOPIC_AGENTS)
 
-        definitions: Dict[str, AgentDefinition] = {
-            BATTERY_SUPPORT: BATTERY_SUPPORT_DEFINITION,
-            MOTOR_SUPPORT: MOTOR_SUPPORT_DEFINITION,
-            LATE_WARRANTY: LATE_WARRANTY_DEFINITION,
-            DEALER_ORDERS: DEALER_ORDERS_DEFINITION,
-        }
+        # Topic -> sub-agent, **scoped per persona**. Never one router over
+        # everything: a dealer and a customer asking the same words mean
+        # different things, and a shared agent set is how a dealer reaches a
+        # customer-only tool.
+        self.triage = TriageAgent(
+            self.catalogue.topic_agents("customer"),
+            self.catalogue.keywords("customer"),
+            self.catalogue.supported_summary("customer"),
+        )
+        self._dealer_agents = self.catalogue.topic_agents("dealer")
+        self._dealer_keywords = self.catalogue.keywords("dealer")
+
         self.agents = {
             name: Agent(definition, self.registry, self.llm, self.log, self.settings)
-            for name, definition in definitions.items()
+            for name, definition in self.catalogue.definitions().items()
         }
 
     # -- entry point ---------------------------------------------------------
@@ -146,10 +148,18 @@ class Runtime:
             # Dealers bypass customer triage entirely. There is no bike to
             # disambiguate and no customer record to enrich from — and routing
             # them through the customer path is precisely how a dealer would end
-            # up holding someone else's warranty data.
-            state.route_to(DEALER_ORDERS)
-            self.log.routed(message.conversation_id, DEALER_ORDERS, "persona:dealer")
-            return self._run_agent(DEALER_ORDERS, message, resolved, state)
+            # up holding someone else's warranty data. Keyword match against the
+            # dealer bots; anything unmatched is an order, which is what dealers
+            # mostly want.
+            if state.agent is None:
+                topic = classify_issue(message.message_text, self._dealer_keywords)
+                agent_name = self._dealer_agents.get(topic or "", DEALER_ORDERS)
+                state.route_to(agent_name)
+                self.log.routed(
+                    message.conversation_id, agent_name,
+                    "persona:dealer" + (":%s" % topic if topic else ""),
+                )
+            return self._run_agent(state.agent or DEALER_ORDERS, message, resolved, state)
 
         if resolved.persona != "customer":
             return self._finish(
