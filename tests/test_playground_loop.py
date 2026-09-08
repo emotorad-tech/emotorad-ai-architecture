@@ -243,3 +243,55 @@ class PersonaIsolationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuppressedToolTests(unittest.TestCase):
+    """Tools withheld on this page only, while content is being authored.
+
+    battery_support's knowledge records are the R1 skeleton and now hold worse
+    content than the prompt does, so searching them would return thinner answers
+    from a second, diverging source of truth. Withheld in the playground and
+    nowhere else — production's TOOL_NAMES must not move for a tester's
+    convenience.
+    """
+
+    def setUp(self):
+        import importlib
+
+        from emotorad_ai.playground import _playground_tool_names
+
+        self.slice_for = _playground_tool_names
+        self.registry = build_registry(today=date.today(), verification=VerificationStore())
+        self.battery = importlib.import_module("emotorad_ai.agents.battery_support")
+        self.motor = importlib.import_module("emotorad_ai.agents.motor_support")
+
+    def test_battery_is_not_offered_the_knowledge_search(self):
+        for live in (True, False):
+            names = self.slice_for("battery_support", self.battery, self.registry, live)
+            self.assertNotIn("search_knowledge", names, "live=%s" % live)
+
+    def test_the_rest_of_batterys_slice_is_untouched(self):
+        names = self.slice_for("battery_support", self.battery, self.registry, False)
+        self.assertIn("lookup_warranty_record", names)
+        self.assertIn("create_support_ticket", names)
+
+    def test_no_other_agent_is_affected(self):
+        names = self.slice_for("motor_support", self.motor, self.registry, True)
+        self.assertIn("search_knowledge", names)
+
+    def test_production_tool_names_are_not_modified(self):
+        # The suppression is a view, not an edit. If it mutated TOOL_NAMES the
+        # deployed agent would lose its knowledge tool too.
+        self.slice_for("battery_support", self.battery, self.registry, True)
+        self.assertIn("search_knowledge", self.battery.TOOL_NAMES)
+
+    def test_the_model_is_never_shown_the_withheld_tool(self):
+        client = _Client([_text("ok")])
+        _run(
+            client,
+            self.registry,
+            self.slice_for("battery_support", self.battery, self.registry, True),
+            lambda: ToolContext(conversation_id=CHAT),
+        )
+        offered = [t["name"] for t in client.messages.calls[0]["tools"]]
+        self.assertNotIn("search_knowledge", offered)

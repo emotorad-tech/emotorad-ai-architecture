@@ -77,7 +77,12 @@ from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, Inbo
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.media import resolve as resolve_media
 from emotorad_ai.tools import fixtures
-from emotorad_ai.tools.mocks import RAISE_INTAKE_TICKET, _coverage, build_registry
+from emotorad_ai.tools.mocks import (
+    RAISE_INTAKE_TICKET,
+    SEARCH_KNOWLEDGE,
+    _coverage,
+    build_registry,
+)
 from emotorad_ai.tools.oms import OMSClient, OMSConfigError, OMSNoRecord, OMSUnavailable
 from emotorad_ai.tools.registry import ToolContext, ToolError, ToolRegistry, is_error
 from emotorad_ai.tools.verification import (
@@ -927,6 +932,32 @@ def _live_account_finder(client: Any) -> Any:
     return finder
 
 
+# Tools withheld from an agent in the playground only, never in production.
+#
+# battery_support: `search_knowledge` is suppressed while the battery flow is
+# being authored in the prompt rather than in knowledge records. The nine shipped
+# records are the R1 skeleton and now hold *worse* content than the prompt does —
+# SOC check, charger-LED branch, revival process — so a search would return
+# thinner answers than the model already has, from a second source of truth that
+# is quietly diverging. One source while the content moves.
+#
+# This comes out when the settled sections are lifted into records; the guide
+# photos on Cloudinary reach customers only through a retrieved record, so
+# nothing renders until it does. Deliberate, not a regression.
+PLAYGROUND_SUPPRESSED_TOOLS: Dict[str, tuple] = {
+    "battery_support": (SEARCH_KNOWLEDGE,),
+}
+
+
+def _playground_tool_names(
+    agent_name: str, module: Any, registry: ToolRegistry, live: bool
+) -> List[str]:
+    """What the model is offered on this page — the agent's slice, adjusted."""
+    names = _live_tool_names(module, registry) if live else list(module.TOOL_NAMES)
+    withheld = PLAYGROUND_SUPPRESSED_TOOLS.get(agent_name, ())
+    return [n for n in names if n not in withheld]
+
+
 def _live_tool_names(module: Any, registry: ToolRegistry) -> List[str]:
     """The agent's own tools, plus the identity tools the live channel needs.
 
@@ -1500,9 +1531,9 @@ def main() -> None:
                             system_prompt,
                             anthropic_messages,
                             registry,
-                            _live_tool_names(module, registry)
-                            if rider_mode == "Live customer"
-                            else module.TOOL_NAMES,
+                            _playground_tool_names(
+                                agent_name, module, registry, rider_mode == "Live customer"
+                            ),
                             (
                                 (lambda: _tool_context(chat["chat_id"], _resolved_for_live(
                                     agent_name, verification.verified_phone(chat["chat_id"]), registry)))
