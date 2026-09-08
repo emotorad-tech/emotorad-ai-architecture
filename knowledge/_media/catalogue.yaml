@@ -1,0 +1,30 @@
+# The guide photos and clips the bot may send, and the only ones it may send.
+#
+# Each key is a name the prompt can refer to and the model can pick from a list
+# it is shown; the model never types a filename or a URL, so it cannot invent one
+# and cannot mistype one. Adding a picture is an entry here plus an upload — no
+# code, no prompt edit.
+#
+# This is an interim home. Media properly belongs on the knowledge record whose
+# steps it illustrates, and moves there when the battery flow is lifted out of
+# the prompt. These ids and captions transfer across unchanged when it does; only
+# the tool goes away.
+#
+# `id` is a Cloudinary public id. Note that a Media Library folder is a *display*
+# folder and is NOT part of the public id — assets uploaded into emotorad/Battery
+# are addressed at the root, as below.
+
+soc_button:
+  id: SOC_Button_non_doodle
+  kind: image
+  caption: The SOC button and charge indicator, on the side of the pack
+
+battery_onoff_switch:
+  id: Battery_OnOff_switch
+  kind: image
+  caption: The battery On/Off switch — set it to ON before charging
+
+battery_revival:
+  id: Battery_Revival_Steps.mp4
+  kind: video
+  caption: Reviving a pack that has gone completely flat

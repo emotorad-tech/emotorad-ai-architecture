@@ -152,3 +152,125 @@ class ShippedRecordsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CatalogueTests(unittest.TestCase):
+    """The fixed set of pictures the bot may send, and nothing else."""
+
+    def test_the_shipped_catalogue_loads_and_every_entry_resolves(self):
+        from emotorad_ai.media import load_catalogue
+
+        catalogue = load_catalogue()
+        self.assertTrue(catalogue, "no guide media authored")
+        with _WithCloud("emotorad-demo"):
+            for key, item in catalogue.items():
+                got = resolve(item)
+                self.assertFalse(got["unresolved"], "%s: %s" % (key, got.get("reason")))
+                self.assertTrue(got["caption"], key)
+
+    def test_the_catalogue_is_not_mistaken_for_a_knowledge_record(self):
+        # It lives under an underscore-prefixed directory. If the loader stopped
+        # skipping those it would raise on every startup, since a catalogue has
+        # none of the fields a record requires.
+        self.assertEqual(len(load_records()), 9)
+
+    def test_a_malformed_record_still_raises(self):
+        # The skip is an explicit namespace, not a licence to drop bad files: a
+        # silently dropped record is a topic the bot has quietly stopped knowing
+        # about, with nothing anywhere to say so.
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "battery").mkdir()
+            (Path(folder) / "battery" / "broken.yaml").write_text("id: x\ntitle: y\n")
+            with self.assertRaises(KnowledgeError):
+                load_records(Path(folder))
+
+    def _catalogue_from(self, text):
+        import tempfile
+        from pathlib import Path
+
+        from emotorad_ai.media import load_catalogue
+
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "_media").mkdir()
+            (Path(folder) / "_media" / "catalogue.yaml").write_text(text)
+            return load_catalogue(Path(folder))
+
+    def test_an_entry_without_a_caption_is_refused(self):
+        from emotorad_ai.media import CatalogueError
+
+        with self.assertRaises(CatalogueError):
+            self._catalogue_from("soc:\n  id: X\n  kind: image\n")
+
+    def test_an_entry_without_an_id_or_url_is_refused(self):
+        from emotorad_ai.media import CatalogueError
+
+        with self.assertRaises(CatalogueError):
+            self._catalogue_from("soc:\n  kind: image\n  caption: c\n")
+
+
+class SendGuideMediaToolTests(unittest.TestCase):
+    """The model chooses a key from a set. It never names a file or a URL."""
+
+    def setUp(self):
+        from datetime import date
+
+        from emotorad_ai.media import load_catalogue
+        from emotorad_ai.tools.mocks import build_registry
+
+        self.catalogue = load_catalogue()
+        self.registry = build_registry(today=date.today(), guide_media=self.catalogue)
+
+    def _send(self, key):
+        from emotorad_ai.tools.registry import ToolContext
+
+        return self.registry.call("send_guide_media", {"key": key}, ToolContext(conversation_id="c"))
+
+    def test_the_keys_are_an_enum_in_the_schema(self):
+        # So an invented key is rejected before it reaches the tool, and the
+        # model can see what it is allowed to pick.
+        schema = self.registry.specs["send_guide_media"].schema()
+        self.assertEqual(
+            sorted(schema["input_schema"]["properties"]["key"]["enum"]), sorted(self.catalogue)
+        )
+
+    def test_the_schema_offers_no_way_to_supply_a_file_or_url(self):
+        properties = self.registry.specs["send_guide_media"].schema()["input_schema"]["properties"]
+        self.assertEqual(set(properties), {"key"})
+
+    def test_sending_a_known_key_returns_renderable_media(self):
+        from emotorad_ai.tools.registry import is_error
+
+        with _WithCloud("emotorad-demo"):
+            envelope = self._send("soc_button")
+        self.assertFalse(is_error(envelope))
+        item = envelope["data"]["media"][0]
+        self.assertTrue(item["url"])
+        self.assertEqual(item["kind"], "image")
+
+    def test_an_unknown_key_errors_and_names_the_valid_ones(self):
+        from emotorad_ai.tools.registry import is_error
+
+        envelope = self._send("a_picture_i_made_up")
+        self.assertTrue(is_error(envelope))
+        self.assertEqual(envelope["error"]["code"], "unknown_guide_media")
+        self.assertIn("soc_button", envelope["error"]["message"])
+
+    def test_unresolvable_media_errors_rather_than_claiming_to_have_sent(self):
+        # Otherwise the reply says "see the photo" and no photo exists.
+        from emotorad_ai.tools.registry import is_error
+
+        with _WithCloud(None):
+            envelope = self._send("soc_button")
+        self.assertTrue(is_error(envelope))
+        self.assertEqual(envelope["error"]["code"], "guide_media_unavailable")
+        self.assertIn("not tell the customer", envelope["error"]["message"])
+
+    def test_the_tool_is_absent_when_no_catalogue_is_supplied(self):
+        from datetime import date
+
+        from emotorad_ai.tools.mocks import build_registry
+
+        self.assertNotIn("send_guide_media", build_registry(today=date.today()).specs)

@@ -11,6 +11,7 @@ import itertools
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
+from .. import media as media_module
 from ..knowledge import BatteryKnowledgeBase
 from . import fixtures
 from .verification import VerificationStore, register_verification_tools
@@ -32,6 +33,10 @@ SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
 # The unverified counterpart of create_support_ticket. Separate on purpose:
 # see its registration below for why the two must not be one tool.
 RAISE_INTAKE_TICKET = "raise_intake_ticket"
+# Sends one of a fixed set of guide pictures. Interim: media belongs on the
+# knowledge record whose steps it illustrates, and moves there once the flow
+# is lifted out of the prompt.
+SEND_GUIDE_MEDIA = "send_guide_media"
 
 # --- dealer tools (W2) -------------------------------------------------------
 # Split into quote / place deliberately. Quoting is a read and can be repeated
@@ -320,6 +325,9 @@ def build_registry(
     # stay identical whichever side of the swap you are on.
     warranty_source: Optional[Callable[[str], Optional[List[Dict[str, Any]]]]] = None,
     verification: Optional["VerificationStore"] = None,
+    # key -> media item. Absent unless a catalogue is supplied, so an agent
+    # with no pictures is never told it can send one.
+    guide_media: Optional[Dict[str, Dict[str, Any]]] = None,
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
@@ -344,6 +352,56 @@ def build_registry(
     # Only offered when a store is supplied. An agent that cannot verify anyone
     # should not be told it can — an absent tool is a fact the model can reason
     # about, a present one that never works invites it to keep trying.
+    if guide_media:
+
+        @registry.register(
+            SEND_GUIDE_MEDIA,
+            "Show the customer a guide photo or short clip — where a button is, what a light "
+            "looks like, how a step is performed. Use it whenever a step is easier to point at "
+            "than to describe, and say in your reply what you are showing them. Choose a key "
+            "from the list below; you cannot send anything else, and there is no way to supply "
+            "a file or a link. Available:\n%s"
+            % "\n".join(
+                "  %s — %s" % (key, item.get("caption", "")) for key, item in sorted(guide_media.items())
+            ),
+            parameters={
+                "key": {
+                    "type": "string",
+                    "enum": sorted(guide_media),
+                    "description": "Which guide picture to send.",
+                }
+            },
+            required=("key",),
+        )
+        def send_guide_media(key: str) -> Dict[str, Any]:
+            """Resolve one catalogue key into something the channel can render.
+
+            The key is an enum in the schema, so an invalid one is rejected before
+            it reaches here — the model chooses from a set rather than naming a
+            file. That is the same rule that keeps frame numbers out of its hands:
+            a URL it composed itself would render as a broken image in front of a
+            customer, and it would have no way to know.
+            """
+            item = guide_media.get(key)
+            if item is None:
+                raise ToolError(
+                    "unknown_guide_media",
+                    "There is no guide picture called %r. Choose one of: %s."
+                    % (key, ", ".join(sorted(guide_media))),
+                )
+            found = media_module.resolve(item)
+            if found.get("unresolved"):
+                # Say so rather than claiming to have sent something. The reply
+                # can then describe the step instead of referring to a picture
+                # the customer never received.
+                raise ToolError(
+                    "guide_media_unavailable",
+                    "%r could not be prepared (%s). Describe the step in words instead, and do "
+                    "not tell the customer you have sent a picture."
+                    % (key, found.get("reason", "unknown")),
+                )
+            return ok({"sent": True, "kind": found["kind"], "caption": found["caption"], "media": [found]})
+
     if verification is not None:
         register_verification_tools(registry, verification, account_finder=account_finder)
         registry.verification = verification  # type: ignore[attr-defined]

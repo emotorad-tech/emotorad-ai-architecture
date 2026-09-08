@@ -172,6 +172,13 @@ def load_records(directory: Optional[Path] = None) -> List[KnowledgeRecord]:
     records: List[KnowledgeRecord] = []
     seen: Dict[str, Path] = {}
     for path in sorted(root.rglob("*.yaml")):
+        # An underscore-prefixed directory is authored content that is not a
+        # record — the guide-media catalogue lives in one. Skipping by an
+        # explicit namespace is not the same as skipping a malformed record,
+        # which still raises: that would be a topic the bot has quietly stopped
+        # knowing about, with nothing anywhere to say so.
+        if any(part.startswith("_") for part in path.relative_to(root).parts):
+            continue
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         _validate(raw, str(path))
 

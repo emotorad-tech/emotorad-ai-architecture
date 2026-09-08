@@ -100,3 +100,49 @@ def resolve(item: Mapping[str, Any]) -> Dict[str, Any]:
     if kind == "video":
         resolved["poster"] = _delivery("video", POSTER_TRANSFORM, "%s.jpg" % public_id.rsplit(".", 1)[0])
     return resolved
+
+
+# --- the guide-media catalogue ----------------------------------------------
+# The fixed set of pictures the bot may send while the battery flow still lives
+# in the prompt rather than in knowledge records. The model picks a key from this
+# list; it never names a file or a URL, so there is nothing for it to invent or
+# mistype. Interim by design — see knowledge/guide_media.yaml.
+
+CATALOGUE_PATH = "_media/catalogue.yaml"
+
+
+class CatalogueError(Exception):
+    """A malformed catalogue. Raised at load, never at send time."""
+
+
+def load_catalogue(directory: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
+    """key -> media item, validated the same way knowledge records are."""
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(directory) if directory else pathlib.Path(__file__).resolve().parents[2] / "knowledge"
+    path = root / CATALOGUE_PATH
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except OSError:
+        return {}
+    if not isinstance(raw, dict):
+        raise CatalogueError("%s: expected a mapping of key -> media item" % path)
+    catalogue: Dict[str, Dict[str, Any]] = {}
+    for key, item in raw.items():
+        where = "%s: %s" % (path.name, key)
+        if not isinstance(item, Mapping):
+            raise CatalogueError("%s: each entry must be a mapping" % where)
+        if not (item.get("id") or item.get("url")):
+            raise CatalogueError("%s: needs an id (a CDN public id) or a url" % where)
+        if not item.get("caption"):
+            # The caption is what the model reasons about when choosing, and what
+            # the customer reads under the picture. Without it the entry is a
+            # filename the model has no basis for picking.
+            raise CatalogueError("%s: needs a caption" % where)
+        kind = item.get("kind", "image")
+        if kind not in KINDS:
+            raise CatalogueError("%s: kind must be 'image' or 'video', not %r" % (where, kind))
+        catalogue[str(key)] = dict(item)
+    return catalogue

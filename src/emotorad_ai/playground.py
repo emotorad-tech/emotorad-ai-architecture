@@ -75,11 +75,13 @@ if _SRC not in sys.path:
 
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
+from emotorad_ai.media import load_catalogue
 from emotorad_ai.media import resolve as resolve_media
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import (
     RAISE_INTAKE_TICKET,
     SEARCH_KNOWLEDGE,
+    SEND_GUIDE_MEDIA,
     _coverage,
     build_registry,
 )
@@ -954,6 +956,10 @@ def _playground_tool_names(
 ) -> List[str]:
     """What the model is offered on this page — the agent's slice, adjusted."""
     names = _live_tool_names(module, registry) if live else list(module.TOOL_NAMES)
+    # Guide pictures are offered in every rider mode: they are how the bot points
+    # at a button, and that is not a live-identity concern.
+    if SEND_GUIDE_MEDIA in registry.specs and SEND_GUIDE_MEDIA not in names:
+        names.append(SEND_GUIDE_MEDIA)
     withheld = PLAYGROUND_SUPPRESSED_TOOLS.get(agent_name, ())
     return [n for n in names if n not in withheld]
 
@@ -969,7 +975,13 @@ def _live_tool_names(module: Any, registry: ToolRegistry) -> List[str]:
     it. Added here rather than in the agent so production stays as designed.
     """
     names = list(module.TOOL_NAMES)
-    for extra in (REQUEST_IDENTITY_VERIFICATION, VERIFY_IDENTITY, FIND_ACCOUNT_BY_CODE, RAISE_INTAKE_TICKET):
+    for extra in (
+        REQUEST_IDENTITY_VERIFICATION,
+        VERIFY_IDENTITY,
+        FIND_ACCOUNT_BY_CODE,
+        RAISE_INTAKE_TICKET,
+        SEND_GUIDE_MEDIA,
+    ):
         if extra in registry.specs and extra not in names:
             names.append(extra)
     return names
@@ -1130,11 +1142,19 @@ def _run_agent_turn(
             # The model never names a URL — it picks a record, and the record
             # brings its own media — so there is nothing here for it to invent.
             if not is_error(envelope):
-                for passage in (envelope.get("data") or {}).get("passages", []) or []:
-                    for item in passage.get("media", []) or []:
-                        found = resolve_media(item)
-                        if found not in outbound_media:
-                            outbound_media.append(found)
+                data = envelope.get("data") or {}
+                # Two sources, deliberately: media cited by a retrieved knowledge
+                # passage, and media the model asked for by catalogue key. The
+                # second is interim and goes away when the flow moves into
+                # records; the first is where this belongs.
+                cited = [m for p in data.get("passages", []) or [] for m in (p.get("media") or [])]
+                for item in cited:
+                    found = resolve_media(item)
+                    if found not in outbound_media:
+                        outbound_media.append(found)
+                for found in data.get("media", []) or []:
+                    if found not in outbound_media:
+                        outbound_media.append(found)
             results.append(
                 {
                     "type": "tool_result",
@@ -1274,6 +1294,7 @@ def main() -> None:
             verification=verification,
             warranty_source=_live_warranty_source(client),
             account_finder=_live_account_finder(client),
+            guide_media=load_catalogue(),
         )
         verified_phone = verification.verified_phone(chat["chat_id"])
         resolved = _resolved_for_live(agent_name, verified_phone, registry)
@@ -1281,7 +1302,7 @@ def main() -> None:
             "Live — verified %s" % verified_phone if verified_phone else "Live — not yet verified"
         )
     else:
-        registry = build_registry(today=date.today())
+        registry = build_registry(today=date.today(), guide_media=load_catalogue())
 
     col_prompt, col_chat = st.columns([1, 1])
 
