@@ -1277,8 +1277,11 @@ def main() -> None:
     # Streamlit refuses writes to a widget's key once that widget is built.
     if pending_load_key in st.session_state:
         st.session_state[textarea_key] = st.session_state.pop(pending_load_key)
+    base_version_key = "editor_base_version_%s" % agent_name
     if textarea_key not in st.session_state:
         st.session_state[textarea_key] = _default_prompt(agent_name, module)
+        seeded = _latest_prompt_version(agent_name)
+        st.session_state[base_version_key] = seeded["version"] if seeded else 0
     if session_key not in st.session_state:
         st.session_state[session_key] = _load_chat(agent_name)
 
@@ -1314,6 +1317,23 @@ def main() -> None:
             key=textarea_key,
         )
 
+        # A version can arrive from outside this browser tab —
+        # scripts/publish_prompt.py, or a second window. Streamlit will not
+        # notice on its own, and silently replacing an unsaved draft with one
+        # published underneath the tester would be worse than making them click.
+        newest = _latest_prompt_version(agent_name)
+        base_version = st.session_state.get(base_version_key, 0)
+        if newest and newest["version"] > base_version and newest["text"] != edited_prompt:
+            st.warning(
+                "**v%d was published** (%s) while this editor was open, and it is not what "
+                "you have here. Your unsaved text is untouched until you load it."
+                % (newest["version"], newest["saved_at"])
+            )
+            if st.button("Load v%d into the editor" % newest["version"], type="primary"):
+                st.session_state[pending_load_key] = newest["text"]
+                st.session_state[base_version_key] = newest["version"]
+                st.rerun()
+
         save_col, diff_col = st.columns([1, 1])
         with save_col:
             if st.button("💾 Save prompt version", type="primary", use_container_width=True):
@@ -1322,6 +1342,7 @@ def main() -> None:
                     st.info("No changes since v%d." % current["version"])
                 else:
                     record = _save_prompt_version(agent_name, edited_prompt)
+                    st.session_state[base_version_key] = record["version"]
                     st.success("Saved v%d — new chats now start from this." % record["version"])
         with diff_col:
             if st.button("Save diff for review", use_container_width=True):
@@ -1347,6 +1368,7 @@ def main() -> None:
                 chosen = newest_first[labels.index(picked)]
                 if st.button("Load v%d into the editor" % chosen["version"]):
                     st.session_state[pending_load_key] = chosen["text"]
+                    st.session_state[base_version_key] = chosen["version"]
                     st.rerun()
                 st.code(chosen["text"])
 

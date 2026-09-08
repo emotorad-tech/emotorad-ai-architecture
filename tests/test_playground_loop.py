@@ -295,3 +295,64 @@ class SuppressedToolTests(unittest.TestCase):
         )
         offered = [t["name"] for t in client.messages.calls[0]["tools"]]
         self.assertNotIn("search_knowledge", offered)
+
+
+class PromptPublishingTests(unittest.TestCase):
+    """Publishing from outside the browser tab.
+
+    Versions are appended, never overwritten, so a bad publish is undone by
+    loading the one before it — and an editor that already has unsaved text is
+    told a newer version exists rather than having it swapped in underneath.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from emotorad_ai import playground
+
+        self.playground = playground
+        self._dir = tempfile.TemporaryDirectory()
+        self._previous = playground.PLAYGROUND_DIR
+        playground.PLAYGROUND_DIR = Path(self._dir.name)
+        playground.PROMPT_DIR = Path(self._dir.name) / "prompts"
+
+    def tearDown(self):
+        self.playground.PLAYGROUND_DIR = self._previous
+        self.playground.PROMPT_DIR = self._previous / "prompts"
+        self._dir.cleanup()
+
+    def test_versions_are_appended_and_numbered(self):
+        first = self.playground._save_prompt_version("battery_support", "one")
+        second = self.playground._save_prompt_version("battery_support", "two")
+        self.assertEqual((first["version"], second["version"]), (1, 2))
+        self.assertEqual(len(self.playground._load_prompt_versions("battery_support")), 2)
+
+    def test_publishing_never_destroys_an_earlier_version(self):
+        # The whole rollback story depends on this.
+        self.playground._save_prompt_version("battery_support", "original")
+        self.playground._save_prompt_version("battery_support", "replacement")
+        texts = [v["text"] for v in self.playground._load_prompt_versions("battery_support")]
+        self.assertIn("original", texts)
+
+    def test_the_newest_version_is_what_a_fresh_editor_starts_from(self):
+        import types
+
+        self.playground._save_prompt_version("battery_support", "older")
+        self.playground._save_prompt_version("battery_support", "newest")
+        module = types.SimpleNamespace(_BASE_PROMPT="module default")
+        self.assertEqual(self.playground._default_prompt("battery_support", module), "newest")
+
+    def test_a_fresh_agent_falls_back_to_its_module_prompt(self):
+        import types
+
+        module = types.SimpleNamespace(_BASE_PROMPT="module default")
+        self.assertEqual(self.playground._default_prompt("motor_support", module), "module default")
+
+    def test_the_version_label_distinguishes_saved_from_draft(self):
+        # What tells the tester whether what they are testing is what is stored.
+        self.playground._save_prompt_version("battery_support", "saved text")
+        self.assertEqual(self.playground._prompt_version_label("battery_support", "saved text"), "v1")
+        self.assertEqual(
+            self.playground._prompt_version_label("battery_support", "edited since"), "v1+draft"
+        )
