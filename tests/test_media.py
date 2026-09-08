@@ -44,9 +44,18 @@ class DeliveryUrlTests(unittest.TestCase):
         self.assertEqual(
             got["url"],
             "https://res.cloudinary.com/emotorad-demo/image/upload/"
-            "f_auto,q_auto,w_900/emotorad/kb/battery/soc-button.png",
+            "f_auto,q_auto,w_900,c_limit/emotorad/kb/battery/soc-button.png",
         )
         self.assertFalse(got["unresolved"])
+
+    def test_delivery_never_enlarges_a_small_source(self):
+        # Without c_limit, Cloudinary scales a small original *up* to the target
+        # width: the 480px SOC photo was delivered as a blurrier 67KB version of
+        # a sharp 36KB original. Guide photos are often small crops.
+        from emotorad_ai.media import IMAGE_TRANSFORM, POSTER_TRANSFORM
+
+        self.assertIn("c_limit", IMAGE_TRANSFORM)
+        self.assertIn("c_limit", POSTER_TRANSFORM)
 
     def test_a_video_uses_the_video_resource_and_gains_a_poster(self):
         # A player with no poster shows a black rectangle until it is tapped,

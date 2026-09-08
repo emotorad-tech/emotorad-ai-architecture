@@ -33,14 +33,17 @@ BASE = "https://res.cloudinary.com"
 # `f_auto` serves WebP/AVIF to clients that take them and JPEG to those that do
 # not; `q_auto` picks a quality per image. Both matter more than they sound on
 # Indian mobile data, where these are opened.
-IMAGE_TRANSFORM = "f_auto,q_auto,w_900"
+# `c_limit` shrinks to fit and never enlarges. Without it Cloudinary scales a
+# small source *up* to the target width — the 480px SOC photo was being delivered
+# as a blurrier, 67KB version of a sharp 36KB original.
+IMAGE_TRANSFORM = "f_auto,q_auto,w_900,c_limit"
 # No width cap on video: re-encoding to a narrow width costs clarity on exactly
 # the small details these clips exist to show.
 VIDEO_TRANSFORM = "f_auto,q_auto"
 # A still for the player to show before playback. `so_0` is the first frame.
 # Delivered from the *video* resource, not the image one — the frame is extracted
 # from the clip, so /image/upload/so_0/... has nothing to extract from and 404s.
-POSTER_TRANSFORM = "so_0,f_jpg,q_auto,w_900"
+POSTER_TRANSFORM = "so_0,f_jpg,q_auto,w_900,c_limit"
 
 KINDS = ("image", "video")
 

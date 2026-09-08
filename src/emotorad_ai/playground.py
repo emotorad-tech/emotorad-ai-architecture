@@ -1442,11 +1442,11 @@ def main() -> None:
                             st.json(call["arguments"])
                         st.caption("result")
                         st.json(envelope)
-                st.write(turn["content"])
-
-                # Guide media the bot sent, rendered as the customer would get
-                # it: the picture, then its caption. Shown after the text because
-                # it illustrates an instruction that has to be read first.
+                # Guide media comes BEFORE the reply. The model writes as though
+                # the customer can already see it — "press that button" — and a
+                # picture underneath makes the sentence refer to nothing. On
+                # WhatsApp the two arrive as separate messages, so the order here
+                # is the order the customer meets them in.
                 for item in turn.get("media") or []:
                     if item.get("unresolved"):
                         st.warning(
@@ -1460,6 +1460,8 @@ def main() -> None:
                         st.image(item["url"], use_container_width=True)
                     if item.get("caption"):
                         st.caption(item["caption"])
+
+                st.write(turn["content"])
 
         # The uploader keeps its files until the user clears it, so a sent file
         # would otherwise re-attach itself to every later message. Its key carries
