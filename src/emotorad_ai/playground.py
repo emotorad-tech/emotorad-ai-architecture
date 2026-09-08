@@ -75,6 +75,7 @@ if _SRC not in sys.path:
 
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
+from emotorad_ai.media import resolve as resolve_media
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import RAISE_INTAKE_TICKET, _coverage, build_registry
 from emotorad_ai.tools.oms import OMSClient, OMSConfigError, OMSNoRecord, OMSUnavailable
@@ -1031,6 +1032,7 @@ def _run_agent_turn(
 
     tools = registry.schemas_for([name for name in tool_names if name in registry.specs])
     trace: List[Dict[str, Any]] = []
+    outbound_media: List[Dict[str, Any]] = []
     seen_calls: set = set()
 
     for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
@@ -1059,7 +1061,13 @@ def _run_agent_turn(
                 )
             elif stop_reason == "max_tokens":
                 text += "\n\n(Truncated — hit the output token cap. Raise it in the sidebar.)"
-            return {"text": text, "trace": trace, "iterations": iteration, "stop_reason": stop_reason}
+            return {
+                "text": text,
+                "trace": trace,
+                "media": outbound_media,
+                "iterations": iteration,
+                "stop_reason": stop_reason,
+            }
 
         results: List[Dict[str, Any]] = []
         for tool_use in tool_uses:
@@ -1076,6 +1084,7 @@ def _run_agent_turn(
                         "production this hands over to a human.)" % tool_use.name
                     ),
                     "trace": trace,
+                    "media": outbound_media,
                     "iterations": iteration,
                 }
             seen_calls.add(signature)
@@ -1084,6 +1093,17 @@ def _run_agent_turn(
                 context = context_factory()
             envelope = registry.call(tool_use.name, arguments, context)
             trace.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})
+
+            # Guide photos and clips ride along with the knowledge passage that
+            # cites them, exactly as Agent.run collects them (agents/base.py).
+            # The model never names a URL — it picks a record, and the record
+            # brings its own media — so there is nothing here for it to invent.
+            if not is_error(envelope):
+                for passage in (envelope.get("data") or {}).get("passages", []) or []:
+                    for item in passage.get("media", []) or []:
+                        found = resolve_media(item)
+                        if found not in outbound_media:
+                            outbound_media.append(found)
             results.append(
                 {
                     "type": "tool_result",
@@ -1100,6 +1120,7 @@ def _run_agent_turn(
             "to a human.)" % MAX_TOOL_ITERATIONS
         ),
         "trace": trace,
+        "media": outbound_media,
         "iterations": MAX_TOOL_ITERATIONS,
     }
 
@@ -1371,6 +1392,23 @@ def main() -> None:
                         st.json(envelope)
                 st.write(turn["content"])
 
+                # Guide media the bot sent, rendered as the customer would get
+                # it: the picture, then its caption. Shown after the text because
+                # it illustrates an instruction that has to be read first.
+                for item in turn.get("media") or []:
+                    if item.get("unresolved"):
+                        st.warning(
+                            "🖼️ Guide media for this step could not be shown — %s"
+                            % item.get("reason", "unresolved")
+                        )
+                        continue
+                    if item["kind"] == "video":
+                        st.video(item["url"])
+                    else:
+                        st.image(item["url"], use_container_width=True)
+                    if item.get("caption"):
+                        st.caption(item["caption"])
+
         # The uploader keeps its files until the user clears it, so a sent file
         # would otherwise re-attach itself to every later message. Its key carries
         # a counter that is bumped on send: a new key means a fresh, empty widget.
@@ -1453,6 +1491,7 @@ def main() -> None:
                 # never a real system — tuning a prompt must not create real Zoho
                 # tickets or book real service slots.
                 trace: List[Dict[str, Any]] = []
+                guide_media: List[Dict[str, Any]] = []
                 try:
                     with st.spinner("Thinking, and calling tools…"):
                         outcome = _run_agent_turn(
@@ -1473,9 +1512,12 @@ def main() -> None:
                             max_tokens=int(max_tokens),
                         )
                     text, trace = outcome["text"], outcome["trace"]
+                    guide_media = outcome.get("media") or []
                 except anthropic.APIStatusError as exc:
                     text = "API error: %s" % exc.message
-                chat["turns"].append({"role": "assistant", "content": text, "tool_calls": trace})
+                chat["turns"].append(
+                    {"role": "assistant", "content": text, "tool_calls": trace, "media": guide_media}
+                )
 
             _save_chat(agent_name, chat)
             st.session_state[nonce_key] = nonce + 1

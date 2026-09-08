@@ -130,10 +130,25 @@ def _validate(raw: Mapping[str, Any], where: str) -> None:
     if not isinstance(raw.get("symptoms"), list):
         raise KnowledgeError("%s: symptoms must be a list" % where)
     for item in raw.get("media") or []:
-        if not isinstance(item, Mapping) or not item.get("url") or not item.get("caption"):
+        if not isinstance(item, Mapping):
+            raise KnowledgeError("%s: each media item must be a mapping" % where)
+        # `id` is a CDN public id resolved by media.py; `url` is an absolute
+        # address for anything hosted elsewhere. One or the other, never neither.
+        if not (item.get("id") or item.get("url")):
             raise KnowledgeError(
-                "%s: every media item needs both a url and a caption — a photo with no "
-                "caption is invisible to retrieval" % where
+                "%s: every media item needs an id (a CDN public id) or a url" % where
+            )
+        if not item.get("caption"):
+            raise KnowledgeError(
+                "%s: every media item needs a caption — a photo with no caption is "
+                "invisible to retrieval, and it is the caption the model reasons about "
+                "while the customer sees the picture" % where
+            )
+        kind = item.get("kind", "image")
+        if kind not in ("image", "video"):
+            raise KnowledgeError(
+                "%s: media kind must be 'image' or 'video', not %r — the channel has to "
+                "know whether to render a picture or a player" % (where, kind)
             )
 
 
