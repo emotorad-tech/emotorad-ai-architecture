@@ -54,7 +54,11 @@ class DeliveryUrlTests(unittest.TestCase):
         with _WithCloud("emotorad-demo"):
             got = resolve({"id": "emotorad/kb/battery/key-turn.mp4", "kind": "video", "caption": "Key to ON"})
         self.assertIn("/video/upload/", got["url"])
-        self.assertIn("/image/upload/so_0", got["poster"])
+        # The poster frame is extracted from the clip, so it is served from the
+        # video resource too. /image/upload/so_0/... has no clip to seek into and
+        # 404s — verified against a real asset, after this test first asserted
+        # the broken URL and happily passed.
+        self.assertIn("/video/upload/so_0", got["poster"])
         self.assertTrue(got["poster"].endswith("key-turn.jpg"))
 
     def test_an_absolute_url_is_passed_through_untouched(self):

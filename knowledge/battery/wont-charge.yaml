@@ -11,6 +11,12 @@ media:
   - id: SOC_Button_non_doodle
     kind: image
     caption: The SOC button and charge indicator, on the side of the pack
+  - id: Battery_OnOff_switch
+    kind: image
+    caption: The battery On/Off switch — it must be set to ON before charging starts
+  - id: Battery_Revival_Steps.mp4
+    kind: video
+    caption: What to try when the pack has gone completely flat
   - url: https://cdn.emotorad.test/kb/charger-seating.png
     caption: Charger barrel fully seated in the battery port
 steps:

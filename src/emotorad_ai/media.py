@@ -38,6 +38,8 @@ IMAGE_TRANSFORM = "f_auto,q_auto,w_900"
 # the small details these clips exist to show.
 VIDEO_TRANSFORM = "f_auto,q_auto"
 # A still for the player to show before playback. `so_0` is the first frame.
+# Delivered from the *video* resource, not the image one — the frame is extracted
+# from the clip, so /image/upload/so_0/... has nothing to extract from and 404s.
 POSTER_TRANSFORM = "so_0,f_jpg,q_auto,w_900"
 
 KINDS = ("image", "video")
@@ -96,5 +98,5 @@ def resolve(item: Mapping[str, Any]) -> Dict[str, Any]:
     resolved["url"] = delivery
     resolved["unresolved"] = False
     if kind == "video":
-        resolved["poster"] = _delivery("image", POSTER_TRANSFORM, "%s.jpg" % public_id.rsplit(".", 1)[0])
+        resolved["poster"] = _delivery("video", POSTER_TRANSFORM, "%s.jpg" % public_id.rsplit(".", 1)[0])
     return resolved
