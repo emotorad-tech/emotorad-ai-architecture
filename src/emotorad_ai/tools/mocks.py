@@ -37,6 +37,9 @@ RAISE_INTAKE_TICKET = "raise_intake_ticket"
 # knowledge record whose steps it illustrates, and moves there once the flow
 # is lifted out of the prompt.
 SEND_GUIDE_MEDIA = "send_guide_media"
+# Display error code -> what it means on *this* bike. Exact lookup, never a
+# near match: a confidently wrong diagnosis is the worst output available.
+LOOKUP_ERROR_CODE = "lookup_error_code"
 
 # --- dealer tools (W2) -------------------------------------------------------
 # Split into quote / place deliberately. Quoting is a read and can be repeated
@@ -332,6 +335,11 @@ def build_registry(
     # survives across turns, which is the only scope at which "already sent"
     # means anything.
     sent_media: Optional[Dict[str, set]] = None,
+    # The published error-code table, and the bikes on this conversation's
+    # account. Both absent unless supplied, so an agent with no table is never
+    # told it can look codes up.
+    error_codes: Optional[Any] = None,
+    owned_bikes: Optional[List[Dict[str, Any]]] = None,
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
@@ -356,6 +364,63 @@ def build_registry(
     # Only offered when a store is supplied. An agent that cannot verify anyone
     # should not be told it can — an absent tool is a fact the model can reason
     # about, a present one that never works invites it to keep trying.
+    if error_codes is not None:
+
+        @registry.register(
+            LOOKUP_ERROR_CODE,
+            "Look up a display error code the customer has read out — E-07, E30, and so on. "
+            "The answer depends on which bike they own as well as the code, so this resolves "
+            "both. Call it as soon as a customer mentions a code, before troubleshooting "
+            "anything: it is a published table and it will tell you more in one call than "
+            "several questions will. Never guess what a code means and never assume a code "
+            "behaves like a neighbouring one.",
+            parameters={
+                "code": {
+                    "type": "string",
+                    "description": "The code exactly as the customer read it, e.g. 'E-07' or 'E30'.",
+                }
+            },
+            required=("code",),
+        )
+        def lookup_error_code(code: str) -> Dict[str, Any]:
+            """Resolve a code against the customer's own bike.
+
+            Four outcomes, and they are not interchangeable. `found` is a
+            documented diagnosis. `unknown_code` means it is not in the table at
+            all. `not_possible_on_this_model` means it is documented elsewhere
+            but not for this bike — which usually means the display was misread,
+            and is a different conversation from a fault. `unknown_model` means
+            no table is published for what they own.
+            """
+            bikes = owned_bikes or []
+            if not bikes:
+                raise ToolError(
+                    "no_bike_resolved",
+                    "No bike is resolved for this conversation, so a code cannot be looked up. "
+                    "Confirm who you are speaking to first.",
+                )
+            if len(bikes) > 1:
+                # Compared by resolved model *group*, not by product name. Two X2
+                # variants are spelled differently in the OMS and give the same
+                # answer; an X2 and a T-REX + V3 do not. Only a real disagreement
+                # is worth interrupting the customer for.
+                groups = {
+                    (error_codes.group_for(b.get("product_name")) or {}).get("id")
+                    for b in bikes
+                }
+                if len(groups) > 1:
+                    # Same discipline as everywhere else: never pick a bike for them.
+                    names = sorted({b.get("product_name") or "?" for b in bikes})
+                    raise ToolError(
+                        "frame_number_required",
+                        "This customer owns bikes that answer this code differently (%s). Ask "
+                        "which one is showing it before looking it up." % ", ".join(names),
+                    )
+            result = error_codes.lookup(code, bikes[0].get("product_name"))
+            if result["status"] == "found":
+                return ok(result["entry"])
+            return ok({"status": result["status"], "detail": result["detail"], "code": code})
+
     if guide_media:
 
         @registry.register(

@@ -74,12 +74,14 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
+from emotorad_ai.errorcodes import load_table as load_error_codes
 from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE, check_evidence
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.media import resolve as resolve_media
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import (
+    LOOKUP_ERROR_CODE,
     RAISE_INTAKE_TICKET,
     SEARCH_KNOWLEDGE,
     SEND_GUIDE_MEDIA,
@@ -959,8 +961,9 @@ def _playground_tool_names(
     names = _live_tool_names(module, registry) if live else list(module.TOOL_NAMES)
     # Guide pictures are offered in every rider mode: they are how the bot points
     # at a button, and that is not a live-identity concern.
-    if SEND_GUIDE_MEDIA in registry.specs and SEND_GUIDE_MEDIA not in names:
-        names.append(SEND_GUIDE_MEDIA)
+    for extra in (SEND_GUIDE_MEDIA, LOOKUP_ERROR_CODE):
+        if extra in registry.specs and extra not in names:
+            names.append(extra)
     withheld = PLAYGROUND_SUPPRESSED_TOOLS.get(agent_name, ())
     return [n for n in names if n not in withheld]
 
@@ -1346,6 +1349,8 @@ def main() -> None:
             account_finder=_live_account_finder(client),
             guide_media=load_catalogue(),
             sent_media=sent_media,
+            error_codes=load_error_codes(),
+            owned_bikes=resolved.bikes if resolved else [],
         )
         verified_phone = verification.verified_phone(chat["chat_id"])
         resolved = _resolved_for_live(agent_name, verified_phone, registry)
@@ -1354,7 +1359,11 @@ def main() -> None:
         )
     else:
         registry = build_registry(
-            today=date.today(), guide_media=load_catalogue(), sent_media=sent_media
+            today=date.today(),
+            guide_media=load_catalogue(),
+            sent_media=sent_media,
+            error_codes=load_error_codes(),
+            owned_bikes=resolved.bikes,
         )
 
     col_prompt, col_chat = st.columns([1, 1])
@@ -1518,6 +1527,19 @@ def main() -> None:
                             st.json(call["arguments"])
                         st.caption("result")
                         st.json(envelope)
+
+                for call in turn.get("tool_calls") or []:
+                    data = (call.get("result") or {}).get("data") or {}
+                    if call["tool"] == LOOKUP_ERROR_CODE and data.get("technician_chain"):
+                        # Behind a control, not in the reply. The chain is written
+                        # for someone holding a spare display; a customer who wants
+                        # the detail can open it, and one who does not is not handed
+                        # a parts list they cannot act on.
+                        with st.expander("🔧 Technical breakdown"):
+                            st.write(data["technician_chain"])
+                            if data.get("verification"):
+                                st.caption("How it is confirmed: %s" % data["verification"])
+
                 if turn.get("proof_note"):
                     # Marked as a fixture so it is never mistaken, in a saved
                     # transcript, for something the customer actually sent.
