@@ -18,10 +18,17 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.11.1"
+PLAYGROUND_VERSION = "0.11.2"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.11.2",
+        "2026-09-09",
+        "An error code asked about on the same turn the customer verified now resolves, and a "
+        "model retrying a call that failed is no longer killed as stuck — that combination was "
+        "ending turns with a handover message instead of the answer.",
+    ),
     (
         "0.11.1",
         "2026-09-09",

@@ -482,3 +482,111 @@ class StaticCorrectnessTests(unittest.TestCase):
         ]
         self.assertEqual(serious, [], "\n".join(serious))
 
+
+
+class RetryAfterErrorTests(unittest.TestCase):
+    """Repeating a call that failed is retrying; repeating one that worked is stuck.
+
+    From chat 20260909-cc16dd19: a customer verified and asked about an error
+    code in the same turn. The lookup failed because the bikes had been captured
+    while they were still anonymous, the model sensibly tried again — and the
+    loop killed the turn as "stuck", discarding the retry *and* the reply. The
+    customer got a handover message instead of their answer.
+    """
+
+    def setUp(self):
+        self.registry = build_registry(today=date.today())
+        self.context = ToolContext(conversation_id=CHAT, phone=next(iter(fixtures.WARRANTY_RECORDS)))
+
+    def _factory(self):
+        return lambda: self.context
+
+    def test_a_call_that_failed_may_be_retried(self):
+        # First attempt errors (no frame number owned), second succeeds because
+        # the arguments differ — but the retry must not be pre-emptively blocked.
+        calls = 0
+
+        class _Flaky:
+            def __init__(self, registry):
+                self.registry = registry
+
+            def call(self, name, arguments, context):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    from emotorad_ai.tools.registry import err
+
+                    return err("temporarily_unavailable", "not yet")
+                return self.registry.call(name, arguments, context)
+
+            def __getattr__(self, item):
+                return getattr(self.registry, item)
+
+        flaky = _Flaky(self.registry)
+        client = _Client(
+            [
+                _uses(("lookup_warranty_record", {})),
+                _uses(("lookup_warranty_record", {})),
+                _text("Your bike is in warranty."),
+            ]
+        )
+        outcome = _run_agent_turn(
+            client, "m", "sys", [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            flaky, ("lookup_warranty_record",), self._factory(),
+        )
+        self.assertEqual(outcome["text"], "Your bike is in warranty.")
+        self.assertFalse(any(c.get("stuck") for c in outcome["trace"]))
+        self.assertFalse(is_error(outcome["trace"][1]["result"]), "the retry's result was kept")
+
+    def test_repeating_a_call_that_already_worked_is_still_stuck(self):
+        client = _Client([_uses(("lookup_warranty_record", {})), _uses(("lookup_warranty_record", {}))])
+        outcome = _run_agent_turn(
+            client, "m", "sys", [{"role": "user", "content": []}],
+            self.registry, ("lookup_warranty_record",), self._factory(),
+        )
+        self.assertTrue(any(c.get("stuck") for c in outcome["trace"]))
+
+    def test_failing_the_same_way_twice_is_stuck(self):
+        # One retry, not unlimited: the same error twice is no progress.
+        context = ToolContext(conversation_id=CHAT)  # no phone -> always missing_identity
+        client = _Client(
+            [
+                _uses(("lookup_warranty_record", {})),
+                _uses(("lookup_warranty_record", {})),
+                _uses(("lookup_warranty_record", {})),
+            ]
+        )
+        outcome = _run_agent_turn(
+            client, "m", "sys", [{"role": "user", "content": []}],
+            self.registry, ("lookup_warranty_record",), lambda: context,
+        )
+        self.assertTrue(any(c.get("stuck") for c in outcome["trace"]))
+
+
+class BikesReadWhenTheToolRunsTests(unittest.TestCase):
+    """owned_bikes may be a callable, for the same reason the context is a factory."""
+
+    def test_a_callable_is_read_at_call_time_not_wiring_time(self):
+        from emotorad_ai.errorcodes import load_table
+
+        bikes = []
+        registry = build_registry(
+            today=date.today(), error_codes=load_table(), owned_bikes=lambda: bikes
+        )
+        first = registry.call("lookup_error_code", {"code": "E-07"}, ToolContext(conversation_id=CHAT))
+        self.assertEqual(first["error"]["code"], "no_bike_resolved")
+
+        bikes.append({"product_name": "X2 Furious Red V2"})
+        second = registry.call("lookup_error_code", {"code": "E-07"}, ToolContext(conversation_id=CHAT))
+        self.assertFalse(is_error(second), "bikes that arrived mid-turn must be visible")
+
+    def test_a_plain_list_still_works(self):
+        from emotorad_ai.errorcodes import load_table
+
+        registry = build_registry(
+            today=date.today(), error_codes=load_table(),
+            owned_bikes=[{"product_name": "X2 Furious Red V2"}],
+        )
+        self.assertFalse(
+            is_error(registry.call("lookup_error_code", {"code": "E-07"}, ToolContext(conversation_id=CHAT)))
+        )

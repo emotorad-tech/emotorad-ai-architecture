@@ -339,7 +339,10 @@ def build_registry(
     # account. Both absent unless supplied, so an agent with no table is never
     # told it can look codes up.
     error_codes: Optional[Any] = None,
-    owned_bikes: Optional[List[Dict[str, Any]]] = None,
+    # A list, or a callable returning one. Callable where the answer can change
+    # mid-turn: a customer who verifies and then asks about a code does both in
+    # one assistant turn, and bikes captured at wiring time are still empty.
+    owned_bikes: Optional[Any] = None,
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
@@ -392,7 +395,7 @@ def build_registry(
             and is a different conversation from a fault. `unknown_model` means
             no table is published for what they own.
             """
-            bikes = owned_bikes or []
+            bikes = (owned_bikes() if callable(owned_bikes) else owned_bikes) or []
             if not bikes:
                 raise ToolError(
                     "no_bike_resolved",

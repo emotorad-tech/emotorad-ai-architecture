@@ -999,6 +999,23 @@ def _live_tool_names(module: Any, registry: ToolRegistry) -> List[str]:
     return names
 
 
+def _live_bikes(agent_name: str, verification: "VerificationStore", chat_id: str) -> List[Dict[str, Any]]:
+    """The bikes on this conversation, read now rather than when the tool was wired.
+
+    A customer who verifies and then asks about an error code does both inside one
+    assistant turn. Bikes captured at wiring time are still empty at that point,
+    and the lookup fails with no_bike_resolved on the very turn the identity
+    arrived — the same mistake the tool context made before it took a factory.
+    """
+    client = OMSClient()
+    lookup = build_registry(
+        today=date.today(),
+        warranty_source=_live_warranty_source(client),
+        account_finder=_live_account_finder(client),
+    )
+    return _resolved_for_live(agent_name, verification.verified_phone(chat_id), lookup).bikes
+
+
 def _resolved_for_live(agent_name: str, verified_phone: Optional[str], registry: ToolRegistry) -> ResolvedIdentity:
     """Anonymous until the customer proves a number, then hydrated from the OMS.
 
@@ -1088,7 +1105,13 @@ def _run_agent_turn(
     tools = registry.schemas_for([name for name in tool_names if name in registry.specs])
     trace: List[Dict[str, Any]] = []
     outbound_media: List[Dict[str, Any]] = []
-    seen_calls: set = set()
+    # signature -> did it succeed. A model repeating a call that *worked* has
+    # nothing new to learn and is stuck. A model repeating one that *errored* is
+    # retrying, which is what it should do — the first attempt may have failed
+    # for a reason that has since changed, and killing the turn there throws away
+    # the successful retry along with the whole reply.
+    call_outcomes: Dict[str, bool] = {}
+    retried: set = set()
 
     for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
         response = client.messages.create(
@@ -1129,24 +1152,29 @@ def _run_agent_turn(
             arguments = _with_idempotency_key(
                 registry, tool_use.name, dict(tool_use.input or {}), context.conversation_id, iteration
             )
-            signature = (tool_use.name, json.dumps(arguments, sort_keys=True, default=str))
-            if signature in seen_calls:
-                # The model is stuck; further iterations reach the same place.
+            signature = "%s|%s" % (tool_use.name, json.dumps(arguments, sort_keys=True, default=str))
+            previously_succeeded = call_outcomes.get(signature)
+            stuck = previously_succeeded is True or (
+                previously_succeeded is False and signature in retried
+            )
+            if previously_succeeded is False:
+                retried.add(signature)
+            if stuck:
+                # Either it already worked, or it has now failed the same way twice.
                 trace.append({"tool": tool_use.name, "arguments": arguments, "result": None, "stuck": True})
                 return {
                     "text": (
-                        "(Stopped: the model asked for %s with identical arguments twice. In "
-                        "production this hands over to a human.)" % tool_use.name
+                        "(Stopped: %s was called with identical arguments twice with no new "
+                        "result. In production this hands over to a human.)" % tool_use.name
                     ),
                     "trace": trace,
                     "media": outbound_media,
                     "iterations": iteration,
                 }
-            seen_calls.add(signature)
-
             if callable(context_factory):
                 context = context_factory()
             envelope = registry.call(tool_use.name, arguments, context)
+            call_outcomes[signature] = not is_error(envelope)
             trace.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})
 
             # Guide photos and clips ride along with the knowledge passage that
@@ -1406,7 +1434,7 @@ def main() -> None:
             guide_media=load_catalogue(),
             sent_media=sent_media,
             error_codes=load_error_codes(),
-            owned_bikes=resolved.bikes if resolved else [],
+            owned_bikes=lambda: _live_bikes(agent_name, verification, chat["chat_id"]),
         )
         verified_phone = verification.verified_phone(chat["chat_id"])
         resolved = _resolved_for_live(agent_name, verified_phone, registry)
