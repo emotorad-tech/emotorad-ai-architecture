@@ -1477,8 +1477,12 @@ def main() -> None:
                         _save_chat(agent_name, reopened)
                         st.rerun()
 
-        for turn in chat["turns"]:
+        for turn_number, turn in enumerate(chat["turns"]):
             with st.chat_message(turn["role"]):
+                # Numbered so a turn can be pointed at — "look at 15" — instead of
+                # described. Counts every turn including the bot's, so the numbers
+                # match the saved transcript rather than only the customer's side.
+                st.caption("#%d" % turn_number)
                 attachments = turn.get("attachments") or []
                 if attachments:
                     for attachment in attachments:
