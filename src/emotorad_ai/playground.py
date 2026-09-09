@@ -1176,6 +1176,48 @@ def _run_agent_turn(
     }
 
 
+# --- test evidence -----------------------------------------------------------
+# Typing `/proof` stands in for uploading a photo or video, so a flow that gates
+# on evidence can be walked end to end without producing a real file at every
+# step.
+#
+# It lives here, in the harness, and deliberately not in the prompt. A bypass
+# phrase in the prompt would be one prompt-extraction away from being a way to
+# open a warranty claim with no evidence; it would have to be stripped from every
+# future version before shipping; and — worst for its actual purpose — it would
+# mean testing a bot that has a bypass when the production one will not.
+#
+# So nothing is bypassed. The turn genuinely carries evidence, the model receives
+# it by the same path a real upload takes, and the gate is satisfied because it
+# has been met.
+PROOF_COMMAND = "/proof"
+
+
+def _proof_note(description: str) -> str:
+    return (
+        "[Evidence attached by the customer: %s. This is a test fixture standing in for a "
+        "real photo or video — treat it as evidence received for the step you asked about, "
+        "and carry on.]" % (description.strip() or "a photo or video of the step just asked about")
+    )
+
+
+def _split_proof(user_text: Optional[str]):
+    """Pull a `/proof …` marker off a message. Returns (text, note or None).
+
+    Anything after the command describes what the evidence shows, so a tester can
+    steer the conversation — "/proof green light, no red" — without opening a
+    camera. Only a message that *starts* with the command counts, so a customer
+    saying "the /proof is in the pudding" is left alone.
+    """
+    if not user_text:
+        return user_text, None
+    stripped = user_text.strip()
+    if not stripped.lower().startswith(PROOF_COMMAND):
+        return user_text, None
+    remainder = stripped[len(PROOF_COMMAND):].strip()
+    return (remainder or "Here you go."), _proof_note(remainder)
+
+
 def _should_submit_chat(user_text: Optional[str], pending_files: List[Any]) -> bool:
     """Only send after the user explicitly submits a chat turn.
 
@@ -1471,6 +1513,10 @@ def main() -> None:
                             st.json(call["arguments"])
                         st.caption("result")
                         st.json(envelope)
+                if turn.get("proof_note"):
+                    # Marked as a fixture so it is never mistaken, in a saved
+                    # transcript, for something the customer actually sent.
+                    st.caption("🧪 test evidence (not a real upload)")
                 # Guide media comes BEFORE the reply. The model writes as though
                 # the customer can already see it — "press that button" — and a
                 # picture underneath makes the sentence refer to nothing. On
@@ -1513,12 +1559,18 @@ def main() -> None:
         if pending_files:
             st.caption("Attached: %s" % ", ".join(file.name for file in pending_files))
 
+        st.caption(
+            "Type `%s` — optionally `%s green light, no red` — to stand in for uploading a "
+            "photo or video, without making a file." % (PROOF_COMMAND, PROOF_COMMAND)
+        )
         user_text = st.chat_input("Type a test customer message…")
         if _should_submit_chat(user_text, pending_files):
+            user_text, proof_note = _split_proof(user_text)
             attachments = [_serialise_uploaded_file(file) for file in pending_files]
             chat["turns"].append({
                 "role": "user",
                 "content": user_text.strip() if user_text else "(Uploaded file(s) for review)",
+                "proof_note": proof_note,
                 # Bytes go to the blob store; the turn keeps only a reference.
                 "attachments": _externalise_attachments(attachments),
                 "prompt_version": _prompt_version_label(agent_name, edited_prompt),
@@ -1559,6 +1611,8 @@ def main() -> None:
                     content = turn.get("content") or ""
                     if content:
                         blocks.append({"type": "text", "text": content})
+                    if turn.get("proof_note"):
+                        blocks.append({"type": "text", "text": turn["proof_note"]})
                     for attachment in turn.get("attachments") or []:
                         blocks.extend(_attachment_blocks([attachment]))
                     if not blocks:

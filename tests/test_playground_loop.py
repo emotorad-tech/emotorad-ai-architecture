@@ -356,3 +356,68 @@ class PromptPublishingTests(unittest.TestCase):
         self.assertEqual(
             self.playground._prompt_version_label("battery_support", "edited since"), "v1+draft"
         )
+
+
+class TestEvidenceCommandTests(unittest.TestCase):
+    """`/proof` stands in for an upload, in the harness and not in the prompt.
+
+    A bypass phrase written into the prompt would be one prompt-extraction away
+    from opening a warranty claim with no evidence, and it would mean testing a
+    bot that has a bypass when the production one will not. Nothing is bypassed
+    here: the turn genuinely carries evidence.
+    """
+
+    def setUp(self):
+        from emotorad_ai.playground import PROOF_COMMAND, _split_proof
+
+        self.split = _split_proof
+        self.command = PROOF_COMMAND
+
+    def test_the_bare_command_produces_evidence_and_a_plain_message(self):
+        text, note = self.split(self.command)
+        self.assertEqual(text, "Here you go.")
+        self.assertIn("Evidence attached", note)
+
+    def test_the_rest_of_the_line_describes_what_it_shows(self):
+        # So a tester can steer the flow without opening a camera.
+        text, note = self.split("/proof green light, no red")
+        self.assertEqual(text, "green light, no red")
+        self.assertIn("green light, no red", note)
+
+    def test_it_is_case_insensitive(self):
+        self.assertIsNotNone(self.split("/PROOF blurry")[1])
+
+    def test_an_ordinary_message_is_untouched(self):
+        text, note = self.split("no light coming")
+        self.assertEqual(text, "no light coming")
+        self.assertIsNone(note)
+
+    def test_the_command_must_start_the_message(self):
+        # A customer whose sentence happens to contain it is not sending evidence.
+        text, note = self.split("the /proof is in the pudding")
+        self.assertIsNone(note)
+        self.assertEqual(text, "the /proof is in the pudding")
+
+    def test_nothing_at_all_is_handled(self):
+        self.assertEqual(self.split(None), (None, None))
+        self.assertEqual(self.split("")[1], None)
+
+    def test_the_note_tells_the_model_it_is_a_fixture(self):
+        # It must never read as a real photo in a saved transcript, and the model
+        # should know it is standing in for one.
+        note = self.split("/proof")[1]
+        self.assertIn("test fixture", note)
+
+    def test_the_command_appears_nowhere_in_any_shipped_prompt(self):
+        # The whole point: this is harness-only. If it ever turns up in an agent's
+        # prompt it is on its way to production.
+        import importlib
+
+        for module_name in (
+            "emotorad_ai.agents.battery_support",
+            "emotorad_ai.agents.motor_support",
+            "emotorad_ai.agents.late_warranty",
+            "emotorad_ai.agents.dealer_orders",
+        ):
+            module = importlib.import_module(module_name)
+            self.assertNotIn(self.command, module._BASE_PROMPT, module_name)
