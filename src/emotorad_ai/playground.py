@@ -1246,14 +1246,39 @@ def _hidden():
     placeholder.empty()
 
 
+# Streamlit's defaults are built for dashboards: ~6rem of top padding, generous
+# gaps, an h1 sized for a landing page. On a page whose whole job is reading a
+# conversation, that is several hundred pixels of nothing before the first
+# message. This trims the frame; it changes no behaviour.
+_PAGE_CSS = """
+<style>
+  .block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1400px; }
+  [data-testid="stSidebar"] .block-container { padding-top: 1.5rem; }
+  /* Tighter vertical rhythm between elements. */
+  [data-testid="stVerticalBlock"] { gap: 0.55rem; }
+  /* Chat bubbles: less padding, and a visible edge between speakers. */
+  [data-testid="stChatMessage"] { padding: 0.55rem 0.85rem; border-radius: 10px; }
+  /* Tool traces are reference, not content — quieter until opened. */
+  [data-testid="stExpander"] summary { font-size: 0.86rem; }
+  /* The status line under the heading. */
+  .pg-status { color: #5f6368; font-size: 0.86rem; }
+  .pg-status code { background: #f1f3f4; padding: 0.05rem 0.35rem; border-radius: 4px; }
+</style>
+"""
+
+
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
-    st.title("Prompt-tuning playground")
-    st.caption("Playground build **v%s** — the harness. Prompt versions are separate." % PLAYGROUND_VERSION)
-    st.caption(
-        "Edit a sub-agent's system prompt, chat-test it against a real Claude model, "
-        "and save a diff for review. Nothing here writes to production code."
-    )
+    st.markdown(_PAGE_CSS, unsafe_allow_html=True)
+
+    header, control = st.columns([2, 1.6])
+    with header:
+        st.markdown(
+            "#### Prompt-tuning playground &nbsp;"
+            "<span style='font-size:0.72rem;color:#9aa0a6;font-weight:400'>build v%s</span>"
+            % PLAYGROUND_VERSION,
+            unsafe_allow_html=True,
+        )
 
     with st.sidebar:
         st.subheader("Setup")
@@ -1261,13 +1286,15 @@ def main() -> None:
         model_label = st.selectbox("Model", list(MODELS.keys()))
         model_id = MODELS[model_label]
 
-        api_key = st.text_input(
+        settings = st.expander("Model settings", expanded=not st.session_state.get("_key_set"))
+        api_key = settings.text_input(
             "Anthropic API key",
             value=os.environ.get("ANTHROPIC_API_KEY", ""),
             type="password",
             help="Session-only — never written to disk. Falls back to ANTHROPIC_API_KEY if set.",
         )
-        max_tokens = st.number_input(
+        st.session_state["_key_set"] = bool(api_key)
+        max_tokens = settings.number_input(
             "Max output tokens",
             min_value=256,
             max_value=32000,
@@ -1394,13 +1421,14 @@ def main() -> None:
     # readable by Streamlit's own AppTest in 1.50 — it iterates the label's
     # characters and raises. Losing the boot matrix, which has caught real bugs,
     # to decorate a control would be a bad trade.
-    view = st.radio(
-        "View",
-        ["Chat", "Side by side", "Prompt"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="view_mode",
-    )
+    with control:
+        view = st.radio(
+            "View",
+            ["Chat", "Side by side", "Prompt"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="view_mode",
+        )
 
     if view == "Side by side":
         col_prompt, col_chat = st.columns([1, 1])
@@ -1473,19 +1501,20 @@ def main() -> None:
                 st.code(chosen["text"])
 
     with col_chat if show_chat else _hidden():
-        st.subheader("Test conversation")
         head_left, head_right = st.columns([3, 1])
         with head_left:
             # One line, not four. Everything a tester needs to know about *which*
             # conversation this is, in the order they ask it.
             st.markdown(
-                "**%s** &nbsp;·&nbsp; prompt `%s` &nbsp;·&nbsp; `%s` &nbsp;·&nbsp; %d turns"
+                "<div class='pg-status'><b>%s</b> &nbsp;·&nbsp; prompt <code>%s</code>"
+                " &nbsp;·&nbsp; <code>%s</code> &nbsp;·&nbsp; %d turns</div>"
                 % (
                     rider_display,
                     _prompt_version_label(agent_name, edited_prompt),
                     chat["chat_id"],
                     len(chat["turns"]),
-                )
+                ),
+                unsafe_allow_html=True,
             )
         with head_right:
             if st.button("➕ Start new chat", width="stretch"):
@@ -1535,6 +1564,19 @@ def main() -> None:
                         st.session_state[session_key] = reopened
                         _save_chat(agent_name, reopened)
                         st.rerun()
+
+        if not chat["turns"]:
+            # A blank page under an input tells a tester nothing about where to
+            # start, and the useful openers differ by rider mode.
+            st.info(
+                "**Nothing sent yet.** Open as a customer would — "
+                + (
+                    "`hi`, then a symptom. The bot knows nothing until it verifies a number."
+                    if rider_mode == "Live customer"
+                    else "`my cycle is not turning on`, or name a display code like `E-07`."
+                )
+                + "  \nAttach with 📎, or type `/proof` to stand in for a photo."
+            )
 
         for turn_number, turn in enumerate(chat["turns"]):
             with st.chat_message(turn["role"]):

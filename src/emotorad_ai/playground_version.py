@@ -18,10 +18,18 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.10.0"
+PLAYGROUND_VERSION = "0.11.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.11.0",
+        "2026-09-09",
+        "Trimmed the frame. Streamlit's dashboard defaults put roughly 400px of heading, "
+        "boilerplate and padding above the first message; the title, build number and view "
+        "switch now share one row, the redundant 'Test conversation' heading is gone, API key "
+        "and token cap fold away once set, and an empty chat suggests where to start.",
+    ),
     (
         "0.10.0",
         "2026-09-09",
