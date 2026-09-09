@@ -1290,6 +1290,10 @@ def main() -> None:
     # One registry per run, shared by identity hydration and the tool loop, so the
     # verification a tool records is the verification the next turn reads.
     verification: VerificationStore = st.session_state.setdefault("verification_store", VerificationStore())
+    # Which guide pictures each conversation has already received. Session-scoped
+    # so it survives across turns; a reload starts it empty, which only means a
+    # picture may be sent once more than strictly needed.
+    sent_media: Dict[str, set] = st.session_state.setdefault("sent_guide_media", {})
     if rider_mode == "Live customer":
         client = OMSClient()
         registry = build_registry(
@@ -1298,6 +1302,7 @@ def main() -> None:
             warranty_source=_live_warranty_source(client),
             account_finder=_live_account_finder(client),
             guide_media=load_catalogue(),
+            sent_media=sent_media,
         )
         verified_phone = verification.verified_phone(chat["chat_id"])
         resolved = _resolved_for_live(agent_name, verified_phone, registry)
@@ -1305,7 +1310,9 @@ def main() -> None:
             "Live — verified %s" % verified_phone if verified_phone else "Live — not yet verified"
         )
     else:
-        registry = build_registry(today=date.today(), guide_media=load_catalogue())
+        registry = build_registry(
+            today=date.today(), guide_media=load_catalogue(), sent_media=sent_media
+        )
 
     col_prompt, col_chat = st.columns([1, 1])
 

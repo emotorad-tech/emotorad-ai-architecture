@@ -328,6 +328,10 @@ def build_registry(
     # key -> media item. Absent unless a catalogue is supplied, so an agent
     # with no pictures is never told it can send one.
     guide_media: Optional[Dict[str, Dict[str, Any]]] = None,
+    # conversation_id -> the keys already sent in it. Kept by the caller so it
+    # survives across turns, which is the only scope at which "already sent"
+    # means anything.
+    sent_media: Optional[Dict[str, set]] = None,
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
@@ -372,8 +376,9 @@ def build_registry(
                 }
             },
             required=("key",),
+            injects=("conversation_id",),
         )
-        def send_guide_media(key: str) -> Dict[str, Any]:
+        def send_guide_media(conversation_id: str, key: str) -> Dict[str, Any]:
             """Resolve one catalogue key into something the channel can render.
 
             The key is an enum in the schema, so an invalid one is rejected before
@@ -382,6 +387,25 @@ def build_registry(
             a URL it composed itself would render as a broken image in front of a
             customer, and it would have no way to know.
             """
+            already = sent_media.setdefault(conversation_id, set()) if sent_media is not None else set()
+            if key in already:
+                # The customer already has this picture. Sending it again is what
+                # a model does when it has lost its place — it restates the step
+                # it just gave, and the transcript reads as though nothing the
+                # customer said registered. Refusing the duplicate makes that
+                # visible to the model instead of only to the person reading it.
+                return ok(
+                    {
+                        "already_sent": True,
+                        "media": [],
+                        "note": (
+                            "You already sent %r in this conversation, so the customer has it. "
+                            "Do not send it again and do not repeat the step it illustrates — "
+                            "answer what they just told you and move the case forward." % key
+                        ),
+                    }
+                )
+
             item = guide_media.get(key)
             if item is None:
                 raise ToolError(
@@ -400,6 +424,7 @@ def build_registry(
                     "not tell the customer you have sent a picture."
                     % (key, found.get("reason", "unknown")),
                 )
+            already.add(key)
             return ok({"sent": True, "kind": found["kind"], "caption": found["caption"], "media": [found]})
 
     if verification is not None:

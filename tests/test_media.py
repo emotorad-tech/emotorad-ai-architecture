@@ -307,3 +307,62 @@ class VideoDeliveryTests(unittest.TestCase):
         with _WithCloud("emotorad-demo"):
             url = resolve({"id": "shot.png", "caption": "c"})["url"]
         self.assertIn("f_auto,q_auto,w_900,c_limit", url)
+
+
+class RepeatedGuideMediaTests(unittest.TestCase):
+    """The same picture, twice in one conversation.
+
+    A model that re-sends a guide photo is a model that has lost its place: it
+    restates the step it just gave, and the transcript reads as though nothing
+    the customer said registered. Refusing the duplicate makes that visible to
+    the model, not only to the person reading it.
+    """
+
+    def setUp(self):
+        from datetime import date
+
+        from emotorad_ai.media import load_catalogue
+        from emotorad_ai.tools.mocks import build_registry
+
+        self.sent = {}
+        self.registry = build_registry(
+            today=date.today(), guide_media=load_catalogue(), sent_media=self.sent
+        )
+
+    def _send(self, key, conversation="c1"):
+        from emotorad_ai.tools.registry import ToolContext
+
+        return self.registry.call("send_guide_media", {"key": key}, ToolContext(conversation_id=conversation))
+
+    def test_the_second_send_returns_no_media(self):
+        with _WithCloud("emotorad-demo"):
+            first = self._send("soc_button")
+            second = self._send("soc_button")
+        self.assertEqual(len(first["data"]["media"]), 1)
+        self.assertEqual(second["data"]["media"], [])
+        self.assertTrue(second["data"]["already_sent"])
+
+    def test_the_model_is_told_not_to_repeat_the_step(self):
+        with _WithCloud("emotorad-demo"):
+            self._send("soc_button")
+            note = self._send("soc_button")["data"]["note"]
+        self.assertIn("already sent", note)
+        self.assertIn("do not repeat the step", note)
+
+    def test_a_different_picture_still_sends(self):
+        with _WithCloud("emotorad-demo"):
+            self._send("soc_button")
+            other = self._send("battery_onoff_switch")
+        self.assertEqual(len(other["data"]["media"]), 1)
+
+    def test_another_conversation_starts_fresh(self):
+        # Otherwise the second customer of the day never sees the picture.
+        with _WithCloud("emotorad-demo"):
+            self._send("soc_button", conversation="c1")
+            again = self._send("soc_button", conversation="c2")
+        self.assertEqual(len(again["data"]["media"]), 1)
+
+    def test_the_conversation_id_is_injected_not_model_supplied(self):
+        spec = self.registry.specs["send_guide_media"]
+        self.assertIn("conversation_id", spec.injects)
+        self.assertNotIn("conversation_id", spec.schema()["input_schema"]["properties"])
