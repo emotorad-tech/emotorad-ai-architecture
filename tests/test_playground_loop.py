@@ -450,3 +450,35 @@ class PlaygroundVersionTests(unittest.TestCase):
         for version, released, summary in CHANGELOG:
             self.assertRegex(released, r"^\d{4}-\d{2}-\d{2}$", version)
             self.assertGreater(len(summary), 40, "%s: summary too thin to be useful" % version)
+
+
+class StaticCorrectnessTests(unittest.TestCase):
+    """Names that are used but never defined.
+
+    A NameError on the submit path shipped and reached the user, past a green
+    boot matrix and 423 tests. It could not have been caught by either: the page
+    tests load the app and click controls, and Streamlit's AppTest cannot drive a
+    file-accepting chat_input at all (it never fills the uploader half of the
+    widget state), so nothing exercises submit.
+
+    But it was a *static* error, and a static check finds it without running
+    anything. pyflakes on the same file reports "undefined name 'nonce'".
+    """
+
+    def test_no_undefined_names_anywhere_in_the_package(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "pyflakes", "src/emotorad_ai", "scripts"],
+            capture_output=True,
+            text=True,
+        )
+        # Unused imports are noise, not bugs. Undefined names are always bugs.
+        serious = [
+            line
+            for line in (result.stdout + result.stderr).splitlines()
+            if "undefined name" in line or "local variable" in line and "referenced before" in line
+        ]
+        self.assertEqual(serious, [], "\n".join(serious))
+

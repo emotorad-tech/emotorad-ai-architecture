@@ -112,7 +112,13 @@ AGENT_MODULES = {
     "dealer_orders": "emotorad_ai.agents.dealer_orders",
 }
 
-PLAYGROUND_DIR = Path(__file__).resolve().parent.parent.parent / ".playground"
+# Overridable so a test can drive the page without writing into a real tester's
+# chats and prompt history — which is why no test had ever submitted a message,
+# and why a NameError on the submit path survived a green boot matrix.
+PLAYGROUND_DIR = Path(
+    os.environ.get("EMOTORAD_PLAYGROUND_DIR")
+    or Path(__file__).resolve().parent.parent.parent / ".playground"
+)
 
 
 @dataclass(frozen=True)
@@ -1367,7 +1373,6 @@ def main() -> None:
 
     session_key = "chat_%s" % agent_name
     textarea_key = "textarea_%s" % agent_name
-    nonce_key = "uploader_nonce_%s" % agent_name
     pending_load_key = "pending_prompt_load_%s" % agent_name
 
     # Restoring an old version has to land here, before the textarea exists:
@@ -1523,7 +1528,6 @@ def main() -> None:
                 # able to compare a v1 run against a v2 run of the same questions.
                 st.session_state[session_key] = _blank_chat()
                 _save_chat(agent_name, st.session_state[session_key])
-                st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
                 st.rerun()
 
         if rider_mode == "Live customer":
@@ -1790,7 +1794,6 @@ def main() -> None:
                 )
 
             _save_chat(agent_name, chat)
-            st.session_state[nonce_key] = nonce + 1
             st.rerun()
 
         with st.expander("System prompt sent to the model (this turn)"):

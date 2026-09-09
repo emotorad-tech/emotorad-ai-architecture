@@ -18,10 +18,16 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.11.0"
+PLAYGROUND_VERSION = "0.11.1"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.11.1",
+        "2026-09-09",
+        "Fixes a crash on sending a message: moving attachments into the chat input removed "
+        "the line defining the old uploader counter but left two uses of it.",
+    ),
     (
         "0.11.0",
         "2026-09-09",
