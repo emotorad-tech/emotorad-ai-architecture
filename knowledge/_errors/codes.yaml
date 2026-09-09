@@ -34,11 +34,15 @@ model_groups:
     match: ["x3 v1", "x3v1"]
 
   - id: standard
-    label: X2, X1 LTD ED, LEGEND 007, T-REX AIR, STX, EMX, TREX+, Doodle V2/V3/V4, Doodle Pro, Ranger, Cargo
+    label: X2, X1 LTD ED, LEGEND 007, T-REX AIR, STX, EMX, TREX+, Doodle (all), Ranger, Cargo
     match:
       ["x2", "x1 ltd", "legend 007", "t-rex air", "trex air", "stx", "emx",
-       "trex+", "t-rex +", "trex plus", "doodle v2", "doodle v3", "doodle v4",
-       "doodle pro", "ranger", "cargo"]
+       "trex+", "t-rex +", "trex plus",
+       # Every Doodle — V1 through V4 and Pro — answers the same way, and OMS
+       # often ships them with no version at all ("Doodle Black"), so matching
+       # on the family name is both correct and the only thing that works.
+       "doodle",
+       "ranger", "cargo"]
 
 codes:
   # --- standard group ------------------------------------------------------
@@ -105,16 +109,18 @@ codes:
       Display first — replace with a working display to confirm. If the code persists:
       harness, then controller, then motor. In the rarest case the PAS.
 
+  # Unlike the others this is a conclusion, not a chain: the culprit is known.
   - code: E-12
     groups: [standard]
     disposition: diagnose
     customer_message: >-
-      E-12 is a battery fault. Confirming it means testing against a known-good battery,
-      which needs a service centre.
+      E-12 means the battery is faulty and needs replacing. It is not dead — that is why the
+      bike still turns on — but it will most likely not run properly, or the power will come
+      and go. A service centre will handle the replacement.
     technician_chain: >-
-      Battery only. Check against a working battery to confirm.
-      # TODO: source row is garbled — "This is only battery issue if. this appears need to
-      # check with the working battery". Confirm whether a condition was lost.
+      Battery faulty, replacement required. Not a dead pack — the bike powers on — but
+      expect it not to run, or to show voltage fluctuation under load. No elimination
+      sequence needed; the battery is the cause.
 
   # --- T-REX + V3 ----------------------------------------------------------
   - code: [E24, E25]
@@ -136,10 +142,13 @@ codes:
       harness, then controller, then motor. In the rarest case the PAS.
 
   # --- X3 V1 ---------------------------------------------------------------
+  # Permanent, and not a documentation gap: the X3 V1 is old enough that no code
+  # on it can be read as meaning any one thing. Saying so is more useful than a
+  # guess dressed up as a diagnosis.
   - code: ["*"]
     groups: [x3_v1]
     disposition: human_support
     customer_message: >-
-      Let me get you to our support team — error codes on your model are handled by a person
-      rather than by me.
-      # TODO: confirm whether this is permanent policy or simply not documented yet.
+      Your X3 V1 is one of our older models, and error codes on it cannot be pinned to a
+      single cause from the code alone — I would only be guessing. A service centre can
+      test it properly. Let me point you to the nearest one.

@@ -31,6 +31,15 @@ class TableTests(unittest.TestCase):
         for name in ("X2 Furious Red V2 - EM02BV01C23", "Doodle V4 Indicator Edition", "STX 27.5 inch"):
             self.assertIsNotNone(self.table.group_for(name), name)
 
+    def test_a_doodle_with_no_version_in_its_name_still_matches(self):
+        # Live OMS ships "Doodle Black" with no version at all. Matching on
+        # "doodle v2"/"doodle v3"/... missed it entirely, which would have been an
+        # unknown_model refusal for a bike that is squarely in the table.
+        for name in ("Doodle Black", "Doodle V1", "Doodle Pro", "Doodle V4 Indicator Edition"):
+            group = self.table.group_for(name)
+            self.assertIsNotNone(group, name)
+            self.assertEqual(group["id"], "standard", name)
+
     def test_the_most_specific_model_group_wins(self):
         # A T-REX + V3 must not fall into the plain TREX+ group, or it would be
         # told E-30 is undocumented when it has a real diagnosis.
