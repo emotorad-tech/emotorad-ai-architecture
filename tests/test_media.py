@@ -283,3 +283,27 @@ class SendGuideMediaToolTests(unittest.TestCase):
         from emotorad_ai.tools.mocks import build_registry
 
         self.assertNotIn("send_guide_media", build_registry(today=date.today()).specs)
+
+
+class VideoDeliveryTests(unittest.TestCase):
+    """Video is served untransformed, and that is not an oversight."""
+
+    def test_no_format_negotiation_on_video(self):
+        # `f_auto` negotiates on the Accept header: a browser asking for webm is
+        # handed video/webm from a URL ending .mp4, the player is told mp4, and
+        # it renders a dead 0:00 frame. Verified against the live asset.
+        from emotorad_ai.media import VIDEO_TRANSFORM
+
+        self.assertNotIn("f_auto", VIDEO_TRANSFORM)
+
+    def test_an_empty_transform_leaves_no_doubled_slash(self):
+        with _WithCloud("emotorad-demo"):
+            url = resolve({"id": "clip.mp4", "kind": "video", "caption": "c"})["url"]
+        self.assertNotIn("//clip", url)
+        self.assertTrue(url.endswith("/video/upload/clip.mp4"), url)
+
+    def test_images_still_get_their_transform(self):
+        # The video rule must not quietly disable image delivery too.
+        with _WithCloud("emotorad-demo"):
+            url = resolve({"id": "shot.png", "caption": "c"})["url"]
+        self.assertIn("f_auto,q_auto,w_900,c_limit", url)

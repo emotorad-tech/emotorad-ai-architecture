@@ -37,9 +37,18 @@ BASE = "https://res.cloudinary.com"
 # small source *up* to the target width — the 480px SOC photo was being delivered
 # as a blurrier, 67KB version of a sharp 36KB original.
 IMAGE_TRANSFORM = "f_auto,q_auto,w_900,c_limit"
-# No width cap on video: re-encoding to a narrow width costs clarity on exactly
-# the small details these clips exist to show.
-VIDEO_TRANSFORM = "f_auto,q_auto"
+# Video is served untransformed, deliberately. Two things go wrong otherwise,
+# both verified against the live asset:
+#   * `f_auto` negotiates on the Accept header, so a browser asking for webm gets
+#     `video/webm;codecs=vp9` back from a URL ending `.mp4`. The player is told
+#     mp4, receives webm, and renders a dead 0:00 frame.
+#   * any derivation is generated asynchronously, so the *first* request for it
+#     returns 423 while Cloudinary builds it — and a video element that gets a
+#     423 does not retry.
+# The original h264/avc1 mp4 plays in every browser and on WhatsApp. It costs
+# bytes (5MB here against 3.3MB of webm) and that is the right trade for a clip
+# that has to play first time, on a phone, for someone already annoyed.
+VIDEO_TRANSFORM = ""
 # A still for the player to show before playback. `so_0` is the first frame.
 # Delivered from the *video* resource, not the image one — the frame is extracted
 # from the clip, so /image/upload/so_0/... has nothing to extract from and 404s.
@@ -57,7 +66,9 @@ def _delivery(kind: str, transform: str, public_id: str) -> Optional[str]:
     if not cloud:
         return None
     resource = "video" if kind == "video" else "image"
-    return "%s/%s/%s/upload/%s/%s" % (BASE, cloud, resource, transform, public_id.lstrip("/"))
+    # An empty transform must not leave a doubled slash in the path.
+    segments = [BASE, cloud, resource, "upload", transform, public_id.lstrip("/")]
+    return "/".join(part for part in segments if part)
 
 
 def resolve(item: Mapping[str, Any]) -> Dict[str, Any]:
