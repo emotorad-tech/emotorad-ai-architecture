@@ -421,3 +421,32 @@ class TestEvidenceCommandTests(unittest.TestCase):
         ):
             module = importlib.import_module(module_name)
             self.assertNotIn(self.command, module._BASE_PROMPT, module_name)
+
+
+class PlaygroundVersionTests(unittest.TestCase):
+    """The build number and its changelog must not drift apart.
+
+    A saved transcript is the product of a prompt version *and* the harness that
+    ran it, so a build number that lies is worse than none — it would date a
+    transcript to behaviour the code did not have.
+    """
+
+    def test_the_version_matches_the_newest_changelog_entry(self):
+        from emotorad_ai.playground_version import CHANGELOG, PLAYGROUND_VERSION
+
+        self.assertEqual(PLAYGROUND_VERSION, CHANGELOG[0][0])
+
+    def test_the_changelog_is_newest_first_and_has_no_duplicates(self):
+        from emotorad_ai.playground_version import CHANGELOG
+
+        versions = [v for v, _, _ in CHANGELOG]
+        self.assertEqual(len(versions), len(set(versions)), "duplicate version")
+        as_tuples = [tuple(int(p) for p in v.split(".")) for v in versions]
+        self.assertEqual(as_tuples, sorted(as_tuples, reverse=True), "not newest-first")
+
+    def test_every_entry_says_what_a_tester_would_notice(self):
+        from emotorad_ai.playground_version import CHANGELOG
+
+        for version, released, summary in CHANGELOG:
+            self.assertRegex(released, r"^\d{4}-\d{2}-\d{2}$", version)
+            self.assertGreater(len(summary), 40, "%s: summary too thin to be useful" % version)

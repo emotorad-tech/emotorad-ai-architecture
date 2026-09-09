@@ -1,0 +1,88 @@
+"""What build of the playground this is, and what changed in it.
+
+Separate from prompt versions, which are content and live in ``.playground``.
+This is the harness: the tool loop, the guardrails, the media pipeline, what the
+uploader accepts. Both numbers matter when reading a saved transcript — a reply
+is the product of a prompt version *and* the build that ran it, and "the bot did
+not send the photo" means something different on 0.4 than on 0.7.
+
+Hand-maintained rather than derived from git, because the deployed container
+carries no ``.git``. A test asserts the number matches the newest changelog
+entry, so the two cannot drift apart silently.
+
+Bump the minor number for a change a tester would notice; bump the patch for a
+fix that only closes a defect in existing behaviour.
+"""
+
+from __future__ import annotations
+
+from typing import List, Tuple
+
+PLAYGROUND_VERSION = "0.9.0"
+
+# (version, date, what a tester would notice). Newest first.
+CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.9.0",
+        "2026-09-09",
+        "Display error codes are looked up against the customer's own bike, with the "
+        "technician's diagnostic chain behind a Technical breakdown control.",
+    ),
+    (
+        "0.8.0",
+        "2026-09-09",
+        "Evidence is enforced in code: a reply concluding a fault with no photo or video "
+        "anywhere in the conversation is blocked, beside the coverage post-check. `/proof` "
+        "stands in for an upload so the flow can be walked without making files. Turns are "
+        "numbered.",
+    ),
+    (
+        "0.7.0",
+        "2026-09-08",
+        "The bot sends guide photos and clips from Cloudinary — through a retrieved knowledge "
+        "record, or by naming a key from a fixed catalogue. The same picture is never sent "
+        "twice in one conversation. Prompt versions can be published from outside the browser "
+        "and the page says when one arrives.",
+    ),
+    (
+        "0.6.0",
+        "2026-09-07",
+        "Live customer mode: anonymous until a one-time code proves the number. An order or "
+        "invoice number recovers an account without revealing it, and a customer who never "
+        "verifies still gets an intake ticket.",
+    ),
+    (
+        "0.5.0",
+        "2026-08-30",
+        "Real OMS reads behind the existing tool shapes, with coverage measured from the "
+        "registration date when no purchase date exists — labelled as provisional wherever it "
+        "is used.",
+    ),
+    (
+        "0.4.0",
+        "2026-08-30",
+        "Video and PDF uploads. A clip is sampled into stills because the model cannot watch "
+        "video, and its audio track is transcribed so the customer's narration is not lost.",
+    ),
+    (
+        "0.3.0",
+        "2026-08-29",
+        "The agent's tools actually run. Every call and result is shown inline, sliced by the "
+        "selected agent's own TOOL_NAMES.",
+    ),
+    (
+        "0.2.0",
+        "2026-08-29",
+        "Chats are archived per id rather than overwritten, attachments stored once, and a "
+        "turn that produced no text says why instead of rendering blank.",
+    ),
+    (
+        "0.1.0",
+        "2026-08-29",
+        "Rider, chat and prompt versions survive a reload.",
+    ),
+]
+
+
+def current() -> Tuple[str, str, str]:
+    return CHANGELOG[0]

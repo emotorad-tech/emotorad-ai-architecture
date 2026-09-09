@@ -77,6 +77,7 @@ from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, Inbo
 from emotorad_ai.errorcodes import load_table as load_error_codes
 from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE, check_evidence
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
+from emotorad_ai.playground_version import CHANGELOG, PLAYGROUND_VERSION
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.media import resolve as resolve_media
 from emotorad_ai.tools import fixtures
@@ -1234,6 +1235,7 @@ def _should_submit_chat(user_text: Optional[str], pending_files: List[Any]) -> b
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
     st.title("Prompt-tuning playground")
+    st.caption("Playground build **v%s** — the harness. Prompt versions are separate." % PLAYGROUND_VERSION)
     st.caption(
         "Edit a sub-agent's system prompt, chat-test it against a real Claude model, "
         "and save a diff for review. Nothing here writes to production code."
@@ -1313,6 +1315,14 @@ def main() -> None:
 
         st.divider()
         st.caption("Tools this agent has (not called in this playground): " + ", ".join(module.TOOL_NAMES))
+
+        st.divider()
+        with st.expander("Playground build v%s — what changed" % PLAYGROUND_VERSION):
+            # A saved transcript is the product of a prompt version *and* the
+            # build that ran it. "It did not send the photo" means something
+            # different on 0.4 than on 0.7.
+            for version, released, summary in CHANGELOG:
+                st.markdown("**v%s** · %s  \n%s" % (version, released, summary))
 
     session_key = "chat_%s" % agent_name
     textarea_key = "textarea_%s" % agent_name
