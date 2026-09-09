@@ -74,6 +74,7 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
+from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE, check_evidence
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.media import resolve as resolve_media
@@ -1654,6 +1655,30 @@ def main() -> None:
                         )
                     text, trace = outcome["text"], outcome["trace"]
                     guide_media = outcome.get("media") or []
+
+                    # The same post-check runtime.handle() runs, so the guardrail
+                    # is testable here rather than only in production. Evidence
+                    # counts for the whole conversation, including a /proof turn.
+                    evidence_seen = any(
+                        (t.get("attachments") or t.get("proof_note"))
+                        for t in chat["turns"]
+                        if t["role"] == "user"
+                    )
+                    verdict = check_evidence(text, evidence_seen)
+                    if verdict.blocked:
+                        blocked_text = text
+                        text = EVIDENCE_BLOCKED_MESSAGE
+                        trace = list(trace) + [{
+                            "tool": "guardrail:evidence_post_check",
+                            "arguments": {"matched": verdict.matched},
+                            "result": {"error": {
+                                "code": verdict.reason,
+                                "message": "Blocked in code, not by the prompt. The reply concluded "
+                                           "a fault with no photo or video anywhere in this "
+                                           "conversation. Suppressed text: %s" % blocked_text,
+                                "retryable": False,
+                            }},
+                        }]
                 except anthropic.APIStatusError as exc:
                     text = "API error: %s" % exc.message
                 chat["turns"].append(

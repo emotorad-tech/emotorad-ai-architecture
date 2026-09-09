@@ -111,3 +111,62 @@ class ShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvidencePostCheckTests(unittest.TestCase):
+    """A fault concluded with nothing seen.
+
+    The rule existed in the prompt in four forms across three versions and was
+    skipped every time: stated at 26% of a 22,000-character prompt, it lost to
+    whichever procedure the model was working at 74%. A rule only holds where it
+    is written, and a long prompt cannot have it written everywhere. So it moved
+    into code, beside the coverage check, for the same reason that one is there.
+    """
+
+    def _check(self, reply, seen=False):
+        from emotorad_ai.guardrails import check_evidence
+
+        return check_evidence(reply, evidence_seen=seen)
+
+    def test_the_reply_that_started_this_is_blocked(self):
+        # Verbatim from chat 20260909-edb42fba, turn 13.
+        verdict = self._check("That's pointing toward a dead battery.")
+        self.assertTrue(verdict.blocked)
+        self.assertEqual(verdict.reason, "fault_concluded_without_evidence")
+
+    def test_raising_a_ticket_with_nothing_seen_is_blocked(self):
+        self.assertTrue(self._check("I'll raise a ticket for you now.").blocked)
+
+    def test_moving_to_warranty_with_nothing_seen_is_blocked(self):
+        self.assertTrue(self._check("Let me proceed with the warranty replacement.").blocked)
+
+    def test_evidence_anywhere_in_the_conversation_clears_it(self):
+        # Not "this turn": a customer who sent the photo three turns ago must not
+        # be asked again because the model concluded later.
+        self.assertFalse(self._check("That's pointing toward a dead battery.", seen=True).blocked)
+
+    def test_the_honest_undetermined_reply_is_not_blocked(self):
+        # The one correct answer when there is no multimeter. Blocking it would
+        # make the guardrail worse than the problem.
+        for reply in (
+            "It could be the battery, or it could be another part of the cycle.",
+            "I can't tell for certain over chat whether the battery is the issue.",
+            "That's inconclusive on its own, so I need to dig a bit deeper.",
+        ):
+            self.assertFalse(self._check(reply).blocked, reply)
+
+    def test_asking_for_evidence_is_not_concluding(self):
+        self.assertFalse(self._check("Before I raise a case, I need a short video.").blocked)
+
+    def test_a_question_about_the_led_is_not_a_conclusion(self):
+        self.assertFalse(self._check("What colour is the charger LED showing?").blocked)
+
+    def test_a_safety_handover_is_never_held_for_a_photo(self):
+        # Never ask someone to photograph a battery that may be dangerous.
+        verdict = self._check("Stop using and stop charging the battery immediately.")
+        self.assertFalse(verdict.blocked)
+        self.assertEqual(verdict.reason, "safety_exempt")
+
+    def test_a_hedge_in_an_earlier_sentence_does_not_soften_a_later_conclusion(self):
+        reply = "It could be a few things. The battery is dead and needs replacing."
+        self.assertTrue(self._check(reply).blocked)

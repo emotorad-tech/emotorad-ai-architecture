@@ -255,3 +255,98 @@ def check_coverage_claim(reply: str, tool_results: Sequence[dict]) -> CoverageCh
             actual="covered" if actual else "not_covered",
         )
     return CoverageCheck(blocked=False)
+
+
+# --- evidence post-check -----------------------------------------------------
+# A fault conclusion, a warranty path or a raised ticket, asserted in a reply
+# when no photo or video has ever arrived in the conversation.
+#
+# This is a code check for the same reason the coverage one is. The rule existed
+# in the prompt in four different forms across three versions and was skipped
+# every time: stated generally at 26% of a 22,000-character prompt, it lost to
+# whichever procedure the model was working through at 74%. A rule only holds
+# where it is written, and a long prompt cannot have it written everywhere.
+#
+# Deliberately narrow. It does not ask whether the evidence was *good* — a human
+# judges that — only whether any arrived. "The bot concluded a fault having seen
+# nothing" is a question with an answer; "was the photo convincing" is not.
+
+EVIDENCE_BLOCKED_MESSAGE = (
+    "Before I can take this further I need to see it — please send a photo or a short video "
+    "of what you are describing, and I will pick it straight up from there."
+)
+
+# Conclusions that must rest on something seen. Phrased for what a support bot
+# actually writes, not for what a spec would say.
+_FAULT_CONCLUSION = re.compile(
+    r"\b(?:"
+    r"battery (?:is|appears|seems|looks) (?:dead|faulty|failed)"
+    r"|(?:is|appears|seems|looks) (?:to be )?(?:dead|faulty|defective)"
+    r"|needs? (?:to be )?(?:replaced|replacement)"
+    r"|(?:raise|raising|raised|open|opening|opened) (?:a |the )?(?:support |warranty |zoho )?ticket"
+    r"|(?:start|starting|begin|beginning) the (?:warranty|replacement)"
+    r"|(?:under|covered by) warranty[, ]+so we(?:'| a)?ll (?:replace|repair)"
+    r"|proceed(?:ing)? (?:with|to) (?:the )?(?:warranty|replacement)"
+    r"|arrange (?:a )?(?:replacement|repair)"
+    # The bare noun phrase, which is how a model most often states it —
+    # "that's pointing toward a dead battery" was the real reply that started
+    # this. Hedges are stripped below rather than enumerated here.
+    r"|(?:dead|faulty|failed) battery"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# A conclusion is not a conclusion when it is being ruled out, weighed against
+# something else, or named as a possibility. Without this the check fires on the
+# correct "it could be the battery or another part — go to a dealer" reply, which
+# is the one honest answer available when there is no multimeter.
+_HEDGE_BEFORE = re.compile(
+    r"(?:"
+    r"could be|might be|may be|maybe|possibly|perhaps"
+    r"|can(?:'|no)?t (?:tell|say|be sure|confirm)|cannot (?:tell|say|confirm)"
+    r"|not (?:sure|certain|clear)|unclear|unsure"
+    r"|whether|if it(?:'| i)?s|in case|rule out|ruling out"
+    r"|either|or another part|or something else"
+    r"|do not conclude|don'?t conclude"
+    r")",
+    re.IGNORECASE,
+)
+
+# Safety short-circuits everything: never hold a dangerous battery behind a
+# request for a photograph of it.
+_SAFETY_HANDOVER = re.compile(
+    r"stop (?:using|charging)|safety team|do not (?:use|charge)|unplug it now", re.IGNORECASE
+)
+
+
+@dataclass(frozen=True)
+class EvidenceCheck:
+    blocked: bool
+    reason: str = ""
+    matched: str = ""
+
+
+def check_evidence(reply: str, evidence_seen: bool, safety_triggered: bool = False) -> EvidenceCheck:
+    """Block a fault conclusion reached without any photo or video.
+
+    ``evidence_seen`` is whether *any* attachment has arrived in this
+    conversation, not this turn: a customer who sent the picture three turns ago
+    should not be asked again because the model concluded later.
+    """
+    if safety_triggered or _SAFETY_HANDOVER.search(reply or ""):
+        # A hazard is handled on the customer's word, immediately, every time.
+        return EvidenceCheck(blocked=False, reason="safety_exempt")
+    if evidence_seen:
+        return EvidenceCheck(blocked=False)
+    found = _FAULT_CONCLUSION.search(reply or "")
+    if not found:
+        return EvidenceCheck(blocked=False)
+    # Look at the sentence the match sits in, not the whole reply: a hedge three
+    # paragraphs earlier does not soften a conclusion stated flatly here.
+    text = reply or ""
+    sentence_start = max(text.rfind(".", 0, found.start()), text.rfind("\n", 0, found.start())) + 1
+    if _HEDGE_BEFORE.search(text[sentence_start:found.end()]):
+        return EvidenceCheck(blocked=False, reason="hedged")
+    return EvidenceCheck(
+        blocked=True, reason="fault_concluded_without_evidence", matched=found.group(0)
+    )

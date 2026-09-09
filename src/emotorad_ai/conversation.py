@@ -47,6 +47,10 @@ class ConversationState:
     context_block: Optional[str] = None
     turns: int = 0
     disclosed: bool = False
+    # Whether any photo or video has arrived in this conversation. Held per
+    # conversation, not per turn: a customer who sent the picture three turns ago
+    # must not be asked for it again because the model concluded later.
+    evidence_seen: bool = False
     history: List[Dict[str, Any]] = field(default_factory=list)
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.

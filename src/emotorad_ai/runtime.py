@@ -38,10 +38,12 @@ from .disclosure import apply_disclosure
 from .enrichment import ContextEnricher
 from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
+    EVIDENCE_BLOCKED_MESSAGE,
     HANDOFF_MESSAGE,
     SAFETY_MESSAGE,
     check_safety,
     check_coverage_claim,
+    check_evidence,
     check_human_handoff,
 )
 from .identity import IdentityResolver, ResolvedIdentity
@@ -128,6 +130,9 @@ class Runtime:
 
         # 1. Safety. A keyword gate ahead of the agent turn, not something the
         #    model has to notice. Allowed to over-trigger.
+        if message.attachments:
+            state.evidence_seen = True
+
         safety = check_safety(message.message_text)
         if safety.triggered:
             return self._handle_safety(message, resolved, state, safety.matched)
@@ -212,6 +217,25 @@ class Runtime:
                 message, state, COVERAGE_BLOCKED_MESSAGE, "guardrail:coverage_post_check",
                 escalated=True, ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": coverage.reason, "suppressed_text": turn.text},
+                already_in_history=True,
+            )
+
+        # The second post-check, for the same reason as the first: a rule the
+        # model was given in prose is a rule it can skip. This one asks only
+        # whether a fault was concluded having seen nothing.
+        # `handle()` returns before this on a safety trigger, so anything reaching
+        # here has already passed check_safety. What check_evidence still watches
+        # for is a reply that hands over for safety reasons the regex did not
+        # catch — a hazard is never held behind a request for a photograph of it.
+        evidence = check_evidence(turn.text, state.evidence_seen)
+        if evidence.blocked:
+            self.log.guardrail(
+                message.conversation_id, "evidence_post_check",
+                {"reason": evidence.reason, "matched": evidence.matched},
+            )
+            return self._finish(
+                message, state, EVIDENCE_BLOCKED_MESSAGE, "guardrail:evidence_post_check",
+                metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text},
                 already_in_history=True,
             )
 
