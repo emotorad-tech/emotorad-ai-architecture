@@ -18,10 +18,18 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.9.0"
+PLAYGROUND_VERSION = "0.10.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.10.0",
+        "2026-09-09",
+        "Layout pass. Attachments moved into the chat input itself, so the standing dropzone "
+        "is gone; a Chat / Side by side / Prompt switch stops the editor holding half the "
+        "screen while you chat; the four stacked status captions became one line; and past "
+        "chats and the verification panel moved to the sidebar, out of the transcript.",
+    ),
     (
         "0.9.0",
         "2026-09-09",

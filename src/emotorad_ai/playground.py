@@ -49,6 +49,7 @@ that wraps it.
 from __future__ import annotations
 
 import base64
+import contextlib
 import difflib
 import hashlib
 import importlib
@@ -1232,6 +1233,19 @@ def _should_submit_chat(user_text: Optional[str], pending_files: List[Any]) -> b
     return user_text is not None and (bool(user_text.strip()) or bool(pending_files))
 
 
+@contextlib.contextmanager
+def _hidden():
+    """Swallow a whole column when the view does not include it.
+
+    Streamlit has no "do not draw this"; the alternative is duplicating the
+    body of each column behind an `if`, which is how these two get out of step.
+    """
+    placeholder = st.empty()
+    with placeholder.container():
+        yield
+    placeholder.empty()
+
+
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
     st.title("Prompt-tuning playground")
@@ -1376,9 +1390,26 @@ def main() -> None:
             owned_bikes=resolved.bikes,
         )
 
-    col_prompt, col_chat = st.columns([1, 1])
+    # A radio rather than st.segmented_control, which looks tidier but is not
+    # readable by Streamlit's own AppTest in 1.50 — it iterates the label's
+    # characters and raises. Losing the boot matrix, which has caught real bugs,
+    # to decorate a control would be a bad trade.
+    view = st.radio(
+        "View",
+        ["Chat", "Side by side", "Prompt"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="view_mode",
+    )
 
-    with col_prompt:
+    if view == "Side by side":
+        col_prompt, col_chat = st.columns([1, 1])
+    else:
+        col_prompt, col_chat = st.container(), st.container()
+    show_prompt = view in ("Side by side", "Prompt")
+    show_chat = view in ("Side by side", "Chat")
+
+    with col_prompt if show_prompt else _hidden():
         st.subheader("System prompt (%s)" % agent_name)
         edited_prompt = st.text_area(
             "Edit, then Save version — the newest version is what new chats start from",
@@ -1405,7 +1436,7 @@ def main() -> None:
 
         save_col, diff_col = st.columns([1, 1])
         with save_col:
-            if st.button("💾 Save prompt version", type="primary", use_container_width=True):
+            if st.button("💾 Save prompt version", type="primary", width="stretch"):
                 current = _latest_prompt_version(agent_name)
                 if current is not None and current["text"] == edited_prompt:
                     st.info("No changes since v%d." % current["version"])
@@ -1414,7 +1445,7 @@ def main() -> None:
                     st.session_state[base_version_key] = record["version"]
                     st.success("Saved v%d — new chats now start from this." % record["version"])
         with diff_col:
-            if st.button("Save diff for review", use_container_width=True):
+            if st.button("Save diff for review", width="stretch"):
                 path = _save_diff(agent_name, module._BASE_PROMPT, edited_prompt)
                 st.success("Diff written to %s — review and apply it as a normal reviewed change." % path)
                 st.code(path.read_text(), language="diff")
@@ -1441,17 +1472,23 @@ def main() -> None:
                     st.rerun()
                 st.code(chosen["text"])
 
-    with col_chat:
+    with col_chat if show_chat else _hidden():
         st.subheader("Test conversation")
         head_left, head_right = st.columns([3, 1])
         with head_left:
-            st.caption("Rider: %s" % rider_display)
-            st.caption(
-                "Chat `%s` · %d turns · prompt %s"
-                % (chat["chat_id"], len(chat["turns"]), _prompt_version_label(agent_name, edited_prompt))
+            # One line, not four. Everything a tester needs to know about *which*
+            # conversation this is, in the order they ask it.
+            st.markdown(
+                "**%s** &nbsp;·&nbsp; prompt `%s` &nbsp;·&nbsp; `%s` &nbsp;·&nbsp; %d turns"
+                % (
+                    rider_display,
+                    _prompt_version_label(agent_name, edited_prompt),
+                    chat["chat_id"],
+                    len(chat["turns"]),
+                )
             )
         with head_right:
-            if st.button("➕ Start new chat", use_container_width=True):
+            if st.button("➕ Start new chat", width="stretch"):
                 # The chat being replaced stays on disk under its own id — it is
                 # test material, and the whole point of prompt versions is being
                 # able to compare a v1 run against a v2 run of the same questions.
@@ -1463,24 +1500,26 @@ def main() -> None:
         if rider_mode == "Live customer":
             # Stands in for the SMS. Shown to the tester only — the model never
             # receives it, which is the property test_verification asserts.
+            # In the sidebar with the other controls: it is something the tester
+            # acts on, not part of the conversation being read.
             pending_code = verification.pending_code(chat["chat_id"])
             if verified_phone:
-                st.success("Verified as %s — the bot may now name bikes and coverage." % verified_phone)
+                st.sidebar.success("Verified as %s — the bot may now name bikes and coverage." % verified_phone)
             elif pending_code:
-                st.info(
+                st.sidebar.info(
                     "📱 SMS code for this conversation: **%s** — type it into the chat as the "
                     "customer would. %d attempt(s) left."
                     % (pending_code, verification.attempts_left(chat["chat_id"]))
                 )
             else:
-                st.caption("Anonymous. The bot cannot name a bike or state coverage until verified.")
-            if (verified_phone or pending_code) and st.button("Reset verification"):
+                st.sidebar.caption("Anonymous — no bike or coverage may be named until verified.")
+            if (verified_phone or pending_code) and st.sidebar.button("Reset verification"):
                 verification.reset(chat["chat_id"])
                 st.rerun()
 
         saved_chats = _list_chats(agent_name)
         if len(saved_chats) > 1:
-            with st.expander("Past chats — %d saved" % len(saved_chats)):
+            with st.sidebar.expander("Past chats — %d saved" % len(saved_chats)):
                 labels = [
                     "%s · %d turns%s"
                     % (c["chat_id"], c["turns"], "  ← open" if c["chat_id"] == chat["chat_id"] else "")
@@ -1500,9 +1539,11 @@ def main() -> None:
         for turn_number, turn in enumerate(chat["turns"]):
             with st.chat_message(turn["role"]):
                 # Numbered so a turn can be pointed at — "look at 15" — instead of
-                # described. Counts every turn including the bot's, so the numbers
-                # match the saved transcript rather than only the customer's side.
-                st.caption("#%d" % turn_number)
+                # described, but small: it is a reference, not content.
+                st.markdown(
+                    "<span style='color:#9aa0a6;font-size:0.72rem'>#%d</span>" % turn_number,
+                    unsafe_allow_html=True,
+                )
                 attachments = turn.get("attachments") or []
                 if attachments:
                     for attachment in attachments:
@@ -1569,38 +1610,27 @@ def main() -> None:
                     if item["kind"] == "video":
                         st.video(item["url"])
                     else:
-                        st.image(item["url"], use_container_width=True)
+                        st.image(item["url"], width="stretch")
                     if item.get("caption"):
                         st.caption(item["caption"])
 
                 st.write(turn["content"])
 
-        # The uploader keeps its files until the user clears it, so a sent file
-        # would otherwise re-attach itself to every later message. Its key carries
-        # a counter that is bumped on send: a new key means a fresh, empty widget.
-        # (Assigning [] to a file_uploader's own key raises instead of clearing it.)
-        nonce = st.session_state.setdefault(nonce_key, 0)
-        uploaded_files = st.file_uploader(
-            "📎 Attach image, video or PDF",
-            type=["png", "jpg", "jpeg", "pdf"] + list(VIDEO_TYPES),
-            accept_multiple_files=True,
-            key="uploader_%s_%d" % (agent_name, nonce),
-            help=(
-                "JPG, PNG, PDF, or video (MP4/MOV/WEBM/M4V). Claude cannot watch video, "
-                "so %d frames are sampled and sent as stills; the original is kept for "
-                "the human who picks up the ticket." % VIDEO_FRAMES
-            ),
-        )
-
-        pending_files = list(uploaded_files or [])
-        if pending_files:
-            st.caption("Attached: %s" % ", ".join(file.name for file in pending_files))
-
         st.caption(
-            "Type `%s` — optionally `%s green light, no red` — to stand in for uploading a "
-            "photo or video, without making a file." % (PROOF_COMMAND, PROOF_COMMAND)
+            "📎 attaches a photo, video or PDF. `%s` — or `%s green light, no red` — stands in "
+            "for one without making a file." % (PROOF_COMMAND, PROOF_COMMAND)
         )
-        user_text = st.chat_input("Type a test customer message…")
+        submission = st.chat_input(
+            "Message as the customer…",
+            accept_file="multiple",
+            file_type=["png", "jpg", "jpeg", "pdf"] + list(VIDEO_TYPES),
+        )
+        # Files ride in the chat input now rather than a dropzone above it. That
+        # is closer to what a customer's chat looks like, and it retires the
+        # uploader-nonce workaround: this widget clears its own files on submit,
+        # so a sent photo cannot re-attach itself to the next message.
+        user_text = submission.text if submission is not None else None
+        pending_files = list(submission.files) if submission is not None else []
         if _should_submit_chat(user_text, pending_files):
             user_text, proof_note = _split_proof(user_text)
             attachments = [_serialise_uploaded_file(file) for file in pending_files]
