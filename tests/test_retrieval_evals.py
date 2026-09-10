@@ -43,6 +43,12 @@ GOLDEN = [
     ("light nahi aa rahi button dabane par", "battery-soc-indicator-dead", "battery", {"product_name": "STX 27.5 inch"}),
     ("the on off switch is not working", "battery-onoff-switch-dead", "battery", {"product_name": "X2 Furious Red V2"}),
     ("battery switch kaam nahi kar raha", "battery-onoff-switch-dead", "battery", {"product_name": "EMX Plus"}),
+    # Melting applies to every bike — a Doodle has a terminal and a controller
+    # like everything else — so these are not scoped away from one.
+    ("my battery terminal has melted", "battery-melted-terminal", "battery", ANY_BIKE),
+    ("there is a burnt smell and the connector looks black", "battery-melted-terminal", "battery", ANY_BIKE),
+    ("terminal jal gaya hai", "battery-melted-terminal", "battery", ANY_BIKE),
+    ("charging port melted", "battery-melted-terminal", "battery", {"product_name": "Doodle Black"}),
     ("charging is taking too long", "battery-charging-slowly", "battery", ANY_BIKE),
     ("slow charging problem", "battery-charging-slowly", "battery", ANY_BIKE),
     ("I am not using the bike for three months, what to do", "battery-storage", "battery", ANY_BIKE),

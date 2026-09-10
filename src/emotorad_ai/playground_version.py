@@ -18,14 +18,22 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.14.0"
+PLAYGROUND_VERSION = "0.15.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
     (
+        "0.15.0",
+        "2026-09-10",
+        "The melting check — both ends, always — is the last battery flow to leave the "
+        "prompt. It is reachable from what the customer says and from an E-06 lookup, and "
+        "a test now fails if the error-code table points at a flow the records no longer "
+        "carry. The prompt is 15,276 characters, down from 29,416.",
+    ),
+    (
         "0.14.0",
         "2026-09-10",
-        "Battery diagnosis finished moving into knowledge records — the standard flow, the "
+        "Battery diagnosis moved into knowledge records — the standard flow, the "
         "SOC-indicator fault and the on/off switch fault join the Doodle flow. The prompt is "
         "down from 29,416 to 16,491 characters and each flow now reaches the model whole, "
         "scoped to the bikes it applies to.",

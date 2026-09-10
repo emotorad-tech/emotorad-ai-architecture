@@ -129,3 +129,49 @@ class MigratedFlowsAreScopedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeltingFlowTests(unittest.TestCase):
+    """§5b1, which was reachable two ways and had to stay reachable both ways.
+
+    The rule that matters most here is the second photo. It was written into the
+    prompt because customers were being closed out on a clean terminal photo and
+    coming back a week later with a melted controller connector; a record that
+    drops it regresses to exactly that.
+    """
+
+    RECORD_ID = "battery-melted-terminal"
+    RULES = {
+        "the second photo is asked for regardless": "whatever the first shows",
+        "and again, explicitly, at the controller step": "even when the terminal turned",
+        "the reason is said out loud": "how far the heat travelled",
+        "melting is a heat event, not wiring": "heat event, not a wiring fault",
+        "the bike is taken out of use": "not to keep using or charging",
+        "no diagnosis from a photo that cannot be read": "too dark or too blurred",
+        "no fault found is a real outcome": "rather than inventing one",
+        "E-06 with both ends clean lands on the BMS": "battery management system",
+    }
+
+    def test_every_rule_survived_the_move(self):
+        body = _body(self.RECORD_ID)
+        missing = [name for name, phrase in self.RULES.items() if phrase not in body]
+        self.assertEqual(missing, [], "rules lost in migration: %s" % missing)
+
+    def test_reachable_from_the_error_code_that_sends_customers_here(self):
+        """E-06's `verification` describes this check; the record must answer to it.
+
+        The two live in different files and neither imports the other, so nothing
+        but this test notices if the code table starts pointing at a flow that no
+        longer exists.
+        """
+        from emotorad_ai.errorcodes import load_table
+
+        entry = load_table().lookup("E-06", "X2 Furious Red V2")["entry"]
+        self.assertIn("melted", entry["verification"].lower())
+        from emotorad_ai.knowledge import KnowledgeBase
+
+        found = KnowledgeBase(load_records()).search(
+            "melted charging port E-06", topic="battery", bike={"throttle": "yes"}
+        )
+        self.assertIn(self.RECORD_ID, [p.id for p in found])
+
