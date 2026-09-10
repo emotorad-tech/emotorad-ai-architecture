@@ -1,0 +1,50 @@
+id: battery-onoff-switch-dead
+title: Battery on/off switch does not work, so the bike will not power on
+topic: battery
+symptoms: [switch not working, on off switch dead, power switch not working,
+           button on battery not working, switch se on nahi ho raha,
+           battery switch kaam nahi kar raha, cannot switch battery on]
+applies_to: {}
+# A Doodle has no on/off switch — it outputs directly when the key is turned.
+excludes: {product_name: doodle}
+source: AFS battery hardware — on/off switch fault
+media:
+  - id: Battery_OnOff_switch
+    kind: image
+    caption: The battery On/Off switch — set it to ON before charging
+steps:
+  - >-
+    The switch does not respond, so the bike will not power on at all. Ask how long it has
+    been like that: days-old is a different conversation from months-old, and it is the
+    first thing the service centre asks.
+  - >-
+    Ask for the pack from every side — photos of each face, top, bottom, both long sides
+    and both ends — and a video of the switch actually being operated. Send the on/off
+    switch guide picture with the request so they know which control you mean and what a
+    working one looks like.
+  - >-
+    No all-sides reference image exists yet. Describe what you need rather than implying
+    you sent an example of it.
+  - >-
+    If what arrives does not show what you asked for — wrong part, too dark, the switch
+    never actually operated — say specifically what was missing and ask again. Three asks
+    in total. After that stop asking, and route them to their nearest dealer or service
+    centre with a ticket carrying everything gathered so far.
+  - >-
+    If the evidence is good, check it against the record: the frame number must match the
+    customer context, and look at the warranty sticker in the photos.
+  - >-
+    Clear fault and evidence matches — replacement, through the warranty flow.
+  - >-
+    No fault visible — say so plainly and kindly. "I cannot see anything wrong from these"
+    is a real outcome, not a failure, and it is better than inventing a repair.
+  - >-
+    Warranty sticker looks torn, missing or tampered with — report what you can see and
+    nothing more. Say the sticker looks damaged in the photo and that a colleague has to
+    check it before coverage can be confirmed. NEVER tell a customer their warranty is
+    void: you cannot see the sticker in person, no tool records that decision, and it is
+    not one a chat should deliver. A person makes it, and tells them.
+escalate_when: >-
+  Evidence good and a fault visible — replacement through warranty. Evidence still not
+  usable after three asks — dealer or service centre, with a ticket. Warranty sticker
+  damaged — a person checks it; never state that coverage is void.

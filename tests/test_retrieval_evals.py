@@ -37,6 +37,12 @@ GOLDEN = [
     ("bike will not turn on", "battery-doodle-wont-power-on", "battery", {"product_name": "Doodle Black"}),
     ("cycle nahi chal rahi", "battery-doodle-wont-power-on", "battery", {"product_name": "Doodle V4 Indicator Edition"}),
     ("doodle not starting, no display", "battery-doodle-wont-power-on", "battery", {"product_name": "Doodle Pro"}),
+    # Battery hardware faults. Both are scoped away from Doodles, which have
+    # neither an SOC button nor an on/off switch, so each query names a bike.
+    ("battery indicator light not coming on", "battery-soc-indicator-dead", "battery", {"product_name": "X2 Furious Red V2"}),
+    ("light nahi aa rahi button dabane par", "battery-soc-indicator-dead", "battery", {"product_name": "STX 27.5 inch"}),
+    ("the on off switch is not working", "battery-onoff-switch-dead", "battery", {"product_name": "X2 Furious Red V2"}),
+    ("battery switch kaam nahi kar raha", "battery-onoff-switch-dead", "battery", {"product_name": "EMX Plus"}),
     ("charging is taking too long", "battery-charging-slowly", "battery", ANY_BIKE),
     ("slow charging problem", "battery-charging-slowly", "battery", ANY_BIKE),
     ("I am not using the bike for three months, what to do", "battery-storage", "battery", ANY_BIKE),

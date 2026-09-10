@@ -1,0 +1,50 @@
+id: battery-soc-indicator-dead
+title: Battery works but the SOC indicator does not light
+topic: battery
+# The symptom is easy to mishear as "won't turn on". It is the opposite: the bike
+# runs, the pack charges, and only the indicator is dead. Phrasings kept close to
+# how customers say it.
+symptoms: [indicator not working, soc button not working, light not coming on battery,
+           no indication on battery, battery light not showing, indicator band dead,
+           battery indicator kaam nahi kar raha, light nahi aa rahi button dabane par]
+applies_to: {}
+# A Doodle has no SOC button, so this fault cannot occur on one.
+excludes: {product_name: doodle}
+source: AFS battery hardware — SOC button / indicator fault
+media:
+  - id: SOC_Button_non_doodle
+    kind: image
+    caption: The SOC button and charge indicator, on the side of the pack
+steps:
+  - >-
+    Confirm the symptom before diagnosing it. The bike runs, the battery charges, and
+    pressing the SOC button produces no light at all. That is the button or its indicator,
+    not the pack, and it is not the won't-power-on flow.
+  - >-
+    Ask when it started and whether it ever worked. "It worked when I bought it and
+    stopped last month" is a different case from "it never lit" — for the second, ask
+    whether they are pressing and holding for one to two seconds, because a short tap does
+    nothing and that is a two-message fix rather than a replacement.
+  - >-
+    Ask for ONE video showing four things in a single continuous take, listed in one
+    message. One unbroken take matters more than four tidy clips: it is what shows the
+    pack working while the indicator stays dark, which is the whole claim.
+  - >-
+    In that video: (1) the charger connected to the battery and what the charger LED
+    shows; (2) the SOC button pressed and held for one to two seconds, and what the
+    indicator does; (3) the charger disconnected; (4) the battery back on the bike and the
+    bike switched on — does it run?
+  - >-
+    How it resolves depends on how old the battery is. Under a year, battery replacement.
+    A year or more, repair at a service centre with the customer bringing the battery in.
+  - >-
+    Say what date you are working from before you lean on it. Coverage here is usually
+    measured from the registration date rather than the purchase date, because the
+    purchase date is missing from most records — the customer context tells you which you
+    have. On a case this close to the line, tell them the age you are using and that a
+    colleague confirms it before anything is booked. Never announce a free replacement on
+    a date you inferred.
+escalate_when: >-
+  Under a year from the recorded date — battery replacement, with the video attached.
+  A year or more — service centre repair, customer brings the battery in. Either way the
+  age is confirmed by a person before anything is booked.

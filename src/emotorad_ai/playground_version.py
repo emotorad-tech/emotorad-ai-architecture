@@ -18,10 +18,18 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.13.0"
+PLAYGROUND_VERSION = "0.14.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.14.0",
+        "2026-09-10",
+        "Battery diagnosis finished moving into knowledge records — the standard flow, the "
+        "SOC-indicator fault and the on/off switch fault join the Doodle flow. The prompt is "
+        "down from 29,416 to 16,491 characters and each flow now reaches the model whole, "
+        "scoped to the bikes it applies to.",
+    ),
     (
         "0.13.0",
         "2026-09-10",
