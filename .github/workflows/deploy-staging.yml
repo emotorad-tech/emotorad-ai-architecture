@@ -10,6 +10,13 @@ env:
   AWS_REGION: ap-south-1
   S3_BUCKET: emotorad-ai-stage-851725486214
   INSTANCE_ID: i-02e7dc2874e0fdacb
+  # Cloudinary cloud name for the knowledge-base guide photos/clips
+  # (src/emotorad_ai/media.py, EMOTORAD_CLOUDINARY_CLOUD). Not a secret — it
+  # appears in every delivery URL the customer receives — so it lives here in
+  # plaintext alongside S3_BUCKET/INSTANCE_ID rather than in Actions secrets.
+  # Without it, cloud_name() returns "" and every guide image resolves as
+  # "unresolved", so the bot silently sends no picture.
+  EMOTORAD_CLOUDINARY_CLOUD: cjdq4bv8
 
 permissions:
   id-token: write   # required for OIDC role assumption below
@@ -77,7 +84,7 @@ jobs:
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e EMOTORAD_AI_MODE=offline -e EMOTORAD_AI_PLAYGROUND_USER='${{ secrets.PLAYGROUND_BASIC_AUTH_USER }}' -e EMOTORAD_AI_PLAYGROUND_PASSWORD='${{ secrets.PLAYGROUND_BASIC_AUTH_PASSWORD }}' emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e EMOTORAD_AI_MODE=offline -e EMOTORAD_CLOUDINARY_CLOUD=$EMOTORAD_CLOUDINARY_CLOUD -e EMOTORAD_AI_PLAYGROUND_USER='${{ secrets.PLAYGROUND_BASIC_AUTH_USER }}' -e EMOTORAD_AI_PLAYGROUND_PASSWORD='${{ secrets.PLAYGROUND_BASIC_AUTH_PASSWORD }}' emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"

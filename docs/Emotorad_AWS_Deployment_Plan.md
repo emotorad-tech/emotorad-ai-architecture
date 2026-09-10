@@ -88,6 +88,13 @@ through this role.
   means the value is visible in the SSM command's own parameters to anyone with
   `ssm:GetCommandInvocation` on the account. Acceptable for a first pass; move it into Parameter
   Store (fetched instance-side, never in the command text) if that visibility becomes a problem.
+- **Cloudinary cloud name (added 2026-09-10):** `EMOTORAD_CLOUDINARY_CLOUD` (`media.py`) — the
+  knowledge-base guide photos/clips are delivered from Cloudinary now, not the S3 bucket in §2.3.
+  This is **not** a secret (it is in every `res.cloudinary.com/<cloud>/...` URL the customer
+  receives), so it is set in plaintext in the `env:` block of `deploy-staging.yml` alongside
+  `S3_BUCKET`/`INSTANCE_ID`, not in Actions secrets. If it is unset the deploy still runs; the bot
+  just sends no guide pictures (`media.cloud_name()` returns `""` → every item resolves as
+  `unresolved`).
 
 ### 2.5 CloudWatch log group
 
