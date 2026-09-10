@@ -87,7 +87,7 @@ class Identity:
 
 @dataclass(frozen=True)
 class Attachment:
-    kind: str  # "image" | "document"
+    kind: str  # "image" | "video" | "document"
     url: str
     mime_type: Optional[str] = None
 

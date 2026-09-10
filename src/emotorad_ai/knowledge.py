@@ -70,6 +70,12 @@ class KnowledgeRecord:
     steps: Sequence[str]
     source: str = ""
     applies_to: Mapping[str, str] = field(default_factory=dict)
+    # The negative of applies_to, and it needs to exist separately: a record
+    # for every model *except* one cannot be written as a positive match
+    # without listing the whole catalogue and revising it at each launch.
+    # Without it a Doodle owner is handed both the Doodle flow and the
+    # standard one, which disagree about what a red charger LED means.
+    excludes: Mapping[str, str] = field(default_factory=dict)
     media: Sequence[Mapping[str, str]] = field(default_factory=tuple)
     escalate_when: str = ""
     superseded_by: Optional[str] = None
@@ -130,10 +136,25 @@ def _validate(raw: Mapping[str, Any], where: str) -> None:
     if not isinstance(raw.get("symptoms"), list):
         raise KnowledgeError("%s: symptoms must be a list" % where)
     for item in raw.get("media") or []:
-        if not isinstance(item, Mapping) or not item.get("url") or not item.get("caption"):
+        if not isinstance(item, Mapping):
+            raise KnowledgeError("%s: each media item must be a mapping" % where)
+        # `id` is a CDN public id resolved by media.py; `url` is an absolute
+        # address for anything hosted elsewhere. One or the other, never neither.
+        if not (item.get("id") or item.get("url")):
             raise KnowledgeError(
-                "%s: every media item needs both a url and a caption — a photo with no "
-                "caption is invisible to retrieval" % where
+                "%s: every media item needs an id (a CDN public id) or a url" % where
+            )
+        if not item.get("caption"):
+            raise KnowledgeError(
+                "%s: every media item needs a caption — a photo with no caption is "
+                "invisible to retrieval, and it is the caption the model reasons about "
+                "while the customer sees the picture" % where
+            )
+        kind = item.get("kind", "image")
+        if kind not in ("image", "video"):
+            raise KnowledgeError(
+                "%s: media kind must be 'image' or 'video', not %r — the channel has to "
+                "know whether to render a picture or a player" % (where, kind)
             )
 
 
@@ -157,6 +178,13 @@ def load_records(directory: Optional[Path] = None) -> List[KnowledgeRecord]:
     records: List[KnowledgeRecord] = []
     seen: Dict[str, Path] = {}
     for path in sorted(root.rglob("*.yaml")):
+        # An underscore-prefixed directory is authored content that is not a
+        # record — the guide-media catalogue lives in one. Skipping by an
+        # explicit namespace is not the same as skipping a malformed record,
+        # which still raises: that would be a topic the bot has quietly stopped
+        # knowing about, with nothing anywhere to say so.
+        if any(part.startswith("_") for part in path.relative_to(root).parts):
+            continue
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         _validate(raw, str(path))
 
@@ -178,6 +206,7 @@ def load_records(directory: Optional[Path] = None) -> List[KnowledgeRecord]:
                 steps=tuple(raw["steps"]),
                 source=raw.get("source", ""),
                 applies_to=dict(raw.get("applies_to") or {}),
+                excludes=dict(raw.get("excludes") or {}),
                 media=tuple(dict(item) for item in (raw.get("media") or [])),
                 escalate_when=raw.get("escalate_when", ""),
                 superseded_by=raw.get("superseded_by"),
@@ -241,6 +270,18 @@ class KnowledgeBase:
                 # part their bike does not have.
                 return False
             if str(expected).lower() not in str(actual).lower():
+                return False
+        for key, unwanted in record.excludes.items():
+            actual = bike.get(key)
+            if actual is None:
+                # Unknown bike: the exclusion does not fire. This is the opposite
+                # of applies_to on purpose. A positive filter names a part the
+                # record depends on, so it must be confirmed present. An
+                # exclusion carves one model out of the default flow — applying
+                # it unconfirmed would leave an anonymous customer with no
+                # record at all, which is a worse answer than the general one.
+                continue
+            if str(unwanted).lower() in str(actual).lower():
                 return False
         return True
 

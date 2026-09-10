@@ -1,14 +1,88 @@
 id: battery-wont-power-on
-title: Bike will not power on
+title: Bike will not power on — SOC check, then the charger LED
 topic: battery
-symptoms: [wont_turn_on, no_power, dead, display blank, nothing happens]
+symptoms: [wont_turn_on, no_power, dead, display blank, nothing happens,
+           bike not turning on, cycle nahi chal rahi, cycle on nahi ho rahi,
+           no light on battery, चालू नहीं, बैटरी चालू]
 applies_to: {}
-source: Battery care manual §4.2
+# A Doodle has no SOC button and no on/off switch, so the first two steps here do
+# not exist on one — and red on its charger means the opposite of red here. See
+# battery-doodle-wont-power-on.
+excludes: {product_name: doodle}
+source: AFS battery diagnostic — Question Sequence 1
 media:
-  - url: https://cdn.emotorad.test/kb/battery-seating.png
-    caption: Battery seated in the frame mount with the latch closed
+  - id: SOC_Button_non_doodle
+    kind: image
+    caption: The SOC button and charge indicator, on the side of the pack
+  - id: Battery_OnOff_switch
+    kind: image
+    caption: The battery On/Off switch — set it to ON before charging
+  - id: Battery_Revival_Steps.mp4
+    kind: video
+    caption: Reviving a pack that has gone completely flat
 steps:
-  - Turn the battery key to ON, then press and hold the display power button for three seconds.
-  - Check the battery is seated in the frame mount and the latch is fully closed.
-  - Charge for thirty minutes and try again. A deeply discharged pack will not wake instantly.
-escalate_when: The display stays blank after charging for thirty minutes.
+  - >-
+    STEP 1 — SOC check. Ask whether the battery is currently charged: press the SOC button
+    on the side of the pack and hold it for one to two seconds, then say whether an
+    indicator light comes on. Ask for a photo of what they see in the same message; the
+    answer decides everything that follows and a photo costs five seconds.
+  - >-
+    A light means the battery is healthy and charged — move on to the other parts. No
+    light means it needs the charger check below.
+  - >-
+    STEP 2 — charger check. Ask how long since the last charge (90+ days makes sleep mode
+    more likely but proves nothing on its own), then have them connect the charger and
+    report the LED colour, with a photo of it in the same message.
+  - >-
+    NO LIGHT on the charger — the charger, the socket or the connection, and nothing yet
+    about the battery. Have them confirm the socket has power and the connector is fully
+    seated. If both are sound and the LED still shows nothing, the charger is the likely
+    fault; say so, because it is better news than they expect. Ask whether they can borrow
+    a charger from anyone with an EMotorad e-cycle: if the battery then charges, the
+    charger is confirmed; if not, the fault is the battery and you rejoin this flow. If
+    they cannot borrow one, proceed on the charger being at fault — warranty and
+    replacement for the charger. Ask for a video of the charger on a live socket showing
+    no LED before opening a case.
+  - >-
+    RED on the charger — the battery is drawing charge and is drained, not faulty. Tell
+    them to charge for at least four hours: the first LED shows red about ten minutes in,
+    and the remaining LEDs turn green as it charges.
+  - >-
+    GREEN on the charger — the battery is not drawing charge, so it is either asleep or
+    dead. Run the Battery Revival Process to tell which.
+  - >-
+    BATTERY REVIVAL PROCESS — with the battery connected to the charger, press the on/off
+    switch eight to ten times in quick succession, then recheck the charger LED. Turns
+    red means it woke from sleep and is now drawing charge: treat it as drained, charge
+    four hours, recheck. Stays green means it is not accepting charge: conclude dead and
+    move to warranty and replacement.
+  - >-
+    ONCE THE CHARGER LED HAS BEEN READ YOU ARE IN THAT BRANCH AND YOU STAY IN IT. Do not
+    move to another row because the customer's next answer is not what you expected.
+  - >-
+    The Battery Revival Process belongs to the green row and to no other. Not red, which
+    means the battery is already drawing charge, so sleep mode is ruled out. Not no-light,
+    which is about the charger and says nothing about the battery yet. Running it anywhere
+    else tells a customer their working battery may be asleep and contradicts what you
+    said a moment earlier.
+  - >-
+    If an answer fits no row, say what you are unsure about and ask one question. Do not
+    borrow the nearest procedure that mentions the same symptom — that is how a charger
+    problem turns into a battery problem.
+  - >-
+    CUSTOMER COMES BACK BEFORE THE FOUR HOURS ARE UP. Expect this; people check early. If
+    less than four hours have passed and the charger LED is still red, that is charging
+    working normally, not a fault. Say so, say how long is left, and remind them what to
+    check when the time is up — the charger LED, and the SOC button for a light. Do not
+    diagnose further and do not start another procedure while the clock is running.
+  - >-
+    POST-CHARGE CHECK, for the drained or revived path. After four or more hours charging,
+    if the charger LED still shows red AND the SOC button still shows nothing, ask for a
+    video of the SOC button being pressed with the charger connected, showing both. Only
+    once you have that video do you conclude the battery is dead and move to warranty and
+    replacement.
+escalate_when: >-
+  Battery healthy and charged — SOC lit on the first check — move to the next part.
+  Healthy but drained — instruct charging and offer to resume afterwards. Dead, by any
+  branch above — warranty and replacement, with the evidence attached. Charger at fault —
+  warranty and replacement for the charger, not the battery.

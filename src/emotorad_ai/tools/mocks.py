@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from .. import media as media_module
 from ..knowledge import BatteryKnowledgeBase
 from . import fixtures
+from .verification import VerificationStore, register_verification_tools
 from .registry import ToolError, ToolRegistry, ok
 
 # Customer-facing tool names, so agents and tests refer to one spelling.
@@ -28,6 +30,16 @@ CREATE_SUPPORT_TICKET = "create_support_ticket"
 FIND_SERVICE_SLOTS = "find_service_slots"
 BOOK_SERVICE_SLOT = "book_service_slot"
 SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
+# The unverified counterpart of create_support_ticket. Separate on purpose:
+# see its registration below for why the two must not be one tool.
+RAISE_INTAKE_TICKET = "raise_intake_ticket"
+# Sends one of a fixed set of guide pictures. Interim: media belongs on the
+# knowledge record whose steps it illustrates, and moves there once the flow
+# is lifted out of the prompt.
+SEND_GUIDE_MEDIA = "send_guide_media"
+# Display error code -> what it means on *this* bike. Exact lookup, never a
+# near match: a confidently wrong diagnosis is the worst output available.
+LOOKUP_ERROR_CODE = "lookup_error_code"
 
 # --- dealer tools (W2) -------------------------------------------------------
 # Split into quote / place deliberately. Quoting is a read and can be repeated
@@ -52,14 +64,34 @@ def _clean(value: Any) -> Any:
     return None if value in ("", "None", "null") else value
 
 
+def _date_only(value: Any) -> Optional[str]:
+    """Upstream's dates, whatever shape they arrive in, as plain ``YYYY-MM-DD``.
+
+    The OMS is not consistent with itself: `purchase_date` comes back as
+    ``2026-07-12T00:00:00Z`` and `created_at` as
+    ``2025-09-05 04:43:48.345000+00:00``, while the recorded fixtures carry bare
+    dates. Coverage is a whole-day comparison, so the time and offset are noise —
+    but noise that raises rather than degrades if it reaches `parse_date`.
+    Translated once, at the boundary, per the same rule as `_clean()`.
+    """
+    cleaned = _clean(value)
+    if cleaned is None:
+        return None
+    text = str(cleaned).strip()
+    # Both separators appear in live payloads, from the same endpoint.
+    head = text.replace("T", " ").split(" ", 1)[0]
+    return head or None
+
+
 def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
     """One bike, with coverage computed rather than read.
 
     The OMS carries no warranty dates at all — verified against the real 60-field
-    response — so start and end are derived from `purchase_date` here. Coverage is
-    resolved per bike, not per call: on a three-bike number one row can be missing
-    its purchase date while the others are fine, and failing the whole lookup for
-    that would deny the customer help with bikes we can answer for.
+    response — so start and end are derived here, from `purchase_date` when it is
+    present and `created_at` when it is not (see below). Coverage is resolved per
+    bike, not per call: on a three-bike number one row can be missing its dates
+    while the others are fine, and failing the whole lookup for that would deny
+    the customer help with bikes we can answer for.
     """
     bike = {
         "frame_number": record["frame_number"],
@@ -67,36 +99,49 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         "product_color": _clean(record.get("product_color")),
         "battery_variant": _clean(record.get("battery_variant")),
         "franchise_name": _clean(record.get("franchise_name")),
-        "purchase_date": _clean(record.get("purchase_date")),
+        "purchase_date": _date_only(record.get("purchase_date")),
     }
 
-    if not bike["purchase_date"]:
-        # Never fall back to `created_at`: that is when the customer *registered*,
-        # so a January purchase registered in June would gain five months of free
-        # coverage. Undeterminable is the honest answer, and it has a fix — the
-        # customer has the date on their invoice.
+    # `purchase_date` is the right answer and `created_at` is the available one.
+    # Verified against live OMS 2026-08-29: purchase_date and ocr_date were null
+    # on every row returned, and docs/api-shapes/warranty.json (recorded
+    # 2026-08-01) is null too. Refusing to compute without a purchase date
+    # therefore dead-ends essentially every real conversation into "send us your
+    # invoice", which is not support.
+    #
+    # So we fall back — and label it. created_at is when the customer
+    # *registered*, always at or after the purchase, so coverage derived from it
+    # runs LONGER than policy: a bike bought in January and registered in June
+    # gains five months. That is a real liability, which is why the fallback is
+    # never silent. `warranty_start_source` and the note say where the date came
+    # from so the agent can hedge and a human can settle a disputed claim.
+    started = bike["purchase_date"] or _date_only(record.get("created_at"))
+    if not started:
         bike.update(
             {
                 "in_warranty": None,
                 "coverage_status": "purchase_date_missing",
                 "remedy": "collect_purchase_proof",
                 "note": (
-                    "This bike is registered but has no recorded purchase date, so coverage "
-                    "cannot be computed. Ask for the invoice or any proof of purchase showing "
-                    "the date it was bought. Do not state or estimate a coverage date."
+                    "This bike is registered but has no recorded purchase or registration "
+                    "date, so coverage cannot be computed. Ask for the invoice or any proof "
+                    "of purchase showing the date it was bought. Do not state or estimate a "
+                    "coverage date."
                 ),
             }
         )
         return bike
 
+    from_registration = not bike["purchase_date"]
     term_months = fixtures.warranty_term_months("battery", bike["product_name"])
-    purchased = fixtures.parse_date(bike["purchase_date"])
+    purchased = fixtures.parse_date(started)
     elapsed = fixtures.months_between(purchased, today or date.today())
     bike.update(
         {
             "in_warranty": elapsed < term_months,
-            "coverage_status": "computed",
-            "warranty_start": bike["purchase_date"],
+            "coverage_status": "computed_from_registration" if from_registration else "computed",
+            "warranty_start": purchased.isoformat(),
+            "warranty_start_source": "registration_date" if from_registration else "purchase_date",
             "warranty_end": fixtures.add_months(purchased, term_months).isoformat(),
             "term_months": term_months,
             # Flags a date we derived rather than one an authoritative system gave
@@ -105,6 +150,13 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
             "months_remaining": max(term_months - elapsed, 0),
         }
     )
+    if from_registration:
+        bike["note"] = (
+            "No purchase date on record, so coverage is measured from the registration "
+            "date instead. Treat it as provisional: say it is based on when the bike was "
+            "registered, and that the exact date can be confirmed from their invoice. Do "
+            "not refuse a claim on this basis alone."
+        )
     return bike
 
 
@@ -268,8 +320,36 @@ def build_registry(
     order_system: Optional["MockOrderSystem"] = None,
     diagnostics_available: bool = False,
     oms_available: bool = True,
-    knowledge_bike: Optional[Dict[str, Any]] = None,
+    # The bike retrieval filters against — a dict, or a callable returning one.
+    # `applies_to` is a hard filter, so a record scoped to a model is
+    # unretrievable while this is empty. Callable for the same reason
+    # owned_bikes is: identity arrives mid-turn.
+    knowledge_bike: Optional[Any] = None,
     today: Optional[date] = None,
+    # Where registered bikes come from. Defaults to the fixtures; the playground
+    # passes a reader backed by the live OMS. The seam is deliberately a plain
+    # callable so the tool's contract, its four outcomes and the coverage math
+    # stay identical whichever side of the swap you are on.
+    warranty_source: Optional[Callable[[str], Optional[List[Dict[str, Any]]]]] = None,
+    verification: Optional["VerificationStore"] = None,
+    # key -> media item. Absent unless a catalogue is supplied, so an agent
+    # with no pictures is never told it can send one.
+    guide_media: Optional[Dict[str, Dict[str, Any]]] = None,
+    # conversation_id -> the keys already sent in it. Kept by the caller so it
+    # survives across turns, which is the only scope at which "already sent"
+    # means anything.
+    sent_media: Optional[Dict[str, set]] = None,
+    # The published error-code table, and the bikes on this conversation's
+    # account. Both absent unless supplied, so an agent with no table is never
+    # told it can look codes up.
+    error_codes: Optional[Any] = None,
+    # A list, or a callable returning one. Callable where the answer can change
+    # mid-turn: a customer who verifies and then asks about a code does both in
+    # one assistant turn, and bikes captured at wiring time are still empty.
+    owned_bikes: Optional[Any] = None,
+    # Order/invoice code -> registered phone, for a customer who cannot recall
+    # their number. Absent unless a real orders API is wired.
+    account_finder: Optional[Callable[[str], Optional[str]]] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -287,6 +367,214 @@ def build_registry(
     registry.tickets = tickets  # type: ignore[attr-defined]  # test/inspection handle
     registry.bookings = bookings  # type: ignore[attr-defined]
     registry.orders = orders  # type: ignore[attr-defined]
+
+    # Only offered when a store is supplied. An agent that cannot verify anyone
+    # should not be told it can — an absent tool is a fact the model can reason
+    # about, a present one that never works invites it to keep trying.
+    if error_codes is not None:
+
+        @registry.register(
+            LOOKUP_ERROR_CODE,
+            "Look up a display error code the customer has read out — E-07, E30, and so on. "
+            "The answer depends on which bike they own as well as the code, so this resolves "
+            "both. Call it as soon as a customer mentions a code, before troubleshooting "
+            "anything: it is a published table and it will tell you more in one call than "
+            "several questions will. Never guess what a code means and never assume a code "
+            "behaves like a neighbouring one.",
+            parameters={
+                "code": {
+                    "type": "string",
+                    "description": "The code exactly as the customer read it, e.g. 'E-07' or 'E30'.",
+                }
+            },
+            required=("code",),
+        )
+        def lookup_error_code(code: str) -> Dict[str, Any]:
+            """Resolve a code against the customer's own bike.
+
+            Four outcomes, and they are not interchangeable. `found` is a
+            documented diagnosis. `unknown_code` means it is not in the table at
+            all. `not_possible_on_this_model` means it is documented elsewhere
+            but not for this bike — which usually means the display was misread,
+            and is a different conversation from a fault. `unknown_model` means
+            no table is published for what they own.
+            """
+            bikes = (owned_bikes() if callable(owned_bikes) else owned_bikes) or []
+            if not bikes:
+                raise ToolError(
+                    "no_bike_resolved",
+                    "No bike is resolved for this conversation, so a code cannot be looked up. "
+                    "Confirm who you are speaking to first.",
+                )
+            if len(bikes) > 1:
+                # Compared by resolved model *group*, not by product name. Two X2
+                # variants are spelled differently in the OMS and give the same
+                # answer; an X2 and a T-REX + V3 do not. Only a real disagreement
+                # is worth interrupting the customer for.
+                groups = {
+                    (error_codes.group_for(b.get("product_name")) or {}).get("id")
+                    for b in bikes
+                }
+                if len(groups) > 1:
+                    # Same discipline as everywhere else: never pick a bike for them.
+                    names = sorted({b.get("product_name") or "?" for b in bikes})
+                    raise ToolError(
+                        "frame_number_required",
+                        "This customer owns bikes that answer this code differently (%s). Ask "
+                        "which one is showing it before looking it up." % ", ".join(names),
+                    )
+            result = error_codes.lookup(code, bikes[0].get("product_name"))
+            if result["status"] == "found":
+                return ok(result["entry"])
+            return ok({"status": result["status"], "detail": result["detail"], "code": code})
+
+    if guide_media:
+
+        @registry.register(
+            SEND_GUIDE_MEDIA,
+            "Show the customer a guide photo or short clip — where a button is, what a light "
+            "looks like, how a step is performed. Use it whenever a step is easier to point at "
+            "than to describe, and say in your reply what you are showing them. Choose a key "
+            "from the list below; you cannot send anything else, and there is no way to supply "
+            "a file or a link. Available:\n%s"
+            % "\n".join(
+                "  %s — %s" % (key, item.get("caption", "")) for key, item in sorted(guide_media.items())
+            ),
+            parameters={
+                "key": {
+                    "type": "string",
+                    "enum": sorted(guide_media),
+                    "description": "Which guide picture to send.",
+                }
+            },
+            required=("key",),
+            injects=("conversation_id",),
+        )
+        def send_guide_media(conversation_id: str, key: str) -> Dict[str, Any]:
+            """Resolve one catalogue key into something the channel can render.
+
+            The key is an enum in the schema, so an invalid one is rejected before
+            it reaches here — the model chooses from a set rather than naming a
+            file. That is the same rule that keeps frame numbers out of its hands:
+            a URL it composed itself would render as a broken image in front of a
+            customer, and it would have no way to know.
+            """
+            already = sent_media.setdefault(conversation_id, set()) if sent_media is not None else set()
+            if key in already:
+                # The customer already has this picture. Sending it again is what
+                # a model does when it has lost its place — it restates the step
+                # it just gave, and the transcript reads as though nothing the
+                # customer said registered. Refusing the duplicate makes that
+                # visible to the model instead of only to the person reading it.
+                return ok(
+                    {
+                        "already_sent": True,
+                        "media": [],
+                        "note": (
+                            "You already sent %r in this conversation, so the customer has it. "
+                            "Do not send it again and do not repeat the step it illustrates — "
+                            "answer what they just told you and move the case forward." % key
+                        ),
+                    }
+                )
+
+            item = guide_media.get(key)
+            if item is None:
+                raise ToolError(
+                    "unknown_guide_media",
+                    "There is no guide picture called %r. Choose one of: %s."
+                    % (key, ", ".join(sorted(guide_media))),
+                )
+            found = media_module.resolve(item)
+            if found.get("unresolved"):
+                # Say so rather than claiming to have sent something. The reply
+                # can then describe the step instead of referring to a picture
+                # the customer never received.
+                raise ToolError(
+                    "guide_media_unavailable",
+                    "%r could not be prepared (%s). Describe the step in words instead, and do "
+                    "not tell the customer you have sent a picture."
+                    % (key, found.get("reason", "unknown")),
+                )
+            already.add(key)
+            return ok({"sent": True, "kind": found["kind"], "caption": found["caption"], "media": [found]})
+
+    if verification is not None:
+        register_verification_tools(registry, verification, account_finder=account_finder)
+        registry.verification = verification  # type: ignore[attr-defined]
+
+        @registry.register(
+            RAISE_INTAKE_TICKET,
+            "Raise a ticket for a customer whose identity could NOT be confirmed — they could "
+            "not complete the one-time code, or could not give a number or order number at "
+            "all. Use it so the conversation still ends with the case in a human's queue "
+            "rather than nowhere. Everything you pass is what the customer TOLD you, not "
+            "anything the system confirmed: pass their words. Do not state or imply any "
+            "warranty outcome to the customer — a person verifies who they are before anyone "
+            "acts on this.",
+            parameters={
+                "stated_name": {"type": "string", "description": "Name as the customer gave it."},
+                "stated_contact": {
+                    "type": "string",
+                    "description": "Any phone or email they offered, unverified, exactly as given.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "The fault, what was already tried, and what the customer is asking for.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "Order or invoice number they read out, files they sent, anything else "
+                        "a human can use to find them. Say so plainly if there is none."
+                    ),
+                },
+                "idempotency_key": {"type": "string", "description": "Stable key for this request."},
+            },
+            required=("summary", "idempotency_key"),
+            injects=("conversation_id",),
+            write=True,
+        )
+        def raise_intake_ticket(
+            conversation_id: str,
+            summary: str,
+            idempotency_key: str,
+            stated_name: str = "",
+            stated_contact: str = "",
+            evidence: str = "",
+        ) -> Dict[str, Any]:
+            """A ticket that records claims, deliberately kept apart from the verified one.
+
+            `create_support_ticket` injects a phone from a resolved identity and
+            refuses without one, which is right: a ticket carrying a frame number
+            and a coverage claim should only exist for someone we know. But that
+            left an unverified customer with no path at all — the agent would
+            promise to raise something and then raise nothing, which is worse
+            than saying no.
+
+            So this is a second, weaker ticket, and the weakness is the point. It
+            asserts nothing. Every field is what the customer said, labelled as
+            such, and `identity: unverified` travels with it so triage cannot
+            mistake it for a confirmed case.
+            """
+            ticket = tickets.create(
+                category="intake_unverified",
+                severity="normal",
+                identity="unverified",
+                conversation_id=conversation_id,
+                stated_name=_clean(stated_name) or "not given",
+                stated_contact=_clean(stated_contact) or "not given",
+                evidence=_clean(evidence) or "none offered",
+                description=summary,
+            )
+            return ok(
+                {
+                    "ticket_id": ticket["ticket_id"],
+                    "status": ticket["status"],
+                    "identity": "unverified",
+                    "expected_response": "a person will verify the customer before acting on this",
+                }
+            )
 
     @registry.register(
         LOOKUP_WARRANTY_RECORD,
@@ -311,7 +599,7 @@ def build_registry(
                 retryable=True,
             )
 
-        records = fixtures.WARRANTY_RECORDS.get(phone)
+        records = warranty_source(phone) if warranty_source else fixtures.WARRANTY_RECORDS.get(phone)
         if not records:
             raise ToolError(
                 "no_warranty_record",
@@ -375,7 +663,8 @@ def build_registry(
         # a throttle is unretrievable for one without. The model cannot widen this
         # by phrasing the query differently — the filter is applied here, not by
         # the search terms.
-        passages = kb.search(query, topic=topic, bike=knowledge_bike or {})
+        bike = knowledge_bike() if callable(knowledge_bike) else knowledge_bike
+        passages = kb.search(query, topic=topic, bike=bike or {})
         if not passages:
             # An explicit empty answer, not a shrug. Without this the model fills
             # the silence from its own training data, which is exactly the

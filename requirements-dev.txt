@@ -1,2 +1,8 @@
 # Local-only tooling — never installed in the deployed container.
 -r requirements.txt
+
+# Static check for undefined names. A NameError on the playground's submit path
+# shipped past a green suite: nothing exercises that path, because Streamlit's
+# AppTest cannot drive a file-accepting chat_input. pyflakes catches the whole
+# class without running anything.
+pyflakes>=3.0

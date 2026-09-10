@@ -43,13 +43,15 @@ class OpeningTests(unittest.TestCase):
     def test_a_registered_bike_with_no_date_is_never_told_to_register(self):
         # Telling someone whose bike we can see that they need to register it
         # reads as though we lost their record.
-        prompt = DEFINITION.build_system_prompt(message(), self._resolved("919700000002"))
+        prompt = DEFINITION.build_system_prompt(
+            message(), self._resolved(fixtures.PHONE_WITH_NO_DATES.lstrip("+"))
+        )
         self.assertIn("IS registered", prompt)
         self.assertIn("Do NOT ask them to register", prompt)
-        self.assertIn("EMXP2024773311", prompt, "acknowledge the bike by name")
+        self.assertIn("DDL32023550188", prompt, "acknowledge the bike by name")
 
     def test_both_paths_forbid_stating_coverage(self):
-        for phone in (fixtures.PHONE_WITH_NO_RECORD.lstrip("+"), "919700000002"):
+        for phone in (fixtures.PHONE_WITH_NO_RECORD.lstrip("+"), fixtures.PHONE_WITH_NO_DATES.lstrip("+")):
             prompt = DEFINITION.build_system_prompt(message(), self._resolved(phone))
             self.assertIn("Never state, estimate or confirm any warranty coverage", prompt)
 

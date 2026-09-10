@@ -135,6 +135,12 @@ class ContextEnricher:
                 descriptor += " (%s)" % bike["product_color"]
             if bike.get("coverage_status") == "purchase_date_missing":
                 coverage = "coverage unknown — no purchase date on record"
+            elif bike.get("warranty_start_source") == "registration_date":
+                coverage = "%s (provisional — measured from registration, no purchase date)" % (
+                    "in warranty, %d month(s) left" % bike.get("months_remaining", 0)
+                    if bike.get("in_warranty")
+                    else "out of warranty"
+                )
             elif bike.get("in_warranty") is True:
                 coverage = "in warranty, %d month(s) left" % bike.get("months_remaining", 0)
             elif bike.get("in_warranty") is False:

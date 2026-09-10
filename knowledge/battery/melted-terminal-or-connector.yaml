@@ -1,0 +1,60 @@
+id: battery-melted-terminal
+title: Something has melted or burnt — check both ends, always
+topic: battery
+# Reached two ways: the customer says it, or lookup_error_code returns E-06 and
+# the agent comes here to run the check that code's `verification` describes.
+symptoms: [melted, burnt, burnt smell, fused, melted terminal, melted connector,
+           battery terminal melted, connector burnt, pins fused, plastic melted,
+           jal gaya, pighal gaya, terminal jal gaya, connector melt ho gaya,
+           E-06, charging port melted]
+# Every bike has a battery terminal and a controller connector, Doodles included.
+applies_to: {}
+source: AFS battery diagnostic — melting, both ends
+media:
+  - id: melted_battery_vs_non_melted
+    kind: image
+    caption: >-
+      Battery terminal, melted versus normal. A damaged one shows fused metal pins and
+      blackened plastic; an intact one has four clean, evenly spaced contacts with the
+      + and - markings still readable.
+  - id: controller_melted_vs_non_melted
+    kind: image
+    caption: >-
+      Controller battery connector, normal versus melted. The failed one shows fused pins,
+      warped plastic and heat marks around the housing.
+steps:
+  - >-
+    ASK FOR TWO PHOTOS, AND ASK FOR THE SECOND ONE WHATEVER THE FIRST SHOWS. One end
+    being clean says nothing about the other.
+  - >-
+    FIRST, THE BATTERY TERMINAL. Send the melted-versus-normal terminal picture with the
+    request, so the customer is comparing rather than guessing. Fused metal pins and
+    blackened plastic mean melted; four clean, evenly spaced contacts with readable + and
+    - markings mean it is not.
+  - >-
+    SECOND, THE CONTROLLER'S BATTERY CONNECTOR — asked for even when the terminal turned
+    out to be fine. This is the step that will feel unnecessary and is not: melting at one
+    end tells you nothing about the other, and which ends are damaged is what decides
+    whether one part is replaced or two. A customer sent away after a clean terminal photo
+    comes back a week later with the same fault. Send the controller comparison picture
+    with this request too.
+  - >-
+    Say why you are asking for the second one, or it reads as not having listened: you are
+    checking how far the heat travelled, not doubting what they showed you.
+  - >-
+    Judge only what is in the photo. If it is too dark or too blurred to compare against
+    the guide, say so and ask for another — that is a re-take, not a rejection. Do not
+    guess at damage you cannot see, and do not describe a photo you were not sent.
+  - >-
+    IF EITHER END IS MELTED, THAT IS A HEAT EVENT, NOT A WIRING FAULT. Tell them not to
+    keep using or charging the bike while it is being sorted out, and to get it to a
+    service centre.
+  - >-
+    If neither end is melted and the bike showed E-06 while charging, the melted port is
+    ruled out and what remains is the battery management system. That is a service-centre
+    diagnosis, not a chat one.
+escalate_when: >-
+  Either end melted — service centre, bike not to be used or charged meanwhile, both
+  photos on the ticket. Neither end melted with E-06 persisting on charge — service
+  centre for the BMS. Neither end melted and no error code — no fault found; say so
+  plainly rather than inventing one.

@@ -175,7 +175,7 @@ class RegistrationJourneyTests(unittest.TestCase):
         runtime, llm = make_runtime(
             [call_tool(SEARCH_BATTERY_KNOWLEDGE, {"query": "charging"}, "t1"), say("Try this.")]
         )
-        reply = whatsapp(runtime, "919700000002", "battery won't charge")
+        reply = whatsapp(runtime, "919700000003", "battery won't charge")
 
         self.assertEqual(reply.handled_by, "battery_support")
         self.assertIn("Coverage: UNKNOWN", llm.requests[0]["system"])

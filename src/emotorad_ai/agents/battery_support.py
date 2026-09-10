@@ -101,6 +101,25 @@ def _coverage_line(bike: Dict[str, Any]) -> str:
             "of purchase showing the date they bought it, and that someone will confirm "
             "coverage once it is checked."
         )
+    if bike.get("warranty_start_source") == "registration_date":
+        # Coverage computed from when the bike was *registered*, because the OMS
+        # holds no purchase date. Real coverage starts at purchase, which is at or
+        # before this — so the figure is generous, and must be offered as
+        # provisional rather than asserted. Still better than the dead end of
+        # refusing to say anything: the customer gets an answer and a way to firm
+        # it up.
+        state = (
+            "in warranty, about %d month(s) left" % bike["months_remaining"]
+            if bike.get("in_warranty")
+            else "out of warranty"
+        )
+        return (
+            "  Coverage: %s of a %d month term — but measured from the REGISTRATION date "
+            "(%s), because no purchase date is on record. Say it is based on when the bike "
+            "was registered and that their invoice can confirm the exact date. Do not refuse "
+            "a claim on this basis alone, and do not present this as final."
+            % (state, bike["term_months"], bike["warranty_start"])
+        )
     if bike.get("in_warranty"):
         return "  Coverage: in warranty, about %d month(s) left of a %d month term." % (
             bike["months_remaining"],

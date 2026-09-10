@@ -63,8 +63,22 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(data["bike_count"], 3)
         self.assertEqual(len({b["frame_number"] for b in data["bikes"]}), 3)
 
-    def test_a_missing_purchase_date_asks_for_the_invoice_instead_of_guessing(self):
-        ctx = ToolContext(conversation_id="c1", phone="+919700000002")
+    def test_a_missing_purchase_date_falls_back_to_the_registration_date(self):
+        # Live OMS rows almost never carry purchase_date, so refusing to compute
+        # would dead-end nearly every real conversation into "send your invoice".
+        # Coverage is answered from created_at instead, and labelled as such.
+        ctx = ToolContext(conversation_id="c1", phone=fixtures.PHONE_REGISTRATION_DATE_ONLY)
+        bike = self.registry.call(LOOKUP_WARRANTY_RECORD, {}, ctx)["data"]["bikes"][0]
+        self.assertIsNotNone(bike["in_warranty"])
+        self.assertEqual(bike["coverage_status"], "computed_from_registration")
+        self.assertEqual(bike["warranty_start_source"], "registration_date")
+        self.assertEqual(bike["warranty_start"], "2024-08-19", "measured from created_at")
+        self.assertIn("registration date", bike["note"])
+
+    def test_a_bike_with_no_date_at_all_still_asks_for_the_invoice(self):
+        # The fallback narrows this path but must not delete it: with neither
+        # date there is nothing to compute from, and guessing is not an option.
+        ctx = ToolContext(conversation_id="c1", phone=fixtures.PHONE_WITH_NO_DATES)
         bike = self.registry.call(LOOKUP_WARRANTY_RECORD, {}, ctx)["data"]["bikes"][0]
         self.assertIsNone(bike["in_warranty"])
         self.assertEqual(bike["coverage_status"], "purchase_date_missing")
