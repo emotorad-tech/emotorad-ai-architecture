@@ -149,7 +149,13 @@ def _clip_with_speech(path, words="my motor is making a wheezing sound"):
     exe = imageio_ffmpeg.get_ffmpeg_exe()
     with tempfile.TemporaryDirectory() as folder:
         aiff = os.path.join(folder, "s.aiff")
-        if subprocess.run(["say", "-o", aiff, words], capture_output=True).returncode != 0:
+        try:
+            said = subprocess.run(["say", "-o", aiff, words], capture_output=True)
+        except OSError:
+            # No `say` binary at all (any non-macOS CI runner) — same outcome as
+            # `say` failing: we can't synthesise the clip, so the caller skips.
+            return False
+        if said.returncode != 0:
             return False
         return subprocess.run(
             [exe, "-y", "-i", aiff, "-f", "lavfi", "-i", "color=c=black:s=160x120",
