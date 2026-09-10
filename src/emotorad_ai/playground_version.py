@@ -18,10 +18,17 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.12.0"
+PLAYGROUND_VERSION = "0.12.1"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.12.1",
+        "2026-09-10",
+        "\"Melted\" now reaches the agent so the two-photo damage assessment can actually "
+        "run; fire, sparks, smoke, heat, leaks, cracks and swelling still stop the "
+        "conversation immediately.",
+    ),
     (
         "0.12.0",
         "2026-09-10",

@@ -106,3 +106,49 @@ class SwollenBatteryTests(unittest.TestCase):
             "the range has dropped",
         ):
             self.assertFalse(check_safety(phrasing).triggered, phrasing)
+
+
+class MeltingReachesTheAgentTests(unittest.TestCase):
+    """Melting is assessed, not intercepted — swelling is the other way round.
+
+    A melted terminal is a thermal event that has already finished, and the case
+    turns on how far the heat travelled: the battery photo *and* the controller
+    photo. Handing it straight to a human meant that assessment never happened.
+
+    A swollen pack is not the same thing and must keep firing. It is venting gas
+    now, which is the standard pre-ignition sign, and nothing in the melting flow
+    needs it to reach the model.
+    """
+
+    def test_melting_reaches_the_agent(self):
+        from emotorad_ai.guardrails import check_safety
+
+        for phrasing in (
+            "my battery is melted",
+            "the terminal looks melted",
+            "battery port melted",
+        ):
+            self.assertFalse(check_safety(phrasing).triggered, phrasing)
+
+    def test_swelling_still_stops_the_conversation(self):
+        from emotorad_ai.guardrails import check_safety
+
+        for phrasing in ("my battery is swollen", "the pack has swelled up", "it has bulged"):
+            self.assertTrue(check_safety(phrasing).triggered, phrasing)
+
+    def test_the_rest_of_the_gate_is_untouched(self):
+        from emotorad_ai.guardrails import check_safety
+
+        expected = {
+            "battery caught fire": "fire",
+            "there are sparks from the battery": "sparks",
+            "smoke is coming from the battery": "smoke",
+            "it is too hot to touch": "overheating",
+            "fluid is leaking from it": "leak",
+            "the casing is cracked": "physical_damage",
+            "there is a burning smell": "burning_smell",
+        }
+        for phrasing, label in expected.items():
+            verdict = check_safety(phrasing)
+            self.assertTrue(verdict.triggered, phrasing)
+            self.assertIn(label, verdict.matched, phrasing)

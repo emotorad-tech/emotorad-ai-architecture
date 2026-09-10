@@ -35,7 +35,15 @@ _SAFETY_TERMS: Sequence[Tuple[str, str]] = (
     ("physical_damage",
      # \b on `dent`: unbounded, it matched inside "accident" and "incident",
      # which is a lot of ordinary sentences escalated for nothing.
-     r"crack(?:ed|s|ing)?|\bdent(?:ed|s)?\b|melted|deformed|punctured|damaged casing"),
+     #
+     # `melted` is deliberately absent. A melted terminal or connector is a
+     # thermal event that has already finished, and the case then turns on how
+     # far the heat travelled — which needs the battery *and* controller photos
+     # the agent collects (prompt §5b1, and E-06's verification rule). Handing it
+     # straight over meant that assessment never happened and the comparison
+     # photos were never sent. Swelling is the opposite and stays above: a pack
+     # that is swollen is venting gas now, not showing damage from before.
+     r"crack(?:ed|s|ing)?|\bdent(?:ed|s)?\b|deformed|punctured|damaged casing"),
     ("sparks", r"spark(?:s|ing|ed)?|short circuit|shock(?:ed|ing)?\b"),
 )
 
