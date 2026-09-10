@@ -74,3 +74,35 @@ class KnowledgeBaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SwollenBatteryTests(unittest.TestCase):
+    """The way people actually say it.
+
+    `swell(ing|ed|s)?` does not match "swollen" — the irregular past participle,
+    and the most natural phrasing. "My battery is swollen" was passing straight
+    through the safety gate to the model, and swelling is the canonical pre-fire
+    symptom on a lithium pack. Found while checking whether a melted-terminal
+    flow could run at all.
+    """
+
+    def test_swollen_reaches_the_safety_gate(self):
+        from emotorad_ai.guardrails import check_safety
+
+        for phrasing in (
+            "my battery is swollen",
+            "the pack looks swollen",
+            "battery has swollen up",
+            "it has bulged out",
+        ):
+            self.assertTrue(check_safety(phrasing).triggered, phrasing)
+
+    def test_ordinary_faults_still_pass(self):
+        from emotorad_ai.guardrails import check_safety
+
+        for phrasing in (
+            "my cycle is not turning on",
+            "the display shows E-06",
+            "the range has dropped",
+        ):
+            self.assertFalse(check_safety(phrasing).triggered, phrasing)

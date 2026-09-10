@@ -23,7 +23,10 @@ from typing import List, Pattern, Sequence, Tuple
 # (label, pattern). Labels land in the log so ops can see which phrasing fired
 # and tune the list against real transcripts.
 _SAFETY_TERMS: Sequence[Tuple[str, str]] = (
-    ("swelling", r"swell(?:ing|ed|s)?|bulg(?:e|ed|ing)|puff(?:ed|y|ing)|expand(?:ed|ing)"),
+    # "swollen" is the irregular past participle and the way people actually say
+    # it — "my battery is swollen" was passing straight through, and swelling is
+    # the canonical pre-fire symptom on a lithium pack.
+    ("swelling", r"swell(?:ing|ed|s)?|swollen|bulg(?:e|ed|ing|y)|puff(?:ed|y|ing)|expand(?:ed|ing)"),
     ("smoke", r"smok(?:e|ing|y)|fumes?|\bdhuan\b"),
     ("fire", r"\bfire\b|flames?|caught fire|burn(?:ing|t|ed)?\b|\baag\b|jal gaya"),
     ("burning_smell", r"burning smell|smell(?:s|ed|ing)? (?:of )?burn|acrid|chemical smell"),

@@ -18,10 +18,17 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.11.2"
+PLAYGROUND_VERSION = "0.12.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.12.0",
+        "2026-09-10",
+        "Melted-terminal and melted-controller comparison photos are available to send, and "
+        "\"my battery is swollen\" now reaches the safety gate — the pattern matched "
+        "\"swelling\" but not the irregular past participle people actually use.",
+    ),
     (
         "0.11.2",
         "2026-09-09",

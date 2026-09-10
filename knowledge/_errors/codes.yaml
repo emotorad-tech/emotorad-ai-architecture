@@ -62,8 +62,11 @@ codes:
       E-06 points at the charging port or the battery management system. The first thing
       to rule out is a melted port, which is visible in a photo.
     verification: >-
-      A clear photo of the charging port. If the port is melted this is case 1 and the
-      diagnosis stops there. If it is not, and E-06 still shows while charging, it is
+      Two photos, and both are needed whatever the first one shows. First the battery
+      terminal — if the pins are fused or the plastic is blackened, that is case 1.
+      Then the controller's battery connector, asked for either way: melting at one end
+      does not tell you whether the other end is damaged, and the extent decides what
+      gets replaced. If neither is melted and E-06 still shows while charging, it is
       case 2.
     technician_chain: >-
       Case 1: port melted — visible on inspection. Case 2: BMS voltage dropping from

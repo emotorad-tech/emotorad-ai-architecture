@@ -28,3 +28,18 @@ battery_revival:
   id: Battery_Revival_Steps.mp4
   kind: video
   caption: Reviving a pack that has gone completely flat
+
+melted_battery_terminal:
+  id: melted_battery_vs_non_melted
+  kind: image
+  caption: >-
+    Battery terminal, melted versus normal. A damaged one shows fused metal pins and
+    blackened plastic; an intact one has four clean, evenly spaced contacts with the
+    + and - markings still readable.
+
+melted_controller_connector:
+  id: controller_melted_vs_non_melted
+  kind: image
+  caption: >-
+    Controller battery connector, normal versus melted. The failed one shows fused pins,
+    warped plastic and heat marks around the housing.
