@@ -246,13 +246,14 @@ if __name__ == "__main__":
 
 
 class SuppressedToolTests(unittest.TestCase):
-    """Tools withheld on this page only, while content is being authored.
+    """Withholding a tool on this page only.
 
-    battery_support's knowledge records are the R1 skeleton and now hold worse
-    content than the prompt does, so searching them would return thinner answers
-    from a second, diverging source of truth. Withheld in the playground and
-    nowhere else — production's TOOL_NAMES must not move for a tester's
-    convenience.
+    battery_support's search_knowledge was withheld while its flows lived in the
+    prompt and its records were the R1 skeleton: searching would have returned
+    thinner content than the model already had, from a second source of truth
+    quietly diverging from the first. The list is empty again now that the Doodle
+    flow lives only in a record — so what is worth asserting is the mechanism and
+    its blast radius, not which agent happened to be in it.
     """
 
     def setUp(self):
@@ -263,38 +264,42 @@ class SuppressedToolTests(unittest.TestCase):
         self.slice_for = _playground_tool_names
         self.registry = build_registry(today=date.today(), verification=VerificationStore())
         self.battery = importlib.import_module("emotorad_ai.agents.battery_support")
-        self.motor = importlib.import_module("emotorad_ai.agents.motor_support")
 
-    def test_battery_is_not_offered_the_knowledge_search(self):
-        for live in (True, False):
-            names = self.slice_for("battery_support", self.battery, self.registry, live)
-            self.assertNotIn("search_knowledge", names, "live=%s" % live)
+    def test_a_suppressed_tool_is_withheld_in_every_rider_mode(self):
+        from emotorad_ai import playground
 
-    def test_the_rest_of_batterys_slice_is_untouched(self):
-        names = self.slice_for("battery_support", self.battery, self.registry, False)
-        self.assertIn("lookup_warranty_record", names)
-        self.assertIn("create_support_ticket", names)
+        previous = playground.PLAYGROUND_SUPPRESSED_TOOLS
+        playground.PLAYGROUND_SUPPRESSED_TOOLS = {"battery_support": ("search_knowledge",)}
+        try:
+            for live in (True, False):
+                names = self.slice_for("battery_support", self.battery, self.registry, live)
+                self.assertNotIn("search_knowledge", names, "live=%s" % live)
+        finally:
+            playground.PLAYGROUND_SUPPRESSED_TOOLS = previous
 
-    def test_no_other_agent_is_affected(self):
-        names = self.slice_for("motor_support", self.motor, self.registry, True)
-        self.assertIn("search_knowledge", names)
+    def test_suppression_touches_only_the_named_agent(self):
+        import importlib
 
-    def test_production_tool_names_are_not_modified(self):
-        # The suppression is a view, not an edit. If it mutated TOOL_NAMES the
-        # deployed agent would lose its knowledge tool too.
+        from emotorad_ai import playground
+
+        previous = playground.PLAYGROUND_SUPPRESSED_TOOLS
+        playground.PLAYGROUND_SUPPRESSED_TOOLS = {"battery_support": ("search_knowledge",)}
+        try:
+            motor = importlib.import_module("emotorad_ai.agents.motor_support")
+            self.assertIn("search_knowledge", self.slice_for("motor_support", motor, self.registry, True))
+        finally:
+            playground.PLAYGROUND_SUPPRESSED_TOOLS = previous
+
+    def test_it_is_a_view_and_never_edits_production_tool_names(self):
+        # If it mutated TOOL_NAMES the deployed agent would lose the tool too.
         self.slice_for("battery_support", self.battery, self.registry, True)
         self.assertIn("search_knowledge", self.battery.TOOL_NAMES)
 
-    def test_the_model_is_never_shown_the_withheld_tool(self):
-        client = _Client([_text("ok")])
-        _run(
-            client,
-            self.registry,
-            self.slice_for("battery_support", self.battery, self.registry, True),
-            lambda: ToolContext(conversation_id=CHAT),
-        )
-        offered = [t["name"] for t in client.messages.calls[0]["tools"]]
-        self.assertNotIn("search_knowledge", offered)
+    def test_battery_can_search_again_now_that_a_flow_lives_in_a_record(self):
+        # The Doodle flow is only in knowledge/. Withholding the tool would make
+        # it unreachable, which is the failure this migration exists to avoid.
+        names = self.slice_for("battery_support", self.battery, self.registry, True)
+        self.assertIn("search_knowledge", names)
 
 
 class PromptPublishingTests(unittest.TestCase):

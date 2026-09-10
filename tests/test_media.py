@@ -181,7 +181,9 @@ class CatalogueTests(unittest.TestCase):
         # It lives under an underscore-prefixed directory. If the loader stopped
         # skipping those it would raise on every startup, since a catalogue has
         # none of the fields a record requires.
-        self.assertEqual(len(load_records()), 9)
+        ids = {record.id for record in load_records()}
+        self.assertNotIn("catalogue", ids)
+        self.assertTrue(ids, "records failed to load at all")
 
     def test_a_malformed_record_still_raises(self):
         # The skip is an explicit namespace, not a licence to drop bad files: a

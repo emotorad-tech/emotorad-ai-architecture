@@ -18,10 +18,17 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.12.1"
+PLAYGROUND_VERSION = "0.13.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.13.0",
+        "2026-09-10",
+        "First knowledge migration. The Doodle battery flow moved out of the prompt into a "
+        "record and battery can search again; records can now exclude a model as well as "
+        "require one, so a Doodle owner gets the Doodle flow and nobody else can see it.",
+    ),
     (
         "0.12.1",
         "2026-09-10",

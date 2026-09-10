@@ -1,0 +1,83 @@
+id: battery-doodle-wont-power-on
+title: Doodle will not power on — diagnosing from the charger LED
+topic: battery
+# Every phrasing that should reach this record, in the languages customers use.
+# Retrieval is scored on these, so a symptom missing here is a record the bot
+# cannot find however well it is written.
+symptoms: [wont_turn_on, no_power, dead, bike not turning on, cycle nahi chal rahi,
+           doodle not starting, no display, nothing happens, cycle on nahi ho rahi,
+           चालू नहीं, चार्ज नहीं]
+# Hard filter, and the whole reason this is a separate record: a Doodle pack has
+# no SOC button and no on/off switch, so the standard flow's first two steps do
+# not exist on it. Matched as a substring, which is what makes it work against
+# the OMS product names — "Doodle Black", "Doodle V4 Indicator Edition".
+applies_to: {product_name: doodle}
+source: AFS battery diagnostic — Doodle V1/V2/V3/V4/Pro
+media:
+  - id: Battery_OnOff_switch
+    kind: image
+    caption: The battery On/Off switch — set it to ON before charging
+steps:
+  - >-
+    These packs output directly when the key is turned. There is no SOC button and no
+    on/off switch, so there is no SOC check and no revival process here: everything is
+    read from the charger LED.
+  - >-
+    Ask the customer to connect the charger and report the LED — and to send a photo of
+    it in the same message. The colour decides everything that follows, and a photo
+    costs them five seconds. Ask for both together; asking for the picture afterwards
+    means they have already put the phone down.
+  - >-
+    NO LIGHT — the charger is the likely fault, not the battery. Rule out the socket and
+    the connection first. If both are sound and the LED still shows nothing, say the
+    charger looks to be at fault; it is better news than they expect. Ask whether they
+    can borrow a charger from anyone with an EMotorad e-cycle: if the battery then
+    charges, the charger is confirmed; if it still does nothing, the fault is the
+    battery. If they cannot borrow one, proceed on the charger being at fault — warranty
+    and replacement for the charger, not the battery.
+  - >-
+    RED — the battery is charging normally and is not the fault. Note that this means the
+    opposite of red on a non-Doodle, where it signals a drained pack. Say so and move on
+    to the other parts: display, motor, controller, cables.
+  - >-
+    GREEN — ambiguous. The battery is either dead or simply fully charged, and the two
+    look identical on the charger. Ask two questions and read them together — when they
+    last charged it, and whether the green came on immediately without showing red first.
+    Ask for a short video of the plug-in for the second: a red phase can be brief, and
+    someone who glanced away will tell you in good faith there was not one.
+  - >-
+    Answer the first question before the second. How long since the last charge decides
+    the branch; the LED behaviour only means anything once you are already past 60 days.
+    Instant green on a battery charged last week is not evidence of a dead pack.
+  - >-
+    More than 60 days ago AND green immediately with no red phase — dead battery. Ask for
+    a video of the charger connected showing green from the moment it is plugged in, then
+    warranty and replacement.
+  - >-
+    More than 60 days ago BUT red showed first — not a dead-battery case. Go to the
+    multimeter check.
+  - >-
+    Within the last 60 days, either way — multimeter check. Do not conclude the battery
+    is dead, and do not conclude the fault is elsewhere. A recent charge is a good signal,
+    not a diagnosis.
+  - >-
+    They cannot remember — multimeter check.
+  - >-
+    MULTIMETER CHECK, and take this detour before blaming another part. A reading is the
+    only thing that separates a healthy battery from a dead one here and it takes a
+    minute; sending someone to investigate their display when the battery was the problem
+    costs them a second trip. Ask whether they have a multimeter or can borrow one. If
+    they do, walk them through a reading across the terminals and have them report it
+    back — that settles it. If they do not, say plainly that you do not know: it could be
+    the battery or another part, it cannot be settled over chat without a reading, and a
+    dealer or service centre can test it — the same check, done by someone who has the
+    meter. Raise a ticket with everything gathered so they do not start again.
+  - >-
+    Never tell a customer the battery is fine and the fault is elsewhere on the strength
+    of the 60-day answer alone. Without a reading you are guessing, and a confident wrong
+    answer sends them to replace a working part.
+escalate_when: >-
+  Green LED with no charge in 60+ days and no red phase, or a multimeter reading
+  confirming a dead pack — warranty and replacement. No multimeter available, whatever
+  the 60-day answer — dealer visit with a ticket, and say it could be the battery or
+  another part.

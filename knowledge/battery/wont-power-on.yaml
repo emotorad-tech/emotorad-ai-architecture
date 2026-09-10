@@ -3,6 +3,10 @@ title: Bike will not power on
 topic: battery
 symptoms: [wont_turn_on, no_power, dead, display blank, nothing happens]
 applies_to: {}
+# A Doodle has no SOC button and no on/off switch, so the first two steps here do
+# not exist on one — and red on its charger means the opposite of red here. See
+# battery-doodle-wont-power-on.
+excludes: {product_name: doodle}
 source: Battery care manual §4.2
 media:
   - url: https://cdn.emotorad.test/kb/battery-seating.png

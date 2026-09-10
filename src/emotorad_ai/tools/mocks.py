@@ -320,7 +320,11 @@ def build_registry(
     order_system: Optional["MockOrderSystem"] = None,
     diagnostics_available: bool = False,
     oms_available: bool = True,
-    knowledge_bike: Optional[Dict[str, Any]] = None,
+    # The bike retrieval filters against — a dict, or a callable returning one.
+    # `applies_to` is a hard filter, so a record scoped to a model is
+    # unretrievable while this is empty. Callable for the same reason
+    # owned_bikes is: identity arrives mid-turn.
+    knowledge_bike: Optional[Any] = None,
     today: Optional[date] = None,
     # Where registered bikes come from. Defaults to the fixtures; the playground
     # passes a reader backed by the live OMS. The seam is deliberately a plain
@@ -659,7 +663,8 @@ def build_registry(
         # a throttle is unretrievable for one without. The model cannot widen this
         # by phrasing the query differently — the filter is applied here, not by
         # the search terms.
-        passages = kb.search(query, topic=topic, bike=knowledge_bike or {})
+        bike = knowledge_bike() if callable(knowledge_bike) else knowledge_bike
+        passages = kb.search(query, topic=topic, bike=bike or {})
         if not passages:
             # An explicit empty answer, not a shrug. Without this the model fills
             # the silence from its own training data, which is exactly the

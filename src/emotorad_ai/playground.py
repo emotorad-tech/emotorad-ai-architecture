@@ -957,9 +957,12 @@ def _live_account_finder(client: Any) -> Any:
 # This comes out when the settled sections are lifted into records; the guide
 # photos on Cloudinary reach customers only through a retrieved record, so
 # nothing renders until it does. Deliberate, not a regression.
-PLAYGROUND_SUPPRESSED_TOOLS: Dict[str, tuple] = {
-    "battery_support": (SEARCH_KNOWLEDGE,),
-}
+# Empty again as of the first knowledge migration. search_knowledge was withheld
+# from battery while its flows lived in the prompt and the records were the R1
+# skeleton — searching would have returned thinner content than the model already
+# had, from a second source of truth quietly diverging from the first. The Doodle
+# flow now lives *only* in a record, so the tool has to be reachable.
+PLAYGROUND_SUPPRESSED_TOOLS: Dict[str, tuple] = {}
 
 
 def _playground_tool_names(
@@ -1435,6 +1438,7 @@ def main() -> None:
             sent_media=sent_media,
             error_codes=load_error_codes(),
             owned_bikes=lambda: _live_bikes(agent_name, verification, chat["chat_id"]),
+            knowledge_bike=lambda: (_live_bikes(agent_name, verification, chat["chat_id"]) or [{}])[0],
         )
         verified_phone = verification.verified_phone(chat["chat_id"])
         resolved = _resolved_for_live(agent_name, verified_phone, registry)
@@ -1448,6 +1452,7 @@ def main() -> None:
             sent_media=sent_media,
             error_codes=load_error_codes(),
             owned_bikes=resolved.bikes,
+            knowledge_bike=(resolved.bikes or [{}])[0],
         )
 
     # A radio rather than st.segmented_control, which looks tidier but is not

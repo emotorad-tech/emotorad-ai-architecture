@@ -70,6 +70,12 @@ class KnowledgeRecord:
     steps: Sequence[str]
     source: str = ""
     applies_to: Mapping[str, str] = field(default_factory=dict)
+    # The negative of applies_to, and it needs to exist separately: a record
+    # for every model *except* one cannot be written as a positive match
+    # without listing the whole catalogue and revising it at each launch.
+    # Without it a Doodle owner is handed both the Doodle flow and the
+    # standard one, which disagree about what a red charger LED means.
+    excludes: Mapping[str, str] = field(default_factory=dict)
     media: Sequence[Mapping[str, str]] = field(default_factory=tuple)
     escalate_when: str = ""
     superseded_by: Optional[str] = None
@@ -200,6 +206,7 @@ def load_records(directory: Optional[Path] = None) -> List[KnowledgeRecord]:
                 steps=tuple(raw["steps"]),
                 source=raw.get("source", ""),
                 applies_to=dict(raw.get("applies_to") or {}),
+                excludes=dict(raw.get("excludes") or {}),
                 media=tuple(dict(item) for item in (raw.get("media") or [])),
                 escalate_when=raw.get("escalate_when", ""),
                 superseded_by=raw.get("superseded_by"),
@@ -263,6 +270,18 @@ class KnowledgeBase:
                 # part their bike does not have.
                 return False
             if str(expected).lower() not in str(actual).lower():
+                return False
+        for key, unwanted in record.excludes.items():
+            actual = bike.get(key)
+            if actual is None:
+                # Unknown bike: the exclusion does not fire. This is the opposite
+                # of applies_to on purpose. A positive filter names a part the
+                # record depends on, so it must be confirmed present. An
+                # exclusion carves one model out of the default flow — applying
+                # it unconfirmed would leave an anonymous customer with no
+                # record at all, which is a worse answer than the general one.
+                continue
+            if str(unwanted).lower() in str(actual).lower():
                 return False
         return True
 

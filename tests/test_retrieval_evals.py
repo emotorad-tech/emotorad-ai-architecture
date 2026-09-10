@@ -30,6 +30,13 @@ GOLDEN = [
     ("battery draining quickly", "battery-range-dropped", "battery", ANY_BIKE),
     ("bike is not turning on at all, display is blank", "battery-wont-power-on", "battery", ANY_BIKE),
     ("no power, nothing happens when I press the button", "battery-wont-power-on", "battery", ANY_BIKE),
+    # The Doodle flow is a separate record because those packs have no SOC button
+    # and no on/off switch, and red on their charger means the opposite of red on
+    # everything else. Each query is scoped to a Doodle: on any other bike these
+    # must reach the standard record instead, which the pairing below asserts.
+    ("bike will not turn on", "battery-doodle-wont-power-on", "battery", {"product_name": "Doodle Black"}),
+    ("cycle nahi chal rahi", "battery-doodle-wont-power-on", "battery", {"product_name": "Doodle V4 Indicator Edition"}),
+    ("doodle not starting, no display", "battery-doodle-wont-power-on", "battery", {"product_name": "Doodle Pro"}),
     ("charging is taking too long", "battery-charging-slowly", "battery", ANY_BIKE),
     ("slow charging problem", "battery-charging-slowly", "battery", ANY_BIKE),
     ("I am not using the bike for three months, what to do", "battery-storage", "battery", ANY_BIKE),
@@ -221,3 +228,39 @@ class CorpusHealthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelScopedRecordTests(unittest.TestCase):
+    """One flow per bike, never both.
+
+    The Doodle and standard power-on records disagree about what a red charger
+    LED means — drained on one, healthy on the other. Handing a customer both is
+    worse than handing them neither, so the split is asserted rather than assumed.
+    """
+
+    def setUp(self):
+        from emotorad_ai.knowledge import BatteryKnowledgeBase
+
+        self.kb = BatteryKnowledgeBase()
+
+    def _ids(self, bike):
+        return [p.record.id for p in self.kb.search("bike will not turn on no power", bike=bike)]
+
+    def test_a_doodle_gets_only_the_doodle_flow(self):
+        for name in ("Doodle Black", "Doodle V4 Indicator Edition", "Doodle Pro", "Doodle V1"):
+            ids = self._ids({"product_name": name})
+            self.assertIn("battery-doodle-wont-power-on", ids, name)
+            self.assertNotIn("battery-wont-power-on", ids, name)
+
+    def test_everything_else_gets_only_the_standard_flow(self):
+        for name in ("X2 Furious Red V2", "STX 27.5 inch", "T-REX + V3", "EMX Plus"):
+            ids = self._ids({"product_name": name})
+            self.assertIn("battery-wont-power-on", ids, name)
+            self.assertNotIn("battery-doodle-wont-power-on", ids, name)
+
+    def test_an_unknown_bike_still_gets_the_general_flow(self):
+        # An exclusion carves one model out of the default; applying it
+        # unconfirmed would leave an anonymous customer with no record at all.
+        ids = self._ids({})
+        self.assertIn("battery-wont-power-on", ids)
+        self.assertNotIn("battery-doodle-wont-power-on", ids)
