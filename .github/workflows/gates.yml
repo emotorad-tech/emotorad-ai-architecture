@@ -1,0 +1,54 @@
+# PR gates: PR-body completeness and the full unit test suite on every pull request. Until now the
+# suite ran only as the manual deploy gate (deploy-staging.yml); a broken main could sit unnoticed.
+name: gates
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  pr-body:
+    name: PR body is complete
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - name: Check template was filled in
+        shell: python
+        run: |
+          import os, re, sys
+          body = os.environ.get("PR_BODY") or ""
+          problems = []
+          if not body.strip():
+              problems.append("PR body is empty; use the template")
+          for ph in ("<command run>", "<last lines of output>"):
+              if ph in body:
+                  problems.append(f"placeholder still present: {ph}")
+          if re.search(r"- \[x\] Tier-1", body, re.I):
+              for field in ("How to revert", "Whom to tell"):
+                  if not re.search(rf"{field}[^:\n]*:\s*(\S.*)", body):
+                      problems.append(f"Tier-1 ticked but '{field}' is empty")
+          if not re.search(r"- \[x\] Tier-[12]", body, re.I):
+              problems.append("tick Tier-1 or Tier-2")
+          if problems:
+              print("PR body gate failed:")
+              for p in problems:
+                  print(" -", p)
+              sys.exit(1)
+          print("PR body gate passed")
+
+  tests:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Compile everything
+        run: python -m compileall -q src tests
+      - name: Test
+        run: python -m unittest discover -s tests -t . 2>&1 | tail -20; test "${PIPESTATUS[0]}" -eq 0
