@@ -1,0 +1,12 @@
+# Tier-1 paths need a code-owner review (enable "require review from code owners" on main).
+src/emotorad_ai/guardrails.py     @sachin-builder
+src/emotorad_ai/runtime.py        @sachin-builder
+src/emotorad_ai/tools/            @sachin-builder
+src/emotorad_ai/llm.py            @sachin-builder
+src/emotorad_ai/disclosure.py     @sachin-builder
+src/emotorad_ai/observability.py  @sachin-builder
+knowledge/                        @sachin-builder
+tests/test_retrieval_evals.py     @sachin-builder
+.github/                          @sachin-builder
+CLAUDE.md                         @sachin-builder
+.claude/                          @sachin-builder
