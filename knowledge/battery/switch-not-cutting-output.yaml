@@ -1,0 +1,62 @@
+id: battery-switch-not-cutting-output
+title: The on/off switch does not cut output — the bike runs with it switched OFF
+topic: battery
+# The inverse of battery-onoff-switch-dead, and they are easy to confuse because
+# both are "the switch is not working". There the switch will not turn the bike
+# ON and nothing runs. Here everything runs and the switch will not turn it OFF.
+# Opposite symptoms, opposite evidence, and only this one is a confirmed
+# replacement.
+symptoms: [switch does not turn off, battery does not switch off, still works when off,
+           bike runs with battery off, switch not cutting power, output even when off,
+           battery band nahi ho raha, off karne par bhi chal raha hai,
+           बंद नहीं हो रहा]
+applies_to: {}
+# A Doodle has no on/off switch, so this fault cannot occur on one.
+excludes: {product_name: doodle}
+source: AFS battery malfunction — on/off switch does not isolate
+media:
+  - id: Battery_OnOff_switch
+    kind: image
+    caption: The battery On/Off switch — the control that should cut output
+steps:
+  - >-
+    Confirm the shape of it before anything else, because the wording overlaps with the
+    opposite fault. Here the bike works, the battery works, and the switch fails to cut
+    power: turned to OFF, the display still lights and the bike still runs. If instead
+    nothing powers on at all, this is not the record — that is battery-onoff-switch-dead.
+  - >-
+    ASK FOR ONE VIDEO, IN A SINGLE CONTINUOUS TAKE, and give each part its reason rather
+    than listing five chores. The whole claim is that the switch does not isolate the
+    pack, and only an unbroken take shows it: (1) the battery fitted to the bike, with the
+    switch visible and in the ON position; (2) the bike switched on, display lit, so the
+    starting state is not in doubt; (3) the switch moved to OFF, on camera, so there is no
+    question it was actually operated; (4) the display and the bike immediately after,
+    still powered — this is the fault; (5) the switch held at OFF for a few seconds more,
+    because a display that fades after a moment is normal capacitor drain and not this
+    fault at all.
+  - >-
+    Ask for the five shots. Do not put a question inside the list — a customer who answers
+    in words has not sent the one take the claim rests on.
+  - >-
+    TELL THEM NOT TO LEAVE IT CHARGING UNATTENDED while the case is open, and not to
+    store it charging overnight. A pack that cannot be switched off cannot be isolated,
+    which is the one safeguard a customer has if anything else goes wrong. This is a
+    precaution and not an alarm — say it plainly, once, without dramatising it.
+  - >-
+    CONFIRMED ON THE VIDEO — the switch has malfunctioned and replacement is the remedy.
+    Repair is not offered for this one. Say so plainly rather than leaving it open, and go
+    to battery-warranty-replacement for coverage and the claim.
+  - >-
+    This is a malfunction, not damage, unless the photographs or the customer say the
+    switch was knocked or forced. Do not let the word "not working" drift into "damaged" —
+    they are opposite answers on who pays.
+  - >-
+    The display fading a second or two after the switch goes to OFF is normal and is not
+    this fault. If that is what the video shows, say so: it is working correctly, and
+    telling them otherwise starts a replacement that is not needed.
+escalate_when: >-
+  Video shows the bike still powered with the switch at OFF — replacement, via
+  battery-warranty-replacement, free inside the warranty unless the switch was knocked or
+  forced. Video shows the power dropping after a moment — normal, no fault, say so. Video
+  does not show the switch actually being operated — ask again; three asks, then a service
+  centre with what has been gathered.

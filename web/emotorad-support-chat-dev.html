@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>EMotorad Support Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<!--
+  EMotorad aftersales chat — front-end prototype
+  =================================================
+  What this is:
+    A static, framework-free HTML/CSS/JS build of the mobile chat UI mocked up
+    in the design canvas. It reproduces the visual design (EMotorad brand
+    colors/typeface, pulled from emotorad.com) and the interaction pattern:
+    AI greeting -> free-text issue -> clarifying quick-replies -> evidence
+    request -> attach video -> ticket confirmation -> free-text fallback.
+
+  What this is NOT:
+    It does not call any AI backend. The conversation is a hardcoded SCRIPT
+    (see below) that advances on a timer/click, exactly mirroring the sample
+    transcript from the prompt-tuning playground (battery on/off-switch case).
+    It's meant as a pixel- and interaction-accurate starting point for real
+    integration, not a working support bot.
+
+  Wiring it to the real agent:
+    Search this file for "INTEGRATION POINT" — those are the places that
+    currently fake a response and need to call the real backend instead
+    (send the user's message/attachment to your agent API, stream/await the
+    reply, and call renderAiTurn(...) with what comes back instead of reading
+    from SCRIPT). The state machine (pointer/typing/filled/extra), rendering,
+    and all CSS can stay as-is; only the "what happens next" logic needs to
+    change from "read the next scripted step" to "ask the real agent".
+-->
+
+<style>
+  :root {
+    --ink: #171717;
+    --accent: #FF6B2B;
+    --bubble-ai-bg: #F1F1F1;
+    --muted: #666666;
+    --border: #EFEFEF;
+    --card-border: #EAEAEA;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: #E9E9E9; /* page backdrop behind the phone frame; remove when embedding in a real shell */
+    font-family: 'Figtree', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  a { color: var(--accent); }
+  a:hover { color: #E85A1E; }
+
+  /* Centers the phone-sized frame on desktop; on an actual phone this frame
+     should just be 100vw/100vh with no outer padding. */
+  .frame-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  #app {
+    width: 390px;
+    height: 844px;
+    max-height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: #FFFFFF;
+    position: relative;
+    border-radius: 28px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.18);
+  }
+
+  /* Header */
+  .header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: #FFFFFF;
+  }
+  .avatar-badge {
+    width: 36px; height: 36px; border-radius: 999px;
+    background: var(--ink);
+    display: flex; align-items: center; justify-content: center;
+    flex: 0 0 auto;
+  }
+  .avatar-badge.sm { width: 24px; height: 24px; }
+  .header-title { font-weight: 700; font-size: 15px; color: var(--ink); letter-spacing: -0.2px; }
+  .header-sub { display: flex; align-items: center; gap: 5px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 999px; background: #22C55E; display: inline-block; }
+  .header-sub span.label { font-size: 12px; color: var(--muted); }
+  .header-menu { margin-left: auto; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; }
+
+  .context-pill-row { flex: 0 0 auto; display: flex; justify-content: center; padding: 10px 0 2px 0; }
+  .context-pill {
+    font-size: 11.5px; font-weight: 600; color: var(--muted);
+    background: #F5F5F5; border-radius: 999px; padding: 5px 12px;
+  }
+
+  /* Message list */
+  .chat-scroll {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 14px 16px 10px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 82%; }
+  .msg-row.ai { align-self: flex-start; }
+  .msg-row.user { align-self: flex-end; }
+
+  .bubble-text {
+    padding: 11px 14px;
+    font-size: 14.5px;
+    line-height: 1.45;
+    white-space: pre-line;
+  }
+  .bubble-ai { background: var(--bubble-ai-bg); color: var(--ink); border-radius: 4px 18px 18px 18px; }
+  .bubble-user { background: var(--ink); color: #FFFFFF; border-radius: 18px 4px 18px 18px; }
+
+  .bubble-list { background: var(--bubble-ai-bg); color: var(--ink); border-radius: 4px 18px 18px 18px; padding: 12px 14px; font-size: 14.5px; line-height: 1.45; }
+  .bubble-list .intro { white-space: pre-line; margin-bottom: 8px; }
+  .bubble-list .items { display: flex; flex-direction: column; gap: 6px; padding-left: 2px; }
+  .bubble-list .items .row { display: flex; gap: 8px; align-items: flex-start; }
+  .bubble-list .items .dot { width: 5px; height: 5px; border-radius: 999px; background: var(--ink); margin-top: 7px; flex: 0 0 auto; display: inline-block; }
+  .bubble-list .outro { white-space: pre-line; margin-top: 8px; color: #555555; font-size: 13px; }
+
+  .ticket-card {
+    background: #FFFFFF; border: 1px solid var(--card-border); border-radius: 16px; padding: 14px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .ticket-check { width: 26px; height: 26px; border-radius: 999px; background: var(--accent); display: flex; align-items: center; justify-content: center; flex: 0 0 auto; margin-top: 1px; }
+  .ticket-title { font-weight: 700; font-size: 14.5px; color: var(--ink); }
+  .ticket-body { font-size: 13.5px; line-height: 1.45; color: #555555; margin-top: 4px; }
+
+  .video-card { width: 190px; border-radius: 16px; overflow: hidden; background: var(--ink); }
+  .video-thumb { height: 104px; display: flex; align-items: center; justify-content: center; background: #232323; }
+  .video-play { width: 38px; height: 38px; border-radius: 999px; background: var(--accent); display: flex; align-items: center; justify-content: center; }
+  .video-meta { padding: 9px 11px; }
+  .video-filename { font-size: 12.5px; font-weight: 600; color: #FFFFFF; }
+  .video-duration { font-size: 11px; color: #B5B5B5; margin-top: 1px; }
+
+  .typing-row { display: flex; align-items: flex-end; gap: 8px; align-self: flex-start; }
+  .typing-bubble { background: var(--bubble-ai-bg); border-radius: 4px 18px 18px 18px; padding: 13px 16px; display: flex; gap: 4px; align-items: center; }
+  .typing-dot { width: 6px; height: 6px; border-radius: 999px; background: #9A9A9A; display: inline-block; animation: dcBounce 1.1s infinite ease-in-out; }
+  .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes dcBounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.45; }
+    40% { transform: translateY(-4px); opacity: 1; }
+  }
+
+  /* Footer variants */
+  .footer-suggestion { flex: 0 0 auto; padding: 0 16px 10px 16px; }
+  .chip {
+    display: inline-flex; align-items: center; min-height: 38px;
+    border: 1.5px solid var(--ink); border-radius: 999px; padding: 8px 15px;
+    font-size: 13px; font-weight: 600; color: var(--ink); background: #FFFFFF;
+    cursor: pointer; user-select: none;
+  }
+  .chip:active { background: #F5F5F5; }
+
+  .footer-chips { flex: 0 0 auto; padding: 0 16px 12px 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip.lg { min-height: 40px; padding: 9px 16px; font-size: 13.5px; }
+
+  .footer-attach { flex: 0 0 auto; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)) 16px; border-top: 1px solid var(--border); }
+  .attach-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px;
+    border: 1.5px solid var(--accent); border-radius: 999px; padding: 12px;
+    font-size: 14px; font-weight: 700; color: var(--ink);
+    cursor: pointer; user-select: none;
+  }
+  .attach-btn:active { background: #FFF7F2; }
+
+  .footer-composer {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) 12px;
+    border-top: 1px solid var(--border); background: #FFFFFF;
+  }
+  .icon-btn { width: 44px; height: 44px; border-radius: 999px; background: #F1F1F1; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+  .composer-input {
+    flex: 1 1 auto; min-width: 0; height: 44px; background: #F5F5F5; border: none; border-radius: 999px;
+    padding: 0 16px; font-size: 14.5px; font-family: inherit; color: var(--ink); outline: none;
+  }
+  .composer-input::placeholder { color: #9A9A9A; }
+  .send-btn { width: 44px; height: 44px; border-radius: 999px; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; cursor: pointer; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="frame-wrap">
+  <div id="app">
+
+    <div class="header">
+      <div class="avatar-badge">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M13 2L4 14H11L10 22L20 9H12L13 2Z" fill="var(--accent)"/></svg>
+      </div>
+      <div>
+        <div class="header-title">EMotorad Assistant</div>
+        <div class="header-sub"><span class="status-dot"></span><span class="label">AI &middot; Online</span></div>
+      </div>
+      <div class="header-menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="5" cy="12" r="1.6" fill="#171717"/><circle cx="12" cy="12" r="1.6" fill="#171717"/><circle cx="19" cy="12" r="1.6" fill="#171717"/></svg>
+      </div>
+    </div>
+
+    <div class="context-pill-row">
+      <div class="context-pill">Verified &middot; Ananya &middot; EMX Plus</div>
+    </div>
+
+    <div class="chat-scroll" id="chatScroll"></div>
+
+    <div id="footer"></div>
+
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   SCRIPT — the hardcoded sample conversation.
+   INTEGRATION POINT: replace this with real agent responses.
+   Each "ai" turn is something the assistant says; each "user"
+   turn is a point where the UI waits for the visitor to act
+   (free text, a quick-reply chip, or an attachment).
+   ============================================================ */
+var SCRIPT = [
+  { who: "ai", kind: "text", text: "Hi! I'm an AI assistant here to help with your EMX Plus.\n\nWhat's going on with the bike?" },
+  { who: "user", kind: "awaitFree", suggestion: "My battery switch is not working" },
+  { who: "ai", kind: "text", text: "Got it. I need to understand which way the switch is failing — two different things can happen.\n\nDoes the bike power on at all right now, or is everything dark?" },
+  { who: "user", kind: "awaitChip", options: ["Stays on, won't switch off", "Nothing turns on at all"] },
+  { who: "ai", kind: "list",
+    intro: "I need to see this in action. Can you send one continuous video showing:",
+    items: [
+      "The battery fitted to the bike, switch visible, in the ON position",
+      "The bike switched on, display lit",
+      "The switch moved to OFF — on camera",
+      "The display still powered right after — that's the fault",
+      "The switch held at OFF for a few seconds more"
+    ],
+    outro: "One unbroken take, so I can see it actually happening." },
+  { who: "user", kind: "awaitAttach", filename: "battery_switch.mp4", duration: "0:34" },
+  { who: "ai", kind: "ticket", id: "EM-00001",
+    body: "Our team will reach out within 24 hours on a working day to arrange the replacement — a service centre visit near you, or a battery collection, whichever is easier." },
+  { who: "ai", kind: "text", text: "Is there anything else I can help with right now?" }
+];
+
+/* ============================================================
+   STATE
+   ============================================================ */
+var state = {
+  pointer: 0,      // index into SCRIPT of the next turn to reveal / wait on
+  typing: false,   // show the animated typing bubble
+  draft: "",       // current composer text
+  filled: {},      // pointer index -> what the user actually sent (string, or {type:'attachment',...})
+  extra: []        // messages appended after SCRIPT is exhausted ({isUser, text})
+};
+var busy = false; // re-entrancy guard so a rapid double-tap can't double-advance the script
+
+/* ============================================================
+   AVATAR / ICONS (small inline helpers, reused in a few places)
+   ============================================================ */
+function aiAvatar(size) {
+  return '<div class="avatar-badge' + (size === 'sm' ? ' sm' : '') + '">' +
+    '<svg width="' + (size === 'sm' ? 12 : 18) + '" height="' + (size === 'sm' ? 12 : 18) + '" viewBox="0 0 24 24" fill="none">' +
+    '<path d="M13 2L4 14H11L10 22L20 9H12L13 2Z" fill="var(--accent)"/></svg></div>';
+}
+
+function esc(s) {
+  var d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
+
+/* ============================================================
+   RENDER — rebuilds the message list + footer from `state`.
+   Called after every state change. Kept simple (full re-render)
+   since this chat is short; swap for incremental DOM updates if
+   the real integration needs to handle long conversations.
+   ============================================================ */
+function render() {
+  var scroll = document.getElementById("chatScroll");
+  var html = "";
+
+  for (var i = 0; i < state.pointer && i < SCRIPT.length; i++) {
+    var turn = SCRIPT[i];
+    if (turn.who === "ai") {
+      html += renderAiTurnHtml(turn);
+    } else if (state.filled[i] !== undefined) {
+      html += renderUserTurnHtml(state.filled[i]);
+    }
+  }
+  state.extra.forEach(function (m) {
+    html += m.isUser ? renderUserTurnHtml(m.text) : renderAiTurnHtml({ kind: "text", text: m.text });
+  });
+
+  if (state.typing) {
+    html += '<div class="typing-row">' + aiAvatar("sm") +
+      '<div class="typing-bubble"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>';
+  }
+
+  scroll.innerHTML = html;
+  scroll.scrollTop = scroll.scrollHeight;
+
+  renderFooter();
+}
+
+function renderAiTurnHtml(turn) {
+  if (turn.kind === "text") {
+    return '<div class="msg-row ai">' + aiAvatar("sm") + '<div class="bubble-text bubble-ai">' + esc(turn.text) + "</div></div>";
+  }
+  if (turn.kind === "list") {
+    var items = turn.items.map(function (t) {
+      return '<div class="row"><span class="dot"></span><span>' + esc(t) + "</span></div>";
+    }).join("");
+    return '<div class="msg-row ai">' + aiAvatar("sm") +
+      '<div class="bubble-list"><div class="intro">' + esc(turn.intro) + '</div>' +
+      '<div class="items">' + items + '</div>' +
+      '<div class="outro">' + esc(turn.outro) + "</div></div></div>";
+  }
+  if (turn.kind === "ticket") {
+    return '<div class="msg-row ai">' + aiAvatar("sm") +
+      '<div class="ticket-card"><div class="ticket-check">' +
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg></div>' +
+      '<div><div class="ticket-title">Ticket ' + esc(turn.id) + ' created</div><div class="ticket-body">' + esc(turn.body) + "</div></div></div></div>";
+  }
+  return "";
+}
+
+function renderUserTurnHtml(value) {
+  if (value && typeof value === "object" && value.type === "attachment") {
+    return '<div class="msg-row user"><div class="video-card"><div class="video-thumb"><div class="video-play">' +
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M8 5v14l11-7z"/></svg></div></div>' +
+      '<div class="video-meta"><div class="video-filename">' + esc(value.filename) + '</div><div class="video-duration">' + esc(value.duration) + ' &middot; video</div></div></div></div>';
+  }
+  return '<div class="msg-row user"><div class="bubble-text bubble-user">' + esc(value) + "</div></div>";
+}
+
+function renderFooter() {
+  var footer = document.getElementById("footer");
+  var pending = state.pointer < SCRIPT.length ? SCRIPT[state.pointer] : null;
+  var mode = "free";
+  if (state.typing) mode = "none";
+  else if (pending) {
+    if (pending.who === "ai") mode = "none";
+    else if (pending.kind === "awaitChip") mode = "chips";
+    else if (pending.kind === "awaitAttach") mode = "attach";
+  }
+
+  if (mode === "none") { footer.innerHTML = ""; return; }
+
+  if (mode === "chips") {
+    var chipsHtml = pending.options.map(function (opt, idx) {
+      return '<div class="chip lg" data-chip-index="' + idx + '">' + esc(opt) + "</div>";
+    }).join("");
+    footer.innerHTML = '<div class="footer-chips">' + chipsHtml + "</div>";
+    footer.querySelectorAll("[data-chip-index]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        handleUserAction(state.pointer, pending.options[Number(el.getAttribute("data-chip-index"))]);
+      });
+    });
+    return;
+  }
+
+  if (mode === "attach") {
+    footer.innerHTML = '<div class="footer-attach"><div class="attach-btn" id="attachBtn">' +
+      '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 014.95 4.95l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.48"/></svg>' +
+      "Attach the video</div></div>";
+    document.getElementById("attachBtn").addEventListener("click", function () {
+      // INTEGRATION POINT: this is where a real build would open the
+      // device's file/camera picker and upload the result, then call
+      // handleUserAction with the real filename/duration/URL.
+      handleUserAction(state.pointer, { type: "attachment", filename: pending.filename, duration: pending.duration });
+    });
+    return;
+  }
+
+  // mode === "free"
+  var showSuggestion = !!(pending && pending.kind === "awaitFree" && pending.suggestion) && state.draft.trim().length === 0;
+  var sendBg = state.draft.trim().length > 0 ? "var(--accent)" : "#D9D9D9";
+
+  var html = "";
+  if (showSuggestion) {
+    html += '<div class="footer-suggestion"><div class="chip" id="suggestionChip">' + esc(pending.suggestion) + "</div></div>";
+  }
+  html += '<div class="footer-composer">' +
+    '<div class="icon-btn"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>' +
+    '<input type="text" class="composer-input" id="draftInput" placeholder="Type your message..." value="' + esc(state.draft) + '" />' +
+    '<div class="send-btn" id="sendBtn" style="background:' + sendBg + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></div>' +
+    "</div>";
+  footer.innerHTML = html;
+
+  if (showSuggestion) {
+    document.getElementById("suggestionChip").addEventListener("click", function () {
+      handleUserAction(state.pointer, pending.suggestion);
+    });
+  }
+  var input = document.getElementById("draftInput");
+  input.addEventListener("input", function (e) { state.draft = e.target.value; renderFooter(); });
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") sendFree(); });
+  document.getElementById("sendBtn").addEventListener("click", sendFree);
+}
+
+/* ============================================================
+   STATE TRANSITIONS
+   ============================================================ */
+function revealFrom(i) {
+  if (i >= SCRIPT.length) {
+    busy = false;
+    state.pointer = i;
+    render();
+    return;
+  }
+  var turn = SCRIPT[i];
+  if (turn.who === "ai") {
+    state.typing = true;
+    render();
+    var delay = i === 0 ? 350 : 750;
+    setTimeout(function () {
+      state.typing = false;
+      state.pointer = i + 1;
+      render();
+      revealFrom(i + 1);
+    }, delay);
+  } else {
+    busy = false;
+    state.pointer = i;
+    render();
+  }
+}
+
+function handleUserAction(i, value) {
+  if (busy) return;
+  busy = true;
+  state.filled[i] = value;
+  state.draft = "";
+  state.pointer = i + 1;
+  render();
+  revealFrom(i + 1);
+}
+
+function sendFree() {
+  if (busy) return;
+  var text = (state.draft || "").trim();
+  if (!text) return;
+
+  if (state.pointer < SCRIPT.length && SCRIPT[state.pointer].who === "user" && SCRIPT[state.pointer].kind === "awaitFree") {
+    // INTEGRATION POINT: in the real build, this is where the visitor's
+    // first free-typed message (their actual issue) should be sent to the
+    // agent backend, and the next "ai" turn below should be whatever the
+    // agent actually says back — not the next hardcoded SCRIPT entry.
+    handleUserAction(state.pointer, text);
+    return;
+  }
+
+  if (state.pointer >= SCRIPT.length) {
+    busy = true;
+    state.extra.push({ isUser: true, text: text });
+    state.draft = "";
+    state.typing = true;
+    render();
+    setTimeout(function () {
+      busy = false;
+      state.typing = false;
+      // INTEGRATION POINT: generic fallback reply — replace with a real
+      // agent call once the conversation is backend-connected.
+      state.extra.push({ isUser: false, text: "Thanks — I've noted that down. The team will follow up if anything further is needed." });
+      render();
+    }, 700);
+  }
+}
+
+/* Kick off the conversation */
+revealFrom(0);
+</script>
+
+</body>
+</html>

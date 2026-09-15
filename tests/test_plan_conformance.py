@@ -5,6 +5,7 @@ Each test here corresponds to something `docs/Emotorad_Platform_Build_Plan.md` o
 quietly stopped matching it. They exist so the drift cannot happen again silently.
 """
 
+import os
 import unittest
 from datetime import date
 
@@ -15,13 +16,18 @@ from emotorad_ai.identity import IdentityResolver
 from emotorad_ai.llm import ScriptedClaude, call_tool, say
 from emotorad_ai.observability import EventLog
 from emotorad_ai.runtime import Runtime
-from emotorad_ai.tools.mocks import SEARCH_KNOWLEDGE, build_registry
+from emotorad_ai import media
+from emotorad_ai.media import load_catalogue
+from emotorad_ai.tools.mocks import SEARCH_KNOWLEDGE, SEND_GUIDE_MEDIA, build_registry
 
 TODAY = date(2026, 8, 6)
 
 
 def make_runtime(script):
-    registry = build_registry(today=TODAY)
+    # The guide-media catalogue is what makes `send_guide_media` exist at all —
+    # the registry skips it when there are no pictures, so an agent with none is
+    # never told it can send one.
+    registry = build_registry(today=TODAY, guide_media=load_catalogue(), sent_media={})
     llm = ScriptedClaude(script)
     runtime = Runtime(
         settings=Settings(log_to_stdout=False, log_path=None),
@@ -87,33 +93,108 @@ class EnrichmentReachesTheModelTests(unittest.TestCase):
 class ReplyAttachmentsTests(unittest.TestCase):
     """§3.1 — 'the reply shape needs its own attachments field'."""
 
+    def setUp(self):
+        # Catalogue pictures are Cloudinary public ids, so without a cloud name
+        # there is no URL to send and `send_guide_media` refuses rather than
+        # claiming it sent something. That refusal is its own behaviour, tested
+        # in test_media.py; here we want the configured case.
+        self._previous = os.environ.get(media.CLOUD_NAME_ENV)
+        os.environ[media.CLOUD_NAME_ENV] = "testcloud"
+
+    def tearDown(self):
+        if self._previous is None:
+            os.environ.pop(media.CLOUD_NAME_ENV, None)
+        else:
+            os.environ[media.CLOUD_NAME_ENV] = self._previous
+
     def test_the_reply_contract_carries_attachments(self):
         self.assertIn("attachments", Reply("c1", "hi", "agent").to_dict())
 
-    def test_media_on_a_retrieved_record_reaches_the_customer(self):
-        # Knowledge records carry diagrams and clips. Before this, the media was
-        # authored, retrieved, and silently dropped on the floor.
+    def test_a_picture_the_model_asked_for_reaches_the_customer(self):
+        # §3.1's requirement is that an outbound picture *can* reach a customer,
+        # and it still does. What changed is what decides: the model asks for one
+        # by catalogue key. It cannot invent a URL — the key is an enum in the
+        # schema and code resolves the address.
+        runtime, _ = make_runtime([
+            call_tool(SEND_GUIDE_MEDIA, {"key": "soc_button"}, "t1"),
+            say("Press and hold the SOC button on the side of the pack."),
+        ])
+        reply = whatsapp(runtime, "battery not charging")
+        self.assertTrue(reply.attachments)
+        self.assertIn("SOC_Button", reply.attachments[0].url)
+
+    def test_retrieving_a_record_does_not_attach_its_media(self):
+        """Retrieval informs the model; it does not send pictures to the customer.
+
+        This was the other way round until the model had a way to ask (auto-attach
+        2026-08-06, `send_guide_media` 2026-09-08, both live for five weeks after).
+        Inferring from retrieval put the revival clip in front of customers still
+        on the SOC-button step, and re-sent photos they already had, because it
+        keys off what a search returned rather than what the reply is about.
+        """
         runtime, _ = make_runtime([
             call_tool(SEARCH_KNOWLEDGE, {"query": "not charging", "topic": "battery"}, "t1"),
             say("Check the charger is fully seated."),
         ])
-        reply = whatsapp(runtime, "battery not charging")
-        self.assertTrue(reply.attachments)
-        self.assertIn("charger-seating", reply.attachments[0].url)
+        self.assertEqual(whatsapp(runtime, "battery not charging").attachments, [])
 
     def test_a_reply_with_no_media_carries_an_empty_list_not_none(self):
         runtime, _ = make_runtime([say("Try a different socket.")])
         self.assertEqual(whatsapp(runtime, "battery won't charge").attachments, [])
 
-    def test_the_same_image_is_not_attached_twice(self):
+    def test_the_same_picture_is_not_sent_twice_in_one_conversation(self):
+        # The tool refuses the repeat rather than the loop de-duplicating it, so
+        # the model is told it already sent this and can stop restating the step.
         runtime, _ = make_runtime([
-            call_tool(SEARCH_KNOWLEDGE, {"query": "not charging"}, "t1"),
-            call_tool(SEARCH_KNOWLEDGE, {"query": "charger light"}, "t2"),
-            say("Check the charger seating."),
+            call_tool(SEND_GUIDE_MEDIA, {"key": "soc_button"}, "t1"),
+            call_tool(SEND_GUIDE_MEDIA, {"key": "soc_button"}, "t2"),
+            say("Tell me what you see."),
         ])
         reply = whatsapp(runtime, "battery not charging")
         urls = [a.url for a in reply.attachments]
-        self.assertEqual(len(urls), len(set(urls)))
+        self.assertEqual(len(urls), 1, urls)
+
+    def test_a_clip_is_not_announced_to_the_channel_as_a_photo(self):
+        # kind used to be hardcoded "image", so a video rendered as a broken
+        # picture on every channel that trusts the field.
+        runtime, _ = make_runtime([
+            call_tool(SEND_GUIDE_MEDIA, {"key": "battery_revival"}, "t1"),
+            say("This clip shows the revival process."),
+        ])
+        reply = whatsapp(runtime, "battery not charging")
+        self.assertEqual([a.kind for a in reply.attachments], ["video"])
+
+
+class EmptyReplyTests(unittest.TestCase):
+    """A turn that writes nothing must not reach the customer as nothing.
+
+    Seen in a real session: the model called `search_knowledge` and
+    `send_guide_media`, got both results, and ended the turn having written no
+    text — `stop_reason` `end_turn`, nothing truncated. The customer was sent a
+    guide photo and then an empty message. Nothing anywhere checked, because the
+    loop's only question was whether the model wanted more tools.
+    """
+
+    def test_an_empty_final_turn_hands_over_instead_of_sending_nothing(self):
+        runtime, _ = make_runtime([
+            call_tool(SEARCH_KNOWLEDGE, {"query": "not charging"}, "t1"),
+            say(""),  # tools came back, model wrote nothing
+        ])
+        reply = whatsapp(runtime, "battery not charging")
+        self.assertTrue(reply.text.strip(), "customer received an empty message")
+        self.assertTrue(reply.escalated)
+        self.assertIn("pass you to someone", reply.text)
+
+    def test_whitespace_only_counts_as_empty(self):
+        runtime, _ = make_runtime([say("   \n  ")])
+        self.assertIn("pass you to someone", whatsapp(runtime, "battery not charging").text)
+
+    def test_it_is_logged_so_the_frequency_can_be_measured(self):
+        # How often this happens is what decides whether it is worth recovering
+        # from with another round trip rather than handing over.
+        runtime, _ = make_runtime([say("")])
+        whatsapp(runtime, "battery not charging")
+        self.assertTrue(any(e["event"] == "empty_reply" for e in runtime.log.events))
 
 
 class StuckAgentTests(unittest.TestCase):

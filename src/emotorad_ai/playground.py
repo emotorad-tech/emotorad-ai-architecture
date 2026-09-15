@@ -80,7 +80,6 @@ from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE, check_evidence
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.playground_version import CHANGELOG, PLAYGROUND_VERSION
 from emotorad_ai.media import load_catalogue
-from emotorad_ai.media import resolve as resolve_media
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import (
     LOOKUP_ERROR_CODE,
@@ -1132,14 +1131,23 @@ def _run_agent_turn(
         if not tool_uses:
             text = "\n".join(block.text for block in response.content if block.type == "text")
             if not text.strip():
-                # A blank bubble tells the tester nothing. This happens for real:
-                # a `max_tokens` cut can end a turn with no text block at all, and
-                # silently rendering "" reads as the bot ignoring the customer.
-                text = (
-                    "(No text returned — stop_reason=%s. If this is max_tokens, raise the "
-                    "output cap in the sidebar; a long knowledge passage plus images can "
-                    "exhaust a small one before the model writes anything.)" % stop_reason
-                )
+                # A blank bubble tells the tester nothing. This happens for real,
+                # and for two unrelated reasons, so say which one — the advice for
+                # the first is useless for the second and sends people to the
+                # wrong knob.
+                if stop_reason == "max_tokens":
+                    text = (
+                        "(No text returned — the output cap was hit before the model wrote "
+                        "anything. Raise it in the sidebar; a long knowledge passage plus "
+                        "images can exhaust a small one.)"
+                    )
+                else:
+                    text = (
+                        "(No text returned — stop_reason=%s, nothing truncated. The model "
+                        "ended its turn having written nothing, usually after its tool calls "
+                        "came back. In production this hands over to a human rather than "
+                        "sending an empty message.)" % stop_reason
+                    )
             elif stop_reason == "max_tokens":
                 text += "\n\n(Truncated — hit the output token cap. Raise it in the sidebar.)"
             return {
@@ -1180,22 +1188,13 @@ def _run_agent_turn(
             call_outcomes[signature] = not is_error(envelope)
             trace.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})
 
-            # Guide photos and clips ride along with the knowledge passage that
-            # cites them, exactly as Agent.run collects them (agents/base.py).
-            # The model never names a URL — it picks a record, and the record
-            # brings its own media — so there is nothing here for it to invent.
+            # One source, and it is the model: `send_guide_media` returns what it
+            # asked to show. Media cited by a retrieved knowledge record used to be
+            # attached here too, which predates that tool by a month and is what
+            # produced the transcripts where a customer was sent the revival clip
+            # while still on the SOC-button step. Mirrors agents/base.py.
             if not is_error(envelope):
-                data = envelope.get("data") or {}
-                # Two sources, deliberately: media cited by a retrieved knowledge
-                # passage, and media the model asked for by catalogue key. The
-                # second is interim and goes away when the flow moves into
-                # records; the first is where this belongs.
-                cited = [m for p in data.get("passages", []) or [] for m in (p.get("media") or [])]
-                for item in cited:
-                    found = resolve_media(item)
-                    if found not in outbound_media:
-                        outbound_media.append(found)
-                for found in data.get("media", []) or []:
+                for found in (envelope.get("data") or {}).get("media", []) or []:
                     if found not in outbound_media:
                         outbound_media.append(found)
             results.append(

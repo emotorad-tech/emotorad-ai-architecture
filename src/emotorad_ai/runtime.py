@@ -246,8 +246,15 @@ class Runtime:
             handled_by=turn.agent,
             escalated=turn.escalate,
             ticket_id=turn.ticket_id,
+            # `kind` comes from the item, not hardcoded: the catalogue carries
+            # clips as well as photos, and a video announced as an image renders
+            # as a broken picture on every channel that trusts the field.
             attachments=[
-                Attachment(kind="image", url=item["url"], mime_type=item.get("mime_type"))
+                Attachment(
+                    kind=item.get("kind") or "image",
+                    url=item["url"],
+                    mime_type=item.get("mime_type"),
+                )
                 for item in turn.attachments
                 if item.get("url")
             ],

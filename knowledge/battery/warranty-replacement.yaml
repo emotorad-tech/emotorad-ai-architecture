@@ -1,0 +1,119 @@
+id: battery-warranty-replacement
+title: A part has been found faulty — coverage and replacement
+topic: battery
+# The destination five other records already point at. "Move to warranty and
+# replacement" was written at the end of the won't-power-on flow, the Doodle
+# flow, the on/off switch flow and the SOC indicator flow, and nothing described
+# it — it was open item 4 in the prompt for as long as those pointers existed.
+# A model that reaches a named destination which is not there does not stop; it
+# improvises, and what it improvised was a hedge: "this points to a deeper
+# battery fault that needs to be checked by our service team", after four checks
+# that had already settled what the fault was.
+symptoms: [battery replacement, replace the battery, warranty replacement, warranty claim,
+           is it covered under warranty, battery dead replacement, replacement under warranty,
+           faulty part warranty, charger replacement, warranty mein replacement,
+           वारंटी में बदलेगा, battery badal jayegi]
+applies_to: {}
+source: AFS battery diagnostic — warranty and replacement
+media: []
+steps:
+  - >-
+    Reached only once a flow has actually concluded a fault — a dead pack, a dead on/off
+    switch, a dead SOC indicator, a charger proven faulty. If you are here without a
+    conclusion, go back and finish the diagnosis. This record decides what happens about a
+    fault; it does not find one, and it cannot make an undecided case decided.
+  - >-
+    SAY WHAT IS BEING REPLACED, AND DO NOT LET IT DRIFT. The battery, the charger, the
+    switch — these are different parts, different costs and different claims. The
+    won't-power-on flow ends in a charger replacement on one branch and a battery
+    replacement on another, and they are one sentence apart. Name the part in the same
+    breath as the conclusion, and carry that same part into the ticket.
+  - >-
+    THE COVERAGE ANSWER IS THE ONE ALREADY IN THE CUSTOMER CONTEXT. It arrived when they
+    were identified. Do not ask for the phone number again, do not ask them to verify
+    again, and do not ask them what their warranty says — they have been through the
+    diagnosis and being asked to prove who they are at the end of it reads as having been
+    forgotten. Read it and use it.
+  - >-
+    WHO PAYS IS TWO QUESTIONS, NOT ONE. Being in warranty is the first. What caused the
+    fault is the second, and it is the one that gets forgotten. In warranty with no
+    physical damage, the remedy is free — whether that remedy turns out to be a repair or
+    a replacement is the service centre's call and does not change the cost. Any physical
+    damage, however it happened, is chargeable even inside the warranty period. Out of
+    warranty is chargeable either way. There is no age rule inside the warranty: a fault
+    at eleven months and a fault at twenty-three months are treated identically.
+  - >-
+    ESTABLISHING CAUSE HAS TWO ROUTES AND YOU NEED BOTH. Visible physical damage in the
+    photographs settles it on its own — knocks, cracks, breakage, a bent port, a part torn
+    off. Where nothing is visible but something has failed, ask how it happened, because a
+    switch knocked off in a fall and a switch that came away on its own look identical in a
+    picture and are opposite answers on cost. Nothing visible and nothing reported means a
+    defect, which is the free branch.
+  - >-
+    YOU ARE NOT JUDGING WHETHER ANYONE IS TELLING THE TRUTH, and you must never imply it.
+    Report what the photographs show and what the customer told you, and let those two
+    things stand together on the ticket. If an account and a picture disagree, that is for
+    a person with the pack in their hands, not for a chat to settle.
+  - >-
+    CHARGEABLE — say so plainly and early rather than at the end, so nobody agrees to a
+    process believing it is free. Say what makes it chargeable: damage from an impact, or
+    a warranty that has run out. You cannot quote a figure — no price list reaches you —
+    so say the service centre confirms the cost before any work starts. That is a real
+    answer, and much better than implying it might be free.
+  - >-
+    COVERED, DATES KNOWN, NO PHYSICAL DAMAGE — say the part is covered, say until when,
+    and raise the replacement ticket in the same message. Do not ask whether to raise it:
+    they have just done four checks to reach this, and asking permission to act on the
+    answer is how a resolved case becomes an abandoned one. Attach what the flow gathered —
+    the readings in order, and every photograph and video already supplied.
+  - >-
+    THE TERM IS PROVISIONAL AND YOU SAY SO WHEN IT IS LOAD-BEARING. Coverage here is
+    computed from the purchase date, not read from a field, and the 24-month term is a
+    working assumption rather than a published one. Well inside it, that changes nothing
+    worth saying. Near the edge, say the date you are working from and that a colleague
+    confirms it before the replacement is booked. Never announce a free replacement on a
+    date you inferred.
+  - >-
+    NO PURCHASE DATE ON THE RECORD — coverage cannot be computed, and that is not the same
+    as not being covered. Say plainly that the fault is established and only the purchase
+    date is missing, ask for the invoice or proof of purchase showing it, and raise the
+    ticket as pending that date. A date read off a photographed invoice is a claim and not
+    a fact: a person verifies it before it is written down or quoted back as coverage.
+  - >-
+    NO WARRANTY RECORD AT ALL — the bike was never registered, which happens constantly
+    and is not the customer's fault. Do not tell them they are out of warranty; you do not
+    know that. The fault stands, registration is a separate problem with its own route,
+    and the ticket carries the diagnosis so none of it is repeated.
+  - >-
+    THE WARRANTY SYSTEM DID NOT ANSWER — say so, say it is ours and not theirs, and raise
+    the ticket with the diagnosis attached so the coverage decision is made by a person
+    rather than guessed at now. Never let an outage read as a refusal.
+  - >-
+    OUT OF COVERAGE, ON DATES THAT ARE ACTUALLY KNOWN — say it once, plainly and without
+    apology-padding, and say what can still be done: a service centre can replace the part
+    paid for. Do not imply it might be covered anyway, and do not pass it upward as though
+    a person might overturn the dates.
+  - >-
+    A REPLACEMENT IS PROPOSED, NEVER PROMISED AS DISPATCHED. Nothing in this conversation
+    ships a part. What you are doing is opening the claim with the evidence attached and
+    telling them what the next step is and who takes it. Say that much and no more — a
+    customer told a battery is on its way and then called by a service centre to arrange
+    an inspection has been misled by the first message, not the second.
+escalate_when: >-
+  In warranty and no physical damage — free, repair or replacement as the fault calls for,
+  ticket raised in the same message. Physical damage from any impact, accidental or not —
+  chargeable even inside the warranty, said plainly and early, cost confirmed by the
+  service centre. Out of warranty — chargeable. No age rule inside the warranty period.
+  Covered on known dates — replacement ticket raised in the same message, evidence
+  attached, part named. Near the edge of the computed term — same, and say a colleague
+  confirms the date before it is booked. Purchase date missing — ticket raised pending the
+  invoice, and a person verifies the date. No warranty record — ticket raised with the
+  diagnosis, registration handled separately, and never described as out of warranty. OMS
+  unavailable — ticket raised, coverage decided by a person, and the outage named as ours.
+  Genuinely out of coverage on known dates — say so once and offer the paid route.
+# Open, and deliberately not invented here: how a replacement is actually
+# fulfilled at EMotorad — dealer visit, courier pickup or service centre — who
+# signs it off, and what turnaround to quote. The steps above stop at "the claim
+# is open and here is who acts next" because that is the honest boundary of what
+# is known. Fill these in and this record can say something far more useful to a
+# customer than it currently does.

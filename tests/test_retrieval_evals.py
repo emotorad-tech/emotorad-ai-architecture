@@ -53,6 +53,25 @@ GOLDEN = [
     ("slow charging problem", "battery-charging-slowly", "battery", ANY_BIKE),
     ("I am not using the bike for three months, what to do", "battery-storage", "battery", ANY_BIKE),
     ("winter storage advice", "battery-storage", "battery", ANY_BIKE),
+    # Where every flow that concludes a fault ends up. Customers ask for it
+    # directly too, which is why it is scored rather than left as an
+    # agent-only destination.
+    ("battery replacement under warranty", "battery-warranty-replacement", "battery", ANY_BIKE),
+    ("warranty mein replacement milega", "battery-warranty-replacement", "battery", ANY_BIKE),
+    # Impact and physical damage, which re-routes the case before the battery
+    # flow runs at all.
+    ("i had an accident", "battery-impact-damage", "battery", ANY_BIKE),
+    ("bike gir gaya", "battery-impact-damage", "battery", ANY_BIKE),
+    # From the service engineer's case notes. The port one is mechanical and must
+    # not be confused with the thermal melting record, nor with wont-charge —
+    # "charging" appears in all three and discriminates none of them.
+    ("charger does not hold in the port", "battery-charging-port-damaged", "battery", ANY_BIKE),
+    ("my charging port is bent", "battery-charging-port-damaged", "battery", ANY_BIKE),
+    ("battery arrived with scratches", "battery-arrival-damage", "battery", ANY_BIKE),
+    # The inverse of the dead-switch record: here everything works and the switch
+    # will not turn it off.
+    ("bike runs even when battery switch is off", "battery-switch-not-cutting-output", "battery", ANY_BIKE),
+    ("off karne par bhi chal raha hai", "battery-switch-not-cutting-output", "battery", ANY_BIKE),
     # -- motor --------------------------------------------------------------
     ("motor is making a grinding noise", "motor-noise", "motor", ANY_BIKE),
     ("there is a whining sound from the motor", "motor-noise", "motor", ANY_BIKE),

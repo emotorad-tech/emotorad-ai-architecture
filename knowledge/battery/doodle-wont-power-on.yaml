@@ -13,10 +13,11 @@ symptoms: [wont_turn_on, no_power, dead, bike not turning on, cycle nahi chal ra
 # the OMS product names — "Doodle Black", "Doodle V4 Indicator Edition".
 applies_to: {product_name: doodle}
 source: AFS battery diagnostic — Doodle V1/V2/V3/V4/Pro
-media:
-  - id: Battery_OnOff_switch
-    kind: image
-    caption: The battery On/Off switch — set it to ON before charging
+# No guide media. The only battery picture in the catalogue is the On/Off switch,
+# and a Doodle has no On/Off switch — this record's own first step says so. It
+# was attached here anyway, captioned "set it to ON before charging", which is an
+# instruction a Doodle owner cannot follow on hardware they do not have.
+media: []
 steps:
   - >-
     These packs output directly when the key is turned. There is no SOC button and no
@@ -38,7 +39,10 @@ steps:
   - >-
     RED — the battery is charging normally and is not the fault. Note that this means the
     opposite of red on a non-Doodle, where it signals a drained pack. Say so and move on
-    to the other parts: display, motor, controller, cables.
+    to the other parts: display, motor, controller, cables. Start with the terminal and
+    the controller's battery connector — battery-melted-terminal covers that check and
+    applies to a Doodle like anything else. Read it before asking about either end: it
+    sets the order and carries the comparison photographs.
   - >-
     GREEN — ambiguous. The battery is either dead or simply fully charged, and the two
     look identical on the charger. Ask two questions and read them together — when they
@@ -52,7 +56,8 @@ steps:
   - >-
     More than 60 days ago AND green immediately with no red phase — dead battery. Ask for
     a video of the charger connected showing green from the moment it is plugged in, then
-    warranty and replacement.
+    warranty and replacement — the flow for that is battery-warranty-replacement; read it
+    rather than improvising an ending.
   - >-
     More than 60 days ago BUT red showed first — not a dead-battery case. Go to the
     multimeter check.
@@ -78,6 +83,6 @@ steps:
     answer sends them to replace a working part.
 escalate_when: >-
   Green LED with no charge in 60+ days and no red phase, or a multimeter reading
-  confirming a dead pack — warranty and replacement. No multimeter available, whatever
+  confirming a dead pack — warranty and replacement, via battery-warranty-replacement. No multimeter available, whatever
   the 60-day answer — dealer visit with a ticket, and say it could be the battery or
   another part.

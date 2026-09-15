@@ -202,11 +202,25 @@ class LoopMechanicsTests(unittest.TestCase):
         self.assertTrue(outcome["trace"][0]["arguments"].get("idempotency_key"))
         self.assertFalse(is_error(outcome["trace"][0]["result"]))
 
-    def test_an_empty_reply_is_explained_rather_than_rendered_blank(self):
+    def test_an_empty_reply_from_a_truncated_turn_points_at_the_output_cap(self):
         client = _Client([_Response([], stop_reason="max_tokens")])
         outcome = _run(client, self.registry, (), self._factory())
         self.assertIn("No text returned", outcome["text"])
-        self.assertIn("max_tokens", outcome["text"])
+        self.assertIn("output cap", outcome["text"])
+
+    def test_an_empty_reply_that_was_not_truncated_says_so_instead(self):
+        """The two causes need different explanations.
+
+        A turn that simply ends with nothing written — `end_turn`, no text block,
+        nothing truncated — used to be reported as though the output cap might be
+        to blame, sending the tester to a knob that has no bearing on it. Seen in
+        a real session after the model's tool calls came back.
+        """
+        client = _Client([_Response([], stop_reason="end_turn")])
+        outcome = _run(client, self.registry, (), self._factory())
+        self.assertIn("No text returned", outcome["text"])
+        self.assertIn("nothing truncated", outcome["text"])
+        self.assertNotIn("output cap", outcome["text"])
 
 
 class PersonaIsolationTests(unittest.TestCase):

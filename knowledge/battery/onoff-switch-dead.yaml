@@ -34,7 +34,9 @@ steps:
     If the evidence is good, check it against the record: the frame number must match the
     customer context, and look at the warranty sticker in the photos.
   - >-
-    Clear fault and evidence matches — replacement, through the warranty flow.
+    Clear fault and evidence matches — replacement, through the warranty flow in
+    battery-warranty-replacement. Name the switch as the part being replaced, not the
+    battery: they are one claim apart.
   - >-
     No fault visible — say so plainly and kindly. "I cannot see anything wrong from these"
     is a real outcome, not a failure, and it is better than inventing a repair.

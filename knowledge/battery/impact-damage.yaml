@@ -1,0 +1,93 @@
+id: battery-impact-damage
+title: The bike was dropped, knocked or in an accident
+topic: battery
+# Filed under battery because that is where it is reached from — the won't-power-on
+# flow and the opening screen both ask about a knock, and the battery agent scopes
+# its searches to this topic. The record itself spans battery, controller and
+# display: after an impact the question is which of them took the hit, and
+# answering that is what stops the case being run as a battery fault by default.
+symptoms: [accident, crash, crashed, fell, fall, dropped the bike, knock, knocked, hit,
+           bike gir gaya, accident ho gaya, takkar, girne ke baad, after a fall,
+           after an accident, damaged in a fall]
+applies_to: {}
+source: AFS battery diagnostic — impact and physical damage
+# No reference photographs exist for impact damage yet. Describe what you need
+# rather than implying you have sent an example of it. (Same position as the
+# on/off switch record, and worth closing with the same batch of SME photos.)
+media: []
+steps:
+  - >-
+    ACTIVE HAZARD FIRST, AND BEFORE ANYTHING ELSE. Ask whether the pack is swollen, hot,
+    smoking, leaking or smells of burning RIGHT NOW. Any of those is a live event, not
+    impact damage to be assessed: hand over immediately, tell them not to charge or use
+    the bike, and do not ask for a photograph of it. An impact is one of the things that
+    starts a cell venting, so this question is asked here even though it was asked at the
+    opening.
+  - >-
+    Everything below is for a bike that is cold, off, and not doing any of that.
+  - >-
+    ASK WHETHER THERE IS VISIBLE DAMAGE. Cracked or deformed casing, a dented or scraped
+    pack, a bent or snapped mount, torn cable, a cracked display lens. If there is,
+    collect it: photographs of the damaged area, and of the battery pack whether or not
+    the pack is what looks damaged.
+  - >-
+    NO VISIBLE DAMAGE, INCLUDING ON THE PACK — carry on with the normal investigation.
+    A knock with nothing to show for it does not on its own make this a battery case or a
+    safety case, and treating every fall as one would send people to a service centre for
+    a bike that is simply flat. Note the impact on the ticket, then run the flow you would
+    have run anyway.
+  - >-
+    ASK WHEN IT STOPPED WORKING RELATIVE TO THE IMPACT, and ask it separately — "did it
+    stop right after, or did it keep working for a while?" Stopped immediately is a strong
+    causal link and the damaged area is where you look first. Kept working and failed days
+    later is a weak one: the impact may be unrelated, so do not let it override what the
+    rest of the diagnosis tells you.
+  - >-
+    WHERE THE IMPACT LANDED NAMES THE SUSPECT, when the failure was immediate. Damage at
+    or near the handlebars points at the display and its cable. Damage to the frame around
+    where the controller is housed points at the controller. Damage to the pack, its mount
+    or its terminal points at the battery. Ask the customer to say where the bike took the
+    hit rather than assuming — layouts differ between models and they are looking at it.
+  - >-
+    THE BATTERY ITSELF TOOK DAMAGE, or the customer reports the pack has been damaged or
+    mistreated in recent days by any route — this is the battery until proven otherwise.
+    Collect the photographs and run the battery flow rather than the general one; a pack
+    with a cracked case or a bent terminal is a likelier answer than anything downstream
+    of it.
+  - >-
+    A DAMAGED PACK IS NOT TO BE CHARGED while the case is open, even when it looks
+    superficial and even when the bike still runs. Say so plainly. Charging is when a
+    damaged cell is most likely to fail, and the customer has no way to know that.
+  - >-
+    IMPACT DAMAGE IS CHARGEABLE, INSIDE THE WARRANTY OR OUT OF IT, and whether the impact
+    was anyone's fault makes no difference — a knock from a passing car and a knock from a
+    dropped bike are the same to the hardware. Say it early, as soon as the damage is
+    established, and not at the end after they have agreed to a process believing it was
+    free. You cannot quote a figure; the service centre confirms the cost before any work
+    starts. Go to battery-warranty-replacement for how to put it.
+  - >-
+    ASK HOW IT HAPPENED WHEN NOTHING IS VISIBLE BUT SOMETHING HAS FAILED. A part knocked
+    loose in a fall and a part that came away on its own look identical in a photograph and
+    are opposite answers on cost, so the question is the only thing that separates them.
+    Ask it plainly and early — "how did it happen?" is an ordinary support question — not
+    as a pointed follow-up once damage is confirmed, which reads as looking for a reason to
+    charge.
+  - >-
+    NOTHING VISIBLE AND NOTHING REPORTED is a defect, and a defect inside the warranty is
+    free. Do not reach for an impact to explain a failure the customer has not described.
+  - >-
+    YOU ARE NOT DECIDING WHETHER ANYONE IS TELLING THE TRUTH. If the photographs look like
+    an impact and the customer says nothing happened, record both and let them stand
+    together on the ticket. A person with the pack in their hands settles that, and saying
+    or implying otherwise to a customer is never yours to do.
+  - >-
+    Judge only what is in the photograph, and say what you cannot see. If the damage is a
+    scuff on a casing you cannot assess from a picture, say a person needs to look at it
+    rather than ruling either way.
+escalate_when: >-
+  Swollen, hot, smoking, leaking or burning now — hand over immediately, no photographs,
+  bike not to be used or charged. Visible damage to the pack, its mount or its terminal —
+  service centre with the photographs on the ticket, and the bike not charged meanwhile.
+  Visible damage elsewhere with immediate failure — service centre, named to the part the
+  impact landed on. No visible damage anywhere — not an impact case; return to the normal
+  flow and keep the impact on the record.

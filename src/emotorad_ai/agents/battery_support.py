@@ -22,6 +22,7 @@ from ..tools.mocks import (
     GET_BATTERY_DIAGNOSTICS,
     LOOKUP_WARRANTY_RECORD,
     SEARCH_BATTERY_KNOWLEDGE,
+    SEND_GUIDE_MEDIA,
 )
 from .base import AgentDefinition
 
@@ -29,10 +30,15 @@ AGENT_NAME = "battery_support"
 
 # get_battery_diagnostics is listed but only reaches the model if it was
 # registered — i.e. if battery telematics actually exist (build plan §8).
+# send_guide_media, like get_battery_diagnostics, only reaches the model if it
+# was registered — the registry skips it when no media catalogue is configured.
+# It is how a picture gets sent at all: knowledge records carry media, but the
+# model choosing a catalogue key is what puts one in front of a customer.
 TOOL_NAMES = (
     LOOKUP_WARRANTY_RECORD,
     GET_BATTERY_DIAGNOSTICS,
     SEARCH_BATTERY_KNOWLEDGE,
+    SEND_GUIDE_MEDIA,
     CREATE_SUPPORT_TICKET,
     FIND_SERVICE_SLOTS,
     BOOK_SERVICE_SLOT,

@@ -1,0 +1,63 @@
+id: battery-arrival-damage
+title: The battery arrived marked or damaged
+topic: battery
+symptoms: [scratches on battery, battery scratched, marks on battery, scuff marks on battery,
+           battery damaged on delivery, damaged on arrival, dented on delivery,
+           battery kharab aaya, delivery ke time kharab, डिलीवरी में खराब]
+applies_to: {}
+source: AFS battery diagnostic — damage reported at delivery
+media: []
+steps:
+  - >-
+    Reached when damage is reported at or near delivery. The first thing to settle is not
+    the damage — it is whether the battery works. Those two answers lead to completely
+    different conversations, and getting them the wrong way round is how a working battery
+    gets replaced and a dead one gets talked out of a replacement.
+  - >-
+    ASK WHETHER THE BIKE RUNS AND THE BATTERY CHARGES, and ask for photographs of the
+    marks in the same message — every face that is affected, in good light.
+  - >-
+    THE BATTERY DOES NOT WORK — stop treating this as cosmetic. Run the won't-power-on
+    checks (battery-wont-power-on) and collect the evidence they call for. A battery that
+    arrived faulty is replaced, and it is free: they bought a working bike and did not get
+    one. Nothing in the persuasion below applies.
+  - >-
+    BREAKAGE, CRACKS, A SPLIT CASING, A PART HANGING OFF — also not cosmetic, whatever the
+    battery currently does. Replacement, free. Scratches are the only thing the branch
+    below is about.
+  - >-
+    SCRATCHES AND SCUFF MARKS ONLY, NOTHING BROKEN, AND THE BATTERY WORKS — do not offer a
+    replacement as the first move. Apologise properly and without hedging: the bike should
+    not have arrived looking like that, and saying so is most of what they want. Then
+    explain what the marks do and do not mean — the casing is cosmetic, the cells and the
+    electronics behind it are untouched, the warranty is entirely unaffected, and the pack
+    will perform exactly as it should.
+  - >-
+    UP TO THREE ATTEMPTS, AND EACH ONE A DIFFERENT ARGUMENT. Repeating the same sentence
+    more firmly is not persuading, it is stonewalling, and a customer who is already
+    annoyed will hear the difference immediately. The angles available: the marks are
+    cosmetic and change nothing about how it works; the warranty covers the pack exactly
+    as it would an unmarked one; a swap means being without the bike while it is arranged,
+    for a fault that is not affecting their riding. Say them once each, at most.
+  - >-
+    THEY STILL WANT IT REPLACED AFTER THREE — replace it, and free. Do not make them ask a
+    fourth time, do not go cold about it, and do not imply they have worn you down. They
+    paid for a new bike and it arrived marked; the reason this was worth discussing at all
+    is that a swap costs them time, not that they are owed less. Go to
+    battery-warranty-replacement and say what happens next.
+  - >-
+    RECORD IT WHATEVER THEY DECIDE, INCLUDING WHEN NOTHING IS REPLACED. Raise the ticket
+    with the photographs attached and the outcome noted. This protects them: if that pack
+    fails in five months, these marks must never be read back as physical damage that
+    voids the claim. We were shown them at delivery and we said they were harmless — that
+    has to be on the record, or we have set the customer up to be refused later for damage
+    we ourselves dismissed.
+  - >-
+    NEVER ARGUE THE MARKS ARE NOT THERE. They are looking at them. The case for not
+    swapping is that the marks do not matter, never that they do not exist.
+escalate_when: >-
+  Battery not working on arrival, or broken, cracked or split — free replacement via
+  battery-warranty-replacement, no persuasion. Scratches only with the battery working —
+  apologise, explain, up to three different arguments; if they still want it replaced,
+  free replacement without friction. Every outcome ticketed with the photographs, so
+  arrival marks can never be read later as damage the customer caused.

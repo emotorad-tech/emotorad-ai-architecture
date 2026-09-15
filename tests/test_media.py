@@ -344,12 +344,36 @@ class RepeatedGuideMediaTests(unittest.TestCase):
         self.assertEqual(second["data"]["media"], [])
         self.assertTrue(second["data"]["already_sent"])
 
-    def test_the_model_is_told_not_to_repeat_the_step(self):
+    def test_the_model_is_told_where_to_go_next_not_just_what_to_avoid(self):
+        """The note names the record as the destination.
+
+        It used to end at "move the case forward" without saying where forward
+        was. Told not to repeat the step and given nowhere to go, the model
+        invented a step instead: on an SOC button that had not lit — where the
+        record says to read the charger LED — it asked whether the pack made a
+        sound or vibrated, which is in no record and cannot mean anything.
+        """
         with _WithCloud("emotorad-demo"):
             self._send("soc_button")
             note = self._send("soc_button")["data"]["note"]
         self.assertIn("already sent", note)
-        self.assertIn("do not repeat the step", note)
+        self.assertIn("knowledge record", note)
+        self.assertIn("search again", note)
+
+    def test_the_note_is_not_phrased_so_it_can_be_read_out_to_the_customer(self):
+        """It is context for the model, and it kept arriving in the reply.
+
+        "you already sent X, so the customer has it" is a statement about the
+        customer written in customer-facing phrasing, and it came back out
+        twice — "you've already seen that", "you already have that image" —
+        neither of which answers anything the customer asked.
+        """
+        with _WithCloud("emotorad-demo"):
+            self._send("soc_button")
+            note = self._send("soc_button")["data"]["note"].lower()
+        self.assertIn("internal, not for the customer", note)
+        self.assertNotIn("the customer has it", note)
+        self.assertIn("say nothing about the picture", note)
 
     def test_a_different_picture_still_sends(self):
         with _WithCloud("emotorad-demo"):

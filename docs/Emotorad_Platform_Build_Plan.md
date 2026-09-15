@@ -168,8 +168,16 @@ but the field exists now so adding it later isn't a contract change.
 
 **The reply shape needs its own attachments field**, because the agent sends workflow diagrams and
 video clips (§4, §6) — not just the inbound attachments shown above. **Built 2026-08-06**: media
-authored on a knowledge record now travels from retrieval to `Reply.attachments` in code, rather
-than relying on the model to copy a URL it cannot see.
+authored on a knowledge record travelled from retrieval to `Reply.attachments` in code, rather
+than relying on the model to copy a URL it cannot see. **Revised 2026-09-13**: that was the only
+way to send a picture at the time. `send_guide_media` (2026-09-08) is the way now — the model
+names a catalogue key, the key is an enum in the schema, and code resolves the address, so it
+still never handles a URL. Attaching from retrieval as well meant a second, dumber sender running
+alongside it: it keys off what a search returned rather than what the reply is about, so it showed
+customers the revival clip while they were still on the SOC-button step, and re-sent photos they
+already had — including on turns where `send_guide_media` had just refused that exact repeat.
+Retrieval now informs the model and sends nothing. The requirement here is unchanged; only what
+fills the field is.
 
 **One field exists in code that is not listed above: `customer_id`.** It is an artefact of the
 mocked fixtures, not of the real system — the OMS has no customer ID, and `frame_number` identifies
