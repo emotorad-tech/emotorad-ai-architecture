@@ -28,4 +28,17 @@ logs/
 
 # Prompt-tuning playground output (diffs against agents/*.py — reviewed by hand,
 # never applied automatically, and never a place API keys should land).
-.playground/
+#
+# Everything here is ignored EXCEPT the prompt store. The published prompt is
+# authored work, it is what the bot actually runs, and it was living on one
+# laptop with no backup and no review trail while the records it points at were
+# in the repo. Same reasoning the knowledge base is versioned here: git is the
+# audit trail and a PR is the approval.
+#
+# Still ignored, deliberately: `chats/` holds transcripts carrying customer
+# names and phone numbers, and `attachments/` is megabytes of uploaded photos
+# and clips. Neither belongs in the repo.
+.playground/*
+!.playground/prompts/
+.playground/prompts/*
+!.playground/prompts/*.json
