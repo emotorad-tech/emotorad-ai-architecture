@@ -21,18 +21,67 @@ media:
     kind: video
     caption: Reviving a pack that has gone completely flat
 steps:
+  # The steps below are a branch, not a running order, and they are labelled by
+  # their precondition for that reason. They used to be numbered STEP 1 / STEP 2,
+  # which reads as a sequence and was followed as one: a bike whose SOC light came
+  # on healthy was sent to the charger check anyway, because "STEP 2" came after
+  # "STEP 1" and the numbering outranked the condition written above it. A label
+  # that asserts an order the flow does not have will win over prose that says
+  # otherwise. Only one branch is ever taken.
   - >-
-    STEP 1 — SOC check. Ask whether the battery is currently charged: press the SOC button
+    BEFORE THE SOC CHECK, AND NOT OPTIONAL — the battery's own on/off switch must be ON.
+    Send the on/off switch picture and have them confirm it is in the ON position before
+    they press anything. A pack switched off reads exactly like a dead one: no SOC light,
+    and nothing from the bike. Skip this and the whole flow below runs on a reading that
+    means nothing, and it ends with a working battery being called dead. (Doodle packs
+    have no such switch — that is a different flow entirely.)
+  - >-
+    THEN THE SOC CHECK. With the switch confirmed ON, ask whether the battery is currently
+    charged: press the SOC button
     on the side of the pack and hold it for one to two seconds, then say whether an
     indicator light comes on. Ask for a photo of what they see in the same message; the
     answer decides everything that follows and a photo costs five seconds.
   - >-
-    A light means the battery is healthy and charged — move on to the other parts. No
-    light means it needs the charger check below.
+    A DARK SOC ON A BIKE THAT WILL NOT START BELONGS TO THIS RECORD. The customer will say
+    it as "the indicator is not showing anything", which is word for word how the SOC
+    indicator fault is described too, and a search on those words can hand you either. The
+    difference is not in the phrasing and never will be: it is whether the bike runs. It
+    does not, or you would not be in this flow — so a dark SOC here means the pack has no
+    charge to show, not that the indicator is broken. Do not leave for
+    battery-soc-indicator-dead on the strength of the wording; that record gates on the
+    bike running and will send you straight back.
   - >-
-    STEP 2 — charger check. Ask how long since the last charge (90+ days makes sleep mode
-    more likely but proves nothing on its own), then have them connect the charger and
+    THE SOC ANSWER PICKS ONE BRANCH AND ONLY ONE. A light means the battery is healthy and
+    charged: take the healthy branch immediately below and do not read the charger steps
+    at all — they are for the other branch and asking for a charger LED here sends the
+    customer to fetch a charger for a battery you have just confirmed is fine. No light
+    means the opposite: skip the healthy branch and go to the charger check.
+  - >-
+    BATTERY HEALTHY AND THE BIKE STILL WILL NOT POWER ON — say which parts come next and
+    go and read them, rather than working it out as you type. Power reaching the pack and
+    not the display points at what is between them: the battery terminal, the controller's
+    battery connector, and the cable between. Both ends can melt, and there is a record for
+    exactly that check — battery-melted-terminal — which sets the order (terminal first,
+    controller second), requires both to be looked at whatever the first one shows, and
+    carries the melted-versus-normal comparison photographs you send with each request.
+    Search for it and follow it. Do not start asking the customer to inspect connectors
+    off your own reasoning: unaided they are being asked to judge melting with nothing to
+    compare against, and the end you did not think to ask about is the one that is damaged.
+  - >-
+    ONLY IF THE SOC SHOWED NO LIGHT — charger check. Do not run this when the SOC lit; on
+    that branch the battery is already known to be charged and the charger tells you
+    nothing you do not have. Ask how long since the last charge (90+ days makes sleep mode
+    more likely but proves nothing on its own), then have them set the charger up and
     report the LED colour, with a photo of it in the same message.
+  - >-
+    SAY ALL THREE PARTS OF THE CHARGER SETUP, EVERY TIME. One: the charger's output lead
+    is connected to the battery. Two: the charger is plugged into a wall socket. Three:
+    the socket is switched on at the wall. "Plug the charger in and tell me the LED
+    colour" is not enough — it is heard as any one of those three, and a charger sitting
+    on a dead socket, or plugged into the wall but not the battery, shows no light for a
+    reason that has nothing to do with the pack. You would read that as a charger fault
+    and be wrong. The colour only means something once all three are true, so ask for all
+    three to be confirmed along with the colour.
   - >-
     NO LIGHT on the charger — the charger, the socket or the connection, and nothing yet
     about the battery. Have them confirm the socket has power and the connector is fully
@@ -48,14 +97,67 @@ steps:
     them to charge for at least four hours: the first LED shows red about ten minutes in,
     and the remaining LEDs turn green as it charges.
   - >-
-    GREEN on the charger — the battery is not drawing charge, so it is either asleep or
-    dead. Run the Battery Revival Process to tell which.
+    GREEN on the charger, ON THIS BRANCH — meaning the SOC showed no light — the battery
+    is not drawing charge, so it is either asleep or dead. Say green on its own means
+    neither. On a pack whose SOC lit, green simply means there is nothing left to put in,
+    and reading this line at a customer there would tell someone with a healthy battery
+    that it may be dead. It is the pair of readings that carries the meaning, never the
+    charger LED alone. A Doodle cannot be told apart this way at all, which is why that
+    flow is separate.
+  - >-
+    Ask when they last charged it, and when the bike last worked, before running the
+    revival process. The answer decides which of asleep and dead you are expecting, and
+    the two are not equally likely — they nearly invert on this one question.
+  - >-
+    NOT CHARGED FOR 60+ DAYS — deep sleep is the likely explanation. Say so before you
+    start, so the revival process does not read as a random trick.
+  - >-
+    CHARGED WITHIN THE LAST 60 DAYS, OR THE BIKE WAS WORKING IN THAT TIME — deep sleep is
+    NOT the likely explanation. A pack that was charged and running days or weeks ago does
+    not fall asleep; that happens after months of standing, and on a recent charge it is
+    rare enough to treat as the exception. The likely explanation on this branch is a dead
+    battery, and that is what you should expect the revival process to confirm. Do not tell
+    the customer you are waking it from sleep, and do not offer deep sleep as the
+    explanation — you would be naming the one answer the evidence argues against, and they
+    will hear it as a diagnosis.
+  - >-
+    Run the Battery Revival Process on either branch. It is quick, it costs the customer
+    nothing, and it is the only thing that settles asleep against dead — a rare case is
+    still worth ruling out before concluding a pack is finished. What changes between the
+    branches is what you expect and what you say, not whether you run it. On the recent
+    charge branch, say you are running one last check before concluding the battery has
+    failed, and that you expect the light to stay green.
   - >-
     BATTERY REVIVAL PROCESS — with the battery connected to the charger, press the on/off
     switch eight to ten times in quick succession, then recheck the charger LED. Turns
     red means it woke from sleep and is now drawing charge: treat it as drained, charge
-    four hours, recheck. Stays green means it is not accepting charge: conclude dead and
-    move to warranty and replacement.
+    four hours, recheck. Stays green means it is not accepting charge — go to the terminal
+    check below, then conclude.
+  - >-
+    DO NOT CALL THIS THE LAST CHECK. Two things follow it before anything is concluded —
+    the terminal check, then the conclusion itself — so promising finality here means
+    going back on it one message later, in front of a customer who was told this settled
+    it. Say what it is: a quick check to separate a sleeping pack from a failed one.
+  - >-
+    TERMINAL CHECK, after a failed revival and before concluding anything. Have them
+    unplug the charger, take the pack off the bike, and photograph the metal terminals,
+    with the melted-versus-normal picture sent alongside so they are comparing rather than
+    guessing. Burnt or fused terminals are a different fault with a different remedy, and
+    they are cheap to rule out. If either end looks damaged, leave this flow for
+    battery-melted-terminal.
+  - >-
+    TERMINALS CLEAN AFTER A FAILED REVIVAL — the battery is dead. Say so plainly and in
+    those words. It is not "a deeper fault", not "something the service team should look
+    at", not an unspecified problem: the pack does not hold or accept charge, every other
+    explanation has been ruled out, and hedging at this point reads as not knowing. The
+    customer has done four checks to reach a verdict and is owed one.
+  - >-
+    THEN GO STRAIGHT TO REPLACEMENT, in the same message. State the coverage from the
+    warranty record already in the customer context — do not ask them for it again and do
+    not re-verify. Raise the ticket with what the flow established: switch confirmed ON,
+    SOC dark, charger green, revival failed, terminals clean, and the photographs. Say
+    what happens next and when. A conclusion the customer has to ask you to act on is a
+    conclusion you have not really delivered.
   - >-
     ONCE THE CHARGER LED HAS BEEN READ YOU ARE IN THAT BRANCH AND YOU STAY IN IT. Do not
     move to another row because the customer's next answer is not what you expected.
@@ -82,7 +184,13 @@ steps:
     once you have that video do you conclude the battery is dead and move to warranty and
     replacement.
 escalate_when: >-
-  Battery healthy and charged — SOC lit on the first check — move to the next part.
+  Switch was off all along — not a fault; the bike works once it is ON, and nothing below
+  applies. Battery healthy and charged — SOC lit on the first check — move to the next
+  part, which is the terminal and controller-connector check in battery-melted-terminal,
+  read before it is asked about. Revival failed and terminals are clean — the battery is
+  dead: say so in those words, state the coverage already in the customer context, and
+  raise the replacement ticket in the same message rather than asking whether to.
   Healthy but drained — instruct charging and offer to resume afterwards. Dead, by any
   branch above — warranty and replacement, with the evidence attached. Charger at fault —
-  warranty and replacement for the charger, not the battery.
+  warranty and replacement for the charger, not the battery. Either way the coverage and
+  the claim itself are battery-warranty-replacement, which is read rather than improvised.

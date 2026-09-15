@@ -102,6 +102,29 @@ class Agent:
             history.append({"role": "assistant", "content": response.api_content})
 
             if not response.wants_tools:
+                # A turn that ends with nothing written is a failed turn, not a
+                # reply. It happens: the model calls its tools, gets the results,
+                # and then ends the turn having said nothing — stop_reason
+                # `end_turn`, no text block, nothing truncated. Passing that
+                # through sent the customer an empty message, or on a channel
+                # that trims it, the AI disclosure on its own.
+                #
+                # Treated like the other two ways this loop fails to produce an
+                # answer — a stuck repeat above, an exhausted budget below — and
+                # logged, because how often it happens is what decides whether
+                # this is worth recovering from (one more round trip nudging the
+                # model to reply) rather than handing over.
+                if not (response.text or "").strip():
+                    self.log.emit(
+                        "empty_reply", message.conversation_id,
+                        agent=self.definition.name,
+                        iteration=iteration,
+                        stop_reason=response.stop_reason,
+                        tools_called=len(turn.tool_calls),
+                    )
+                    turn.escalate = True
+                    turn.text = HANDOVER_TEXT
+                    return turn
                 turn.text = response.text
                 return turn
 
@@ -128,11 +151,20 @@ class Agent:
                 if tool_use.name in TICKET_PRODUCING_TOOLS and not is_error(envelope):
                     turn.ticket_id = envelope["data"].get("ticket_id", turn.ticket_id)
 
+                # Media goes out because the model asked for it, never because a
+                # search happened to return a record carrying some. Retrieved media
+                # used to be attached automatically here, which was the only way to
+                # send a picture before `send_guide_media` existed (2026-08-06 vs
+                # 2026-09-08). It infers from retrieval rather than from what the
+                # reply is about, so it re-sent photos the customer already had and
+                # attached a runner-up passage's media for a diagnosis that was
+                # never given. `send_guide_media` has none of that: the model picks
+                # a catalogue key from an enum, code resolves the URL, and the tool
+                # refuses a duplicate within a conversation.
                 if not is_error(envelope):
-                    for passage in (envelope.get("data") or {}).get("passages", []) or []:
-                        for item in passage.get("media", []) or []:
-                            if item not in turn.attachments:
-                                turn.attachments.append(item)
+                    for item in (envelope.get("data") or {}).get("media", []) or []:
+                        if item not in turn.attachments:
+                            turn.attachments.append(item)
 
                 results.append(
                     {

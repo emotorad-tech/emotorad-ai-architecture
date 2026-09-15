@@ -470,10 +470,27 @@ def build_registry(
                     {
                         "already_sent": True,
                         "media": [],
+                        # Worded as an instruction and nothing else. It used to
+                        # open "you already sent X, so the customer has it" —
+                        # a statement about the customer, in customer-facing
+                        # phrasing, sitting in the model's context. It came back
+                        # out of the model's mouth twice: "you've already seen
+                        # that", "you already have that image", neither of which
+                        # answers anything the customer asked.
+                        #
+                        # It also used to end at "move the case forward" without
+                        # saying where forward is. Told not to repeat the step
+                        # and given no destination, the model invented one — on
+                        # an SOC button that had not lit, it asked whether the
+                        # pack made a sound. Naming the record as the next
+                        # destination costs nothing and is the whole fix.
                         "note": (
-                            "You already sent %r in this conversation, so the customer has it. "
-                            "Do not send it again and do not repeat the step it illustrates — "
-                            "answer what they just told you and move the case forward." % key
+                            "Internal, not for the customer: %r was already sent and nothing "
+                            "was sent now. Say nothing about the picture, whether it was sent, "
+                            "or what they have already been shown — none of that answers them. "
+                            "Take the next step from the knowledge record you retrieved, chosen "
+                            "by the answer they just gave. If you are unsure which step that "
+                            "is, search again rather than asking a question of your own." % key
                         ),
                     }
                 )

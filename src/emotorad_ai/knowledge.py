@@ -22,6 +22,7 @@ nothing else; the record shape and the filter stay.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,7 +45,13 @@ _WORD = re.compile(r"[\w\u0900-\u097f]+", re.UNICODE)
 # between "not charging" and "charging slowly", and dropping it makes those two
 # records score identically on the query a customer is most likely to type.
 _STOPWORDS = frozenset(
+    # "does"/"do"/"did" sit here with is/are/was, which were always listed: they
+    # are auxiliaries and carry no meaning on their own. Their absence was an
+    # oversight, and it showed — a record whose symptoms read "charger does not
+    # fit" was matching a query about the charger LED not coming on, on the
+    # strength of "does" plus "charger".
     """a an and are as at be but by for from get getting go has have how i in is it
+    do does did
     me my of on or so the this to was what when why will with you your
     bike battery motor cycle ebike e problem issue""".split()
 )
@@ -235,6 +242,44 @@ class KnowledgeBase:
         # same confidence as a current one.
         self.records = [record for record in loaded if not record.superseded_by]
         self.retired = [record for record in loaded if record.superseded_by]
+        self._idf = self._build_idf(self.records)
+
+    @staticmethod
+    def _build_idf(records: Sequence[KnowledgeRecord]) -> Dict[str, float]:
+        """How much one matched word is worth, by how rare it is in the corpus.
+
+        Without this every matched word counts the same, and a word that says
+        almost nothing outranks one that says everything. Measured on the real
+        corpus: "nothing" appears in 7 of 13 records and "happens" in 4, while
+        "laga" and "diya" appear in exactly one — the Hinglish for *I plugged the
+        charger in*, which is the whole meaning of the question. Flat weighting
+        let the two vague words outscore the two precise ones, and the records
+        tied at identical scores, decided by whichever id sorted first.
+
+        That tie is not a curiosity: several golden queries were passing on it,
+        so any honest edit to an unrelated record could silently flip them. This
+        is the same seam pgvector replaces later (see the module docstring);
+        until then, frequency is the signal available.
+        """
+        total = len(records) or 1
+        frequency: Dict[str, int] = {}
+        for record in records:
+            seen = set(_tokens(record.title)) | set(_tokens(record.text))
+            for symptom in record.symptoms:
+                seen.update(_tokens(symptom.replace("_", " ")))
+            for token in seen:
+                frequency[token] = frequency.get(token, 0) + 1
+        # Smoothed, and floored at 1.0 so a word in every record still counts for
+        # something — being unhelpful is not the same as being evidence against.
+        return {
+            token: 1.0 + math.log(total / count)
+            for token, count in frequency.items()
+        }
+
+    def _weight(self, tokens: set) -> float:
+        # An unknown word (in the query, in no record) gets the weight of the
+        # rarest thing we have seen rather than zero.
+        return sum(self._idf.get(token, 1.0 + math.log(len(self.records) or 1)) for token in tokens)
 
     def _score(self, record: KnowledgeRecord, query_tokens: set) -> float:
         """Score a record, or 0 when the only overlap is incidental prose.
@@ -253,12 +298,25 @@ class KnowledgeBase:
         title_tokens = set(_tokens(record.title))
         body_tokens = set(_tokens(record.text))
 
-        symptom_hits = len(query_tokens & symptom_tokens)
-        title_hits = len(query_tokens & title_tokens)
-        if symptom_hits == 0 and title_hits == 0:
+        symptom_hits = query_tokens & symptom_tokens
+        title_hits = query_tokens & title_tokens
+        if not symptom_hits and not title_hits:
             return 0.0
 
-        return 3.0 * symptom_hits + 2.0 * title_hits + 1.0 * len(query_tokens & body_tokens)
+        # Each matched word now counts for what it is worth rather than one
+        # apiece (see `_build_idf`), and the field weights are spread to match:
+        # symptoms are curated for retrieval, titles nearly so, prose is
+        # incidental. Body was 1.0 against 3.0/2.0 when every word counted the
+        # same. Weighting words exposed that as too generous — a record can
+        # repeat an ordinary word across its title and a dozen steps, and under
+        # IDF that out-scored a record whose curated symptom list matched the
+        # query outright. Prose can now break a tie and not much more, which is
+        # what the docstring above always claimed it was for.
+        return (
+            4.0 * self._weight(symptom_hits)
+            + 2.0 * self._weight(title_hits)
+            + 0.25 * self._weight(query_tokens & body_tokens)
+        )
 
     def _applicable(self, record: KnowledgeRecord, bike: Mapping[str, Any]) -> bool:
         """Hard filter. Wrong-for-this-bike must be unretrievable, not ranked low."""

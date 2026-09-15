@@ -61,13 +61,21 @@ codes:
     customer_message: >-
       E-06 points at the charging port or the battery management system. The first thing
       to rule out is a melted port, which is visible in a photo.
+    # States what must be seen and where the check lives. It used to restate the
+    # whole procedure here — two photos, terminal first, controller either way —
+    # which made this a second copy of battery-melted-terminal, and the copy is
+    # what got followed: `lookup_error_code` runs first by §5b0, this read as
+    # complete instructions, and search_knowledge was never called. The real
+    # record carries the melted-versus-normal comparison pictures that go out
+    # with each request; this field cannot, so a bot working from here asks a
+    # customer to judge melting against nothing and stops after one photo.
     verification: >-
-      Two photos, and both are needed whatever the first one shows. First the battery
-      terminal — if the pins are fused or the plastic is blackened, that is case 1.
-      Then the controller's battery connector, asked for either way: melting at one end
-      does not tell you whether the other end is damaged, and the extent decides what
-      gets replaced. If neither is melted and E-06 still shows while charging, it is
-      case 2.
+      Both ends seen and compared before either case holds — the battery terminal and the
+      controller's battery connector, melted or not, whatever the first one shows. Do not
+      run that check from this line: it is battery-melted-terminal, and only that record
+      carries the melted-versus-normal comparison pictures and the order they go in.
+      Search for it. Case 2 is only reachable once both photographs are in and neither
+      end is melted.
     technician_chain: >-
       Case 1: port melted — visible on inspection. Case 2: BMS voltage dropping from
       string imbalance — E-06 persists on charging AND case 1 is ruled out.

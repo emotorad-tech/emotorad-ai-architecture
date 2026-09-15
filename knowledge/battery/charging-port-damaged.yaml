@@ -1,0 +1,62 @@
+id: battery-charging-port-damaged
+title: Bent or damaged port — the charger will not seat or stay in
+topic: battery
+# Mechanical, and deliberately separate from battery-melted-terminal, which is
+# thermal. Both are "something wrong at the port" and they are opposite faults:
+# a bent port is a shape problem you can see and feel, melting is a heat event
+# that has already happened. The remedies differ and so does what the photographs
+# need to show.
+symptoms: [port bent, port damaged, port loose, port broken, socket on battery damaged,
+           charger does not fit, charger not going in, charger keeps falling out,
+           charger does not hold, charger dhila ho gaya, port kharab,
+           charger fit nahi ho raha, पोर्ट खराब]
+applies_to: {}
+source: AFS battery diagnostic — charging port, mechanical damage
+# No reference photograph of a bent port exists yet. Describe what is needed
+# rather than implying an example has been sent.
+media: []
+steps:
+  - >-
+    The complaint is about fit, not about charging behaviour: the charger will not seat,
+    will not stay in, or the port feels loose or bent. If the charger seats normally and
+    the problem is what the LED does afterwards, this is the wrong record — that is the
+    won't-charge or won't-power-on flow.
+  - >-
+    ASK FOR PHOTOGRAPHS AND A SHORT VIDEO TOGETHER, in one message. Photographs of the
+    port itself, straight on and from the side so a bend shows; and a video of the charger
+    actually being offered up to it, because "it does not hold" is a thing that happens in
+    motion and a still picture cannot show it. Ask for both at once — asking for the video
+    afterwards means they have already put the phone down.
+  - >-
+    BEFORE ANYTHING ELSE ABOUT REMEDY — ask how long it has been like that, and whether it
+    was like it from the day the bike arrived or started later. Ask it plainly and early,
+    as part of understanding the problem. It is a normal support question, and the answer
+    decides the whole outcome.
+  - >-
+    LIKE IT ON ARRIVAL — this is delivery damage, not a fault they caused. Go to
+    battery-arrival-damage, which handles what to offer and what to say. Do not treat it
+    as an impact.
+  - >-
+    STARTED LATER, AND SOMETHING HAPPENED — a knock, a fall, the charger forced or pulled
+    sideways, the bike dropped with the charger in. That is physical damage and it is
+    chargeable even inside the warranty. Say so early rather than at the end, and go to
+    battery-warranty-replacement for how to put it.
+  - >-
+    STARTED LATER WITH NOTHING REPORTED, and no impact visible in the photographs — treat
+    it as a defect in the port, which inside the warranty is put right free. Go to
+    battery-warranty-replacement.
+  - >-
+    A BENT PORT IS NOT TO BE FORCED OR STRAIGHTENED. Say so. A customer who works the
+    charger into a damaged port can short the contacts or tear them out, and they will do
+    it because they want the bike working. Tell them to stop using that charger with that
+    port until it has been looked at.
+  - >-
+    Judge only what the photographs show. A port that looks slightly off in a dim picture
+    is not a diagnosis — ask for another, in better light, straight on. Say what you cannot
+    see rather than deciding around it.
+escalate_when: >-
+  Damage on arrival — battery-arrival-damage. An impact or the port having been forced —
+  chargeable, via battery-warranty-replacement, said plainly and before the process
+  starts. No impact reported or visible — a port defect, free inside the warranty, via
+  battery-warranty-replacement. Photographs not clear enough to tell — ask again rather
+  than deciding; three asks, then a service centre with everything gathered.

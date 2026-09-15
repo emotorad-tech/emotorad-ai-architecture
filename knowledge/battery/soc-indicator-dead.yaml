@@ -16,10 +16,34 @@ media:
     kind: image
     caption: The SOC button and charge indicator, on the side of the pack
 steps:
+  # This gate is step one because the record kept being applied to the wrong
+  # fault. The precondition used to be stated as a description — "the bike runs,
+  # the battery charges" — sitting next to a step phrased as an instruction, and
+  # the instruction was the one that got executed. A customer whose bike would
+  # not turn on at all was asked whether the indicator had ever lit, shown the
+  # four-part evidence video that exists to prove a pack works, and told the bike
+  # should still run. A condition written as prose does not gate anything.
+  #
+  # Retrieval cannot make this call. Both records legitimately own the words
+  # "SOC button" and "no light" — a customer says the same sentence for either
+  # fault, and the thing that separates them is whether the bike runs, which is
+  # in the conversation and not in the query. So the gate lives here, where the
+  # answer is known, rather than being something scoring is expected to settle.
   - >-
-    Confirm the symptom before diagnosing it. The bike runs, the battery charges, and
-    pressing the SOC button produces no light at all. That is the button or its indicator,
-    not the pack, and it is not the won't-power-on flow.
+    GATE — ANSWER THIS BEFORE ANYTHING ELSE IN THIS RECORD. Does the bike still run? If
+    you do not already know from what the customer has said, ask that and nothing else,
+    and wait.
+  - >-
+    THE BIKE DOES NOT RUN, OR WILL NOT POWER ON — this is not the record. Stop here, take
+    nothing from it, and go to battery-wont-power-on. Being handed this record by a search
+    is not evidence that it applies: it matches on the words "SOC button" and "no light",
+    which both faults are described with. A dark SOC on a bike that will not start means
+    the pack has no charge to show, which is the won't-power-on flow; a dark SOC is only
+    an indicator fault when everything else works.
+  - >-
+    THE BIKE RUNS AND THE PACK CHARGES, and only the indicator is dead — this is the
+    record. Carry on below. Say the bike working is what makes this the indicator rather
+    than the pack, so the customer understands why the questions changed.
   - >-
     Ask when it started and whether it ever worked. "It worked when I bought it and
     stopped last month" is a different case from "it never lit" — for the second, ask
@@ -30,13 +54,27 @@ steps:
     message. One unbroken take matters more than four tidy clips: it is what shows the
     pack working while the indicator stays dark, which is the whole claim.
   - >-
-    In that video: (1) the charger connected to the battery and what the charger LED
-    shows; (2) the SOC button pressed and held for one to two seconds, and what the
-    indicator does; (3) the charger disconnected; (4) the battery back on the bike and the
-    bike switched on — does it run?
+    In that video, and give each part its reason rather than listing four chores: (1) the
+    charger connected to the battery with the charger LED visible — the pack accepting
+    charge; (2) the SOC button pressed and held for one to two seconds with the indicator
+    staying dark — the fault itself; (3) the charger unplugged, visibly, on camera —
+    without this nothing in the last part proves anything, because a bike with the charger
+    still attached may be running on the charger rather than on the pack, and the pack
+    delivering power is the whole claim; (4) the battery refitted to the bike and the bike
+    switched on and running on it.
   - >-
-    How it resolves depends on how old the battery is. Under a year, battery replacement.
-    A year or more, repair at a service centre with the customer bringing the battery in.
+    Do not put a question inside that list. "— does it run?" as the fourth item reads as
+    something to answer rather than something to film, and a customer who answers it in
+    words has not sent the one shot the claim rests on. Ask for four things to film. Ask
+    questions afterwards, about what the video showed.
+  - >-
+    How it resolves is battery-warranty-replacement, and nothing about it depends on how
+    far into the warranty they are. This record used to say under a year meant replacement
+    and a year or more meant a paid service-centre repair. There is no such rule: inside
+    the warranty a fault with no physical damage is put right free, at eleven months or at
+    twenty-three, and whether that is a repair or a replacement is the service centre's
+    call rather than a date's. Cost turns on physical damage and on the warranty having
+    run out — not on age within it.
   - >-
     Say what date you are working from before you lean on it. Coverage here is usually
     measured from the registration date rather than the purchase date, because the
@@ -45,6 +83,6 @@ steps:
     colleague confirms it before anything is booked. Never announce a free replacement on
     a date you inferred.
 escalate_when: >-
-  Under a year from the recorded date — battery replacement, with the video attached.
-  A year or more — service centre repair, customer brings the battery in. Either way the
-  age is confirmed by a person before anything is booked.
+  Confirmed by the video — the remedy and who pays are battery-warranty-replacement. In
+  warranty with no physical damage, free, whatever the age within the term. Physical
+  damage or an expired warranty, chargeable. The video goes on the ticket either way.
