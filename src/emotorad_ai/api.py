@@ -50,6 +50,7 @@ from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
+from .tools.verification import VerificationStore
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 
@@ -62,6 +63,13 @@ def _build_llm(mode: str, settings: Settings) -> Optional[object]:
 
 
 settings = load_settings()
+# Verification is per conversation and has to outlive a single request, so the
+# store is module-level. Without one, `build_registry` does not register
+# `request_identity_verification` or `verify_identity` at all, and an anonymous
+# visitor asked for their number has no way to prove it — the flow dead-ends.
+verification_store = VerificationStore()
+
+
 def _build_registry():
     """Real OMS reads when a key is configured, fixtures when it is not.
 
@@ -75,9 +83,10 @@ def _build_registry():
     convincing, and therefore worse, than fixtures all the way through.
     """
     if not os.environ.get("EMOTORAD_OMS_API_KEY"):
-        return build_registry()
+        return build_registry(verification=verification_store)
     client = OMSClient()
     return build_registry(
+        verification=verification_store,
         warranty_source=live_warranty_source(client),
         account_finder=live_account_finder(client),
     )
@@ -169,6 +178,29 @@ def post_message(body: MessageIn) -> MessageOut:
             for a in reply.attachments
         ],
     )
+
+
+# Reading the code off the screen replaces the SMS that is not wired yet, the
+# way the playground shows it in its sidebar. It is a verification bypass by
+# definition: it hands the pending code for any conversation to anyone who asks.
+#
+# So it is off unless switched on, never on unless switched off. A deployment
+# that forgets to set anything gets 404, and the only way to enable it is to
+# have decided to. Delete the whole route once an SMS provider is wired; nothing
+# else depends on it.
+DEV_CODES = os.environ.get("EMOTORAD_AI_DEV_CODES") == "1"
+
+
+@app.get("/dev/verification/{conversation_id}")
+def dev_verification(conversation_id: str) -> dict:
+    if not DEV_CODES:
+        raise HTTPException(status_code=404, detail="not found")
+    return {
+        "conversation_id": conversation_id,
+        "pending_code": verification_store.pending_code(conversation_id),
+        "verified_phone": verification_store.verified_phone(conversation_id),
+        "attempts_left": verification_store.attempts_left(conversation_id),
+    }
 
 
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"

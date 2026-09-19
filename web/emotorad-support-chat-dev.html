@@ -224,6 +224,10 @@
       <div class="context-pill" id="contextPill"></div>
     </div>
 
+    <div class="context-pill-row" id="devCodeRow" hidden>
+      <div class="context-pill" id="devCode" style="background:#FFF1E8;color:#B4470F"></div>
+    </div>
+
     <div class="chat-scroll" id="chatScroll"></div>
 
     <div id="footer"></div>
@@ -366,6 +370,7 @@ function ask(text) {
     state.busy = false;
     state.turns.push({ isUser: false, text: reply.text, attachments: reply.attachments || [] });
     render();
+    pollDevCode();
   }).catch(function (err) {
     // Say what happened rather than leaving a spinner running. A chat that
     // silently stops is indistinguishable from one that is still thinking.
@@ -387,6 +392,33 @@ function send() {
   state.turns.push({ isUser: true, text: text });
   state.draft = "";
   ask(text);
+}
+
+/* Reading the verification code off the screen, because no SMS provider is
+   wired: the code is generated locally and the playground shows it in its
+   sidebar. Same idea, different surface. The endpoint 404s unless the server
+   was started with EMOTORAD_AI_DEV_CODES=1, so this quietly shows nothing in
+   any deployment that has not deliberately opted in. */
+function pollDevCode() {
+  if (!state.conversationId) return;
+  fetch("/dev/verification/" + encodeURIComponent(state.conversationId))
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      var row = document.getElementById("devCodeRow");
+      var el = document.getElementById("devCode");
+      if (!row || !el) return;
+      if (d && d.pending_code) {
+        el.textContent = "Testing only \u00b7 code " + d.pending_code +
+                         " \u00b7 " + d.attempts_left + " attempts left";
+        row.hidden = false;
+      } else if (d && d.verified_phone) {
+        el.textContent = "Verified \u00b7 " + d.verified_phone;
+        row.hidden = false;
+      } else {
+        row.hidden = true;
+      }
+    })
+    .catch(function () { /* endpoint disabled: nothing to show */ });
 }
 
 /* The first-party cookie every visitor carries, logged in or not. Anonymous is
