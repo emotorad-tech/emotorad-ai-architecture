@@ -220,8 +220,8 @@
       </div>
     </div>
 
-    <div class="context-pill-row">
-      <div class="context-pill">Verified &middot; Ananya &middot; EMX Plus</div>
+    <div class="context-pill-row" id="contextPillRow" hidden>
+      <div class="context-pill" id="contextPill"></div>
     </div>
 
     <div class="chat-scroll" id="chatScroll"></div>
@@ -327,7 +327,15 @@ function renderFooter() {
     '<div class="send-btn" id="sendBtn" style="background:' + sendBg + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></div>' +
     "</div>";
   var input = document.getElementById("draftInput");
-  input.addEventListener("input", function (e) { state.draft = e.target.value; renderFooter(); });
+  // Do NOT re-render on input. Rebuilding the composer recreates the <input>,
+  // which resets the caret to position 0, so every character typed lands before
+  // the previous one and the text comes out reversed. Only the send button
+  // changes as you type, so change only the send button.
+  input.addEventListener("input", function (e) {
+    state.draft = e.target.value;
+    var btn = document.getElementById("sendBtn");
+    if (btn) btn.style.background = state.draft.trim().length > 0 ? "var(--accent)" : "#D9D9D9";
+  });
   input.addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
   document.getElementById("sendBtn").addEventListener("click", send);
   document.getElementById("attachBtn").addEventListener("click", function () {
@@ -345,7 +353,11 @@ function ask(text) {
   fetch("/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation_id: state.conversationId, text: text })
+    body: JSON.stringify({
+      conversation_id: state.conversationId,
+      em_aid: emAid(),
+      text: text
+    })
   }).then(function (r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return r.json();
@@ -375,6 +387,20 @@ function send() {
   state.turns.push({ isUser: true, text: text });
   state.draft = "";
   ask(text);
+}
+
+/* The first-party cookie every visitor carries, logged in or not. Anonymous is
+   a valid identity: it gets generic help, and nothing personal until a phone is
+   verified in the conversation itself. */
+function emAid() {
+  var key = "em_aid";
+  var v = null;
+  try { v = window.localStorage.getItem(key); } catch (e) { /* private window */ }
+  if (!v) {
+    v = "em-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { window.localStorage.setItem(key, v); } catch (e) { /* not fatal */ }
+  }
+  return v;
 }
 
 /* Open the conversation. The greeting is local so the window is never blank;

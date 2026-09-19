@@ -106,7 +106,18 @@ app = FastAPI(title="Emotorad AI — battery support")
 
 class MessageIn(BaseModel):
     conversation_id: Optional[str] = None
-    session_token: str = "sess-ananya"
+    # No default. It used to be "sess-ananya", a fixture session mapping to
+    # +919876543210, which meant every caller who did not set one arrived
+    # already verified as a test customer. Harmless while the tools were
+    # fixtures; not harmless once the OMS key is set, because that fixture phone
+    # is then looked up for real and returns somebody's actual bikes to whoever
+    # opened the page.
+    session_token: Optional[str] = None
+    # The website's first-party cookie: present for every visitor, logged in or
+    # not, and the identifier this channel is specified to arrive with. An
+    # anonymous visitor is a valid identity, not a failure — they get a cluster
+    # and generic help, and must verify a phone before anything personal.
+    em_aid: Optional[str] = None
     text: str
     pill: Optional[str] = None
 
@@ -141,6 +152,7 @@ def post_message(body: MessageIn) -> MessageOut:
         {
             "conversation_id": conversation_id,
             "session_token": body.session_token,
+            "em_aid": body.em_aid,
             "text": body.text,
             "pill": body.pill,
         }
