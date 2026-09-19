@@ -24,6 +24,7 @@ from ..tools.mocks import (
     SEARCH_BATTERY_KNOWLEDGE,
     SEND_GUIDE_MEDIA,
 )
+from ..prompts import load_base_prompt
 from .base import AgentDefinition
 
 AGENT_NAME = "battery_support"
@@ -44,7 +45,7 @@ TOOL_NAMES = (
     BOOK_SERVICE_SLOT,
 )
 
-_BASE_PROMPT = """\
+_FALLBACK_PROMPT = """\
 You are the battery support assistant for EMotorad, an Indian e-cycle company. You are \
 talking to a signed-in customer about a battery problem with the bike they own.
 
@@ -85,6 +86,12 @@ Style: reply in short plain sentences suited to a chat widget. No headings, no b
 symbols, no markdown, no emoji. Indian English. Numbers of steps written out inline. If \
 you do not know something, say so.
 """
+
+# The promoted prompt wins; the literal above is the fallback for a checkout
+# that has never run promote_prompt.py. Assigned once at import, and read from
+# the module global by build_system_prompt, so the playground's
+# `_tuned_system_prompt` monkey-patch keeps working unchanged.
+_BASE_PROMPT = load_base_prompt(AGENT_NAME) or _FALLBACK_PROMPT
 
 
 def _describe(bike: Dict[str, Any]) -> str:

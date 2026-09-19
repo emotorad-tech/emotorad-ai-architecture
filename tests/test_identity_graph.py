@@ -301,10 +301,19 @@ class PromptDisclosureTests(unittest.TestCase):
         self.assertIn("Do NOT assume", prompt)
 
     def test_a_bike_with_no_date_at_all_never_gets_a_coverage_claim(self):
-        prompt = self._prompt(self.resolver, "919700000003")
-        self.assertIn("Coverage: UNKNOWN", prompt)
-        self.assertIn("invoice", prompt)
-        self.assertNotIn("in warranty", prompt)
+        # Scoped to the customer-context block, like the outage test above, and
+        # it has to be. The rule is that *this bike* is never described as
+        # covered when no purchase date exists, and that is a statement the
+        # facts block makes or does not make. Searching the whole system prompt
+        # worked only while the base prompt was short and generic: the promoted
+        # prompt discusses warranty at length as instruction ("whether the bike
+        # is in warranty is the first question"), which is guidance to the model
+        # and not a claim about anyone's bike. Widen this back and it fails on
+        # the next prompt that mentions the word.
+        facts = self._prompt(self.resolver, "919700000003").split("Customer context")[-1]
+        self.assertIn("Coverage: UNKNOWN", facts)
+        self.assertIn("invoice", facts)
+        self.assertNotIn("in warranty", facts)
 
     def test_coverage_from_a_registration_date_is_never_stated_as_final(self):
         # The figure is generous by construction — registration is at or after
