@@ -87,6 +87,87 @@ class BedrockClaude:
         )
 
 
+class AnthropicClaude:
+    """Claude via the Anthropic API directly, keyed from the environment.
+
+    A deviation from the architecture, and a deliberate, temporary one. CLAUDE.md
+    says model access goes through Bedrock so LLM traffic stays inside Emotorad's
+    AWS boundary, and `BedrockClaude` above is that path. It needs AWS access that
+    is not yet wired up, which is why `api.py` has defaulted to the offline
+    planner since it was written.
+
+    Meanwhile the playground has been calling the Anthropic API directly for
+    weeks with a key pasted into its sidebar, so every prompt we have tuned was
+    tuned against this transport. This class is that same call, moved behind the
+    `LLMResponse` interface so the API path can use it too.
+
+    What it buys is one agent loop. The alternative, pointing a chat UI at the
+    playground's own loop, would ship a bot carrying one guardrail out of three:
+    the playground runs `check_evidence` but neither `check_safety` nor the
+    coverage post-check, which CLAUDE.md calls the highest-value control in the
+    system. Going through `runtime.handle()` keeps all three.
+
+    Parameters are deliberately the ones the playground already proves work
+    against this endpoint. `thinking` and `output_config` are Bedrock-Mantle
+    settings and are not sent here.
+
+    Swap back to Bedrock by setting EMOTORAD_AI_MODE=bedrock once AWS access
+    lands. Nothing else has to change.
+    """
+
+    def __init__(self, settings: Settings, client: Any = None, api_key: Optional[str] = None) -> None:
+        self.settings = settings
+        if client is not None:
+            self._client = client
+            return
+        import os
+
+        import anthropic  # imported lazily: tests never need it
+
+        key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            # Loudly, at construction. An agent that starts without a key fails
+            # on the customer's first message instead, which reads as the bot
+            # being broken rather than as the service being misconfigured.
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set, and EMOTORAD_AI_MODE=anthropic needs it. "
+                "Set it, or run with EMOTORAD_AI_MODE=offline for the fixed planner."
+            )
+        self._client = anthropic.Anthropic(api_key=key)
+
+    def create(
+        self,
+        system: str,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+    ) -> LLMResponse:
+        response = self._client.messages.create(
+            model=self.settings.model,
+            max_tokens=self.settings.max_tokens,
+            system=system,
+            messages=list(messages),
+            tools=list(tools),
+        )
+
+        api_content: List[Dict[str, Any]] = []
+        text_parts: List[str] = []
+        tool_uses: List[ToolUse] = []
+        for block in response.content:
+            api_content.append(block.model_dump(exclude_none=True))
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_uses.append(ToolUse(id=block.id, name=block.name, arguments=dict(block.input or {})))
+
+        return LLMResponse(
+            stop_reason=response.stop_reason or "end_turn",
+            text="\n".join(part for part in text_parts if part).strip(),
+            tool_uses=tool_uses,
+            api_content=api_content,
+            usage=response.usage.model_dump() if response.usage else None,
+        )
+
+
 class ScriptedClaude:
     """Returns queued responses in order. Used by tests and `cli --fake`.
 

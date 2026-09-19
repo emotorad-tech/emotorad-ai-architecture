@@ -239,47 +239,29 @@
    turn is a point where the UI waits for the visitor to act
    (free text, a quick-reply chip, or an attachment).
    ============================================================ */
-var SCRIPT = [
-  { who: "ai", kind: "text", text: "Hi! I'm an AI assistant here to help with your EMX Plus.\n\nWhat's going on with the bike?" },
-  { who: "user", kind: "awaitFree", suggestion: "My battery switch is not working" },
-  { who: "ai", kind: "text", text: "Got it. I need to understand which way the switch is failing — two different things can happen.\n\nDoes the bike power on at all right now, or is everything dark?" },
-  { who: "user", kind: "awaitChip", options: ["Stays on, won't switch off", "Nothing turns on at all"] },
-  { who: "ai", kind: "list",
-    intro: "I need to see this in action. Can you send one continuous video showing:",
-    items: [
-      "The battery fitted to the bike, switch visible, in the ON position",
-      "The bike switched on, display lit",
-      "The switch moved to OFF — on camera",
-      "The display still powered right after — that's the fault",
-      "The switch held at OFF for a few seconds more"
-    ],
-    outro: "One unbroken take, so I can see it actually happening." },
-  { who: "user", kind: "awaitAttach", filename: "battery_switch.mp4", duration: "0:34" },
-  { who: "ai", kind: "ticket", id: "EM-00001",
-    body: "Our team will reach out within 24 hours on a working day to arrange the replacement — a service centre visit near you, or a battery collection, whichever is easier." },
-  { who: "ai", kind: "text", text: "Is there anything else I can help with right now?" }
-];
-
 /* ============================================================
-   STATE
+   LIVE. The four INTEGRATION POINTs the handoff doc lists are
+   now real calls to POST /message on this same origin. The
+   rendering functions and the state shape below are unchanged
+   from the prototype, which is what that doc said would happen:
+   only "what happens next" moved from reading a hardcoded
+   SCRIPT to asking the agent.
+
+   Still stubbed, deliberately: the attach button. Uploading
+   needs somewhere to put the file and a decision about size and
+   type limits, and MessageIn has no attachment field yet. Until
+   then it sends a text note so the conversation can continue,
+   and the agent's evidence gate will correctly refuse to
+   conclude a fault on it.
    ============================================================ */
+var OPENING = "Hi! I'm an AI assistant here to help with your EMotorad bike.\n\nWhat's going on?";
+
 var state = {
-  pointer: 0,      // index into SCRIPT of the next turn to reveal / wait on
-  typing: false,   // show the animated typing bubble
-  draft: "",       // current composer text
-  filled: {},      // pointer index -> what the user actually sent (string, or {type:'attachment',...})
-  extra: []        // messages appended after SCRIPT is exhausted ({isUser, text})
+  conversationId: null,  // assigned by the server on the first reply
+  draft: "",
+  busy: false,
+  turns: []              // {isUser, text} | {isUser:true, attachment:{...}} | {isAi, attachments:[...]}
 };
-var busy = false; // re-entrancy guard so a rapid double-tap can't double-advance the script
-
-/* ============================================================
-   AVATAR / ICONS (small inline helpers, reused in a few places)
-   ============================================================ */
-function aiAvatar(size) {
-  return '<div class="avatar-badge' + (size === 'sm' ? ' sm' : '') + '">' +
-    '<svg width="' + (size === 'sm' ? 12 : 18) + '" height="' + (size === 'sm' ? 12 : 18) + '" viewBox="0 0 24 24" fill="none">' +
-    '<path d="M13 2L4 14H11L10 22L20 9H12L13 2Z" fill="var(--accent)"/></svg></div>';
-}
 
 function esc(s) {
   var d = document.createElement("div");
@@ -287,206 +269,118 @@ function esc(s) {
   return d.innerHTML;
 }
 
-/* ============================================================
-   RENDER — rebuilds the message list + footer from `state`.
-   Called after every state change. Kept simple (full re-render)
-   since this chat is short; swap for incremental DOM updates if
-   the real integration needs to handle long conversations.
-   ============================================================ */
-function render() {
-  var scroll = document.getElementById("chatScroll");
-  var html = "";
-
-  for (var i = 0; i < state.pointer && i < SCRIPT.length; i++) {
-    var turn = SCRIPT[i];
-    if (turn.who === "ai") {
-      html += renderAiTurnHtml(turn);
-    } else if (state.filled[i] !== undefined) {
-      html += renderUserTurnHtml(state.filled[i]);
-    }
-  }
-  state.extra.forEach(function (m) {
-    html += m.isUser ? renderUserTurnHtml(m.text) : renderAiTurnHtml({ kind: "text", text: m.text });
-  });
-
-  if (state.typing) {
-    html += '<div class="typing-row">' + aiAvatar("sm") +
-      '<div class="typing-bubble"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>';
-  }
-
-  scroll.innerHTML = html;
-  scroll.scrollTop = scroll.scrollHeight;
-
-  renderFooter();
+function aiAvatar(size) {
+  return '<div class="avatar-badge' + (size === 'sm' ? ' sm' : '') + '">' +
+    '<svg width="' + (size === 'sm' ? 12 : 18) + '" height="' + (size === 'sm' ? 12 : 18) + '" viewBox="0 0 24 24" fill="none">' +
+    '<path d="M13 2L4 14H11L10 22L20 9H12L13 2Z" fill="var(--accent)"/></svg></div>';
 }
 
 function renderAiTurnHtml(turn) {
-  if (turn.kind === "text") {
-    return '<div class="msg-row ai">' + aiAvatar("sm") + '<div class="bubble-text bubble-ai">' + esc(turn.text) + "</div></div>";
-  }
-  if (turn.kind === "list") {
-    var items = turn.items.map(function (t) {
-      return '<div class="row"><span class="dot"></span><span>' + esc(t) + "</span></div>";
-    }).join("");
-    return '<div class="msg-row ai">' + aiAvatar("sm") +
-      '<div class="bubble-list"><div class="intro">' + esc(turn.intro) + '</div>' +
-      '<div class="items">' + items + '</div>' +
-      '<div class="outro">' + esc(turn.outro) + "</div></div></div>";
-  }
-  if (turn.kind === "ticket") {
-    return '<div class="msg-row ai">' + aiAvatar("sm") +
-      '<div class="ticket-card"><div class="ticket-check">' +
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg></div>' +
-      '<div><div class="ticket-title">Ticket ' + esc(turn.id) + ' created</div><div class="ticket-body">' + esc(turn.body) + "</div></div></div></div>";
-  }
-  return "";
+  var html = '<div class="msg-row ai">' + aiAvatar("sm") +
+    '<div class="bubble-text bubble-ai">' + esc(turn.text) + "</div></div>";
+  // Guide photos and clips the agent chose to send. It picks a catalogue key;
+  // code resolves the URL, so nothing here is ever a link the model typed.
+  (turn.attachments || []).forEach(function (a) {
+    if (a.kind === "video") {
+      html += '<div class="msg-row ai"><div class="video-card"><video src="' + esc(a.url) +
+        '" controls playsinline style="width:100%;display:block"></video></div></div>';
+    } else {
+      html += '<div class="msg-row ai"><img src="' + esc(a.url) +
+        '" alt="" style="max-width:190px;border-radius:16px;display:block" /></div>';
+    }
+  });
+  return html;
 }
 
-function renderUserTurnHtml(value) {
-  if (value && typeof value === "object" && value.type === "attachment") {
+function renderUserTurnHtml(turn) {
+  if (turn.attachment) {
     return '<div class="msg-row user"><div class="video-card"><div class="video-thumb"><div class="video-play">' +
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M8 5v14l11-7z"/></svg></div></div>' +
-      '<div class="video-meta"><div class="video-filename">' + esc(value.filename) + '</div><div class="video-duration">' + esc(value.duration) + ' &middot; video</div></div></div></div>';
+      '<div class="video-meta"><div class="video-filename">' + esc(turn.attachment.filename) +
+      '</div><div class="video-duration">' + esc(turn.attachment.duration) + ' &middot; video</div></div></div></div>';
   }
-  return '<div class="msg-row user"><div class="bubble-text bubble-user">' + esc(value) + "</div></div>";
+  return '<div class="msg-row user"><div class="bubble-text bubble-user">' + esc(turn.text) + "</div></div>";
+}
+
+function render() {
+  var scroll = document.getElementById("chatScroll");
+  var html = "";
+  state.turns.forEach(function (t) {
+    html += t.isUser ? renderUserTurnHtml(t) : renderAiTurnHtml(t);
+  });
+  if (state.busy) {
+    html += '<div class="typing-row">' + aiAvatar("sm") +
+      '<div class="typing-bubble"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>';
+  }
+  scroll.innerHTML = html;
+  scroll.scrollTop = scroll.scrollHeight;
+  renderFooter();
 }
 
 function renderFooter() {
   var footer = document.getElementById("footer");
-  var pending = state.pointer < SCRIPT.length ? SCRIPT[state.pointer] : null;
-  var mode = "free";
-  if (state.typing) mode = "none";
-  else if (pending) {
-    if (pending.who === "ai") mode = "none";
-    else if (pending.kind === "awaitChip") mode = "chips";
-    else if (pending.kind === "awaitAttach") mode = "attach";
-  }
-
-  if (mode === "none") { footer.innerHTML = ""; return; }
-
-  if (mode === "chips") {
-    var chipsHtml = pending.options.map(function (opt, idx) {
-      return '<div class="chip lg" data-chip-index="' + idx + '">' + esc(opt) + "</div>";
-    }).join("");
-    footer.innerHTML = '<div class="footer-chips">' + chipsHtml + "</div>";
-    footer.querySelectorAll("[data-chip-index]").forEach(function (el) {
-      el.addEventListener("click", function () {
-        handleUserAction(state.pointer, pending.options[Number(el.getAttribute("data-chip-index"))]);
-      });
-    });
-    return;
-  }
-
-  if (mode === "attach") {
-    footer.innerHTML = '<div class="footer-attach"><div class="attach-btn" id="attachBtn">' +
-      '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 014.95 4.95l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.48"/></svg>' +
-      "Attach the video</div></div>";
-    document.getElementById("attachBtn").addEventListener("click", function () {
-      // INTEGRATION POINT: this is where a real build would open the
-      // device's file/camera picker and upload the result, then call
-      // handleUserAction with the real filename/duration/URL.
-      handleUserAction(state.pointer, { type: "attachment", filename: pending.filename, duration: pending.duration });
-    });
-    return;
-  }
-
-  // mode === "free"
-  var showSuggestion = !!(pending && pending.kind === "awaitFree" && pending.suggestion) && state.draft.trim().length === 0;
+  if (state.busy) { footer.innerHTML = ""; return; }
   var sendBg = state.draft.trim().length > 0 ? "var(--accent)" : "#D9D9D9";
-
-  var html = "";
-  if (showSuggestion) {
-    html += '<div class="footer-suggestion"><div class="chip" id="suggestionChip">' + esc(pending.suggestion) + "</div></div>";
-  }
-  html += '<div class="footer-composer">' +
-    '<div class="icon-btn"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>' +
+  footer.innerHTML = '<div class="footer-composer">' +
+    '<div class="icon-btn" id="attachBtn" title="Attach"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>' +
     '<input type="text" class="composer-input" id="draftInput" placeholder="Type your message..." value="' + esc(state.draft) + '" />' +
     '<div class="send-btn" id="sendBtn" style="background:' + sendBg + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></div>' +
     "</div>";
-  footer.innerHTML = html;
-
-  if (showSuggestion) {
-    document.getElementById("suggestionChip").addEventListener("click", function () {
-      handleUserAction(state.pointer, pending.suggestion);
-    });
-  }
   var input = document.getElementById("draftInput");
   input.addEventListener("input", function (e) { state.draft = e.target.value; renderFooter(); });
-  input.addEventListener("keydown", function (e) { if (e.key === "Enter") sendFree(); });
-  document.getElementById("sendBtn").addEventListener("click", sendFree);
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
+  document.getElementById("sendBtn").addEventListener("click", send);
+  document.getElementById("attachBtn").addEventListener("click", function () {
+    // INTEGRATION POINT, still open: no upload endpoint exists yet.
+    state.draft = "[photo/video attached]";
+    renderFooter();
+  });
+  input.focus();
 }
 
-/* ============================================================
-   STATE TRANSITIONS
-   ============================================================ */
-function revealFrom(i) {
-  if (i >= SCRIPT.length) {
-    busy = false;
-    state.pointer = i;
-    render();
-    return;
-  }
-  var turn = SCRIPT[i];
-  if (turn.who === "ai") {
-    state.typing = true;
-    render();
-    var delay = i === 0 ? 350 : 750;
-    setTimeout(function () {
-      state.typing = false;
-      state.pointer = i + 1;
-      render();
-      revealFrom(i + 1);
-    }, delay);
-  } else {
-    busy = false;
-    state.pointer = i;
-    render();
-  }
-}
-
-function handleUserAction(i, value) {
-  if (busy) return;
-  busy = true;
-  state.filled[i] = value;
-  state.draft = "";
-  state.pointer = i + 1;
+/* The one real integration: ask the agent, render what comes back. */
+function ask(text) {
+  state.busy = true;
   render();
-  revealFrom(i + 1);
+  fetch("/message", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: state.conversationId, text: text })
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function (reply) {
+    state.conversationId = reply.conversation_id;
+    state.busy = false;
+    state.turns.push({ isUser: false, text: reply.text, attachments: reply.attachments || [] });
+    render();
+  }).catch(function (err) {
+    // Say what happened rather than leaving a spinner running. A chat that
+    // silently stops is indistinguishable from one that is still thinking.
+    state.busy = false;
+    state.turns.push({
+      isUser: false,
+      text: "Sorry, I could not reach support just then (" + err.message +
+            "). Please try again in a moment.",
+      attachments: []
+    });
+    render();
+  });
 }
 
-function sendFree() {
-  if (busy) return;
+function send() {
+  if (state.busy) return;
   var text = (state.draft || "").trim();
   if (!text) return;
-
-  if (state.pointer < SCRIPT.length && SCRIPT[state.pointer].who === "user" && SCRIPT[state.pointer].kind === "awaitFree") {
-    // INTEGRATION POINT: in the real build, this is where the visitor's
-    // first free-typed message (their actual issue) should be sent to the
-    // agent backend, and the next "ai" turn below should be whatever the
-    // agent actually says back — not the next hardcoded SCRIPT entry.
-    handleUserAction(state.pointer, text);
-    return;
-  }
-
-  if (state.pointer >= SCRIPT.length) {
-    busy = true;
-    state.extra.push({ isUser: true, text: text });
-    state.draft = "";
-    state.typing = true;
-    render();
-    setTimeout(function () {
-      busy = false;
-      state.typing = false;
-      // INTEGRATION POINT: generic fallback reply — replace with a real
-      // agent call once the conversation is backend-connected.
-      state.extra.push({ isUser: false, text: "Thanks — I've noted that down. The team will follow up if anything further is needed." });
-      render();
-    }, 700);
-  }
+  state.turns.push({ isUser: true, text: text });
+  state.draft = "";
+  ask(text);
 }
 
-/* Kick off the conversation */
-revealFrom(0);
+/* Open the conversation. The greeting is local so the window is never blank;
+   everything after it comes from the agent. */
+state.turns.push({ isUser: false, text: OPENING, attachments: [] });
+render();
 </script>
 
 </body>

@@ -31,12 +31,13 @@ import base64
 import binascii
 import os
 import secrets
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
 import httpx
 import websockets
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -44,12 +45,20 @@ from .adapters import WebsiteChatAdapter
 from .config import load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
-from .llm import OfflinePlanner
+from .llm import AnthropicClaude, OfflinePlanner
 from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
+
+def _build_llm(mode: str, settings: Settings) -> Optional[object]:
+    if mode == "offline":
+        return OfflinePlanner()
+    if mode == "anthropic":
+        return AnthropicClaude(settings)
+    return None  # Runtime constructs BedrockClaude
+
 
 settings = load_settings()
 registry = build_registry()
@@ -58,7 +67,13 @@ log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 runtime = Runtime(
     settings=settings,
     registry=registry,
-    llm=OfflinePlanner() if MODE == "offline" else None,
+    # offline   -> the fixed planner: no model, no key, no tokens spent.
+    # anthropic -> Claude via the Anthropic API, keyed from the environment.
+    #              Temporary, and the transport every tuned prompt was tuned
+    #              against. See AnthropicClaude for why it exists.
+    # bedrock   -> None, so Runtime builds BedrockClaude: the architecture's
+    #              answer, waiting on AWS access.
+    llm=_build_llm(MODE, settings),
     log=log,
     resolver=resolver,
 )
@@ -74,12 +89,22 @@ class MessageIn(BaseModel):
     pill: Optional[str] = None
 
 
+class AttachmentOut(BaseModel):
+    kind: str
+    url: str
+    mime_type: Optional[str] = None
+
+
 class MessageOut(BaseModel):
     conversation_id: str
     text: str
     escalated: bool
     ticket_id: Optional[str]
     handled_by: Optional[str]
+    # Guide photos and clips the agent chose to send. `Reply` has carried these
+    # all along; this layer computed them and then dropped them on the floor, so
+    # over HTTP the bot could never show anyone the SOC button it was describing.
+    attachments: List[AttachmentOut] = []
 
 
 @app.get("/health")
@@ -105,7 +130,32 @@ def post_message(body: MessageIn) -> MessageOut:
         escalated=reply.escalated,
         ticket_id=reply.ticket_id,
         handled_by=reply.handled_by,
+        attachments=[
+            AttachmentOut(kind=a.kind, url=a.url, mime_type=a.mime_type)
+            for a in reply.attachments
+        ],
     )
+
+
+WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
+CHAT_FILE = WEB_DIR / "emotorad-support-chat-dev.html"
+
+
+@app.get("/chat", response_class=HTMLResponse)
+def chat() -> HTMLResponse:
+    """The customer chat UI, talking to /message on this same origin.
+
+    Served from `web/` rather than bundled, so the file stays the one a designer
+    opens directly in a browser. There is no auth on it yet and it must not be
+    exposed publicly: every tool behind it is still a fixture, so a real customer
+    would be told about a bike that is not theirs and promised a ticket that does
+    not exist. Local and internal use only until the OMS key and a real ticketing
+    integration are in place.
+    """
+    try:
+        return HTMLResponse(CHAT_FILE.read_text(encoding="utf-8"))
+    except OSError:
+        raise HTTPException(status_code=404, detail="chat UI not found at web/")
 
 
 @app.get("/")
