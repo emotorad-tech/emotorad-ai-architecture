@@ -171,3 +171,62 @@ class OMSClient:
             if isinstance(rows, list) and rows:
                 return [row for row in rows if isinstance(row, dict)]
         raise last
+
+
+# --- Mapping OMS outcomes onto the tool's own ------------------------------
+#
+# These lived in playground.py, which meant the only surface that could talk to
+# the real OMS was the one that happened to import Streamlit. They are pure
+# functions over a client, so they belong beside the client instead, and the API
+# can use them too. The mapping is the reason they exist and it must not be
+# reimplemented per caller: "no rows" is a customer who never registered and
+# routes to Late Warranty Registration, while a rejected key, a timeout or a 500
+# is our outage and has to say so. Reporting an outage as "no record" tells a
+# registered owner to re-register.
+
+
+def live_warranty_source(client: Any) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
+    """Registered bikes from the real OMS, mapped onto the tool's own outcomes."""
+    from .registry import ToolError  # local: registry imports tools, not the reverse
+
+    def source(phone: str) -> Optional[List[Dict[str, Any]]]:
+        try:
+            return client.get_warranties_by_mobile(phone)
+        except OMSNoRecord:
+            return None
+        except (OMSUnavailable, OMSConfigError) as exc:
+            raise ToolError(
+                "oms_unavailable",
+                "The warranty system is not responding (%s)." % type(exc).__name__,
+                retryable=True,
+            )
+
+    return source
+
+
+def live_account_finder(client: Any) -> Callable[[str], Optional[str]]:
+    """Order or invoice code -> the phone the warranty is registered on, or None.
+
+    Returns the number to the *registry*, never to the model: the tool that uses
+    this hands back only a masked form. An order code is printed on paper, so
+    treating it as identification would make an invoice enough to read someone's
+    contact details.
+    """
+    from .registry import ToolError
+
+    def finder(code: str) -> Optional[str]:
+        try:
+            rows = client.get_orders_by_code(code)
+        except (OMSNoRecord, OMSConfigError):
+            return None
+        except OMSUnavailable:
+            raise ToolError(
+                "oms_unavailable", "The order system is not responding.", retryable=True
+            )
+        for row in rows:
+            phone = (row.get("mobile") or "").strip()
+            if phone and phone not in ("None", "null"):
+                return phone if phone.startswith("+") else "+91%s" % phone.lstrip("0")
+        return None
+
+    return finder

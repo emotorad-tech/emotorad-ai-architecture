@@ -89,7 +89,7 @@ from emotorad_ai.tools.mocks import (
     _coverage,
     build_registry,
 )
-from emotorad_ai.tools.oms import OMSClient, OMSConfigError, OMSNoRecord, OMSUnavailable
+from emotorad_ai.tools.oms import OMSClient, OMSConfigError, OMSNoRecord, OMSUnavailable, live_account_finder, live_warranty_source
 from emotorad_ai.tools.registry import ToolContext, ToolError, ToolRegistry, is_error
 from emotorad_ai.tools.verification import (
     FIND_ACCOUNT_BY_CODE,
@@ -893,55 +893,6 @@ DEFAULT_MAX_TOKENS = 16000
 _WRITE_KEY_FIELD = "idempotency_key"
 
 
-def _live_warranty_source(client: Any) -> Any:
-    """Registered bikes from the real OMS, mapped onto the tool's own outcomes.
-
-    The mapping is the point. `no rows` is a customer who never registered and
-    routes to Late Warranty Registration; everything else — a rejected key, a
-    timeout, a 500 — is our outage and must say so. Reporting an outage as "no
-    record" would tell a registered owner to re-register.
-    """
-
-    def source(phone: str) -> Optional[List[Dict[str, Any]]]:
-        try:
-            return client.get_warranties_by_mobile(phone)
-        except OMSNoRecord:
-            return None
-        except (OMSUnavailable, OMSConfigError) as exc:
-            raise ToolError(
-                "oms_unavailable",
-                "The warranty system is not responding (%s)." % type(exc).__name__,
-                retryable=True,
-            )
-
-    return source
-
-
-def _live_account_finder(client: Any) -> Any:
-    """Order or invoice code -> the phone the warranty is registered on, or None.
-
-    Returns the number to the *registry*, never to the model: the tool that uses
-    this hands back only a masked form. An order code is printed on paper, so
-    treating it as identification would make an invoice enough to read someone's
-    contact details.
-    """
-
-    def finder(code: str) -> Optional[str]:
-        try:
-            rows = client.get_orders_by_code(code)
-        except (OMSNoRecord, OMSConfigError):
-            return None
-        except OMSUnavailable:
-            raise ToolError(
-                "oms_unavailable", "The order system is not responding.", retryable=True
-            )
-        for row in rows:
-            phone = (row.get("mobile") or "").strip()
-            if phone and phone not in ("None", "null"):
-                return phone if phone.startswith("+") else "+91%s" % phone.lstrip("0")
-        return None
-
-    return finder
 
 
 # Tools withheld from an agent in the playground only, never in production.
@@ -1012,8 +963,8 @@ def _live_bikes(agent_name: str, verification: "VerificationStore", chat_id: str
     client = OMSClient()
     lookup = build_registry(
         today=date.today(),
-        warranty_source=_live_warranty_source(client),
-        account_finder=_live_account_finder(client),
+        warranty_source=live_warranty_source(client),
+        account_finder=live_account_finder(client),
     )
     return _resolved_for_live(agent_name, verification.verified_phone(chat_id), lookup).bikes
 
@@ -1431,8 +1382,8 @@ def main() -> None:
         registry = build_registry(
             today=date.today(),
             verification=verification,
-            warranty_source=_live_warranty_source(client),
-            account_finder=_live_account_finder(client),
+            warranty_source=live_warranty_source(client),
+            account_finder=live_account_finder(client),
             guide_media=load_catalogue(),
             sent_media=sent_media,
             error_codes=load_error_codes(),

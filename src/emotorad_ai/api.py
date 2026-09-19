@@ -49,6 +49,7 @@ from .llm import AnthropicClaude, OfflinePlanner
 from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
+from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 
@@ -61,7 +62,28 @@ def _build_llm(mode: str, settings: Settings) -> Optional[object]:
 
 
 settings = load_settings()
-registry = build_registry()
+def _build_registry():
+    """Real OMS reads when a key is configured, fixtures when it is not.
+
+    The key is the only switch. Without it every lookup is a fixture, which is
+    what the tests and a fresh clone get, and `/chat` will happily name a bike
+    that belongs to nobody. With it, a phone number reaches the live purchase
+    table and the bikes, frame numbers and purchase dates are the customer's own.
+
+    Ticketing stays mocked either way. That combination is worth knowing about:
+    real bike details followed by a ticket number that exists nowhere is more
+    convincing, and therefore worse, than fixtures all the way through.
+    """
+    if not os.environ.get("EMOTORAD_OMS_API_KEY"):
+        return build_registry()
+    client = OMSClient()
+    return build_registry(
+        warranty_source=live_warranty_source(client),
+        account_finder=live_account_finder(client),
+    )
+
+
+registry = _build_registry()
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 runtime = Runtime(
