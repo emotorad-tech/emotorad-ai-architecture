@@ -68,9 +68,23 @@ class ToolContext:
     cluster_id: Optional[str] = None
     customer_id: Optional[str] = None
     dealer_id: Optional[str] = None
+    # Facts that can only be known once the turn is under way. Identity is not
+    # always settled before the first tool runs: on a surface that verifies
+    # inside the conversation, the model proves a phone and looks the customer
+    # up in the same assistant turn, because it has just been told the code was
+    # correct. A context snapshotted before that would refuse the lookup for
+    # want of a phone the conversation proved seconds earlier.
+    #
+    # Resolved at call time, and only ever as a fallback: a value the channel
+    # already resolved always wins, so this can never redirect a lookup away
+    # from the identity the channel established.
+    late: Dict[str, Callable[[], Any]] = field(default_factory=dict)
 
     def value_for(self, name: str) -> Any:
-        return getattr(self, name, None)
+        value = getattr(self, name, None)
+        if value is None and name in self.late:
+            return self.late[name]()
+        return value
 
 
 @dataclass(frozen=True)

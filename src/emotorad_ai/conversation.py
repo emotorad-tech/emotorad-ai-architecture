@@ -93,6 +93,56 @@ class ConversationState:
         self.move_to(AWAITING_ISSUE, "handback:" + reason)
 
 
+# How many customer turns the model is shown. A battery diagnosis runs fifteen
+# to twenty turns, but the ones that matter are recent: what the customer just
+# said, what was just tried, what the last tool returned. Identity is not in
+# here at all — it lives in VerificationStore — so a window can never cost
+# someone their verification.
+HISTORY_TURNS = 12
+
+
+def _is_customer_turn(entry: Dict[str, Any]) -> bool:
+    """Whether this entry begins a customer turn, and so is safe to cut before.
+
+    Both a customer's message and a batch of tool results are `user` entries.
+    What separates them is the content: tool results are always blocks of type
+    `tool_result`, and everything else from the customer — plain text, or text
+    with a photo attached — is not.
+
+    Testing for a plain string instead was right until a customer could send a
+    photo. Their turn then arrives as a list of blocks, stops being recognised
+    as a boundary, and the window cuts in the wrong place.
+    """
+    if entry.get("role") != "user":
+        return False
+    content = entry.get("content")
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        return not any(
+            isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+        )
+    return False
+
+
+def trim_history(history: List[Dict[str, Any]], max_turns: int = HISTORY_TURNS) -> List[Dict[str, Any]]:
+    """Keep the last `max_turns` customer turns, and cut nowhere else.
+
+    Left untrimmed, every turn resent the whole transcript, so cost grew with
+    the square of the conversation length and a long enough one would have hit
+    the context window with nothing handling it.
+
+    The cut point is the only subtle part; see `_is_customer_turn`. Cutting
+    anywhere else can leave a `tool_result` above the `tool_use` it answers,
+    which the API rejects outright — so a naive window would turn a conversation
+    that costs too much into one that fails.
+    """
+    starts = [i for i, entry in enumerate(history) if _is_customer_turn(entry)]
+    if len(starts) <= max_turns:
+        return history
+    return history[starts[-max_turns] :]
+
+
 class ConversationStore:
     """In-memory conversation state.
 

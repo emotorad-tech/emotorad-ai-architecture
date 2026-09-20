@@ -20,7 +20,8 @@ the steps is the design:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from dataclasses import replace
+from typing import Any, Callable, Dict, List, Optional
 
 from .agents.base import Agent, AgentDefinition
 from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
@@ -49,8 +50,13 @@ from .guardrails import (
 from .identity import IdentityResolver, ResolvedIdentity
 from .llm import BedrockClaude
 from .observability import EventLog
-from .tools.mocks import CREATE_SUPPORT_TICKET, build_registry
+from .tools.mocks import CREATE_SUPPORT_TICKET, RAISE_INTAKE_TICKET, build_registry
 from .tools.registry import ToolContext, ToolRegistry, is_error
+from .tools.verification import (
+    FIND_ACCOUNT_BY_CODE,
+    REQUEST_IDENTITY_VERIFICATION,
+    VERIFY_IDENTITY,
+)
 from .triage import TriageAgent
 
 UNSUPPORTED_MESSAGE = (
@@ -64,6 +70,19 @@ UNSUPPORTED_MESSAGE = (
 TOPIC_AGENTS = {"battery": BATTERY_SUPPORT, "motor": MOTOR_SUPPORT}
 DEALER_AGENTS = {"order": DEALER_ORDERS}
 
+# What a surface needs to establish identity inside the conversation, when the
+# channel did not resolve it upstream. `find_account_by_code` is the fallback
+# for a customer who cannot recall the number they registered on, and
+# `raise_intake_ticket` is what the agent falls back to when nothing resolves,
+# so a customer who cannot be identified is still captured for a human rather
+# than left in a loop.
+SELF_SERVICE_IDENTITY_TOOLS = (
+    REQUEST_IDENTITY_VERIFICATION,
+    VERIFY_IDENTITY,
+    FIND_ACCOUNT_BY_CODE,
+    RAISE_INTAKE_TICKET,
+)
+
 
 class Runtime:
     def __init__(
@@ -74,6 +93,8 @@ class Runtime:
         log: Optional[EventLog] = None,
         resolver: Optional[IdentityResolver] = None,
         diagnostics_available: bool = False,
+        self_service_identity: bool = False,
+        phone_resolver: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
@@ -90,10 +111,41 @@ class Runtime:
             LATE_WARRANTY: LATE_WARRANTY_DEFINITION,
             DEALER_ORDERS: DEALER_ORDERS_DEFINITION,
         }
+        if self_service_identity:
+            definitions = {
+                name: self._with_identity_tools(definition)
+                for name, definition in definitions.items()
+            }
         self.agents = {
-            name: Agent(definition, self.registry, self.llm, self.log, self.settings)
+            name: Agent(
+                definition,
+                self.registry,
+                self.llm,
+                self.log,
+                self.settings,
+                phone_resolver=phone_resolver,
+            )
             for name, definition in definitions.items()
         }
+
+    def _with_identity_tools(self, definition: AgentDefinition) -> AgentDefinition:
+        """The agent's own tools, plus the ones a surface needs to establish identity.
+
+        Production never needs these: identity is resolved upstream by the
+        channel, so each agent's `TOOL_NAMES` is right to omit them. A website
+        visitor who has not signed in is the one case where the agent has to
+        establish identity itself, and slicing strictly by `TOOL_NAMES` left the
+        verification tools registered but unreachable.
+
+        Added here rather than in the agent module so the production slice stays
+        as designed, and only for tools the registry actually holds — naming an
+        unregistered tool would advertise one the model cannot call.
+        """
+        names = list(definition.tool_names)
+        for extra in SELF_SERVICE_IDENTITY_TOOLS:
+            if extra in self.registry.specs and extra not in names:
+                names.append(extra)
+        return replace(definition, tool_names=tuple(names))
 
     # -- entry point ---------------------------------------------------------
 
@@ -167,6 +219,19 @@ class Runtime:
         if resolved.method in ("no_warranty_record",) and LATE_WARRANTY in self.agents:
             state.route_to(LATE_WARRANTY)
             return self._run_agent(LATE_WARRANTY, message, resolved, state)
+
+        # A pin naming an agent this runtime does not have is dropped rather
+        # than followed. It reaches here from `MessageIn.agent`, which is
+        # browser-supplied, and following it raised KeyError on every turn of
+        # that conversation forever — including turns that pinned nothing,
+        # because the bad name had already been written into the state. The
+        # conversation could never recover. Clearing it sends the customer
+        # through triage, which is where they would have gone without the pin.
+        if state.agent is not None and state.agent not in self.agents:
+            self.log.emit(
+                "unknown_agent_cleared", message.conversation_id, agent=state.agent
+            )
+            state.agent = None
 
         # 4. Triage: which bike, what issue, which agent.
         if state.agent is None:

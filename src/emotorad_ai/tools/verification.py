@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import random
 import threading
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Optional
 
+from ..contract import VERIFIED, InboundMessage
 from .oms import OMSConfigError, normalise_mobile
 from .registry import ToolError, ToolRegistry, ok
 
@@ -65,12 +67,39 @@ def mask_phone(phone: str) -> str:
     return ("•" * max(len(digits) - 3, 0)) + digits[-3:] if digits else ""
 
 
+# How long a code is worth typing, and how long proving a number keeps someone
+# signed in. Two lifetimes because they answer different questions: a code is a
+# secret in transit and should be short, while a verified session is how long a
+# customer may keep talking without proving themselves again. Ten minutes covers
+# an SMS arriving and being typed; twelve hours covers someone who puts the
+# phone down mid-diagnosis and comes back after work.
+CODE_TTL_SECONDS = 600
+VERIFIED_TTL_SECONDS = 12 * 60 * 60
+
+
 @dataclass
 class _Pending:
     phone: str
     code: str
     attempts: int = 0
     verified: bool = False
+    # Monotonic, not wall clock: a laptop waking from sleep or an NTP correction
+    # must not extend a code's life or cut a session short.
+    issued_at: float = 0.0
+    verified_at: float = 0.0
+
+    def code_expired(self, now: float) -> bool:
+        return now - self.issued_at > CODE_TTL_SECONDS
+
+    def session_expired(self, now: float) -> bool:
+        return now - self.verified_at > VERIFIED_TTL_SECONDS
+
+    def dead(self, now: float) -> bool:
+        """Nothing useful left: the session has lapsed, or an unverified code
+        has expired and cannot be typed any more."""
+        if self.verified:
+            return self.session_expired(now)
+        return self.code_expired(now)
 
 
 @dataclass
@@ -99,6 +128,20 @@ class VerificationStore:
     _pending: Dict[str, _Pending] = field(default_factory=dict)
     _candidates: Dict[str, _Candidate] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    # Injected so expiry can be tested by elapsing time rather than sleeping.
+    clock: Callable[[], float] = time.monotonic
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    def _sweep(self, now: float) -> None:
+        """Drop entries nothing can use again. Called on issue, which is the
+        only moment the store grows, so expiry doubles as the eviction this
+        store never had."""
+        for conversation_id in [c for c, p in self._pending.items() if p.dead(now)]:
+            self._pending.pop(conversation_id, None)
+            self._candidates.pop(conversation_id, None)
 
     def remember_candidate(self, conversation_id: str, phone: str) -> None:
         with self._lock:
@@ -111,15 +154,28 @@ class VerificationStore:
 
     def issue(self, conversation_id: str, phone: str, code: str) -> None:
         with self._lock:
+            now = self.clock()
+            self._sweep(now)
             previous = self._pending.get(conversation_id)
-            # Attempts survive a re-request on purpose; see MAX_ATTEMPTS.
-            attempts = previous.attempts if previous else 0
-            self._pending[conversation_id] = _Pending(phone=phone, code=code, attempts=attempts)
+            # Attempts survive a re-request on purpose; see MAX_ATTEMPTS. They do
+            # not survive the code expiring: attempts spent against a code that
+            # could no longer have worked would lock out a customer who simply
+            # came back late.
+            attempts = 0
+            if previous and not previous.code_expired(now):
+                attempts = previous.attempts
+            self._pending[conversation_id] = _Pending(
+                phone=phone, code=code, attempts=attempts, issued_at=now
+            )
 
     def check(self, conversation_id: str, code: str) -> bool:
         with self._lock:
             pending = self._pending.get(conversation_id)
             if pending is None or pending.attempts >= MAX_ATTEMPTS:
+                return False
+            # An expired code fails without costing an attempt: the customer has
+            # done nothing wrong, and they need a fresh code, not a lockout.
+            if pending.code_expired(self.clock()):
                 return False
             pending.attempts += 1
             # The comparison is here, in code. Not in the prompt, and not in the
@@ -127,19 +183,28 @@ class VerificationStore:
             if (code or "").strip() != pending.code:
                 return False
             pending.verified = True
+            pending.verified_at = self.clock()
             return True
 
     def verified_phone(self, conversation_id: str) -> Optional[str]:
         """The number this conversation has proved, or None."""
         with self._lock:
             pending = self._pending.get(conversation_id)
-            return pending.phone if pending and pending.verified else None
+            if pending is None or not pending.verified:
+                return None
+            if pending.session_expired(self.clock()):
+                return None
+            return pending.phone
 
     def pending_code(self, conversation_id: str) -> Optional[str]:
         """The outstanding code — for the harness to display. Never for the model."""
         with self._lock:
             pending = self._pending.get(conversation_id)
-            return pending.code if pending and not pending.verified else None
+            if pending is None or pending.verified:
+                return None
+            if pending.code_expired(self.clock()):
+                return None
+            return pending.code
 
     def attempts_left(self, conversation_id: str) -> int:
         with self._lock:
@@ -288,3 +353,34 @@ def register_verification_tools(
         # Masked, and nothing else. No name, no address, no bike: the person
         # holding the invoice has proved nothing yet.
         return ok({"found": True, "phone_masked": mask_phone(phone)})
+
+
+def apply_verified_identity(
+    message: InboundMessage, store: VerificationStore
+) -> InboundMessage:
+    """Carry a phone this conversation has *proved* onto the inbound identity.
+
+    `verify_identity` records the proof against the conversation, and until this
+    function existed nothing read it back. The resolver hydrates from
+    `message.identity`, which for an anonymous website visitor carries no phone,
+    so `lookup_warranty_record` was refused for want of one on every turn after
+    a correct code exactly as it was before. The customer typed a code and
+    nothing changed.
+
+    A surface whose channel already resolved identity upstream is left alone: an
+    existing phone is never overwritten, so a stale entry on a reused
+    conversation id can never redirect a lookup to somebody else's number.
+
+    This is the one place the disclosure gate opens, and it opens on the store's
+    verdict rather than the model's. `Identity.may_disclose` follows from the
+    strength set here, so no prompt wording can reach it.
+    """
+    if message.identity.phone:
+        return message
+    phone = store.verified_phone(message.conversation_id)
+    if not phone:
+        return message
+    return replace(
+        message,
+        identity=replace(message.identity, strength=VERIFIED, phone=phone),
+    )

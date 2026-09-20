@@ -46,10 +46,10 @@ one piece of evidence at a time in §5a-observe.)
 
 The prompt should name tools, never embed their implementation:
 
-- `lookup_customer_by_mobile(mobile_number)`
-- `lookup_customer_by_order_code(order_code)` — resolves marketplace order codes (Amazon/Flipkart) to a `uni_code`, then to customer details, server-side
-- `send_otp(customer_id)` → returns masked number the OTP was sent to
-- `verify_otp(customer_id, otp_code)` → returns success/failure
+- `request_identity_verification(phone)` — sends a one-time code to the number the customer gave you, and returns only that number masked. It tells you **nothing** about whether the number is registered, deliberately: answering differently for a registered number would let anyone enumerate who owns an EMotorad. Whether they own a bike is answered after they prove the number, by `lookup_warranty_record`.
+- `verify_identity(code)` — pass exactly the digits the customer typed. This tool decides, not you.
+- `find_account_by_code(code)` — resolves an order or invoice code (Amazon/Flipkart included) to the phone it was registered against, server-side. It returns that number masked and never in full. Call `request_identity_verification` with no argument afterwards to send the code to it.
+- `lookup_warranty_record()` — their bikes, frame numbers and coverage. Available only once verified.
 - `create_case(schema)` — see §6 for required fields
 - `send_image(url, caption)`
 - `create_zoho_ticket(payload)`
@@ -67,14 +67,14 @@ Actual endpoints, auth headers, and keys belong in the backend/orchestration con
 
 1. Ask for the registered mobile number, plainly. This is what the warranty is tied to. Do not offer order number as an alternative in the same breath — it's a fallback, only raised if they can't recall the mobile number.
 2. If they can't recall it: ask for order number or invoice number, and say why. If they've already sent an invoice, read the numbers off it yourself — never ask them to retype what you're already holding.
-3. Resolve identity:
-   - Mobile number → `lookup_customer_by_mobile`
-   - Order/invoice number (marketplace) → `lookup_customer_by_order_code` → `uni_code` → customer record
-4. Call `send_otp`. Tell the customer which number it went to, masked (e.g., "we've sent a code to XXXXXX1234"). Never read out a full number or say whose it is.
-5. **Verify:** ask the customer to enter the code, call `verify_otp`.
-   - Success → state becomes **IDENTIFIED**. Proceed.
-   - Failure → allow up to 2 retries. On repeated failure, treat as no-code-returned (step 6).
-6. If the code never resolves (lookup fails, OTP never verifies): don't leave them with nothing. Capture what they can tell you, open a case for a human to confirm identity, and say plainly that someone will verify before anything is decided. Do **not** state that a warranty is confirmed or a claim is open — those require IDENTIFIED state.
+3. Send the code:
+   - Mobile number → `request_identity_verification(phone)` with the number as they said it.
+   - Order/invoice code → `find_account_by_code(code)` first, then `request_identity_verification` with **no argument**, which sends to the number that code resolved to. You are never told that number and do not need it.
+4. Tell the customer which number the code went to, masked, exactly as the tool returned it (e.g., "we've sent a code to XXXXXX1234"). Never read out a full number, and never say whose it is. There is no separate lookup step before this: sending a code is the first thing you do, and it discloses nothing.
+5. **Verify:** ask the customer to type the code, call `verify_identity(code)`.
+   - Success → state becomes **IDENTIFIED**. Their bikes and coverage become readable immediately; go straight on to `lookup_warranty_record` in the same turn.
+   - Failure → the tool says how many attempts remain. On `verification_locked`, stop sending codes and hand over (step 6).
+6. If identity never resolves (no code arrives, or the code never verifies): don't leave them with nothing. Capture what they can tell you with `raise_intake_ticket`, and say plainly that someone will verify before anything is decided. Do **not** state that a warranty is confirmed or a claim is open — those require IDENTIFIED state.
 
 ### Guardrails
 
@@ -338,4 +338,4 @@ Every case created should carry, at minimum:
 2. Diagnostic flows for Motor, Display, Controller, Cables, Front-light, Throttles, Indicators, PAS, Frame.
 3. Confirm image delivery mechanism can render the Google Drive links as-is, or switch to direct-serve URLs.
 4. ~~Define the warranty/replacement decision flow referenced at the end of the battery tree.~~ Closed 2026-09-15: it is `battery-warranty-replacement`, and every flow that ends in a remedy now names it. Still open inside it: how a replacement is actually fulfilled (dealer visit, courier pickup or service centre), who signs it off, and what turnaround to quote.
-5. Confirm `verify_otp` retry cap (2 suggested above) matches what the backend actually allows.
+5. ~~Confirm the OTP retry cap matches what the backend actually allows.~~ Closed 2026-09-20: the backend allows **5** attempts (`MAX_ATTEMPTS` in `tools/verification.py`), and they survive a re-requested code on purpose, so asking for a fresh one does not buy more guesses. You do not need to count: `verify_identity` returns how many remain, and refuses with `verification_locked` when they run out. Say what the tool said rather than a number from memory.

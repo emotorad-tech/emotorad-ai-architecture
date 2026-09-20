@@ -42,15 +42,18 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
-from .config import load_settings
+from .attachments import AttachmentError, validate as validate_attachments
+from .config import Settings, load_settings
 from .contract import new_conversation_id
+from .media import load_catalogue
 from .identity import IdentityResolver
 from .llm import AnthropicClaude, OfflinePlanner
 from .observability import EventLog
+from .ratelimit import RateLimiter
 from .runtime import Runtime
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
-from .tools.verification import VerificationStore
+from .tools.verification import VerificationStore, apply_verified_identity
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 
@@ -69,6 +72,20 @@ settings = load_settings()
 # visitor asked for their number has no way to prove it — the flow dead-ends.
 verification_store = VerificationStore()
 
+# The guide photos and clips the agent may show. Loaded once: it is authored
+# content in the repo, not per-request state.
+#
+# `send_guide_media` was named in the agents' TOOL_NAMES all along, but no
+# catalogue was ever passed here, so the tool was never registered and was
+# filtered straight back out of the slice. The prompt told the model to point at
+# the button it was describing, and it had nothing to point with.
+GUIDE_MEDIA = load_catalogue()
+
+# conversation_id -> the keys already shown in it. Module-level because "already
+# sent" only means anything across turns, and a request-scoped dict would let
+# the agent send the same photo every turn.
+sent_media: dict = {}
+
 
 def _build_registry():
     """Real OMS reads when a key is configured, fixtures when it is not.
@@ -83,12 +100,18 @@ def _build_registry():
     convincing, and therefore worse, than fixtures all the way through.
     """
     if not os.environ.get("EMOTORAD_OMS_API_KEY"):
-        return build_registry(verification=verification_store)
+        return build_registry(
+            verification=verification_store,
+            guide_media=GUIDE_MEDIA,
+            sent_media=sent_media,
+        )
     client = OMSClient()
     return build_registry(
         verification=verification_store,
         warranty_source=live_warranty_source(client),
         account_finder=live_account_finder(client),
+        guide_media=GUIDE_MEDIA,
+        sent_media=sent_media,
     )
 
 
@@ -107,6 +130,16 @@ runtime = Runtime(
     llm=_build_llm(MODE, settings),
     log=log,
     resolver=resolver,
+    # Website chat is the one surface that arrives anonymous. Every other
+    # channel resolves identity upstream — WhatsApp and Amiigo supply a verified
+    # phone natively — so the agents' own TOOL_NAMES stay right for them and the
+    # verification tools are added only here, where the agent has to establish
+    # identity inside the conversation.
+    self_service_identity=True,
+    # The phone this conversation proves mid-turn. The model verifies a code and
+    # looks the customer up in the same assistant turn, so a phone snapshotted
+    # before the first tool ran is already stale by the second one.
+    phone_resolver=verification_store.verified_phone,
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -129,6 +162,11 @@ class MessageIn(BaseModel):
     em_aid: Optional[str] = None
     text: str
     pill: Optional[str] = None
+    # Photos the customer sent, inline and never stored. The evidence gate asks
+    # for a picture of the terminal before it will conclude a fault, and until
+    # this field existed there was no way to answer it. See attachments.py for
+    # the limits, which are the whole security story for this path.
+    attachments: Optional[List[dict]] = None
     # Pin the conversation to one sub-agent, the way the playground's sidebar
     # picks one. Triage only runs while `state.agent is None`, so naming an
     # agent skips it and the tuned prompt runs the conversation end to end —
@@ -140,6 +178,28 @@ class MessageIn(BaseModel):
     # and the None branch re-asks the same sentence forever. Its own docstring
     # says None means "the model decides", and nothing asks the model yet.
     agent: Optional[str] = None
+
+
+# The agents this surface may pin. Website chat serves customers, so the dealer
+# agent is not on the list: its tools all inject a dealer_id that a customer
+# message does not carry, so nothing leaks, but it would answer a customer in a
+# dealer's voice and spend tokens doing it.
+#
+# Anything outside this set is refused here rather than written into the
+# conversation. Writing first was the bug: an unknown name went into the state,
+# every later turn read it back, and the conversation returned HTTP 500 forever
+# with no way for the customer to recover.
+CHAT_AGENTS = ("battery_support", "motor_support", "late_warranty")
+
+
+# Every /message call reaches a real model and the real OMS, and the endpoint has
+# no authentication, so an open loop against it spends money. Twenty a minute is
+# far above what a person typing can produce and far below what a script can.
+#
+# This is not authentication and does not make the endpoint safe to expose. Who
+# may use the chat is still undecided; this only bounds what an anonymous caller
+# can cost while that decision is outstanding.
+message_limiter = RateLimiter(limit=20, window_seconds=60.0)
 
 
 class AttachmentOut(BaseModel):
@@ -166,8 +226,17 @@ def health() -> dict:
 
 
 @app.post("/message", response_model=MessageOut)
-def post_message(body: MessageIn) -> MessageOut:
+def post_message(body: MessageIn, request: Request) -> MessageOut:
+    if not message_limiter.allow(request.client.host if request.client else None):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many messages. Wait a moment and try again.",
+        )
     conversation_id = body.conversation_id or new_conversation_id()
+    try:
+        validate_attachments(body.attachments)
+    except AttachmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     message = adapter.to_message(
         {
             "conversation_id": conversation_id,
@@ -175,9 +244,21 @@ def post_message(body: MessageIn) -> MessageOut:
             "em_aid": body.em_aid,
             "text": body.text,
             "pill": body.pill,
+            "attachments": body.attachments or [],
         }
     )
+    # The proof this conversation has already given. Without this the customer
+    # types a correct code and the very next turn still resolves anonymous, so
+    # the warranty lookup is refused for want of a phone exactly as it was
+    # before they bothered.
+    message = apply_verified_identity(message, verification_store)
     if body.agent:
+        if body.agent not in CHAT_AGENTS:
+            raise HTTPException(
+                status_code=400,
+                detail="Unknown agent %r. Expected one of: %s"
+                % (body.agent, ", ".join(CHAT_AGENTS)),
+            )
         runtime.conversations.get(conversation_id).route_to(body.agent)
     reply = runtime.handle(message)
     return MessageOut(

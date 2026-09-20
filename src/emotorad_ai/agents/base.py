@@ -12,7 +12,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from ..attachments import to_image_blocks, validate
 from ..config import Settings
+from ..conversation import HISTORY_TURNS, trim_history
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..observability import EventLog
@@ -56,12 +58,44 @@ class Agent:
         llm: Any,
         log: EventLog,
         settings: Settings,
+        phone_resolver: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         self.definition = definition
         self.registry = registry
         self.llm = llm
         self.log = log
         self.settings = settings
+        # A surface that establishes identity inside the conversation resolves
+        # the phone late, because the model proves it and uses it in the same
+        # turn. None for every channel that arrives already resolved.
+        self.phone_resolver = phone_resolver
+
+    def _late_identity(self, conversation_id: str) -> Dict[str, Callable[[], Any]]:
+        """Identity the conversation may prove while this turn is still running.
+
+        Only consulted when the channel resolved nothing, so it can never
+        redirect a lookup away from an identity already established upstream.
+        """
+        if self.phone_resolver is None:
+            return {}
+        return {"phone": lambda: self.phone_resolver(conversation_id)}
+
+    @staticmethod
+    def _user_content(message: InboundMessage) -> Any:
+        """The customer's turn: their words, and any photo they sent with them.
+
+        Plain text when there is no photo, so every channel that has never sent
+        one is byte-for-byte unchanged. The image goes first because the text
+        usually refers to it ("here is the terminal"), and the words go with it
+        rather than being dropped — they are often the half that names the
+        symptom.
+        """
+        if not message.attachments:
+            return message.message_text
+        blocks = to_image_blocks(validate([a.to_dict() for a in message.attachments]))
+        if not blocks:
+            return message.message_text
+        return blocks + [{"type": "text", "text": message.message_text}]
 
     def run(
         self,
@@ -78,9 +112,14 @@ class Agent:
             conversation_id=message.conversation_id,
             phone=resolved.identity.phone,
             cluster_id=resolved.cluster_id,
+            late=self._late_identity(message.conversation_id),
         )
 
-        history.append({"role": "user", "content": message.message_text})
+        # Bound the transcript before adding to it. In place, because this is
+        # the conversation's own history list and the store hands out the same
+        # object every turn.
+        history[:] = trim_history(history, HISTORY_TURNS - 1)
+        history.append({"role": "user", "content": self._user_content(message)})
 
         turn = AgentTurn(text="", agent=self.definition.name)
         # Same tool, same arguments, twice: the model is stuck, and the remaining
