@@ -1,0 +1,32 @@
+# Which replacement parts need a technician to fit, and which the customer is
+# asked about. Business data: the owner set every row on 2026-09-20. Git is the
+# audit trail and a pull request is the approval.
+#
+#   technician: true   fitment, alignment or complicated steps. Dealer branch.
+#   technician: false  the customer can fit it. Ships to their address.
+#   ask: true          no technician needed, but offer self-fit or dealer and
+#                      let the customer choose.
+#
+# A part not in this file is "not sure" by definition and is never ordered by
+# the bot on its own.
+
+battery:
+  technician: false
+  ask: false
+charger:
+  technician: false
+  ask: false
+display:
+  technician: false
+  ask: true
+seat:
+  technician: false
+  ask: true
+motor:
+  technician: true
+controller:
+  technician: true
+brakes:
+  technician: true
+suspension:
+  technician: true
