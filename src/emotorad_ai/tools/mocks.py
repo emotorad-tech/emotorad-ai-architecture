@@ -12,6 +12,7 @@ from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
 from .. import media as media_module
+from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
 from . import fixtures
 from .verification import VerificationStore, register_verification_tools
@@ -48,6 +49,9 @@ LOOKUP_ERROR_CODE = "lookup_error_code"
 GET_DEALER_ACCOUNT = "get_dealer_account"
 QUOTE_ORDER = "quote_order"
 PLACE_ORDER = "place_order"
+
+# --- replacement fulfilment --------------------------------------------------
+PLACE_REPLACEMENT_ORDER = "place_replacement_order"
 
 TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety", "other")
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
@@ -360,6 +364,12 @@ def build_registry(
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
+    # The replacement order the bot places on the customer's behalf. Absent
+    # unless a store is supplied, so an agent that cannot place one is never
+    # told it can. Item codes default to the mock resolver.
+    replacement_orders: Optional["ReplacementOrders"] = None,
+    item_codes: Optional["ItemCodes"] = None,
+    approval_mode: str = "reasonable",
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -1006,5 +1016,139 @@ def build_registry(
                 "credit_available_after": priced["credit_available"] - priced["total"],
             }
         )
+
+    if replacement_orders is not None:
+        parts_table = load_parts_table()
+        codes = item_codes or ItemCodes()
+
+        @registry.register(
+            PLACE_REPLACEMENT_ORDER,
+            "Place a replacement-part order to the customer's address, once a flow has "
+            "concluded that a part needs replacing and the customer has confirmed where to "
+            "send it. Pass the address exactly as they confirmed it. This decides on its own "
+            "whether the part needs a technician, whether an order is already on its way, "
+            "and whether it can be approved now; read the result and say what it says. It "
+            "handles in-warranty only: anything chargeable is refused and goes to a person.",
+            parameters={
+                "frame_number": {
+                    "type": "string",
+                    "description": "The bike, from lookup_warranty_record. Required when the customer owns more than one.",
+                },
+                "part": {
+                    "type": "string",
+                    "enum": sorted(parts_table),
+                    "description": "The part the flow concluded needs replacing.",
+                },
+                "confirmed_address": {
+                    "type": "string",
+                    "description": (
+                        "The delivery address the customer confirmed in this conversation: the one from "
+                        "lookup_warranty_record if they said it is still right, or the one they gave instead."
+                    ),
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Stable key for this order, so a retry does not place it twice.",
+                },
+            },
+            required=("part", "confirmed_address", "idempotency_key"),
+            injects=("phone", "conversation_id", "evidence_seen", "coverage_result"),
+            write=True,
+        )
+        def place_replacement_order(
+            phone: str,
+            conversation_id: str,
+            evidence_seen: bool,
+            coverage_result: Dict[str, Any],
+            part: str,
+            confirmed_address: str,
+            idempotency_key: str,
+            frame_number: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            rule = parts_table.get(part)
+            if rule is None:
+                raise ToolError("part_not_identified", "%r is not a part this flow can order." % part)
+            if rule.technician:
+                raise ToolError(
+                    "technician_required",
+                    "A %s needs a technician to fit. Route the customer to a dealer rather than "
+                    "shipping it to their address." % part,
+                    remedy="dealer_visit",
+                )
+            if not (confirmed_address or "").strip():
+                raise ToolError(
+                    "address_required",
+                    "Read the delivery address back to the customer and pass what they confirmed.",
+                )
+
+            bike = _owned_bike(phone, frame_number, bikes_on)
+            if bike is None:
+                raise ToolError("frame_number_required", "No bike could be resolved for this order.")
+            frame = bike["frame_number"]
+
+            # Coverage, from the lookup the runtime remembered. Chargeable is a
+            # later build; refusing it here keeps the model from improvising a
+            # payment it cannot take.
+            covered = None
+            for entry in (coverage_result.get("data") or {}).get("bikes", []):
+                if entry.get("frame_number") == frame:
+                    covered = entry.get("in_warranty")
+            if covered is None:
+                raise ToolError(
+                    "coverage_undetermined",
+                    "Coverage for this bike is not settled. Ask for the invoice before ordering.",
+                    remedy="collect_purchase_proof",
+                )
+            if covered is False:
+                raise ToolError(
+                    "chargeable_not_supported",
+                    "This bike is out of warranty, so the part is chargeable. Chargeable "
+                    "replacements are handled by a person for now; hand over rather than quote.",
+                    remedy="human_handoff",
+                )
+
+            existing = replacement_orders.in_flight(frame, part)
+            if existing is not None:
+                return ok(
+                    {
+                        "order_id": existing["order_id"],
+                        "status": existing["status"],
+                        "part": part,
+                        "item_code": existing.get("item_code"),
+                        "delivery_address": existing.get("delivery_address"),
+                        "already_placed": True,
+                    }
+                )
+
+            item_code = codes.resolve(bike.get("product_name"), part)
+            sure = is_sure(evidence_seen, covered, item_code, rule)
+            if item_code is None and approval_mode != "bot":
+                raise ToolError(
+                    "part_not_identified",
+                    "No replacement item code is on file for a %s on this model. Hand over "
+                    "so a person can identify it." % part,
+                    remedy="human_handoff",
+                )
+            status = decide(sure, approval_mode)
+            order = replacement_orders.create(
+                frame_number=frame,
+                part=part,
+                item_code=item_code,
+                delivery_address=confirmed_address.strip(),
+                phone=phone,
+                conversation_id=conversation_id,
+                sure=sure,
+                status=status,
+            )
+            return ok(
+                {
+                    "order_id": order["order_id"],
+                    "status": order["status"],
+                    "part": part,
+                    "item_code": item_code,
+                    "delivery_address": order["delivery_address"],
+                    "already_placed": False,
+                }
+            )
 
     return registry
