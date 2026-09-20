@@ -124,7 +124,71 @@
 
   /* Wider bubbles wrap onto fewer lines, which is the cheapest scroll saving
      available: nothing gets smaller, there is just less of it. */
+  /* The messages themselves, pushed to the bottom of the scroll area so a
+     short conversation sits above the composer instead of floating at the top
+     with a void beneath it.
+
+     `margin-top: auto` on this wrapper rather than `justify-content: flex-end`
+     on the scroller: that has a long-standing Chrome bug where the top of the
+     content becomes unreachable once it overflows. */
+  .chat-inner {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
   .msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 88%; }
+
+  /* Guide photos and clips, lined up with the bubble above them. The text row
+     is indented by the avatar column; without the same indent the image ran
+     flush to the edge, about 32px further left, which is what looked wrong.
+
+     Not centred, deliberately. Left is the assistant and right is the
+     customer, and a centred image belongs to neither side — which matters more
+     once the customer's own photos are in the thread too. */
+  .media-row { padding-left: 32px; }
+  .media-row.user { padding-left: 0; padding-right: 0; }
+  /* Bigger than the 190px the desktop mockup used. These are diagnostic:
+     somebody is holding their own battery up against one. Still tappable for
+     the full-screen view. */
+  .bubble-media { max-width: 240px; border-radius: 16px; display: block; cursor: zoom-in; }
+
+  /* A photo that has been picked and not yet sent. Sits between the chat and
+     the composer, so what is about to go out is visible before it goes. */
+  .pending-strip {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-top: 1px solid var(--border); background: #FAFAFA;
+  }
+  .pending-strip[hidden] { display: none; }
+  .pending-thumb { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; cursor: zoom-in; flex: 0 0 auto; }
+  .pending-label { flex: 1 1 auto; font-size: 13px; color: var(--muted); }
+  .pending-remove {
+    width: 32px; height: 32px; border-radius: 999px; border: none;
+    background: #EDEDED; color: var(--ink); font-size: 18px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; flex: 0 0 auto;
+  }
+
+  /* The choice attach offers: camera or gallery. A sheet in the page rather
+     than the OS chooser, because what the OS shows for a file input varies by
+     phone and some go straight to the file manager. */
+  .sheet-backdrop {
+    position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,0.35);
+    display: flex; align-items: flex-end; justify-content: center;
+  }
+  .sheet-backdrop[hidden] { display: none; }
+  .sheet {
+    width: 100%; max-width: 390px; background: #FFFFFF;
+    border-radius: 18px 18px 0 0; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)) 12px;
+  }
+  .sheet-handle { width: 36px; height: 4px; border-radius: 999px; background: #DDDDDD; margin: 0 auto 10px auto; }
+  .sheet-btn {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    padding: 14px 12px; border: none; background: transparent; border-radius: 12px;
+    font-family: inherit; font-size: 15px; font-weight: 600; color: var(--ink); text-align: left; cursor: pointer;
+  }
+  .sheet-btn:active { background: #F5F5F5; }
+  .sheet-cancel { color: var(--muted); font-weight: 500; justify-content: center; }
   .msg-row.ai { align-self: flex-start; }
   .msg-row.user { align-self: flex-end; }
 
@@ -133,6 +197,15 @@
     font-size: 14.5px;
     line-height: 1.4;
     white-space: pre-line;
+  }
+  /* Lists the model wrote. `pre-line` already supplies the line breaks, so
+     these only need the marker and the indent, not vertical margins. */
+  .bubble-text ul, .bubble-text ol { margin: 4px 0; padding-left: 20px; }
+  .bubble-text li { margin: 2px 0; }
+  .bubble-text strong { font-weight: 700; }
+  .bubble-text code {
+    background: rgba(0,0,0,0.06); border-radius: 4px;
+    padding: 1px 4px; font-size: 13px;
   }
   .bubble-ai { background: var(--bubble-ai-bg); color: var(--ink); border-radius: 4px 18px 18px 18px; }
   .bubble-user { background: var(--ink); color: #FFFFFF; border-radius: 18px 4px 18px 18px; }
@@ -205,6 +278,13 @@
   .composer-input::placeholder { color: #9A9A9A; }
   .send-btn { width: 44px; height: 44px; border-radius: 999px; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; cursor: pointer; }
 
+  /* While the agent is answering. Dimmed and inert, but still on the screen and
+     still holding focus: removing the focused element is what made Android
+     close the keyboard and throw the layout around on every message. */
+  .footer-composer.is-busy { opacity: 0.55; }
+  .footer-composer.is-busy .send-btn,
+  .footer-composer.is-busy .icon-btn { pointer-events: none; }
+
   .hidden { display: none !important; }
 
   /* Full-screen view of a guide photo. Outside the chat scroll in the markup,
@@ -226,7 +306,6 @@
     display: flex; align-items: center; justify-content: center;
     cursor: pointer;
   }
-  .bubble-media { cursor: zoom-in; }
 
   /* On a real phone the mockup frame is not a frame, it is the whole screen.
      `dvh` rather than `vh`: `vh` ignores the browser's own chrome, so the
@@ -272,6 +351,12 @@
 
     <div class="chat-scroll" id="chatScroll"></div>
 
+    <div class="pending-strip" id="pendingStrip" hidden>
+      <img class="pending-thumb" id="pendingThumb" alt="Photo ready to send, tap to enlarge" />
+      <div class="pending-label">1 photo ready to send</div>
+      <button class="pending-remove" id="pendingRemove" aria-label="Remove photo">&times;</button>
+    </div>
+
     <div id="footer"></div>
 
   </div>
@@ -282,7 +367,29 @@
   <!-- Outside #app so a re-render never replaces it mid-pick. `accept` limits
        the picker to images; leaving `capture` off means the phone offers the
        camera and the gallery rather than forcing the camera. -->
-  <input type="file" id="photoInput" accept="image/jpeg,image/png,image/webp" hidden />
+  <!-- Two inputs, one per choice. `capture` opens straight into the rear
+       camera on Android and iOS; without it the same input opens the gallery
+       or file picker. `image/*` rather than a mime list: a narrow list sent
+       Android straight to the file manager. The OS asks for camera permission
+       the first time the camera input fires; there is no way for a web page to
+       request gallery access up front, the picker grants it implicitly. -->
+  <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden />
+  <input type="file" id="galleryInput" accept="image/*" hidden />
+
+  <div class="sheet-backdrop" id="attachSheet" hidden>
+    <div class="sheet" role="dialog" aria-label="Attach a photo">
+      <div class="sheet-handle"></div>
+      <button class="sheet-btn" id="sheetCamera">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        Take a photo
+      </button>
+      <button class="sheet-btn" id="sheetGallery">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        Choose from gallery
+      </button>
+      <button class="sheet-btn sheet-cancel" id="sheetCancel">Cancel</button>
+    </div>
+  </div>
 
   <div class="lightbox" id="lightbox" hidden>
     <button class="lightbox-close" id="lightboxClose" aria-label="Close photo">&times;</button>
@@ -337,6 +444,66 @@ function collapseBlankLines(text) {
   return String(text == null ? "" : text).replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/* The small slice of markdown the agent actually writes.
+
+   It leans on emphasis and lists to make a diagnostic step scannable, and the
+   page was escaping all of it, so a customer read "set it to **ON**" with the
+   asterisks in place.
+
+   Escape first, format second. The model's output never enters the DOM as raw
+   HTML: by the time any tag is inserted here, every < > & in the original text
+   is already an entity, so the only tags in the result are the ones this
+   function put there.
+
+   Links are deliberately absent. A rendered link from model output is a
+   phishing surface, and the prompt already forbids the model typing links or
+   filenames — guide media goes through send_guide_media, where code resolves
+   the URL from a catalogue key. Rendering links here would quietly undo that.
+
+   Headings and tables are absent for a duller reason: a chat bubble is not a
+   document, and the agent does not write them. */
+function renderMarkdown(text) {
+  var out = esc(collapseBlankLines(text));
+
+  // Inline code before emphasis, so asterisks inside a code span are left alone.
+  out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  // Single asterisks only where they are not part of a bold run.
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+
+  // Lists. Consecutive marker lines become one list; everything else is left
+  // as it is, because the bubble is `white-space: pre-line` and already
+  // renders the model's own line breaks.
+  var lines = out.split("\n");
+  var html = [];
+  var buffer = [];
+  var kind = null;
+
+  function flush() {
+    if (!buffer.length) return;
+    html.push("<" + kind + ">" + buffer.join("") + "</" + kind + ">");
+    buffer = [];
+    kind = null;
+  }
+
+  lines.forEach(function (line) {
+    var bullet = line.match(/^\s*[-*\u2022]\s+(.*)$/);
+    var numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      var want = bullet ? "ul" : "ol";
+      if (kind && kind !== want) flush();
+      kind = want;
+      buffer.push("<li>" + (bullet ? bullet[1] : numbered[1]) + "</li>");
+      return;
+    }
+    flush();
+    html.push(line);
+  });
+  flush();
+
+  return html.join("\n");
+}
+
 /* Full-screen photo. The customer is being asked to compare their battery
    terminal against a reference picture, and they cannot do that at 190px. */
 function openLightbox(url) {
@@ -364,19 +531,19 @@ function aiAvatar(size) {
 
 function renderAiTurnHtml(turn) {
   var html = '<div class="msg-row ai">' + aiAvatar("sm") +
-    '<div class="bubble-text bubble-ai">' + esc(collapseBlankLines(turn.text)) + "</div></div>";
+    '<div class="bubble-text bubble-ai">' + renderMarkdown(turn.text) + "</div></div>";
   // Guide photos and clips the agent chose to send. It picks a catalogue key;
   // code resolves the URL, so nothing here is ever a link the model typed.
   (turn.attachments || []).forEach(function (a) {
     if (a.kind === "video") {
-      html += '<div class="msg-row ai"><div class="video-card"><video src="' + esc(a.url) +
+      html += '<div class="msg-row ai media-row"><div class="video-card"><video src="' + esc(a.url) +
         '" controls playsinline style="width:100%;display:block"></video></div></div>';
     } else {
       // data-full carries the URL so the tap handler does not have to parse it
       // back out of the src attribute.
-      html += '<div class="msg-row ai"><img class="bubble-media" data-full="' + esc(a.url) +
+      html += '<div class="msg-row ai media-row"><img class="bubble-media" data-full="' + esc(a.url) +
         '" src="' + esc(a.url) +
-        '" alt="Guide photo, tap to enlarge" style="max-width:190px;border-radius:16px;display:block" /></div>';
+        '" alt="Guide photo, tap to enlarge" /></div>';
     }
   });
   return html;
@@ -384,9 +551,9 @@ function renderAiTurnHtml(turn) {
 
 function renderUserTurnHtml(turn) {
   if (turn.photo) {
-    return '<div class="msg-row user"><img class="bubble-media" data-full="' + esc(turn.photo) +
+    return '<div class="msg-row user media-row user"><img class="bubble-media" data-full="' + esc(turn.photo) +
       '" src="' + esc(turn.photo) +
-      '" alt="Photo you sent, tap to enlarge" style="max-width:190px;border-radius:16px;display:block" /></div>';
+      '" alt="Photo you sent, tap to enlarge" /></div>';
   }
   if (turn.attachment) {
     return '<div class="msg-row user"><div class="video-card"><div class="video-thumb"><div class="video-play">' +
@@ -407,20 +574,41 @@ function render() {
     html += '<div class="typing-row">' + aiAvatar("sm") +
       '<div class="typing-bubble"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>';
   }
-  scroll.innerHTML = html;
+  // Only the message list is rebuilt. The composer is never inside this.
+  scroll.innerHTML = '<div class="chat-inner">' + html + "</div>";
   // Re-bound after every render, because the nodes they were on have just been
   // replaced. One listener on the scroll region would be tidier; this stays
   // closer to how the rest of the file already works.
   Array.prototype.forEach.call(scroll.querySelectorAll(".bubble-media"), function (img) {
     img.addEventListener("click", function () { openLightbox(img.getAttribute("data-full")); });
   });
-  scroll.scrollTop = scroll.scrollHeight;
+  pinToBottom();
   renderFooter();
 }
 
+/* Keep the newest message against the composer. Called after every render and
+   whenever the visual viewport changes, because the keyboard opening is a
+   viewport change and otherwise leaves the last message scrolled out of
+   sight. */
+function pinToBottom() {
+  var scroll = document.getElementById("chatScroll");
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+
+/* Built once and then left alone.
+
+   It used to be emptied whenever the agent was answering. That removed the
+   focused <input> from the document, so Android closed the keyboard, the
+   viewport resized, and when the reply arrived the composer was rebuilt and
+   focused — opening the keyboard and resizing again. Two resizes per message,
+   which is the lurch reported from a phone on 20 September.
+
+   Now the only thing that changes while busy is a class and the send button's
+   colour. Nothing is added to or removed from the document, so the keyboard
+   never notices. */
 function renderFooter() {
   var footer = document.getElementById("footer");
-  if (state.busy) { footer.innerHTML = ""; return; }
+  if (footer.firstChild) { composerDisabled(state.busy); return; }
   var sendBg = state.draft.trim().length > 0 ? "var(--accent)" : "#D9D9D9";
   footer.innerHTML = '<div class="footer-composer">' +
     '<div class="icon-btn" id="attachBtn" title="Attach"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>' +
@@ -434,15 +622,40 @@ function renderFooter() {
   // changes as you type, so change only the send button.
   input.addEventListener("input", function (e) {
     state.draft = e.target.value;
-    var btn = document.getElementById("sendBtn");
-    if (btn) btn.style.background = state.draft.trim().length > 0 ? "var(--accent)" : "#D9D9D9";
+    paintSendButton();
   });
   input.addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
   document.getElementById("sendBtn").addEventListener("click", send);
-  document.getElementById("attachBtn").addEventListener("click", function () {
-    document.getElementById("photoInput").click();
-  });
-  input.focus();
+  document.getElementById("attachBtn").addEventListener("click", openAttachSheet);
+  // Deliberately no focus() here. renderFooter runs on every message, and
+  // focusing on a message the customer is reading reopens the keyboard under
+  // their thumb. Focus follows what they tap; the input is no longer destroyed,
+  // so it keeps focus on its own.
+  composerDisabled(state.busy);
+}
+
+function paintSendButton() {
+  var btn = document.getElementById("sendBtn");
+  if (!btn) return;
+  var ready = !state.busy && (state.draft.trim().length > 0 || !!state.pendingPhoto);
+  btn.style.background = ready ? "var(--accent)" : "#D9D9D9";
+}
+
+/* Dim and deaden the composer without touching the document's structure. The
+   input keeps its value, its caret and its focus. */
+function composerDisabled(busy) {
+  var composer = document.querySelector(".footer-composer");
+  var input = document.getElementById("draftInput");
+  if (!composer || !input) return;
+  composer.className = "footer-composer" + (busy ? " is-busy" : "");
+  // readOnly, not disabled: a disabled input is blurred by the browser, which
+  // would close the keyboard — the very thing this is here to avoid.
+  input.readOnly = !!busy;
+  // Only when it actually differs. Assigning to value moves the caret to the
+  // end even when the string is identical, and a caret that jumps while
+  // someone is typing is how the reversed-typing bug worked.
+  if (input.value !== state.draft) input.value = state.draft;
+  paintSendButton();
 }
 
 /* The one real integration: ask the agent, render what comes back. */
@@ -454,6 +667,7 @@ function ask(text) {
   // attach the same photo to the next message too.
   var sentPhoto = state.pendingPhoto;
   state.pendingPhoto = null;
+  renderPendingStrip();
   fetch("/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -545,9 +759,41 @@ function onPhotoPicked(event) {
       return;
     }
     state.pendingPhoto = dataUri;
-    if (!state.draft) state.draft = "Here is the photo.";
-    render();
+    renderPendingStrip();
+    paintSendButton();
   });
+}
+
+/* What is about to be sent, shown before it goes. The strip is fixed markup
+   between the chat and the composer, so render() never rebuilds it and a
+   photo does not vanish from view when the next message arrives. */
+function renderPendingStrip() {
+  var strip = document.getElementById("pendingStrip");
+  var thumb = document.getElementById("pendingThumb");
+  if (!strip || !thumb) return;
+  if (state.pendingPhoto) {
+    thumb.src = state.pendingPhoto;
+    strip.hidden = false;
+  } else {
+    thumb.src = "";
+    strip.hidden = true;
+  }
+  pinToBottom();
+}
+
+function removePendingPhoto() {
+  state.pendingPhoto = null;
+  renderPendingStrip();
+  paintSendButton();
+}
+
+function openAttachSheet() {
+  if (state.busy) return;
+  document.getElementById("attachSheet").hidden = false;
+}
+
+function closeAttachSheet() {
+  document.getElementById("attachSheet").hidden = true;
 }
 
 /* Reading the verification code off the screen, because no SMS provider is
@@ -593,18 +839,63 @@ function emAid() {
 
 /* Open the conversation. The greeting is local so the window is never blank;
    everything after it comes from the agent. */
-document.getElementById("photoInput").addEventListener("change", onPhotoPicked);
+/* The keyboard and the layout.
+
+   `100dvh` accounts for the browser's own chrome, not the virtual keyboard, so
+   when the keyboard opened the app kept its full height and the browser
+   scrolled the page to reveal the input — taking the header off the top of the
+   screen and clipping the message above it.
+
+   `window.visualViewport` is the one that does shrink for the keyboard. Sizing
+   the app from it means the whole chat sits above the keyboard instead of
+   behind it. The CSS keeps `100dvh` as the fallback for anything without this
+   API, so nothing regresses if it is missing. */
+function fitToViewport() {
+  var vv = window.visualViewport;
+  var app = document.getElementById("app");
+  if (!vv || !app || window.innerWidth > 480) return;
+  app.style.height = vv.height + "px";
+  // The keyboard appearing is a viewport change like any other, and without
+  // this the newest message is left scrolled out of sight behind it.
+  pinToBottom();
+}
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", fitToViewport);
+  window.visualViewport.addEventListener("scroll", fitToViewport);
+}
+window.addEventListener("orientationchange", fitToViewport);
+
+document.getElementById("cameraInput").addEventListener("change", onPhotoPicked);
+document.getElementById("galleryInput").addEventListener("change", onPhotoPicked);
+document.getElementById("sheetCamera").addEventListener("click", function () {
+  closeAttachSheet();
+  document.getElementById("cameraInput").click();
+});
+document.getElementById("sheetGallery").addEventListener("click", function () {
+  closeAttachSheet();
+  document.getElementById("galleryInput").click();
+});
+document.getElementById("sheetCancel").addEventListener("click", closeAttachSheet);
+document.getElementById("attachSheet").addEventListener("click", function (e) {
+  if (e.target.id === "attachSheet") closeAttachSheet();
+});
+document.getElementById("pendingRemove").addEventListener("click", removePendingPhoto);
+document.getElementById("pendingThumb").addEventListener("click", function () {
+  openLightbox(state.pendingPhoto);
+});
 document.getElementById("lightboxClose").addEventListener("click", closeLightbox);
 document.getElementById("lightbox").addEventListener("click", function (e) {
   // Tapping the backdrop closes; tapping the photo itself does not.
   if (e.target.id === "lightbox") closeLightbox();
 });
 document.addEventListener("keydown", function (e) {
-  if (e.key === "Escape") closeLightbox();
+  if (e.key === "Escape") { closeLightbox(); closeAttachSheet(); }
 });
 
 state.turns.push({ isUser: false, text: OPENING, attachments: [] });
 render();
+fitToViewport();
 </script>
 
 </body>
