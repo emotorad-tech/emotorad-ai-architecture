@@ -163,10 +163,11 @@ def is_sure(
     * the part resolved to an item code;
     * the part is in the table.
 
-    The spec also names "the knowledge record's flow reached its concluding
-    step". The runtime does not yet record which step a flow reached, so this
-    first build approximates it with evidence_seen plus the part being one the
-    table knows. That is the weakest of the four and is called out in the plan.
+    The spec's fourth fact, that the knowledge record's flow reached its
+    concluding step, is not implemented; the runtime does not yet record which
+    step a flow reached. Until it does, a photo of anything plus an in-warranty
+    record plus a known part is sure. That is weaker than the spec and is the
+    first thing to tighten before approval_mode leaves human in production.
 
     The model's own confidence is never consulted. That is the point.
     """

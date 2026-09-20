@@ -85,6 +85,42 @@ class HappyPathTests(unittest.TestCase):
         self.assertEqual(result["data"]["delivery_address"], "New place, Mumbai 400001")
 
 
+class ItemCodeMissingTests(unittest.TestCase):
+    """The spec says a not-sure case is still placed as pending_approval and
+    nothing is dropped. A missing item code is one such case in every mode: it
+    never refuses and never approves."""
+
+    def _unknown_model_registry(self, approval_mode, orders=None):
+        return build_registry(
+            today=date(2026, 7, 28),
+            replacement_orders=orders or ReplacementOrders(),
+            item_codes=ItemCodes(),
+            approval_mode=approval_mode,
+            warranty_source=lambda phone: [
+                {
+                    "frame_number": "EMXP2025004417",
+                    "product_name": "Unknown Model",
+                    "purchase_date": "2025-03-14",
+                    "full_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006",
+                }
+            ],
+        )
+
+    def test_a_part_with_no_item_code_is_placed_pending_in_every_mode(self):
+        coverage = {"data": {"bikes": [
+            {"frame_number": "EMXP2025004417", "product_name": "Unknown Model", "in_warranty": True},
+        ]}}
+        for mode in ("bot", "reasonable", "human"):
+            with self.subTest(mode=mode):
+                orders = ReplacementOrders()
+                registry = self._unknown_model_registry(mode, orders=orders)
+                result = _place(registry, _context(coverage=coverage))
+                self.assertNotIn("error", result, result)
+                self.assertEqual(result["data"]["status"], "pending_approval")
+                self.assertIsNone(result["data"]["item_code"])
+                self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
+
+
 class ApprovalModeTests(unittest.TestCase):
     def test_human_mode_leaves_it_pending(self):
         self.assertEqual(_place(_registry("human"), _context())["data"]["status"], "pending_approval")

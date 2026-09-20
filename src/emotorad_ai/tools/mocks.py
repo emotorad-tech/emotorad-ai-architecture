@@ -1134,14 +1134,14 @@ def build_registry(
 
             item_code = codes.resolve(bike.get("product_name"), part)
             sure = is_sure(evidence_seen, covered, item_code, rule)
-            if item_code is None and approval_mode != "bot":
-                raise ToolError(
-                    "part_not_identified",
-                    "No replacement item code is on file for a %s on this model. Hand over "
-                    "so a person can identify it." % part,
-                    remedy="human_handoff",
-                )
+            # A missing item code is never a refusal and never an approval: the
+            # spec has a not-sure case still placed as pending_approval, with
+            # nothing dropped, and a human resolving the code. Approving it
+            # would hand the OMS an order it cannot fulfil; refusing it drops a
+            # customer's correct claim for 48 hours behind the in-flight check.
             status = decide(sure, approval_mode)
+            if item_code is None:
+                status = "pending_approval"
             order = replacement_orders.create(
                 frame_number=frame,
                 part=part,

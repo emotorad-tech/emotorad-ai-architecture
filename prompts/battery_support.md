@@ -347,7 +347,8 @@ Reached only when a flow has actually concluded a part needs replacing, and only
    - `already_placed: true` — that order is already on its way. Give them the id. Do not apologise for checking.
    - `technician_required` — say a technician is needed and move to the dealer flow. Do not ship it to their home.
    - `customer_choice_required` — the part can be fitted by the customer or a dealer; that choice is not built yet, so hand over.
-   - `chargeable_not_supported` or `part_not_identified` — hand over, as the error says.
+   - `chargeable_not_supported` — hand over, as the error says.
+   - `part_not_identified` — the part named is not one this flow knows at all; hand over. A part it knows but cannot find an item code for is not this: it comes back as `pending_approval` instead, and you tell the customer someone will confirm it.
 4. Never say "service centre" for a part the customer can fit. Never invent an order id: the only order ids you may say are the ones this tool returned.
 
 ## 7. Open Items / Flagged for Follow-up
