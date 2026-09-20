@@ -112,9 +112,10 @@ class RefusalTests(unittest.TestCase):
 
     def test_no_coverage_lookup_at_all_is_refused(self):
         """The registry refuses before the tool runs: coverage_result is a
-        required injected fact and it is None."""
+        required injected fact and it is None. It is a conversation fact, not
+        an identity field, so the refusal is missing_fact."""
         result = _place(_registry(), _context(coverage=None))
-        self.assertEqual(result["error"]["code"], "missing_identity")
+        self.assertEqual(result["error"]["code"], "missing_fact")
 
     def test_an_empty_address_is_refused(self):
         self.assertEqual(_place(_registry(), _context(), confirmed_address="  ")["error"]["code"], "address_required")

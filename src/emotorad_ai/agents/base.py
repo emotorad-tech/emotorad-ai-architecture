@@ -117,6 +117,7 @@ class Agent:
         history: List[Dict[str, Any]],
         context: str = "",
         facts: Optional[Dict[str, Callable[[], Any]]] = None,
+        on_tool_result: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
         tools = self.registry.schemas_for(
@@ -216,6 +217,8 @@ class Agent:
                 seen_calls.add(signature)
                 envelope = self.registry.call(tool_use.name, arguments, context)
                 self.log.tool_call(message.conversation_id, tool_use.name, arguments, envelope)
+                if on_tool_result is not None:
+                    on_tool_result(tool_use.name, envelope)
                 turn.tool_calls.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})
 
                 if tool_use.name in TICKET_PRODUCING_TOOLS and not is_error(envelope):

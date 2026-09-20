@@ -91,6 +91,24 @@ class KrishnaTests(unittest.TestCase):
         self.assertTrue(reply.escalated)
         self.assertEqual(reply.handled_by, "guardrail:order_post_check")
 
+    def test_lookup_and_order_in_one_turn_succeeds(self):
+        """A model that calls lookup_warranty_record and place_replacement_order
+        in the same assistant turn must see the lookup's own result when the
+        order tool asks for coverage_result — not `missing_identity`, because
+        the lookup has not "finished" in the sense of the turn ending yet."""
+        runtime, adapter, orders = _runtime([
+            call_tool("lookup_warranty_record", {}),
+            call_tool(
+                PLACE_REPLACEMENT_ORDER,
+                {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "one-turn"},
+            ),
+            say("Done. Order RO-00001 is on its way."),
+        ])
+        reply = _send(runtime, adapter, "please replace my battery, here is the photo", photo=True)
+        self.assertFalse(reply.escalated, reply.text)
+        self.assertIn("RO-00001", reply.text)
+        self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
+
     def test_asking_again_tomorrow_does_not_place_a_second_order(self):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),

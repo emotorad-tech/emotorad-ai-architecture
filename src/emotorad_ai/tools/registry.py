@@ -20,6 +20,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 Envelope = Dict[str, Any]
 
+# Identity fields injected from the resolved profile. A None value here means
+# the platform never resolved who this conversation is with, which is a
+# different failure from an ordinary conversation fact (such as
+# coverage_result) simply not being known yet.
+_IDENTITY_FIELDS = ("phone", "cluster_id", "customer_id", "dealer_id", "conversation_id")
+
 
 def ok(data: Any, freshness_seconds: int = 0) -> Envelope:
     return {"data": data, "freshness_seconds": freshness_seconds}
@@ -175,9 +181,15 @@ class ToolRegistry:
         for field_name in spec.injects:
             value = context.value_for(field_name)
             if value is None:
+                if field_name in _IDENTITY_FIELDS:
+                    return err(
+                        "missing_identity",
+                        "%s is required for %s but was not resolved for this conversation."
+                        % (field_name, name),
+                    )
                 return err(
-                    "missing_identity",
-                    "%s is required for %s but was not resolved for this conversation."
+                    "missing_fact",
+                    "%s is required for %s but is not known yet in this conversation."
                     % (field_name, name),
                 )
             arguments[field_name] = value

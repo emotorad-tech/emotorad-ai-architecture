@@ -276,6 +276,12 @@ class Runtime:
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
             },
+            # Recorded as the loop runs, not only once the turn ends: a model
+            # that calls lookup_warranty_record and place_replacement_order in
+            # the same assistant turn needs coverage_result to see the lookup
+            # that just happened, not the state as it stood before the turn
+            # began.
+            on_tool_result=lambda name, envelope: self._remember_lookup(state, name, envelope),
         )
         if turn.escalate:
             self.log.escalation(message.conversation_id, "agent_requested_handover", turn.ticket_id)
@@ -375,6 +381,20 @@ class Runtime:
             ],
             metadata={"tool_calls": [c["tool"] for c in turn.tool_calls], "iterations": turn.iterations},
         )
+
+    def _remember_lookup(self, state: ConversationState, name: str, envelope: Dict[str, Any]) -> None:
+        """Record a tool result as it happens, mid-turn.
+
+        `Agent.run` calls this straight after every tool call, before the loop
+        goes round again. That is what lets a model call
+        `lookup_warranty_record` and `place_replacement_order` in the same
+        assistant turn: without it, `state.coverage_result` was only ever
+        written after `run` returned, so the order tool's `coverage_result`
+        injection saw the previous turn's lookup, or nothing at all, when the
+        model had just done both in one turn.
+        """
+        if name == LOOKUP_WARRANTY_RECORD and not is_error(envelope):
+            state.coverage_result = envelope
 
     def _handle_safety(
         self,
