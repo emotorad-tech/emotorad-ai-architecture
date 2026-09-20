@@ -222,5 +222,23 @@ class CustomerTextsTests(unittest.TestCase):
         self.assertEqual(customer_texts([]), [])
 
 
+from emotorad_ai.conversation import address_tokens
+
+
+class AddressTokensTests(unittest.TestCase):
+    """The unit the address backstop compares on. Punctuation and case are
+    the model's; the words are the customer's."""
+
+    def test_words_and_numbers_survive_punctuation(self):
+        self.assertEqual(
+            address_tokens("A1102, Park View City 1 - 122018."),
+            {"a1102", "park", "view", "city", "1", "122018"},
+        )
+
+    def test_empty_is_empty(self):
+        self.assertEqual(address_tokens(""), set())
+        self.assertEqual(address_tokens(" , . "), set())
+
+
 if __name__ == "__main__":
     unittest.main()

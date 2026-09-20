@@ -13,8 +13,9 @@ currently owns the conversation. Everything else is transcript.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # Phases. A conversation moves forward through these, and can move back — a
 # customer who says "actually, my other bike" returns to bike selection from a
@@ -163,6 +164,21 @@ def customer_texts(history: List[Dict[str, Any]]) -> List[str]:
                 if isinstance(block, dict) and block.get("type") == "text":
                     texts.append(block.get("text", ""))
     return texts
+
+
+_ADDRESS_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def address_tokens(text: str) -> Set[str]:
+    """The comparable words of an address: lowercase, alphanumeric only.
+
+    Punctuation, spacing and case are the model's formatting. The words and
+    numbers are the customer's, and those are what the backstop checks. A
+    set, because the customer may give the street in one message and the
+    pincode in another, in either order, and the model may reorder them into
+    a postal shape.
+    """
+    return set(_ADDRESS_TOKEN.findall((text or "").lower()))
 
 
 def trim_history(history: List[Dict[str, Any]], max_turns: int = HISTORY_TURNS) -> List[Dict[str, Any]]:

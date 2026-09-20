@@ -8,10 +8,12 @@ nothing else. Nothing in this module talks to a real system.
 from __future__ import annotations
 
 import itertools
+import re
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
 from .. import media as media_module
+from ..conversation import address_tokens
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
 from . import fixtures
@@ -55,6 +57,9 @@ PLACE_REPLACEMENT_ORDER = "place_replacement_order"
 
 TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety", "other")
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
+
+# An Indian pincode. Six digits, first digit 1 to 9.
+_PINCODE = re.compile(r"\b[1-9]\d{5}\b")
 
 
 def _clean(value: Any) -> Any:
@@ -1102,25 +1107,41 @@ def build_registry(
                 raise ToolError("frame_number_required", "No bike could be resolved for this order.")
             frame = bike["frame_number"]
 
-            # The address backstop: confirmed_address must be either the
-            # record's own delivery_address (after whitespace normalisation)
-            # or appear verbatim in something the customer actually typed in
-            # this conversation. Without this a model could invent an address
-            # of its own and the tool would ship to it on the model's word
-            # alone.
-            norm = lambda s: " ".join(s.split()).lower()
-            confirmed_norm = norm(confirmed_address)
+            # The address backstop, in two parts.
+            #
+            # First, a pincode. An Indian delivery address without one is
+            # undeliverable, and on 2026-09-20 the model shipped an order
+            # without one because dropping the pincode was the only way past
+            # the old check. A refusal a model can route around by degrading
+            # its input is worse than no check; this one cannot be.
+            if not _PINCODE.search(confirmed_address):
+                raise ToolError(
+                    "pincode_required",
+                    "The delivery address needs a six-digit pincode. Ask for it and pass the "
+                    "full address with the pincode included.",
+                )
+
+            # Second, provenance. Every word of the address must have been
+            # typed by the customer somewhere in this conversation, or be on
+            # the record. Compared as a set of words, because the customer
+            # gives the street in one message and the pincode in another and
+            # the model reorders them into a postal shape. Without this a model
+            # could invent an address and the tool would ship to it on the
+            # model's word alone.
+            wanted = address_tokens(confirmed_address)
             # `full_address` is the raw record's field name; `_coverage()`
             # renames it to `delivery_address` for the model-facing lookup
             # result, but this reads the same record directly.
-            record_norm = norm(_clean(bike.get("full_address")) or "")
-            if confirmed_norm != record_norm and not any(
-                confirmed_norm in norm(message) for message in customer_messages
-            ):
+            known = address_tokens(_clean(bike.get("full_address")) or "")
+            for message in customer_messages:
+                known |= address_tokens(message)
+            unknown = sorted(wanted - known)
+            if unknown:
                 raise ToolError(
                     "address_unconfirmed",
-                    "The address does not match the record or anything the customer typed. "
-                    "Read the address back and pass what they confirmed.",
+                    "These parts of the address were not typed by the customer and are not on "
+                    "the record: %s. Read the address back and pass what they confirmed."
+                    % ", ".join(unknown),
                 )
 
             # Coverage, from the lookup the runtime remembered. Chargeable is a

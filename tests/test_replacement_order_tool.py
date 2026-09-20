@@ -177,7 +177,7 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(_place(_registry(), _context(), frame_number="NOT-MINE")["error"]["code"], "frame_number_not_owned")
 
     def test_an_address_the_customer_never_gave_is_refused(self):
-        result = _place(_registry(), _context(), confirmed_address="1 Made Up Lane")
+        result = _place(_registry(), _context(), confirmed_address="1 Made Up Lane 122018")
         self.assertEqual(result["error"]["code"], "address_unconfirmed")
 
     def test_an_address_the_customer_typed_is_accepted(self):
@@ -194,6 +194,70 @@ class RefusalTests(unittest.TestCase):
         ]}}
         result = _place(_registry(), _context(coverage=other_bike))
         self.assertEqual(result["error"]["code"], "coverage_undetermined")
+
+
+class AddressProvenanceTests(unittest.TestCase):
+    """What went wrong live on 2026-09-20, conversation b186a5dd.
+
+    The customer gave the address in two messages: "It's A1102 Park view
+    city 1", then "122018". The model combined them. The check required the
+    combined string to appear verbatim in ONE customer message, refused it
+    twice, and the model dropped the pincode to get past the check. The order
+    shipped with no pincode and the bot told the customer logistics would
+    "confirm the pincode when they call". A refusal a model can route around
+    by degrading its input is worse than no check.
+
+    The rule now: every word of the confirmed address must have been typed by
+    the customer somewhere in this conversation or be on the record, and an
+    Indian delivery address carries a six-digit pincode.
+    """
+
+    STREET = "It's A1102 Park view city 1"
+    PIN = "122018"
+
+    def test_an_address_given_across_two_messages_is_accepted(self):
+        result = _place(
+            _registry(), _context(customer_messages=(self.STREET, self.PIN)),
+            confirmed_address="A1102 Park view city 1, 122018",
+        )
+        self.assertNotIn("error", result, result)
+        self.assertEqual(result["data"]["delivery_address"], "A1102 Park view city 1, 122018")
+
+    def test_order_of_the_two_messages_does_not_matter(self):
+        result = _place(
+            _registry(), _context(customer_messages=(self.PIN, self.STREET)),
+            confirmed_address="A1102 Park view city 1, 122018",
+        )
+        self.assertNotIn("error", result, result)
+
+    def test_a_read_back_the_customer_agreed_to_is_accepted(self):
+        """The bot restates the address and the customer says yes. That is
+        exactly the confirmation the spec asks for and the old check ignored."""
+        result = _place(
+            _registry(), _context(customer_messages=(self.STREET, self.PIN, "Yes")),
+            confirmed_address="A1102 Park view city 1, 122018",
+        )
+        self.assertNotIn("error", result, result)
+
+    def test_a_word_the_customer_never_typed_is_refused(self):
+        result = _place(
+            _registry(), _context(customer_messages=(self.STREET, self.PIN)),
+            confirmed_address="A1102 Park view city 1, Gurgaon, 122018",
+        )
+        self.assertEqual(result["error"]["code"], "address_unconfirmed")
+        self.assertIn("gurgaon", result["error"]["message"].lower())
+
+    def test_an_address_with_no_pincode_is_refused(self):
+        """The refusal the model cannot route around by dropping something."""
+        result = _place(
+            _registry(), _context(customer_messages=(self.STREET,)),
+            confirmed_address="A1102 Park view city 1",
+        )
+        self.assertEqual(result["error"]["code"], "pincode_required")
+
+    def test_the_records_own_address_needs_no_customer_message(self):
+        result = _place(_registry(), _context(customer_messages=()))
+        self.assertNotIn("error", result, result)
 
 
 class InFlightTests(unittest.TestCase):
