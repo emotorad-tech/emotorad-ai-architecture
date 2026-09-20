@@ -360,6 +360,7 @@ function ask(text) {
     body: JSON.stringify({
       conversation_id: state.conversationId,
       em_aid: emAid(),
+      agent: "battery_support",
       text: text
     })
   }).then(function (r) {

@@ -129,6 +129,17 @@ class MessageIn(BaseModel):
     em_aid: Optional[str] = None
     text: str
     pill: Optional[str] = None
+    # Pin the conversation to one sub-agent, the way the playground's sidebar
+    # picks one. Triage only runs while `state.agent is None`, so naming an
+    # agent skips it and the tuned prompt runs the conversation end to end —
+    # identification, diagnosis and all — which is what it was written to do and
+    # what every transcript we tuned against exercised.
+    #
+    # Routing through triage instead put an unfinished component in front of it:
+    # `classify_issue` is keyword-only, returns None for "bike nahi chal rahi",
+    # and the None branch re-asks the same sentence forever. Its own docstring
+    # says None means "the model decides", and nothing asks the model yet.
+    agent: Optional[str] = None
 
 
 class AttachmentOut(BaseModel):
@@ -166,6 +177,8 @@ def post_message(body: MessageIn) -> MessageOut:
             "pill": body.pill,
         }
     )
+    if body.agent:
+        runtime.conversations.get(conversation_id).route_to(body.agent)
     reply = runtime.handle(message)
     return MessageOut(
         conversation_id=conversation_id,

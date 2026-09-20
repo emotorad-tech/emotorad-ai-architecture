@@ -87,6 +87,19 @@ class BedrockClaude:
         )
 
 
+
+def _direct_model_id(model: str) -> str:
+    """Bedrock model id -> the id the Anthropic API answers to.
+
+    `settings.model` is "anthropic.claude-opus-5", which is how Bedrock names
+    it. The direct API wants "claude-opus-5" and 404s on the prefixed form, the
+    same name the playground has always passed. Stripping it here rather than
+    changing the setting keeps one source of truth: Bedrock is still the target
+    and its id stays canonical, and this transport adapts to it.
+    """
+    return model[len("anthropic."):] if model.startswith("anthropic.") else model
+
+
 class AnthropicClaude:
     """Claude via the Anthropic API directly, keyed from the environment.
 
@@ -142,7 +155,7 @@ class AnthropicClaude:
         tools: Sequence[Dict[str, Any]],
     ) -> LLMResponse:
         response = self._client.messages.create(
-            model=self.settings.model,
+            model=_direct_model_id(self.settings.model),
             max_tokens=self.settings.max_tokens,
             system=system,
             messages=list(messages),
