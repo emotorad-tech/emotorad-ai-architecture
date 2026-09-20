@@ -13,7 +13,7 @@ merely costing too much.
 
 import unittest
 
-from emotorad_ai.conversation import HISTORY_TURNS, trim_history
+from emotorad_ai.conversation import HISTORY_TURNS, customer_texts, trim_history
 
 
 def _turn(n):
@@ -184,6 +184,42 @@ class TurnsCarryingAPhotoTests(unittest.TestCase):
                     offered.add(block["id"])
                 if block.get("type") == "tool_result":
                     self.assertIn(block["tool_use_id"], offered)
+
+
+class CustomerTextsTests(unittest.TestCase):
+    """The plain text of every customer message, for the address backstop:
+    place_replacement_order accepts an address the customer typed in this
+    conversation, and it needs their words, not the model's or a tool's."""
+
+    def test_plain_string_turns_are_collected(self):
+        history = [
+            {"role": "user", "content": "please send it to 9 New Road"},
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        ]
+        self.assertEqual(customer_texts(history), ["please send it to 9 New Road"])
+
+    def test_a_photo_with_text_contributes_its_text_block(self):
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {}},
+                    {"type": "text", "text": "here is the address: 9 New Road"},
+                ],
+            }
+        ]
+        self.assertEqual(customer_texts(history), ["here is the address: 9 New Road"])
+
+    def test_tool_results_are_never_customer_text(self):
+        history = [
+            {"role": "user", "content": "melted terminal"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "x"}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "{}"}]},
+        ]
+        self.assertEqual(customer_texts(history), ["melted terminal"])
+
+    def test_an_empty_history_gives_nothing(self):
+        self.assertEqual(customer_texts([]), [])
 
 
 if __name__ == "__main__":

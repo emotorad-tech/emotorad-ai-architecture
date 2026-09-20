@@ -1057,7 +1057,7 @@ def build_registry(
                 },
             },
             required=("part", "confirmed_address", "idempotency_key"),
-            injects=("phone", "conversation_id", "evidence_seen", "coverage_result"),
+            injects=("phone", "conversation_id", "evidence_seen", "coverage_result", "customer_messages"),
             write=True,
         )
         def place_replacement_order(
@@ -1065,6 +1065,7 @@ def build_registry(
             conversation_id: str,
             evidence_seen: bool,
             coverage_result: Dict[str, Any],
+            customer_messages: List[str],
             part: str,
             confirmed_address: str,
             idempotency_key: str,
@@ -1097,6 +1098,27 @@ def build_registry(
             if bike is None:
                 raise ToolError("frame_number_required", "No bike could be resolved for this order.")
             frame = bike["frame_number"]
+
+            # The address backstop: confirmed_address must be either the
+            # record's own delivery_address (after whitespace normalisation)
+            # or appear verbatim in something the customer actually typed in
+            # this conversation. Without this a model could invent an address
+            # of its own and the tool would ship to it on the model's word
+            # alone.
+            norm = lambda s: " ".join(s.split()).lower()
+            confirmed_norm = norm(confirmed_address)
+            # `full_address` is the raw record's field name; `_coverage()`
+            # renames it to `delivery_address` for the model-facing lookup
+            # result, but this reads the same record directly.
+            record_norm = norm(_clean(bike.get("full_address")) or "")
+            if confirmed_norm != record_norm and not any(
+                confirmed_norm in norm(message) for message in customer_messages
+            ):
+                raise ToolError(
+                    "address_unconfirmed",
+                    "The address does not match the record or anything the customer typed. "
+                    "Read the address back and pass what they confirmed.",
+                )
 
             # Coverage, from the lookup the runtime remembered. Chargeable is a
             # later build; refusing it here keeps the model from improvising a

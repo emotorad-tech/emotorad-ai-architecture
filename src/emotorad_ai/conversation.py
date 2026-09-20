@@ -141,6 +141,30 @@ def _is_customer_turn(entry: Dict[str, Any]) -> bool:
     return False
 
 
+def customer_texts(history: List[Dict[str, Any]]) -> List[str]:
+    """The plain text of every customer message in this conversation.
+
+    A customer's turn is either a bare string or a list of blocks (an image
+    plus text); either shape can carry an address they typed. Tool-result
+    entries are `user` role too but are never customer text — the same
+    distinction `_is_customer_turn` draws, reused here for the address
+    backstop on `place_replacement_order`: it needs the customer's own words,
+    not a tool's or the model's.
+    """
+    texts: List[str] = []
+    for entry in history:
+        if not _is_customer_turn(entry):
+            continue
+        content = entry.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+    return texts
+
+
 def trim_history(history: List[Dict[str, Any]], max_turns: int = HISTORY_TURNS) -> List[Dict[str, Any]]:
     """Keep the last `max_turns` customer turns, and cut nowhere else.
 

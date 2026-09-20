@@ -34,7 +34,7 @@ from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
 from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
-from .conversation import ConversationState, ConversationStore
+from .conversation import ConversationState, ConversationStore, customer_texts
 from .disclosure import apply_disclosure
 from .enrichment import ContextEnricher
 from .guardrails import (
@@ -281,6 +281,13 @@ class Runtime:
             facts={
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
+                # The customer's own words, for the address backstop: an
+                # address is accepted only if it matches the record or
+                # something the customer actually typed in this conversation.
+                # The current message is already in history by the time tools
+                # run (Agent.run appends it before the loop), so an address
+                # typed in this very message counts.
+                "customer_messages": lambda: customer_texts(state.history),
             },
             # Recorded as the loop runs, not only once the turn ends: a model
             # that calls lookup_warranty_record and place_replacement_order in

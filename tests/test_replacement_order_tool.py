@@ -29,10 +29,14 @@ def _registry(approval_mode="reasonable", orders=None):
     )
 
 
-def _context(evidence_seen=True, coverage=COVERED):
+def _context(evidence_seen=True, coverage=COVERED, customer_messages=()):
     return ToolContext(
         conversation_id="c1", phone=PHONE,
-        late={"evidence_seen": lambda: evidence_seen, "coverage_result": lambda: coverage},
+        late={
+            "evidence_seen": lambda: evidence_seen,
+            "coverage_result": lambda: coverage,
+            "customer_messages": lambda: customer_messages,
+        },
     )
 
 
@@ -81,7 +85,8 @@ class HappyPathTests(unittest.TestCase):
         self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
 
     def test_a_new_address_the_customer_gave_is_used(self):
-        result = _place(_registry(), _context(), confirmed_address="New place, Mumbai 400001")
+        context = _context(customer_messages=["please send it to New place, Mumbai 400001"])
+        result = _place(_registry(), context, confirmed_address="New place, Mumbai 400001")
         self.assertEqual(result["data"]["delivery_address"], "New place, Mumbai 400001")
 
 
@@ -170,6 +175,16 @@ class RefusalTests(unittest.TestCase):
 
     def test_a_frame_the_customer_does_not_own_is_refused(self):
         self.assertEqual(_place(_registry(), _context(), frame_number="NOT-MINE")["error"]["code"], "frame_number_not_owned")
+
+    def test_an_address_the_customer_never_gave_is_refused(self):
+        result = _place(_registry(), _context(), confirmed_address="1 Made Up Lane")
+        self.assertEqual(result["error"]["code"], "address_unconfirmed")
+
+    def test_an_address_the_customer_typed_is_accepted(self):
+        context = _context(customer_messages=["please send it to 9 New Road, Mumbai 400001"])
+        result = _place(_registry(), context, confirmed_address="9 New Road, Mumbai 400001")
+        self.assertNotIn("error", result, result)
+        self.assertEqual(result["data"]["delivery_address"], "9 New Road, Mumbai 400001")
 
     def test_another_bikes_coverage_never_vouches_for_this_one(self):
         """The most safety-critical check in the tool. A record listing a
