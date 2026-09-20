@@ -100,6 +100,20 @@ class AttachmentsNeverReachTheLogTests(unittest.TestCase):
         self.assertIn(url, str(self.log.events[-1]))
 
 
+class BareDigitsTests(unittest.TestCase):
+    """A pincode and a one-time code are both six digits typed alone. The log
+    cannot tell them apart, so it must not claim to. Conversation b186a5dd
+    logged the customer's pincode as [code]."""
+
+    def test_six_bare_digits_are_hidden_without_being_called_a_code(self):
+        out = redact_pii("122018")
+        self.assertNotIn("122018", out)
+        self.assertEqual(out, "[6 digits]")
+
+    def test_the_count_is_honest(self):
+        self.assertEqual(redact_pii("1234"), "[4 digits]")
+
+
 class ErrorCodesStayReadableTests(unittest.TestCase):
     """Redacting `code` to hide one-time codes also hid every error code.
 

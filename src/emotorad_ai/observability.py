@@ -25,11 +25,11 @@ _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 _LONG_DIGITS = re.compile(r"\b\d{12,19}\b")
 
 
-# A one-time code typed on its own. Six digits are far too short to pattern
-# match inside a sentence without eating pincodes, prices and model numbers, so
-# this is anchored: the whole string, and nothing else. That is how the code
-# actually arrives, both as the customer's message and as verify_identity's
-# argument.
+# A one-time code or pincode typed on its own. Six digits are far too short
+# to pattern match inside a sentence without eating pincodes, prices and model
+# numbers, so this is anchored: the whole string, and nothing else. That is how
+# the code actually arrives, both as the customer's message and as
+# verify_identity's argument.
 _OTP_ALONE = re.compile(r"^\s*\d{4,8}\s*$")
 
 # Argument and result fields that are removed by name rather than by pattern,
@@ -53,8 +53,12 @@ def redact_pii(text: str) -> str:
     Ownership data already reaches us through identity resolution, so nothing
     downstream needs these to be readable in the log.
     """
-    if _OTP_ALONE.match(text):
-        return "[code]"
+    match = _OTP_ALONE.match(text)
+    if match:
+        # A one-time code or a pincode, typed alone. Both are hidden; the
+        # placeholder says only what it can know. Calling every bare
+        # six-digit message a code logged a customer's pincode as [code].
+        return "[%d digits]" % len(text.strip())
     text = _EMAIL.sub("[email]", text)
     # Phones before long digit runs. "+919876500000" is twelve digits, so
     # _LONG_DIGITS claimed it first and labelled a mobile number as a card. It
