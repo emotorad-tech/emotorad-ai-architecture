@@ -63,5 +63,79 @@ class PartsTableTests(unittest.TestCase):
                 load_parts_table(tmp)
 
 
+from emotorad_ai.fulfilment import IN_FLIGHT_SECONDS, ItemCodes, ReplacementOrders
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class ItemCodesTests(unittest.TestCase):
+    """A mock in the shape the ERP read will have: bike model plus part in,
+    item code out. The real one walks Item -> BOM -> component; this one
+    walks a dictionary."""
+
+    def test_a_known_bike_and_part_resolve(self):
+        self.assertEqual(ItemCodes().resolve("EMX Plus", "battery"), "BAT-EMX-48V")
+
+    def test_an_unknown_bike_does_not(self):
+        self.assertIsNone(ItemCodes().resolve("Not A Bike", "battery"))
+
+    def test_an_unknown_part_does_not(self):
+        self.assertIsNone(ItemCodes().resolve("EMX Plus", "flux capacitor"))
+
+    def test_the_live_product_name_shape_resolves(self):
+        """Real records look like 'X1 C Red-XX01EB0007/EM01AV01C19'. The model
+        name is the part before the colour and the codes."""
+        self.assertEqual(ItemCodes().resolve("X1 C Red-XX01EB0007/EM01AV01C19", "battery"), "BAT-X1C-36V")
+
+
+class ReplacementOrdersTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = _Clock()
+        self.orders = ReplacementOrders(clock=self.clock)
+
+    def test_an_order_gets_an_id_and_a_status(self):
+        order = self.orders.create(frame_number="F1", part="battery", status="pending_approval")
+        self.assertRegex(order["order_id"], r"^RO-\d{5}$")
+        self.assertEqual(order["status"], "pending_approval")
+
+    def test_nothing_is_in_flight_to_begin_with(self):
+        self.assertIsNone(self.orders.in_flight("F1", "battery"))
+
+    def test_a_fresh_order_is_in_flight(self):
+        created = self.orders.create(frame_number="F1", part="battery", status="approved")
+        self.assertEqual(self.orders.in_flight("F1", "battery")["order_id"], created["order_id"])
+
+    def test_a_different_part_on_the_same_frame_is_not(self):
+        self.orders.create(frame_number="F1", part="battery", status="approved")
+        self.assertIsNone(self.orders.in_flight("F1", "charger"))
+
+    def test_the_same_part_on_a_different_frame_is_not(self):
+        self.orders.create(frame_number="F1", part="battery", status="approved")
+        self.assertIsNone(self.orders.in_flight("F2", "battery"))
+
+    def test_it_ages_out_after_48_hours(self):
+        self.orders.create(frame_number="F1", part="battery", status="approved")
+        self.clock.advance(IN_FLIGHT_SECONDS + 1)
+        self.assertIsNone(self.orders.in_flight("F1", "battery"))
+
+    def test_it_is_still_in_flight_just_inside(self):
+        self.orders.create(frame_number="F1", part="battery", status="approved")
+        self.clock.advance(IN_FLIGHT_SECONDS - 1)
+        self.assertIsNotNone(self.orders.in_flight("F1", "battery"))
+
+    def test_approve_flips_the_status(self):
+        order = self.orders.create(frame_number="F1", part="battery", status="pending_approval")
+        self.assertEqual(self.orders.approve(order["order_id"])["status"], "approved")
+
+
 if __name__ == "__main__":
     unittest.main()
