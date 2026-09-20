@@ -384,3 +384,41 @@ def check_evidence(reply: str, evidence_seen: bool, safety_triggered: bool = Fal
     return EvidenceCheck(
         blocked=True, reason="fault_concluded_without_evidence", matched=found.group(0)
     )
+
+
+# --- order post-check -------------------------------------------------------
+# Replacement order ids as place_replacement_order issues them. Tickets are
+# EM- and dealer orders SO-; only RO- is a claim this check owns.
+_ORDER_ID = re.compile(r"\bRO-\d{5}\b")
+
+ORDER_BLOCKED_MESSAGE = (
+    "Let me get this confirmed for you properly. I am passing this to our support team so "
+    "they can check the order and come back to you."
+)
+
+
+@dataclass(frozen=True)
+class OrderCheck:
+    blocked: bool
+    reason: str = ""
+    claimed: str = ""
+
+
+def check_order_claim(reply: str, tool_results: Sequence[dict]) -> OrderCheck:
+    """Block a reply that names an order no tool in the conversation placed.
+
+    The same control as the coverage post-check, pointed at shipments: calling
+    the order tool proves it ran, not that the reply names the order it
+    returned. An order id the model made up would send a customer to wait for
+    a battery nobody is sending.
+    """
+    placed = set()
+    for result in tool_results:
+        data = (result or {}).get("data") or {}
+        order_id = data.get("order_id")
+        if isinstance(order_id, str):
+            placed.add(order_id)
+    for claimed in _ORDER_ID.findall(reply):
+        if claimed not in placed:
+            return OrderCheck(blocked=True, reason="order_claim_without_tool_result", claimed=claimed)
+    return OrderCheck(blocked=False)

@@ -41,11 +41,13 @@ from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
     EVIDENCE_BLOCKED_MESSAGE,
     HANDOFF_MESSAGE,
+    ORDER_BLOCKED_MESSAGE,
     SAFETY_MESSAGE,
-    check_safety,
     check_coverage_claim,
     check_evidence,
     check_human_handoff,
+    check_order_claim,
+    check_safety,
 )
 from .identity import IdentityResolver, ResolvedIdentity
 from .llm import BedrockClaude
@@ -310,6 +312,26 @@ class Runtime:
                 message, state, COVERAGE_BLOCKED_MESSAGE, "guardrail:coverage_post_check",
                 escalated=True, ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": coverage.reason, "suppressed_text": turn.text},
+                already_in_history=True,
+            )
+
+        # The third post-check, same reason as the first: the order tool ran
+        # is not the reply named the order it returned. Order results from this
+        # turn only; an order id is never carried forward, so a claim on a
+        # later turn has to be about an order the tool reported that turn
+        # (place_replacement_order reports an in-flight order rather than
+        # placing a second one, so re-asking is safe).
+        order = check_order_claim(turn.text, [call["result"] for call in turn.tool_calls])
+        if order.blocked:
+            self.log.guardrail(
+                message.conversation_id, "order_post_check",
+                {"reason": order.reason, "claimed": order.claimed, "suppressed_text": turn.text},
+            )
+            self.log.escalation(message.conversation_id, "order_claim_blocked", turn.ticket_id)
+            return self._finish(
+                message, state, ORDER_BLOCKED_MESSAGE, "guardrail:order_post_check",
+                escalated=True, ticket_id=turn.ticket_id,
+                metadata={"blocked_reason": order.reason, "suppressed_text": turn.text},
                 already_in_history=True,
             )
 
