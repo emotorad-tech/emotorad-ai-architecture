@@ -131,11 +131,38 @@ class TheModelActuallySeesThePhotoTests(unittest.TestCase):
         text = [b for b in blocks if b.get("type") == "text"]
         self.assertEqual(text[0]["text"], "here is the terminal")
 
+    def test_a_photo_with_no_caption_sends_no_empty_text_block(self):
+        """Tap attach, pick, send. The API rejects an empty text block, so a
+        photo on its own must go as image blocks alone."""
+        from emotorad_ai.config import Settings
+        from emotorad_ai.contract import ANONYMOUS, Attachment, Identity, InboundMessage
+        from emotorad_ai.identity import IdentityResolver
+        from emotorad_ai.llm import ScriptedClaude, say
+        from emotorad_ai.observability import EventLog
+        from emotorad_ai.runtime import Runtime
+        from emotorad_ai.tools.mocks import build_registry
+
+        registry = build_registry()
+        llm = ScriptedClaude([say("I can see the terminal.")])
+        runtime = Runtime(
+            settings=Settings(log_path="", log_to_stdout=False),
+            registry=registry, llm=llm, log=EventLog(path=None),
+            resolver=IdentityResolver(registry),
+        )
+        runtime.conversations.get("nocap").route_to("battery_support")
+        runtime.handle(InboundMessage(
+            conversation_id="nocap", persona="customer",
+            identity=Identity(strength=ANONYMOUS, em_aid="aid-1"),
+            channel="website_chat", message_text="",
+            attachments=[Attachment(kind="image", url=_JPEG)],
+        ))
+        blocks = llm.requests[-1]["messages"][-1]["content"]
+        self.assertTrue(all(b.get("type") == "image" for b in blocks), blocks)
+
     def test_a_turn_without_a_photo_is_unchanged(self):
         """Every existing channel sends plain text and must keep working
         exactly as it did."""
         self.assertEqual(self._run([])[-1]["content"], "here is the terminal")
-
 
 if __name__ == "__main__":
     unittest.main()

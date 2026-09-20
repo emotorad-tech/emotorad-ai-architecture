@@ -95,7 +95,11 @@ class Agent:
         blocks = to_image_blocks(validate([a.to_dict() for a in message.attachments]))
         if not blocks:
             return message.message_text
-        return blocks + [{"type": "text", "text": message.message_text}]
+        # A photo sent on its own — tap attach, pick, send, no caption — goes as
+        # image blocks alone. The API rejects an empty text block.
+        if message.message_text.strip():
+            blocks.append({"type": "text", "text": message.message_text})
+        return blocks
 
     def run(
         self,
@@ -122,6 +126,17 @@ class Agent:
         history.append({"role": "user", "content": self._user_content(message)})
 
         turn = AgentTurn(text="", agent=self.definition.name)
+        # Everything the model writes during the turn, in the order it wrote it.
+        #
+        # A model narrates before it acts: "Before anything else, check the
+        # battery's on/off switch is ON" arrives in the same block as the
+        # send_guide_media call that shows the switch. That text was appended to
+        # the history the model sees and then dropped, because turn.text was
+        # assigned from the final tool-free response alone. The customer got the
+        # last sentence of a paragraph they never received — on 20 September, a
+        # photo of a switch and the words "The picture should be just above this
+        # message."
+        said: List[str] = []
         # Same tool, same arguments, twice: the model is stuck, and the remaining
         # iterations will burn tokens and latency to arrive at the same place.
         # Breaking early and handing over is cheaper and more honest than looping
@@ -139,6 +154,8 @@ class Agent:
                 response.usage,
             )
             history.append({"role": "assistant", "content": response.api_content})
+            if (response.text or "").strip():
+                said.append(response.text.strip())
 
             if not response.wants_tools:
                 # A turn that ends with nothing written is a failed turn, not a
@@ -153,7 +170,11 @@ class Agent:
                 # logged, because how often it happens is what decides whether
                 # this is worth recovering from (one more round trip nudging the
                 # model to reply) rather than handing over.
-                if not (response.text or "").strip():
+                # Nothing written anywhere in the turn, not merely nothing in
+                # the last block. A turn that explained itself and then ended
+                # without a closing line has still told the customer something,
+                # and handing them to a human would throw that away.
+                if not said:
                     self.log.emit(
                         "empty_reply", message.conversation_id,
                         agent=self.definition.name,
@@ -164,7 +185,7 @@ class Agent:
                     turn.escalate = True
                     turn.text = HANDOVER_TEXT
                     return turn
-                turn.text = response.text
+                turn.text = "\n\n".join(said)
                 return turn
 
             # All results for one assistant turn go back in a single user
