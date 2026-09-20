@@ -51,6 +51,15 @@ class ConversationState:
     # conversation, not per turn: a customer who sent the picture three turns ago
     # must not be asked for it again because the model concluded later.
     evidence_seen: bool = False
+    # The most recent warranty lookup, kept for the conversation for the same
+    # reason `evidence_seen` is. Coverage is looked up once and then relied on;
+    # the post-check that guards coverage claims was fed the current turn's tool
+    # results alone, so a correct "that's covered" three turns after the lookup
+    # was blocked as unsupported and the customer escalated to a human to check
+    # a warranty that was already checked. The check itself is unchanged — a
+    # claim must still match what a tool returned — this is only how long the
+    # tool's answer is remembered.
+    coverage_result: Optional[Dict[str, Any]] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.

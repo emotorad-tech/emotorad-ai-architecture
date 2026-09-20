@@ -50,7 +50,7 @@ from .guardrails import (
 from .identity import IdentityResolver, ResolvedIdentity
 from .llm import BedrockClaude
 from .observability import EventLog
-from .tools.mocks import CREATE_SUPPORT_TICKET, RAISE_INTAKE_TICKET, build_registry
+from .tools.mocks import CREATE_SUPPORT_TICKET, LOOKUP_WARRANTY_RECORD, RAISE_INTAKE_TICKET, build_registry
 from .tools.registry import ToolContext, ToolRegistry, is_error
 from .tools.verification import (
     FIND_ACCOUNT_BY_CODE,
@@ -270,12 +270,30 @@ class Runtime:
 
         # The post-check: calling the warranty tool proved the tool ran, not that
         # the reply matches what it returned.
+        #
+        # Remember this turn's lookup before checking, so a claim made in the
+        # same turn as the lookup and a claim made three turns later are judged
+        # against the same fact. Latest wins: a second lookup replaces the first.
+        for call in turn.tool_calls:
+            if call["tool"] == LOOKUP_WARRANTY_RECORD and not is_error(call["result"]):
+                state.coverage_result = call["result"]
         results = [call["result"] for call in turn.tool_calls]
+        if state.coverage_result is not None:
+            results = results + [state.coverage_result]
         coverage = check_coverage_claim(turn.text, results)
         if coverage.blocked:
             self.log.guardrail(
                 message.conversation_id, "coverage_post_check",
-                {"reason": coverage.reason, "claimed": coverage.claimed, "actual": coverage.actual},
+                {
+                    "reason": coverage.reason,
+                    "claimed": coverage.claimed,
+                    "actual": coverage.actual,
+                    # What the customer nearly got told. Without it a false
+                    # positive and a true positive are indistinguishable in the
+                    # log, and the only way to tell them apart is to ask the
+                    # customer.
+                    "suppressed_text": turn.text,
+                },
             )
             self.log.escalation(message.conversation_id, "coverage_claim_blocked", turn.ticket_id)
             return self._finish(
