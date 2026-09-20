@@ -66,7 +66,7 @@ def redact_pii(text: str) -> str:
     return text
 
 
-def redact_fields(value: Any, key: Optional[str] = None) -> Any:
+def redact_fields(value: Any, key: Optional[str] = None, parent: Optional[str] = None) -> Any:
     """Walk a logged structure and redact what should not be written down.
 
     Applied to whole events rather than to the few call sites that looked risky.
@@ -74,17 +74,22 @@ def redact_fields(value: Any, key: Optional[str] = None) -> Any:
     was redacted on the way in and written out in full a few lines later as a
     tool argument. Redacting at the sink means a field added later is covered by
     default instead of being covered only if someone remembers.
+
+    One exemption, by parent: the `code` of an error envelope is the name of
+    the error, not a secret. Redacting it hid every refusal reason in the log
+    and left only the message text to read.
     """
-    if key is not None and key.lower() in _SENSITIVE_KEYS and isinstance(value, str):
+    sensitive = key is not None and key.lower() in _SENSITIVE_KEYS and isinstance(value, str)
+    if sensitive and not (key.lower() == "code" and parent == "error"):
         return "[redacted]"
     if isinstance(value, str):
         if _DATA_URI.match(value):
             return "[attachment]"
         return redact_pii(value)
     if isinstance(value, dict):
-        return {k: redact_fields(v, k) for k, v in value.items()}
+        return {k: redact_fields(v, k, key) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [redact_fields(v, key) for v in value]
+        return [redact_fields(v, key, parent) for v in value]
     return value
 
 

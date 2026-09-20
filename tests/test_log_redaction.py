@@ -100,5 +100,31 @@ class AttachmentsNeverReachTheLogTests(unittest.TestCase):
         self.assertIn(url, str(self.log.events[-1]))
 
 
+class ErrorCodesStayReadableTests(unittest.TestCase):
+    """Redacting `code` to hide one-time codes also hid every error code.
+
+    On 2026-09-20 a refused order was logged as {"error": {"code":
+    "[redacted]", ...}} and the refusal could only be read from its message
+    text. A log that cannot say which error fired is not doing its one job.
+    """
+
+    def setUp(self):
+        self.log = EventLog(path=None)
+
+    def test_an_error_envelopes_code_is_kept(self):
+        self.log.tool_call("c1", "place_replacement_order", {}, {"error": {"code": "address_unconfirmed", "message": "m"}})
+        self.assertIn("address_unconfirmed", str(self.log.events[-1]))
+
+    def test_a_one_time_code_argument_is_still_hidden(self):
+        self.log.tool_call("c1", "verify_identity", {"code": "039760"}, {"data": {}})
+        self.assertNotIn("039760", str(self.log.events[-1]))
+
+    def test_a_code_nested_under_data_is_still_hidden(self):
+        """Only the error envelope is exempt. A tool that echoed a code back
+        in its data would still be redacted."""
+        self.log.tool_call("c1", "some_tool", {}, {"data": {"code": "039760"}})
+        self.assertNotIn("039760", str(self.log.events[-1]))
+
+
 if __name__ == "__main__":
     unittest.main()
