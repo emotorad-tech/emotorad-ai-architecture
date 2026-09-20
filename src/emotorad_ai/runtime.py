@@ -292,6 +292,12 @@ class Runtime:
                 # start with a non-zero digit, so a bare code looks exactly
                 # like a pincode and was otherwise accepted as one by the
                 # provenance check on `place_replacement_order`.
+                #
+                # `state.history` is already the trimmed window by the time
+                # this runs (the last HISTORY_TURNS customer turns), so an
+                # address given earlier than that falls out of provenance and
+                # the tool asks again; safe, but the refusal will say the
+                # words were never typed.
                 "customer_messages": lambda: [
                     m for m in customer_texts(state.history) if m.strip() not in state.consumed_codes
                 ],

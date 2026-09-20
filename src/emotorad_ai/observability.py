@@ -53,8 +53,7 @@ def redact_pii(text: str) -> str:
     Ownership data already reaches us through identity resolution, so nothing
     downstream needs these to be readable in the log.
     """
-    match = _OTP_ALONE.match(text)
-    if match:
+    if _OTP_ALONE.match(text):
         # A one-time code or a pincode, typed alone. Both are hidden; the
         # placeholder says only what it can know. Calling every bare
         # six-digit message a code logged a customer's pincode as [code].

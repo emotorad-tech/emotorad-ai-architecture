@@ -139,6 +139,24 @@ class ErrorCodesStayReadableTests(unittest.TestCase):
         self.log.tool_call("c1", "some_tool", {}, {"data": {"code": "039760"}})
         self.assertNotIn("039760", str(self.log.events[-1]))
 
+    def test_a_code_nested_deeper_under_error_is_still_hidden(self):
+        """The exemption is by immediate parent, not by anything above it. A
+        code inside a sub-object of the error envelope is not itself the
+        error's own code, so it is not exempt."""
+        self.log.tool_call(
+            "c1", "some_tool", {},
+            {"error": {"code": "keep", "details": {"code": "039760"}}},
+        )
+        logged = str(self.log.events[-1])
+        self.assertIn("keep", logged)
+        self.assertNotIn("039760", logged)
+
+    def test_a_list_named_errors_is_not_exempt(self):
+        """The exemption is keyed on the literal parent name "error", singular.
+        A list of error dicts under "errors" is not that shape."""
+        self.log.tool_call("c1", "some_tool", {}, {"errors": [{"code": "039760"}]})
+        self.assertNotIn("039760", str(self.log.events[-1]))
+
 
 if __name__ == "__main__":
     unittest.main()
