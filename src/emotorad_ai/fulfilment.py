@@ -145,3 +145,42 @@ class ReplacementOrders:
                 ):
                     return dict(order)
         return None
+
+
+def is_sure(
+    evidence_seen: bool,
+    in_warranty: Optional[bool],
+    item_code: Optional[str],
+    rule: Optional[PartRule],
+) -> bool:
+    """Whether the bot is sure, in the only sense the approval modes accept.
+
+    Four facts, every one of them something the runtime already holds:
+
+    * evidence arrived in the conversation (a photo or clip);
+    * coverage was looked up and is in warranty. Chargeable is not built yet,
+      so out of warranty is not a case the bot may act on alone;
+    * the part resolved to an item code;
+    * the part is in the table.
+
+    The spec also names "the knowledge record's flow reached its concluding
+    step". The runtime does not yet record which step a flow reached, so this
+    first build approximates it with evidence_seen plus the part being one the
+    table knows. That is the weakest of the four and is called out in the plan.
+
+    The model's own confidence is never consulted. That is the point.
+    """
+    return bool(evidence_seen) and in_warranty is True and bool(item_code) and rule is not None
+
+
+def decide(sure: bool, approval_mode: str) -> str:
+    """The order's status at placement, from the configured mode.
+
+    Fails closed: a mode this function does not know approves nothing, even
+    though Settings refuses unknown modes at startup.
+    """
+    if approval_mode == "bot":
+        return "approved"
+    if approval_mode == "reasonable":
+        return "approved" if sure else "pending_approval"
+    return "pending_approval"

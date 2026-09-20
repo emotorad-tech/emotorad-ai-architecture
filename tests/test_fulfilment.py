@@ -137,5 +137,54 @@ class ReplacementOrdersTests(unittest.TestCase):
         self.assertEqual(self.orders.approve(order["order_id"])["status"], "approved")
 
 
+from emotorad_ai.fulfilment import decide, is_sure
+
+_BATTERY = PartRule(part="battery", technician=False)
+
+
+class SureTests(unittest.TestCase):
+    """'Sure' is four facts the runtime already holds, never the model's own
+    confidence. This is the definition the approval modes stand on."""
+
+    def test_all_four_facts_make_it_sure(self):
+        self.assertTrue(is_sure(True, True, "BAT-EMX-48V", _BATTERY))
+
+    def test_no_photo_is_not_sure(self):
+        self.assertFalse(is_sure(False, True, "BAT-EMX-48V", _BATTERY))
+
+    def test_coverage_undetermined_is_not_sure(self):
+        self.assertFalse(is_sure(True, None, "BAT-EMX-48V", _BATTERY))
+
+    def test_out_of_warranty_is_not_sure_in_this_build(self):
+        """Chargeable is build two. Until then it is not a case the bot may
+        approve on its own."""
+        self.assertFalse(is_sure(True, False, "BAT-EMX-48V", _BATTERY))
+
+    def test_no_item_code_is_not_sure(self):
+        self.assertFalse(is_sure(True, True, None, _BATTERY))
+
+    def test_a_part_outside_the_table_is_not_sure(self):
+        self.assertFalse(is_sure(True, True, "X", None))
+
+
+class DecideTests(unittest.TestCase):
+    def test_bot_mode_approves_everything(self):
+        self.assertEqual(decide(True, "bot"), "approved")
+        self.assertEqual(decide(False, "bot"), "approved")
+
+    def test_reasonable_mode_approves_only_sure(self):
+        self.assertEqual(decide(True, "reasonable"), "approved")
+        self.assertEqual(decide(False, "reasonable"), "pending_approval")
+
+    def test_human_mode_approves_nothing(self):
+        self.assertEqual(decide(True, "human"), "pending_approval")
+        self.assertEqual(decide(False, "human"), "pending_approval")
+
+    def test_an_unknown_mode_never_approves(self):
+        """Settings refuses unknown modes at startup, but this function must
+        fail closed on its own too."""
+        self.assertEqual(decide(True, "yolo"), "pending_approval")
+
+
 if __name__ == "__main__":
     unittest.main()
