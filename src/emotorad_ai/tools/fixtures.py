@@ -55,6 +55,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "411045",
             "battery_variant": "48V 14.4Ah removable",
             "created_at": "2025-03-20",  # registration, NOT purchase. Never compute from this
+            "full_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006",
         }
     ],
     # One bike, bought long enough ago to be out of warranty.
@@ -70,6 +71,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "560037",
             "battery_variant": "36V 12.75Ah removable",
             "created_at": "2022-11-05",
+            "full_address": "42 Residency Road, Bengaluru, Karnataka 560025",
         }
     ],
     # Three bikes on one number. Confirmed in production, so disambiguation is a
@@ -86,6 +88,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "682024",
             "battery_variant": "36V 13Ah removable",
             "created_at": "2024-06-14",
+            "full_address": "House No. 18, Marine Drive, Kochi, Kerala 682024",
         },
         {
             "customer_name": "Priya Nair",
@@ -98,6 +101,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "682024",
             "battery_variant": "48V 14.4Ah removable",
             "created_at": "2025-01-09",
+            "full_address": "Door No. 18/A, Marine Drive, Kochi, Kerala 682024",
         },
         {
             "customer_name": "Priya Nair",
@@ -110,6 +114,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "682024",
             "battery_variant": "36V 12.75Ah removable",
             "created_at": "2021-10-02",
+            "full_address": "TC 18/1234, Marine Drive, Kochi, Kerala 682024",
         },
     ],
     # Registered, but the purchase date was never captured — which live OMS rows
@@ -128,6 +133,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "440010",
             "battery_variant": "48V 14.4Ah removable",
             "created_at": "2024-08-19",
+            "full_address": "Plot 7, Sadar Bazaar, Nagpur, Maharashtra 440010",
         }
     ],
     # Neither date present. Rare, but it is the only remaining route into
@@ -146,6 +152,7 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "pin_code": "500032",
             "battery_variant": "36V 12.75Ah removable",
             "created_at": None,
+            "full_address": "6-3-210, Banjara Hills, Hyderabad, Telangana 500032",
         }
     ],
 }

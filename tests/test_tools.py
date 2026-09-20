@@ -199,5 +199,57 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("get_battery_diagnostics", build_registry(diagnostics_available=True).specs)
 
 
+class DeliveryAddressOnTheRecordTests(unittest.TestCase):
+    """The replacement order needs somewhere to go. The real warranty response
+    carries full_address; the tool was dropping it."""
+
+    def test_the_fixture_address_reaches_the_model(self):
+        registry = build_registry()
+        result = registry.call("lookup_warranty_record", {}, ToolContext(conversation_id="c", phone="+919876543210"))
+        bike = result["data"]["bikes"][0]
+        self.assertIn("delivery_address", bike)
+        self.assertTrue(bike["delivery_address"])
+
+    def test_a_live_style_record_maps_full_address(self):
+        record = {
+            "frame_number": "E1", "product_name": "X1 C Red-X/Y", "purchase_date": "2025-04-01",
+            "full_address": "12 MG Road, Pune 411001", "product_id": 77,
+        }
+        registry = build_registry(warranty_source=lambda phone: [record])
+        bike = registry.call("lookup_warranty_record", {}, ToolContext(conversation_id="c", phone="+911111111111"))["data"]["bikes"][0]
+        self.assertEqual(bike["delivery_address"], "12 MG Road, Pune 411001")
+        self.assertEqual(bike["product_id"], 77)
+
+
+class WritesValidateAgainstTheLiveRecordTests(unittest.TestCase):
+    """_owned_bike read fixtures.WARRANTY_RECORDS directly, so with a live
+    warranty source a ticket for a real customer validated the frame against
+    fixtures, found nothing, and silently dropped the frame. Every write must
+    validate against the same source the lookup used."""
+
+    def test_a_ticket_validates_the_frame_against_the_live_source(self):
+        record = {"frame_number": "LIVE1", "product_name": "X1 C", "purchase_date": "2025-04-01"}
+        registry = build_registry(warranty_source=lambda phone: [record])
+        result = registry.call(
+            "create_support_ticket",
+            {"category": "battery_power", "description": "d", "severity": "high",
+             "idempotency_key": "k1", "frame_number": "LIVE1"},
+            ToolContext(conversation_id="c", phone="+911111111111"),
+        )
+        self.assertNotIn("error", result, result)
+        self.assertEqual(registry.tickets.tickets[result["data"]["ticket_id"]]["frame_number"], "LIVE1")
+
+    def test_a_frame_the_live_source_does_not_own_is_refused(self):
+        record = {"frame_number": "LIVE1", "product_name": "X1 C", "purchase_date": "2025-04-01"}
+        registry = build_registry(warranty_source=lambda phone: [record])
+        result = registry.call(
+            "create_support_ticket",
+            {"category": "battery_power", "description": "d", "severity": "high",
+             "idempotency_key": "k2", "frame_number": "SOMEONE-ELSES"},
+            ToolContext(conversation_id="c", phone="+911111111111"),
+        )
+        self.assertEqual(result["error"]["code"], "frame_number_not_owned")
+
+
 if __name__ == "__main__":
     unittest.main()

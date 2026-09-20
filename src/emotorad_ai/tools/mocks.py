@@ -100,6 +100,12 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         "battery_variant": _clean(record.get("battery_variant")),
         "franchise_name": _clean(record.get("franchise_name")),
         "purchase_date": _date_only(record.get("purchase_date")),
+        # Where a replacement ships. The real response carries full_address;
+        # the fixtures now carry one too. Read back to the customer before any
+        # order is placed, never assumed.
+        "delivery_address": _clean(record.get("full_address")),
+        # For the ERP item-code read later. Absent on fixtures, present live.
+        "product_id": record.get("product_id"),
     }
 
     # `purchase_date` is the right answer and `created_at` is the available one.
@@ -228,7 +234,11 @@ def _price_order(dealer: Dict[str, Any], lines: List[Dict[str, Any]]) -> Dict[st
     }
 
 
-def _owned_bike(phone: str, frame_number: Optional[str]) -> Optional[Dict[str, Any]]:
+def _owned_bike(
+    phone: str,
+    frame_number: Optional[str],
+    bikes_on: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+) -> Optional[Dict[str, Any]]:
     """Resolve which bike a write is about, refusing anything not owned.
 
     Two failures this exists to stop, both of which the model will otherwise
@@ -242,7 +252,7 @@ def _owned_bike(phone: str, frame_number: Optional[str]) -> Optional[Dict[str, A
       unspecified frame number is missing information, not a default — so this
       refuses rather than guessing, and the refusal tells the agent to ask.
     """
-    records = fixtures.WARRANTY_RECORDS.get(phone) or []
+    records = bikes_on(phone) if bikes_on else (fixtures.WARRANTY_RECORDS.get(phone) or [])
     if not records:
         return None  # no record at all; the ticket is still worth raising
 
@@ -364,6 +374,16 @@ def build_registry(
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
     registry = ToolRegistry()
+
+    # Every write validates a frame against the same source the lookup used.
+    # Before this, _owned_bike read the fixtures directly, and with a live
+    # warranty source a ticket for a real customer validated against fixtures,
+    # found nothing, and silently dropped the frame number.
+    def bikes_on(phone: str) -> List[Dict[str, Any]]:
+        if warranty_source is not None:
+            return warranty_source(phone) or []
+        return fixtures.WARRANTY_RECORDS.get(phone) or []
+
     registry.tickets = tickets  # type: ignore[attr-defined]  # test/inspection handle
     registry.bookings = bookings  # type: ignore[attr-defined]
     registry.orders = orders  # type: ignore[attr-defined]
@@ -739,7 +759,7 @@ def build_registry(
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
         if severity not in TICKET_SEVERITIES:
             raise ToolError("invalid_severity", "Unknown severity %r." % severity)
-        bike = _owned_bike(phone, frame_number)
+        bike = _owned_bike(phone, frame_number, bikes_on)
         ticket = tickets.create(
             phone=phone,
             category=category,
