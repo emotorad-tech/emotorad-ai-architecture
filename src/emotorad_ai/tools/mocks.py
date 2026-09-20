@@ -109,6 +109,9 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         # order is placed, never assumed.
         "delivery_address": _clean(record.get("full_address")),
         # For the ERP item-code read later. Absent on fixtures, present live.
+        # An integer id, not a string, so it is deliberately not passed
+        # through _clean() — that helper's job is normalising upstream's
+        # empty-string conventions, and an id is never one of those.
         "product_id": record.get("product_id"),
     }
 

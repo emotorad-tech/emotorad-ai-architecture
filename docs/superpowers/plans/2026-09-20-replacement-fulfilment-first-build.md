@@ -33,7 +33,7 @@
 | `src/emotorad_ai/config.py` | `approval_mode` on `Settings`. |
 | `src/emotorad_ai/tools/mocks.py` | `_coverage` gains `delivery_address` and `product_id`; `_bikes_on(phone)` replaces the fixtures-only lookup in `_owned_bike`; `place_replacement_order` registered when a store is supplied. |
 | `src/emotorad_ai/agents/base.py` | `Agent.run` accepts `facts`, merged into `ToolContext.late`. |
-| `src/emotorad_ai/runtime.py` | Passes `evidence_seen` and `coverage_result` as facts; logs the replacement decision; runs the order-id post-check. |
+| `src/emotorad_ai/runtime.py` | Passes `evidence_seen` and `coverage_result` as facts; runs the order-id post-check. The replacement decision is recoverable from the `tool_call` event rather than logged as its own event; a dedicated `replacement_decided` event is a follow-up. |
 | `src/emotorad_ai/guardrails.py` | `check_order_claim(reply, tool_results)`. |
 | `src/emotorad_ai/agents/battery_support.py` | `PLACE_REPLACEMENT_ORDER` in `TOOL_NAMES`. |
 | `prompts/battery_support.md` | A replacement section naming the tool and the address step. |

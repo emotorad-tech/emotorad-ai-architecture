@@ -45,8 +45,8 @@ def load_parts_table(directory: Optional[Any] = None) -> Dict[str, PartRule]:
     path = root / PARTS_TABLE_PATH
     try:
         raw = yaml.safe_load(path.read_text()) or {}
-    except OSError:
-        raise PartsTableError("%s: not found" % path)
+    except OSError as exc:
+        raise PartsTableError("%s: not found" % path) from exc
     if not isinstance(raw, Mapping):
         raise PartsTableError("%s: expected a mapping of part -> rule" % path)
     table: Dict[str, PartRule] = {}

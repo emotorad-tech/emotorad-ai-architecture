@@ -33,6 +33,9 @@ class Settings:
     #   human      - everything waits for a human
     # The business-facing names for a panel later are "Bot in love with
     # customer", "Reasonable bot", "No brain, human approval only".
+    # default_factory, unlike the other fields above: it reads the environment
+    # per construction rather than once at import time, which is what lets
+    # tests patch EMOTORAD_AI_APPROVAL_MODE and get a fresh Settings() back.
     approval_mode: str = field(default_factory=lambda: os.environ.get("EMOTORAD_AI_APPROVAL_MODE", "reasonable"))
 
 

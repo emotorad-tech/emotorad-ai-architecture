@@ -11,7 +11,6 @@ from datetime import date
 from emotorad_ai.adapters import WebsiteChatAdapter
 from emotorad_ai.agents.battery_support import AGENT_NAME, TOOL_NAMES
 from emotorad_ai.config import Settings
-from emotorad_ai.contract import Attachment
 from emotorad_ai.fulfilment import ItemCodes, ReplacementOrders
 from emotorad_ai.identity import IdentityResolver
 from emotorad_ai.llm import ScriptedClaude, call_tool, say
