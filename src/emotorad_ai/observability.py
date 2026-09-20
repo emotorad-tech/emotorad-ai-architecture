@@ -15,10 +15,36 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-_PHONE = re.compile(r"\b(?:\+?91[\s-]?)?[6-9]\d{9}\b")
+# `\b` cannot match before a "+", so the leading sign was left behind and the
+# log read "+[phone]". A lookbehind that rejects a digit or a sign also stops
+# this matching the tail of a longer digit run, which is what the word
+# boundary was there for.
+_PHONE = re.compile(r"(?<![\d+])(?:\+?91[\s-]?)?[6-9]\d{9}(?!\d)")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # 16-digit-ish sequences: card numbers pasted into a support chat.
 _LONG_DIGITS = re.compile(r"\b\d{12,19}\b")
+
+
+# A one-time code typed on its own. Six digits are far too short to pattern
+# match inside a sentence without eating pincodes, prices and model numbers, so
+# this is anchored: the whole string, and nothing else. That is how the code
+# actually arrives, both as the customer's message and as verify_identity's
+# argument.
+_OTP_ALONE = re.compile(r"^\s*\d{4,8}\s*$")
+
+# Argument and result fields that are removed by name rather than by pattern,
+# because what makes them sensitive is what they are, not what they look like.
+# `phone_masked` is deliberately absent: the masked form is what the agent reads
+# back to the customer, and checking it was masked correctly is a thing the log
+# has to be able to answer.
+_SENSITIVE_KEYS = frozenset({"code", "otp", "phone", "mobile", "stated_contact"})
+
+# An inline image, which is how a customer's photo arrives. Never written down:
+# it is a picture of somebody's bike, their garage and whoever is standing in
+# it, and a megabyte of base64 on one line would make the log unreadable for
+# the thing it exists for. The fact that a photo was sent still survives, in
+# the surrounding fields.
+_DATA_URI = re.compile(r"^data:[^;,]*;base64,", re.I)
 
 
 def redact_pii(text: str) -> str:
@@ -27,10 +53,39 @@ def redact_pii(text: str) -> str:
     Ownership data already reaches us through identity resolution, so nothing
     downstream needs these to be readable in the log.
     """
+    if _OTP_ALONE.match(text):
+        return "[code]"
     text = _EMAIL.sub("[email]", text)
-    text = _LONG_DIGITS.sub("[number]", text)
+    # Phones before long digit runs. "+919876500000" is twelve digits, so
+    # _LONG_DIGITS claimed it first and labelled a mobile number as a card. It
+    # was redacted either way, but anyone reading the log was told the wrong
+    # thing about what had been there. A card number cannot be caught by _PHONE
+    # in passing: its word boundaries cannot land inside a longer digit run.
     text = _PHONE.sub("[phone]", text)
+    text = _LONG_DIGITS.sub("[number]", text)
     return text
+
+
+def redact_fields(value: Any, key: Optional[str] = None) -> Any:
+    """Walk a logged structure and redact what should not be written down.
+
+    Applied to whole events rather than to the few call sites that looked risky.
+    `redact_pii` was on the inbound text alone, so a number the customer typed
+    was redacted on the way in and written out in full a few lines later as a
+    tool argument. Redacting at the sink means a field added later is covered by
+    default instead of being covered only if someone remembers.
+    """
+    if key is not None and key.lower() in _SENSITIVE_KEYS and isinstance(value, str):
+        return "[redacted]"
+    if isinstance(value, str):
+        if _DATA_URI.match(value):
+            return "[attachment]"
+        return redact_pii(value)
+    if isinstance(value, dict):
+        return {k: redact_fields(v, k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_fields(v, key) for v in value]
+    return value
 
 
 @dataclass
@@ -52,7 +107,7 @@ class EventLog:
             "event": event_type,
             "conversation_id": conversation_id,
         }
-        event.update(fields)
+        event.update({k: redact_fields(v, k) for k, v in fields.items()})
         with self._lock:
             self.events.append(event)
             line = json.dumps(event, default=str)
