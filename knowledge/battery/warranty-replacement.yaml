@@ -50,6 +50,13 @@ steps:
     picture and are opposite answers on cost. Nothing visible and nothing reported means a
     defect, which is the free branch.
   - >-
+    HEAT DAMAGE IS NOT PHYSICAL DAMAGE. A melted terminal, a melted connector, scorched or
+    fused pins — these are defects by policy, whatever caused the heat, and mains
+    fluctuation on the customer's side does not move them out of the defect branch. Do not
+    ask the service centre to look for an impact on a heat-damaged part, and do not hedge
+    the cost on one being found. Physical damage means an impact or an accident: something
+    hit, dropped, bent, cracked or torn.
+  - >-
     YOU ARE NOT JUDGING WHETHER ANYONE IS TELLING THE TRUTH, and you must never imply it.
     Report what the photographs show and what the customer told you, and let those two
     things stand together on the ticket. If an account and a picture disagree, that is for
