@@ -683,7 +683,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Test: `tests/test_tools.py`
 
 **Interfaces:**
-- Produces: each `bikes[]` entry from `lookup_warranty_record` carries `delivery_address: Optional[str]` and `product_id: Optional[Any]`; module-level `_bikes_on(phone) -> List[dict]` used by every write that validates a frame.
+- Produces: each `bikes[]` entry from `lookup_warranty_record` carries `delivery_address: Optional[str]` and `product_id: Optional[Any]`; `_owned_bike(phone, frame_number, bikes_on)` where `bikes_on` is a closure built once in `build_registry` over `warranty_source`, used by every write that validates a frame.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -786,28 +786,38 @@ Replace with:
         return None  # no record at all; the ticket is still worth raising
 ```
 
-Add, immediately above `_owned_bike`:
+Change `_owned_bike`'s signature to take the source explicitly, so there is no module state and two registries in one process cannot cross-talk:
 
 ```python
-# Set once by build_registry so every write validates a frame against the same
-# source the lookup used. Before this, _owned_bike read the fixtures directly,
-# and with a live warranty source a ticket for a real customer validated
-# against fixtures, found nothing, and silently dropped the frame number.
-_warranty_source: Optional[Callable[[str], Optional[List[Dict[str, Any]]]]] = None
-
-
-def _bikes_on(phone: str) -> List[Dict[str, Any]]:
-    if _warranty_source is not None:
-        return _warranty_source(phone) or []
-    return fixtures.WARRANTY_RECORDS.get(phone) or []
+def _owned_bike(
+    phone: str,
+    frame_number: Optional[str],
+    bikes_on: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+) -> Optional[Dict[str, Any]]:
 ```
 
-In `build_registry`, right after `registry = ToolRegistry()`, add:
+and use it:
 
 ```python
-    global _warranty_source
-    _warranty_source = warranty_source
+    records = bikes_on(phone) if bikes_on else (fixtures.WARRANTY_RECORDS.get(phone) or [])
+    if not records:
+        return None  # no record at all; the ticket is still worth raising
 ```
+
+In `build_registry`, right after `registry = ToolRegistry()`, define the one lookup every write shares:
+
+```python
+    # Every write validates a frame against the same source the lookup used.
+    # Before this, _owned_bike read the fixtures directly, and with a live
+    # warranty source a ticket for a real customer validated against fixtures,
+    # found nothing, and silently dropped the frame number.
+    def bikes_on(phone: str) -> List[Dict[str, Any]]:
+        if warranty_source is not None:
+            return warranty_source(phone) or []
+        return fixtures.WARRANTY_RECORDS.get(phone) or []
+```
+
+Then change every existing call `_owned_bike(phone, frame_number)` inside `build_registry` (there are several: the ticket, the booking, the warranty-proof tools) to `_owned_bike(phone, frame_number, bikes_on)`. Grep for `_owned_bike(` to find them all.
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -1018,10 +1028,10 @@ from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER, build_registry
 from emotorad_ai.tools.registry import ToolContext
 
 PHONE = "+919876543210"  # fixture: one EMX Plus, in warranty on 2026-07-28
-COVERED = {"data": {"bikes": [{"frame_number": "EM12345678", "product_name": "EMX Plus", "in_warranty": True,
+COVERED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": True,
                                "delivery_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006"}]}}
-NOT_COVERED = {"data": {"bikes": [{"frame_number": "EM12345678", "product_name": "EMX Plus", "in_warranty": False}]}}
-UNDETERMINED = {"data": {"bikes": [{"frame_number": "EM12345678", "product_name": "EMX Plus", "in_warranty": None}]}}
+NOT_COVERED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": False}]}}
+UNDETERMINED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": None}]}}
 
 
 def _registry(approval_mode="reasonable", orders=None):
@@ -1041,7 +1051,7 @@ def _context(evidence_seen=True, coverage=COVERED):
 
 
 def _place(registry, context, **overrides):
-    args = {"frame_number": "EM12345678", "part": "battery",
+    args = {"frame_number": "EMXP2025004417", "part": "battery",
             "confirmed_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006",
             "idempotency_key": "k-1"}
     args.update(overrides)
@@ -1074,7 +1084,7 @@ class HappyPathTests(unittest.TestCase):
     def test_the_order_is_recorded(self):
         orders = ReplacementOrders()
         _place(_registry(orders=orders), _context())
-        self.assertIsNotNone(orders.in_flight("EM12345678", "battery"))
+        self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
 
     def test_a_new_address_the_customer_gave_is_used(self):
         result = _place(_registry(), _context(), confirmed_address="New place, Mumbai 400001")
@@ -1245,7 +1255,7 @@ Add the registration inside `build_registry`, immediately before `return registr
                     "Read the delivery address back to the customer and pass what they confirmed.",
                 )
 
-            bike = _owned_bike(phone, frame_number)
+            bike = _owned_bike(phone, frame_number, bikes_on)
             if bike is None:
                 raise ToolError("frame_number_required", "No bike could be resolved for this order.")
             frame = bike["frame_number"]
@@ -1589,7 +1599,7 @@ class KrishnaTests(unittest.TestCase):
         reply = _send(runtime, adapter, "yes that address is right")
         self.assertFalse(reply.escalated, reply.text)
         self.assertIn("RO-00001", reply.text)
-        placed = orders.in_flight("EM12345678", "battery")
+        placed = orders.in_flight("EMXP2025004417", "battery")
         self.assertIsNotNone(placed)
         self.assertEqual(placed["status"], "approved")
         self.assertEqual(placed["delivery_address"], ADDRESS)
@@ -1604,7 +1614,7 @@ class KrishnaTests(unittest.TestCase):
         _send(runtime, adapter, "my battery is dead, just replace it")
         reply = _send(runtime, adapter, "ok")
         self.assertFalse(reply.escalated, reply.text)
-        self.assertEqual(orders.in_flight("EM12345678", "battery")["status"], "pending_approval")
+        self.assertEqual(orders.in_flight("EMXP2025004417", "battery")["status"], "pending_approval")
 
     def test_an_invented_order_id_is_blocked(self):
         runtime, adapter, _ = _runtime([
