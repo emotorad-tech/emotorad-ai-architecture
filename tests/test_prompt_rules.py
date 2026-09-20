@@ -33,3 +33,9 @@ class PromptRuleTests(unittest.TestCase):
     def test_the_idempotency_key_carries_no_name(self):
         """A model-chosen key put the customer's name in the order store."""
         self.assertIn("frame number and the part", self.text)
+
+    def test_a_display_photo_is_asked_for_on_any_code(self):
+        """lookup_error_code is not in the chat slice. The photo request was
+        bundled with the call, so when the model skipped the call it skipped
+        the photo too. Conversation b186a5dd never saw the display."""
+        self.assertIn("whether or not `lookup_error_code` is available", self.text)
