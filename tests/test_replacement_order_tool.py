@@ -122,6 +122,15 @@ class RefusalTests(unittest.TestCase):
     def test_a_frame_the_customer_does_not_own_is_refused(self):
         self.assertEqual(_place(_registry(), _context(), frame_number="NOT-MINE")["error"]["code"], "frame_number_not_owned")
 
+    def test_another_bikes_coverage_never_vouches_for_this_one(self):
+        """The most safety-critical check in the tool. A record listing a
+        different, covered bike must not make this frame look covered."""
+        other_bike = {"data": {"bikes": [
+            {"frame_number": "SOMEONE-ELSES", "product_name": "EMX Plus", "in_warranty": True},
+        ]}}
+        result = _place(_registry(), _context(coverage=other_bike))
+        self.assertEqual(result["error"]["code"], "coverage_undetermined")
+
 
 class InFlightTests(unittest.TestCase):
     def test_a_second_order_reports_the_first(self):
