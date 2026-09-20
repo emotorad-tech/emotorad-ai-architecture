@@ -39,3 +39,4 @@ class PromptRuleTests(unittest.TestCase):
         bundled with the call, so when the model skipped the call it skipped
         the photo too. Conversation b186a5dd never saw the display."""
         self.assertIn("whether or not `lookup_error_code` is available", self.text)
+        self.assertIn("its result decides, per the table below", self.text)
