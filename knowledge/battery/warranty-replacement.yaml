@@ -69,7 +69,8 @@ steps:
     answer, and much better than implying it might be free.
   - >-
     COVERED, DATES KNOWN, NO PHYSICAL DAMAGE — say the part is covered, say until when,
-    and raise the replacement ticket in the same message. Do not ask whether to raise it:
+    confirm the delivery address and place it with `place_replacement_order` in the
+    same message, with the ticket beside it. Do not ask whether to raise it:
     they have just done four checks to reach this, and asking permission to act on the
     answer is how a resolved case becomes an abandoned one. Attach what the flow gathered —
     the readings in order, and every photograph and video already supplied.

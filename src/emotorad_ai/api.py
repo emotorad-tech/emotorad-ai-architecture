@@ -45,6 +45,7 @@ from .adapters import WebsiteChatAdapter
 from .attachments import AttachmentError, validate as validate_attachments
 from .config import Settings, load_settings
 from .contract import new_conversation_id
+from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .identity import IdentityResolver
 from .llm import AnthropicClaude, OfflinePlanner
@@ -86,6 +87,10 @@ GUIDE_MEDIA = load_catalogue()
 # the agent send the same photo every turn.
 sent_media: dict = {}
 
+# The replacement orders the bot places. Mocked: nothing reaches the OMS from
+# here yet. Module-level so "already on its way" holds across conversations.
+replacement_orders = ReplacementOrders()
+
 
 def _build_registry():
     """Real OMS reads when a key is configured, fixtures when it is not.
@@ -104,6 +109,9 @@ def _build_registry():
             verification=verification_store,
             guide_media=GUIDE_MEDIA,
             sent_media=sent_media,
+            replacement_orders=replacement_orders,
+            item_codes=ItemCodes(),
+            approval_mode=settings.approval_mode,
         )
     client = OMSClient()
     return build_registry(
@@ -112,6 +120,9 @@ def _build_registry():
         account_finder=live_account_finder(client),
         guide_media=GUIDE_MEDIA,
         sent_media=sent_media,
+        replacement_orders=replacement_orders,
+        item_codes=ItemCodes(),
+        approval_mode=settings.approval_mode,
     )
 
 

@@ -56,7 +56,8 @@ steps:
     that is on the customer's side of the wall — it still counts as a defect, by policy,
     not as damage. So do not raise impact, accident or "chargeable" here; there is no
     impact to find, and asking the service centre to look for one is wrong. In warranty
-    means covered, free, and the replacement ticket raised in the same message — see
+    means covered, free, and the address confirmed and the order placed with
+    `place_replacement_order` in the same message, the ticket beside it — see
     battery-warranty-replacement for the coverage wording. Out of warranty is the only
     thing that makes this chargeable.
   - >-
