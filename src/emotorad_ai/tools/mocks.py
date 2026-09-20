@@ -1036,7 +1036,12 @@ def build_registry(
                 },
                 "part": {
                     "type": "string",
-                    "enum": sorted(parts_table),
+                    # This build ships no-technician, no-ask parts only.
+                    # Technician parts need a dealer visit and ask parts (offer
+                    # self-fit or dealer, let the customer choose) are not
+                    # built yet; the tool still refuses either in code if a
+                    # model names one regardless, since schemas are advisory.
+                    "enum": sorted(p for p, r in parts_table.items() if not r.technician and not r.ask),
                     "description": "The part the flow concluded needs replacing.",
                 },
                 "confirmed_address": {
@@ -1074,6 +1079,13 @@ def build_registry(
                     "A %s needs a technician to fit. Route the customer to a dealer rather than "
                     "shipping it to their address." % part,
                     remedy="dealer_visit",
+                )
+            if rule.ask:
+                raise ToolError(
+                    "customer_choice_required",
+                    "A %s can be fitted by the customer or by a dealer. Ask which they prefer; "
+                    "ordering it to an address is a later build." % part,
+                    remedy="human_handoff",
                 )
             if not (confirmed_address or "").strip():
                 raise ToolError(

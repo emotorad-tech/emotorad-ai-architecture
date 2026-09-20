@@ -55,6 +55,14 @@ class RegistrationTests(unittest.TestCase):
     def test_it_is_a_write(self):
         self.assertTrue(_registry().specs[PLACE_REPLACEMENT_ORDER].write)
 
+    def test_the_enum_offers_only_parts_this_build_can_ship(self):
+        """This build ships no-technician, no-ask parts only. Technician parts
+        and ask parts (display, seat: offer self-fit or dealer, not built yet)
+        are both left out of what the model may name, even though the tool
+        still refuses them in code if a model names one regardless."""
+        schema = _registry().specs[PLACE_REPLACEMENT_ORDER].schema()
+        self.assertEqual(schema["input_schema"]["properties"]["part"]["enum"], ["battery", "charger"])
+
 
 class HappyPathTests(unittest.TestCase):
     def test_a_sure_in_warranty_battery_is_approved_in_reasonable_mode(self):
@@ -92,6 +100,10 @@ class ApprovalModeTests(unittest.TestCase):
 
 
 class RefusalTests(unittest.TestCase):
+    def test_an_ask_part_is_refused_until_the_question_is_built(self):
+        result = _place(_registry(), _context(), part="display")
+        self.assertEqual(result["error"]["code"], "customer_choice_required")
+
     def test_a_technician_part_is_refused_with_the_dealer_remedy(self):
         result = _place(_registry(), _context(), part="motor")
         self.assertEqual(result["error"]["code"], "technician_required")
