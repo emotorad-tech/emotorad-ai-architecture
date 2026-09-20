@@ -60,6 +60,13 @@ class ConversationState:
     # claim must still match what a tool returned — this is only how long the
     # tool's answer is remembered.
     coverage_result: Optional[Dict[str, Any]] = None
+    # Every order this conversation has placed, kept for the same reason
+    # `coverage_result` is. The order post-check only ever saw this turn's tool
+    # results, so a correct "it was RO-00001" a turn after the order was placed
+    # was blocked as unsupported and the customer escalated to check an order
+    # that had already gone through. The check itself is unchanged — a claimed
+    # order id must still be one a tool actually placed, in this conversation.
+    placed_order_ids: List[str] = field(default_factory=list)
     history: List[Dict[str, Any]] = field(default_factory=list)
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.

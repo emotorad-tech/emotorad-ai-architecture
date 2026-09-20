@@ -109,6 +109,56 @@ class KrishnaTests(unittest.TestCase):
         self.assertIn("RO-00001", reply.text)
         self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
 
+    def test_repeating_the_order_id_next_turn_is_not_blocked(self):
+        """A placed order is remembered for the whole conversation, so a
+        customer asking about it later must not trip the order post-check."""
+        runtime, adapter, orders = _runtime([
+            call_tool("lookup_warranty_record", {}),
+            say("Found it. Address still right: " + ADDRESS + "?"),
+            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "a"}),
+            say("Order RO-00001 placed."),
+            say("It was RO-00001."),
+        ])
+        _send(runtime, adapter, "melted terminal", photo=True)
+        _send(runtime, adapter, "yes")
+        reply = _send(runtime, adapter, "It was RO-00001.")
+        self.assertFalse(reply.escalated, reply.text)
+        self.assertIn("RO-00001", reply.text)
+
+    def test_an_order_id_from_another_conversation_is_still_blocked(self):
+        orders = ReplacementOrders()
+        registry = build_registry(
+            today=date(2026, 7, 28), replacement_orders=orders, item_codes=ItemCodes(), approval_mode="reasonable",
+        )
+        runtime = Runtime(
+            settings=Settings(log_path="", log_to_stdout=False, approval_mode="reasonable"),
+            registry=registry,
+            llm=ScriptedClaude([
+                call_tool("lookup_warranty_record", {}),
+                say("Found it. Address still right: " + ADDRESS + "?"),
+                call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "a"}),
+                say("Order RO-00001 placed."),
+                say("Your order RO-00001 is on its way."),
+            ]),
+            log=EventLog(path=None),
+            resolver=IdentityResolver(registry),
+        )
+        adapter = WebsiteChatAdapter(runtime.resolver)
+
+        def send(conversation_id, text, photo=False):
+            runtime.conversations.get(conversation_id).route_to(AGENT_NAME)
+            event = {"conversation_id": conversation_id, "session_token": "sess-ananya", "text": text}
+            if photo:
+                event["attachments"] = [{"kind": "image", "url": _JPEG}]
+            return runtime.handle(adapter.to_message(event))
+
+        send("conv-a", "melted terminal", photo=True)
+        send("conv-a", "yes")
+
+        reply = send("conv-b", "Your order RO-00001 is on its way.")
+        self.assertTrue(reply.escalated)
+        self.assertEqual(reply.handled_by, "guardrail:order_post_check")
+
     def test_asking_again_tomorrow_does_not_place_a_second_order(self):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),

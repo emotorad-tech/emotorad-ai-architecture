@@ -52,7 +52,13 @@ from .guardrails import (
 from .identity import IdentityResolver, ResolvedIdentity
 from .llm import BedrockClaude
 from .observability import EventLog
-from .tools.mocks import CREATE_SUPPORT_TICKET, LOOKUP_WARRANTY_RECORD, RAISE_INTAKE_TICKET, build_registry
+from .tools.mocks import (
+    CREATE_SUPPORT_TICKET,
+    LOOKUP_WARRANTY_RECORD,
+    PLACE_REPLACEMENT_ORDER,
+    RAISE_INTAKE_TICKET,
+    build_registry,
+)
 from .tools.registry import ToolContext, ToolRegistry, is_error
 from .tools.verification import (
     FIND_ACCOUNT_BY_CODE,
@@ -322,12 +328,15 @@ class Runtime:
             )
 
         # The third post-check, same reason as the first: the order tool ran
-        # is not the reply named the order it returned. Order results from this
-        # turn only; an order id is never carried forward, so a claim on a
-        # later turn has to be about an order the tool reported that turn
-        # (place_replacement_order reports an in-flight order rather than
-        # placing a second one, so re-asking is safe).
-        order = check_order_claim(turn.text, [call["result"] for call in turn.tool_calls])
+        # is not the reply named the order it returned. A placed order is
+        # remembered for the conversation, the way coverage_result is, so a
+        # claim about an order placed three turns ago is not blocked as
+        # unsupported; an id from another conversation still is.
+        order = check_order_claim(
+            turn.text,
+            [call["result"] for call in turn.tool_calls]
+            + [{"data": {"order_id": order_id}} for order_id in state.placed_order_ids],
+        )
         if order.blocked:
             self.log.guardrail(
                 message.conversation_id, "order_post_check",
@@ -395,6 +404,10 @@ class Runtime:
         """
         if name == LOOKUP_WARRANTY_RECORD and not is_error(envelope):
             state.coverage_result = envelope
+        if name == PLACE_REPLACEMENT_ORDER and not is_error(envelope):
+            order_id = (envelope.get("data") or {}).get("order_id")
+            if order_id and order_id not in state.placed_order_ids:
+                state.placed_order_ids.append(order_id)
 
     def _handle_safety(
         self,
