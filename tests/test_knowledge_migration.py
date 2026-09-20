@@ -272,7 +272,12 @@ class WarrantyReplacementFlowTests(unittest.TestCase):
         "no warranty record is not the same as out of warranty": "do not tell them they are out of warranty",
         "an outage is ours and never reads as a refusal": "never let an outage read as a refusal",
         "genuinely out of coverage is said once, with the paid route": "paid for",
-        "a claim is opened, never a dispatch promised": "never promised as dispatched",
+        # Reversed on 2026-09-20: a part the customer can fit is ordered from the
+        # conversation with place_replacement_order. The rule that survives is
+        # that only the order the tool returned may be named, and "on its way"
+        # is said only for one it returned as approved.
+        "a replacement is placed, and only the tool's order is named": "the only\n    one you may name",
+        "on its way is said only for an approved order": "did\n    not return as approved",
     }
 
     def test_every_rule_is_present(self):
