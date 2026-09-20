@@ -263,7 +263,17 @@ class Runtime:
         state: ConversationState,
     ) -> Reply:
         turn = self.agents[agent_name].run(
-            message, resolved, state.history, state.context_block or ""
+            message,
+            resolved,
+            state.history,
+            state.context_block or "",
+            # Conversation facts the order tool decides on. Lambdas, because
+            # evidence_seen can flip during this very turn when a photo arrives
+            # with the message that triggers the order.
+            facts={
+                "evidence_seen": lambda: state.evidence_seen,
+                "coverage_result": lambda: state.coverage_result,
+            },
         )
         if turn.escalate:
             self.log.escalation(message.conversation_id, "agent_requested_handover", turn.ticket_id)

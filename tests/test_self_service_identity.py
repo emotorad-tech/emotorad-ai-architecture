@@ -214,6 +214,20 @@ class IdentityArrivingMidTurnTests(unittest.TestCase):
         self.assertEqual(context.value_for("phone"), "+919812345678")
         self.assertIsNone(context.value_for("dealer_id"))
 
+    def test_runtime_facts_are_injectable(self):
+        """A tool that declares injects=('evidence_seen',) gets the
+        conversation's value, resolved at call time."""
+        from emotorad_ai.tools.registry import ToolRegistry, ok
+
+        registry = ToolRegistry()
+
+        @registry.register("peek", "test", parameters={}, injects=("evidence_seen",))
+        def peek(evidence_seen):
+            return ok({"seen": evidence_seen})
+
+        context = ToolContext(conversation_id="c1", late={"evidence_seen": lambda: True})
+        self.assertEqual(registry.call("peek", {}, context)["data"]["seen"], True)
+
 
 class VerifyThenLookUpInOneTurnTests(unittest.TestCase):
     """The regression test for the live failure of 2026-09-20.

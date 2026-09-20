@@ -70,15 +70,24 @@ class Agent:
         # turn. None for every channel that arrives already resolved.
         self.phone_resolver = phone_resolver
 
-    def _late_identity(self, conversation_id: str) -> Dict[str, Callable[[], Any]]:
-        """Identity the conversation may prove while this turn is still running.
+    def _late_facts(
+        self, conversation_id: str, facts: Optional[Dict[str, Callable[[], Any]]]
+    ) -> Dict[str, Callable[[], Any]]:
+        """Facts a tool may need that are only settled once the turn is under
+        way, or that live on the conversation rather than the identity.
 
-        Only consulted when the channel resolved nothing, so it can never
-        redirect a lookup away from an identity already established upstream.
+        Identity: the phone a self-service surface proves mid-turn. Only
+        consulted when the channel resolved nothing, so it can never redirect a
+        lookup away from an identity already established upstream.
+
+        Conversation: whatever the runtime hands over, such as whether a photo
+        has arrived. A tool that declares one of these in `injects` gets the
+        live value at call time.
         """
-        if self.phone_resolver is None:
-            return {}
-        return {"phone": lambda: self.phone_resolver(conversation_id)}
+        late: Dict[str, Callable[[], Any]] = dict(facts or {})
+        if self.phone_resolver is not None:
+            late["phone"] = lambda: self.phone_resolver(conversation_id)
+        return late
 
     @staticmethod
     def _user_content(message: InboundMessage) -> Any:
@@ -107,6 +116,7 @@ class Agent:
         resolved: ResolvedIdentity,
         history: List[Dict[str, Any]],
         context: str = "",
+        facts: Optional[Dict[str, Callable[[], Any]]] = None,
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
         tools = self.registry.schemas_for(
@@ -116,7 +126,7 @@ class Agent:
             conversation_id=message.conversation_id,
             phone=resolved.identity.phone,
             cluster_id=resolved.cluster_id,
-            late=self._late_identity(message.conversation_id),
+            late=self._late_facts(message.conversation_id, facts),
         )
 
         # Bound the transcript before adding to it. In place, because this is

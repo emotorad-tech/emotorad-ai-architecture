@@ -195,6 +195,28 @@ class RuntimeTests(unittest.TestCase):
         history = runtime.conversations.history("conv-1")
         self.assertEqual(len(history), 4)  # user, assistant, user, assistant
 
+    def test_the_runtime_offers_evidence_seen_to_tools(self):
+        """The order tool needs to know a photo arrived. That fact lives on
+        ConversationState; the runtime has to hand it to the tool context."""
+        from emotorad_ai.tools.registry import ok
+
+        runtime, adapter, llm = make_runtime([call_tool("peek", {}), say("ok")])
+
+        @runtime.registry.register("peek", "test", parameters={}, injects=("evidence_seen",))
+        def peek(evidence_seen):
+            return ok({"seen": evidence_seen})
+
+        runtime.agents[AGENT_NAME].definition = runtime.agents[AGENT_NAME].definition.__class__(
+            name=AGENT_NAME,
+            tool_names=tuple(runtime.agents[AGENT_NAME].definition.tool_names) + ("peek",),
+            build_system_prompt=runtime.agents[AGENT_NAME].definition.build_system_prompt,
+        )
+        runtime.conversations.get("conv-1").route_to(AGENT_NAME)
+        runtime.conversations.get("conv-1").evidence_seen = True
+        send(runtime, adapter, "here")
+        peeked = [c for c in llm.requests[-1]["messages"] if c["role"] == "user" and isinstance(c["content"], list)]
+        self.assertIn('"seen": true', str(peeked).replace("True", "true"))
+
 
 class RedactionTests(unittest.TestCase):
     def test_contact_details_are_stripped_from_logged_text(self):
