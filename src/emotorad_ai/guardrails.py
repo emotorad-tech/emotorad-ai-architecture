@@ -235,13 +235,18 @@ def check_coverage_claim(reply: str, tool_results: Sequence[dict]) -> CoverageCh
     * Where a customer owns several bikes and the results disagree, any claim is
       blocked — the reply cannot be verified against "one of them is covered".
     """
-    says_covered = bool(_COVERED_CLAIM.search(reply))
-    says_not_covered = bool(_NOT_COVERED_CLAIM.search(reply))
-
-    # "not covered" also matches the "covered" pattern's tail, so a negative
-    # phrasing must win — otherwise every correct refusal reads as a claim.
-    if says_not_covered:
-        says_covered = False
+    negative = [m.span() for m in _NOT_COVERED_CLAIM.finditer(reply)]
+    # A "covered" match that overlaps a negative one is that negative phrase's
+    # own tail — "is not covered", "chargeable even within warranty" — not a
+    # separate claim. Only a match standing on its own counts as the positive
+    # half. Without this, every correct refusal would read as saying both.
+    positive = [
+        m.span()
+        for m in _COVERED_CLAIM.finditer(reply)
+        if not any(m.start() < n_end and n_start < m.end() for n_start, n_end in negative)
+    ]
+    says_covered = bool(positive)
+    says_not_covered = bool(negative)
     if not (says_covered or says_not_covered):
         return CoverageCheck(blocked=False)
 
@@ -258,6 +263,24 @@ def check_coverage_claim(reply: str, tool_results: Sequence[dict]) -> CoverageCh
         )
 
     actual = facts[0]
+
+    # Coverage is two questions, and a correct answer to a customer in the
+    # term with physical damage says both: "you are in warranty" and "impact
+    # damage would be chargeable". That is the rule the business confirmed and
+    # battery-warranty-replacement encodes. A reply saying both is a
+    # conditional explanation, not a contradiction — provided the positive
+    # half is actually true. When the tool says the term has ended, the
+    # "in warranty" half is unsupported and the reply is blocked as before.
+    if says_covered and says_not_covered:
+        if actual:
+            return CoverageCheck(blocked=False)
+        return CoverageCheck(
+            blocked=True,
+            reason="coverage_claim_contradicts_tool_result",
+            claimed="covered",
+            actual="not_covered",
+        )
+
     if says_covered != actual:
         return CoverageCheck(
             blocked=True,

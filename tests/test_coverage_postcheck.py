@@ -68,6 +68,69 @@ class ContradictionTests(unittest.TestCase):
         )
 
 
+class TwoQuestionCoverageTests(unittest.TestCase):
+    """Coverage is two questions, not one, and a correct answer says both.
+
+    In the warranty term with no physical damage is free; physical damage is
+    chargeable even inside the term; out of the term is chargeable. That rule
+    is confirmed by the business and encoded in battery-warranty-replacement,
+    so a correct reply about a bike in warranty with heat damage has to say
+    "you are in warranty" and "impact damage would be chargeable" in the same
+    breath.
+
+    Blocked live on 20 September, conversation ef679f97. The reply below is
+    close to a model answer, and the check read its "chargeable" as a denial of
+    cover contradicting in_warranty=True. The customer got a handover instead.
+    """
+
+    BLOCKED_LIVE = (
+        "On cost \u2014 your bike is in warranty on our record, with about 7 months "
+        "left. That's counted from when the bike was registered, 1 April 2025, since "
+        "there's no purchase date on file, so your invoice can confirm the exact date. "
+        "If the service centre finds nothing from an impact, a covered fault costs you "
+        "nothing; if they do find impact damage, it's chargeable even within warranty, "
+        "and they'll confirm any cost with you before starting work. I can't quote "
+        "figures myself."
+    )
+
+    def test_the_reply_blocked_live_passes(self):
+        check = check_coverage_claim(self.BLOCKED_LIVE, IN_WARRANTY)
+        self.assertFalse(check.blocked, check)
+
+    def test_in_warranty_plus_a_conditional_charge_is_not_a_contradiction(self):
+        check = check_coverage_claim(
+            "You're in warranty, so a fault is covered; damage from a drop would be chargeable.",
+            IN_WARRANTY,
+        )
+        self.assertFalse(check.blocked, check)
+
+    def test_a_flat_denial_on_an_in_warranty_bike_is_still_blocked(self):
+        """Saying only the negative half is still a contradiction. The fix must
+        not weaken the check it corrects."""
+        check = check_coverage_claim(
+            "That would be chargeable, I'm afraid.", IN_WARRANTY
+        )
+        self.assertTrue(check.blocked)
+        self.assertEqual(check.claimed, "not_covered")
+
+    def test_both_halves_on_an_out_of_warranty_bike_are_still_blocked(self):
+        """The 'covered' half is unsupported when the tool says the term has
+        ended. Conservative in both directions, as before."""
+        check = check_coverage_claim(
+            "You're in warranty, so a fault is covered; damage would be chargeable.",
+            OUT_OF_WARRANTY,
+        )
+        self.assertTrue(check.blocked)
+
+    def test_a_negation_alone_does_not_count_as_the_positive_half(self):
+        """'is not covered' contains 'covered'. It must not be read as saying
+        both, or every correct refusal on an out-of-warranty bike would pass
+        as a two-question answer."""
+        check = check_coverage_claim("This is not covered under warranty.", IN_WARRANTY)
+        self.assertTrue(check.blocked)
+        self.assertEqual(check.claimed, "not_covered")
+
+
 class UnsupportedClaimTests(unittest.TestCase):
     def test_a_coverage_claim_with_no_tool_call_at_all_is_blocked(self):
         # The Air Canada shape exactly: a confident policy statement with no
