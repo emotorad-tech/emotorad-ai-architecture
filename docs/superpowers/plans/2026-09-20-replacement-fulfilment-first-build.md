@@ -1316,7 +1316,7 @@ Add the registration inside `build_registry`, immediately before `return registr
             )
 ```
 
-Idempotency needs no code here: `ToolRegistry.call` already requires `idempotency_key` on every `write=True` tool and returns the first envelope for a repeated key, scoped to the tool name (`registry.py`, around line 185). That is what makes `test_the_same_idempotency_key_returns_the_same_envelope` pass. Verified on 2026-09-20 while writing this plan.
+Idempotency needs no code here: `ToolRegistry.call` already requires `idempotency_key` on every `write=True` tool and returns the first envelope for a repeated key, scoped to conversation id plus tool name plus key (`registry.py`, around line 185). Across conversations the key does not match, which is exactly why the in-flight check in the store exists. That is what makes `test_the_same_idempotency_key_returns_the_same_envelope` pass. Verified on 2026-09-20 while writing this plan.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1751,4 +1751,4 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Type consistency.** `PartRule(part, technician, ask)` in Tasks 2, 4, 7. `ReplacementOrders.create/approve/in_flight` in Tasks 3, 7, 9. `is_sure(evidence_seen, in_warranty, item_code, rule)` and `decide(sure, approval_mode)` in Tasks 4, 7. `check_order_claim(reply, tool_results) -> OrderCheck` in Task 8. `Agent.run(..., facts=)` in Task 6, consumed by the runtime in Task 6 and relied on in Task 7's injects. `build_registry(replacement_orders=, item_codes=, approval_mode=)` in Tasks 7, 9. Settings field `approval_mode` in Tasks 1, 9.
 
-**Verified while writing.** Task 7 relies on the registry's existing idempotency for `write=True` tools; `ToolRegistry.call` was read and it does exactly that, keyed on tool name plus `idempotency_key`.
+**Verified while writing.** Task 7 relies on the registry's existing idempotency for `write=True` tools; `ToolRegistry.call` was read and it does exactly that, keyed on conversation id plus tool name plus `idempotency_key`; cross-conversation duplicates are the store's job, not the registry's.
