@@ -42,3 +42,6 @@ logs/
 !.playground/prompts/
 .playground/prompts/*
 !.playground/prompts/*.json
+
+# Session worktrees created by the Claude Code EnterWorktree tool
+.claude/worktrees/
