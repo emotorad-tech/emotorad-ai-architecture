@@ -287,14 +287,23 @@ class Runtime:
                 # The current message is already in history by the time tools
                 # run (Agent.run appends it before the loop), so an address
                 # typed in this very message counts.
-                "customer_messages": lambda: customer_texts(state.history),
+                # A code `verify_identity` has already consumed is a spent
+                # secret, not an address the customer typed. Nine in ten OTPs
+                # start with a non-zero digit, so a bare code looks exactly
+                # like a pincode and was otherwise accepted as one by the
+                # provenance check on `place_replacement_order`.
+                "customer_messages": lambda: [
+                    m for m in customer_texts(state.history) if m.strip() not in state.consumed_codes
+                ],
             },
             # Recorded as the loop runs, not only once the turn ends: a model
             # that calls lookup_warranty_record and place_replacement_order in
             # the same assistant turn needs coverage_result to see the lookup
             # that just happened, not the state as it stood before the turn
             # began.
-            on_tool_result=lambda name, envelope: self._remember_lookup(state, name, envelope),
+            on_tool_result=lambda name, arguments, envelope: self._remember_lookup(
+                state, name, arguments, envelope
+            ),
         )
         if turn.escalate:
             self.log.escalation(message.conversation_id, "agent_requested_handover", turn.ticket_id)
@@ -398,7 +407,9 @@ class Runtime:
             metadata={"tool_calls": [c["tool"] for c in turn.tool_calls], "iterations": turn.iterations},
         )
 
-    def _remember_lookup(self, state: ConversationState, name: str, envelope: Dict[str, Any]) -> None:
+    def _remember_lookup(
+        self, state: ConversationState, name: str, arguments: Dict[str, Any], envelope: Dict[str, Any]
+    ) -> None:
         """Record a tool result as it happens, mid-turn.
 
         `Agent.run` calls this straight after every tool call, before the loop
@@ -415,6 +426,13 @@ class Runtime:
             order_id = (envelope.get("data") or {}).get("order_id")
             if order_id and order_id not in state.placed_order_ids:
                 state.placed_order_ids.append(order_id)
+        # A code the conversation consumed for verification is not customer
+        # address text (final fix wave, item 1). Probe:
+        # `AddressFromTheConversationTests.test_a_verified_code_is_not_a_pincode`.
+        if name == VERIFY_IDENTITY and not is_error(envelope):
+            code = str(arguments.get("code", "")).strip()
+            if code and code not in state.consumed_codes:
+                state.consumed_codes.append(code)
 
     def _handle_safety(
         self,

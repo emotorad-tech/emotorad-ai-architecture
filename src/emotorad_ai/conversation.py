@@ -68,6 +68,8 @@ class ConversationState:
     # that had already gone through. The check itself is unchanged — a claimed
     # order id must still be one a tool actually placed, in this conversation.
     placed_order_ids: List[str] = field(default_factory=list)
+    # Codes the customer typed that `verify_identity` accepted; they are secrets that were spent, not address text.
+    consumed_codes: List[str] = field(default_factory=list)
     history: List[Dict[str, Any]] = field(default_factory=list)
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.
