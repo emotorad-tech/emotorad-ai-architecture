@@ -110,12 +110,21 @@ class MessageIn(BaseModel):
     attachments: List[AttachmentIn] = []
 
 
+class AttachmentOut(BaseModel):
+    kind: str
+    url: str
+    mime_type: Optional[str] = None
+    caption: Optional[str] = None
+    poster: Optional[str] = None
+
+
 class MessageOut(BaseModel):
     conversation_id: str
     text: str
     escalated: bool
     ticket_id: Optional[str]
     handled_by: Optional[str]
+    attachments: List[AttachmentOut] = []
 
 
 class AssetPath(BaseModel):
@@ -266,6 +275,16 @@ def post_message(body: MessageIn) -> MessageOut:
         escalated=reply.escalated,
         ticket_id=reply.ticket_id,
         handled_by=reply.handled_by,
+        attachments=[
+            AttachmentOut(
+                kind=attachment.kind,
+                url=attachment.url,
+                mime_type=attachment.mime_type,
+                caption=attachment.caption,
+                poster=attachment.poster,
+            )
+            for attachment in reply.attachments
+        ],
     )
 
 

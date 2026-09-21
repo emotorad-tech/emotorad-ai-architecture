@@ -5,6 +5,7 @@ from emotorad_ai.contract import (
     ANONYMOUS,
     ASSERTED,
     VERIFIED,
+    Attachment,
     Identity,
     InboundMessage,
 )
@@ -69,6 +70,12 @@ class ContractTests(unittest.TestCase):
         me = Identity(cluster_id="c1", strength=VERIFIED, phone="+919876543210")
         message = InboundMessage("c1", "customer", me, "website_chat", "hi")
         self.assertIs(message.about, me)
+
+    def test_attachment_serialises_caption_and_poster(self):
+        attachment = Attachment("image", "https://x", "image/png", caption="c", poster=None)
+        payload = attachment.to_dict()
+        self.assertEqual(payload["caption"], "c")
+        self.assertIsNone(payload["poster"])
 
 
 class WebsiteAdapterTests(unittest.TestCase):

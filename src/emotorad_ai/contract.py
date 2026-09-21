@@ -90,9 +90,17 @@ class Attachment:
     kind: str  # "image" | "video" | "document"
     url: str
     mime_type: Optional[str] = None
+    caption: Optional[str] = None
+    poster: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"kind": self.kind, "url": self.url, "mime_type": self.mime_type}
+        return {
+            "kind": self.kind,
+            "url": self.url,
+            "mime_type": self.mime_type,
+            "caption": self.caption,
+            "poster": self.poster,
+        }
 
 
 @dataclass(frozen=True)

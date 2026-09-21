@@ -130,6 +130,19 @@ class ReplyAttachmentsTests(unittest.TestCase):
         self.assertTrue(url.startswith("https://signed.test/"), url)
         self.assertIn("assets/afs/battery/", url)
 
+    def test_the_attachment_carries_the_catalogue_caption(self):
+        # A channel rendering the picture needs to say what it is, not just show
+        # it — the caption travels from the catalogue entry through to the reply.
+        runtime, _ = make_runtime([
+            call_tool(SEND_GUIDE_MEDIA, {"key": "soc_button"}, "t1"),
+            say("Press and hold the SOC button on the side of the pack."),
+        ])
+        reply = whatsapp(runtime, "battery not charging")
+        self.assertEqual(
+            reply.attachments[0].caption,
+            "The SOC button and charge indicator, on the side of the pack",
+        )
+
     def test_retrieving_a_record_does_not_attach_its_media(self):
         """Retrieval informs the model; it does not send pictures to the customer.
 

@@ -128,6 +128,48 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(self.store.fetched, [])
 
 
+class ReplyAttachmentsOnMessageTests(unittest.TestCase):
+    """The reply's attachments (guide photos/clips) must reach /message's JSON,
+    caption and poster included, so a web chat can render them."""
+
+    def setUp(self):
+        self.store = _Store()
+        self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+
+    def test_reply_attachments_carry_kind_url_mime_caption_poster(self):
+        from emotorad_ai.contract import Attachment, Reply
+
+        scripted_reply = Reply(
+            conversation_id="c1",
+            text="Here you go.",
+            handled_by="battery_agent",
+            attachments=[
+                Attachment(
+                    kind="image", url="https://signed.test/soc.png", mime_type="image/png",
+                    caption="The SOC button", poster=None,
+                ),
+                Attachment(
+                    kind="video", url="https://signed.test/onoff.mp4", mime_type="video/mp4",
+                    caption=None, poster="https://signed.test/onoff.jpg",
+                ),
+            ],
+        )
+        with mock.patch.object(self.api.runtime, "handle", return_value=scripted_reply):
+            r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya", "text": "how do I turn it off"})
+        self.assertEqual(r.status_code, 200, r.text)
+        attachments = r.json()["attachments"]
+        self.assertEqual(len(attachments), 2)
+        self.assertEqual(
+            attachments[0],
+            {"kind": "image", "url": "https://signed.test/soc.png", "mime_type": "image/png", "caption": "The SOC button", "poster": None},
+        )
+        self.assertEqual(
+            attachments[1],
+            {"kind": "video", "url": "https://signed.test/onoff.mp4", "mime_type": "video/mp4", "caption": None, "poster": "https://signed.test/onoff.jpg"},
+        )
+
+
 class NoBucketTests(unittest.TestCase):
     def test_uploads_and_media_are_503_without_a_bucket(self):
         api = fresh_api(None)

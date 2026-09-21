@@ -259,6 +259,8 @@ class Runtime:
                     kind=item.get("kind") or "image",
                     url=item["url"],
                     mime_type=item.get("mime_type"),
+                    caption=item.get("caption"),
+                    poster=item.get("poster"),
                 )
                 for item in turn.attachments
                 if item.get("url")
