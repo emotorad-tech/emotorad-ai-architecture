@@ -1,0 +1,55 @@
+# infra/config-store.yaml
+# The application config store: one Secrets Manager secret per environment and
+# read permission for the EC2 instance role. Creates the secret's *shell* only —
+# the value is set by a person from a terminal (docs/runbooks/config-store.md),
+# never by a template, a workflow, or a chat session.
+#
+#   aws cloudformation deploy --profile emotorad-staging --region ap-south-1 \
+#     --stack-name emotorad-ai-stage-config-store \
+#     --template-file infra/config-store.yaml \
+#     --parameter-overrides Environment=stage InstanceRoleName=emotorad-ai-stage-ec2-role \
+#     --capabilities CAPABILITY_NAMED_IAM
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EMotorad AI platform - application config store (Secrets Manager) and instance-role read access
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [stage, prod]
+    Description: Environment segment of the secret name /emotorad/<env>/ai/app
+  InstanceRoleName:
+    Type: String
+    Default: emotorad-ai-stage-ec2-role
+    Description: Existing EC2 instance role that must be able to read the secret
+
+Resources:
+  AppConfig:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /emotorad/${Environment}/ai/app
+      Description: !Sub "EMotorad AI platform startup config for ${Environment}. JSON: API_KEY_CLAUDE, EMOTORAD_OMS_API_KEY, EMOTORAD_AI_PLAYGROUND_USER, EMOTORAD_AI_PLAYGROUND_PASSWORD. Value set by hand; see docs/runbooks/config-store.md."
+      Tags:
+        - Key: service
+          Value: emotorad-ai
+        - Key: environment
+          Value: !Ref Environment
+
+  ReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub emotorad-ai-${Environment}-config-store-read
+      Description: Read the one app config secret. Attached to the instance role.
+      Roles:
+        - !Ref InstanceRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref AppConfig
+
+Outputs:
+  SecretArn:
+    Value: !Ref AppConfig
+  SecretName:
+    Value: !Sub /emotorad/${Environment}/ai/app
