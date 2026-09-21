@@ -62,30 +62,32 @@ class UploadRegistry:
     # -- begin -------------------------------------------------------------------
 
     def begin_customer(self, cluster_id: str, conversation_id: str, mime: str, size: int) -> Tuple[Pending, Dict[str, Any]]:
-        self._check_type_and_size(mime, size, keys.customer_kind_for(mime))
+        kind = self._check_type_and_size(mime, size)
         upload_id = keys.new_upload_id()
         try:
-            key = keys.customer_key(cluster_id, conversation_id, keys.customer_kind_for(mime), upload_id, mime)
+            key = keys.customer_key(cluster_id, conversation_id, kind, upload_id, mime)
         except KeyValidationError as exc:
             raise UploadError(400, str(exc)) from None
-        return self._remember(upload_id, key, mime, size, keys.customer_kind_for(mime), "customers")
+        return self._remember(upload_id, key, mime, size, kind, "customers")
 
     def begin_asset(self, programme: str, category: str, kind: str, slug: str, mime: str, size: int) -> Tuple[Pending, Dict[str, Any]]:
-        self._check_type_and_size(mime, size, keys.customer_kind_for(mime))
+        self._check_type_and_size(mime, size)
         try:
             key = keys.asset_key(programme, category, kind, slug, mime)
         except KeyValidationError as exc:
             raise UploadError(400, str(exc)) from None
         return self._remember(keys.new_upload_id(), key, mime, size, kind, "assets")
 
-    def _check_type_and_size(self, mime: str, size: int, cap_kind: str) -> None:
+    def _check_type_and_size(self, mime: str, size: int) -> str:
         if mime not in keys.MIME_TYPES:
             raise UploadError(415, "unsupported content type %r; allowed: %s" % (mime, ", ".join(keys.MIME_TYPES)))
         if not isinstance(size, int) or size <= 0:
             raise UploadError(400, "size_bytes must be a positive integer")
-        cap = keys.SIZE_CAPS[cap_kind]
+        kind = keys.customer_kind_for(mime)
+        cap = keys.SIZE_CAPS[kind]
         if size > cap:
-            raise UploadError(413, "%s uploads are capped at %d bytes" % (cap_kind, cap))
+            raise UploadError(413, "%s uploads are capped at %d bytes" % (kind, cap))
+        return kind
 
     def _remember(self, upload_id: str, key: str, mime: str, size: int, kind: str, tree: str) -> Tuple[Pending, Dict[str, Any]]:
         presign = self._store.presign_put(key, mime, size)
@@ -114,8 +116,14 @@ class UploadRegistry:
             # to the same signed URL still works.
             raise UploadError(409, "the uploaded object does not match what was presigned")
 
+        # The pop under the lock is what makes an id single-use: whichever
+        # thread's pop actually removes the entry is the one claim that
+        # wins, even if several threads passed the head check above. The
+        # head call itself stays outside the lock so I/O never blocks
+        # other claims.
         with self._lock:
-            self._pending.pop(upload_id, None)
+            if self._pending.pop(upload_id, None) is None:
+                raise UploadError(404, "unknown or expired upload id")
         return Claimed(upload_id, pending.key, pending.mime, pending.size, pending.kind)
 
     def forget(self, upload_id: str) -> None:

@@ -100,6 +100,34 @@ class ClaimTests(unittest.TestCase):
             self.reg.claim(self.pending.upload_id)
         self.assertEqual(caught.exception.status, 404)
 
+    def test_concurrent_claims_of_one_id_succeed_exactly_once(self):
+        import threading
+
+        self.store.objects[self.pending.key] = {"size": 1234, "mime": "image/jpeg"}
+        gate = threading.Barrier(4)
+        original_head = self.store.head
+
+        def slow_head(key):
+            gate.wait(timeout=5)  # every thread has read `pending` before any pops
+            return original_head(key)
+
+        self.store.head = slow_head
+        results = []
+
+        def attempt():
+            try:
+                results.append(("ok", self.reg.claim(self.pending.upload_id)))
+            except UploadError as exc:
+                results.append(("err", exc.status))
+
+        threads = [threading.Thread(target=attempt) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(sorted(r[0] for r in results), ["err", "err", "err", "ok"])
+        self.assertTrue(all(r[1] == 404 for r in results if r[0] == "err"))
+
 
 if __name__ == "__main__":
     unittest.main()
