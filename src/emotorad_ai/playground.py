@@ -1323,12 +1323,20 @@ def main() -> None:
         model_id = MODELS[model_label]
 
         settings = st.expander("Model settings", expanded=not st.session_state.get("_key_set"))
-        api_key = settings.text_input(
-            "Anthropic API key",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""),
-            type="password",
-            help="Session-only — never written to disk. Falls back to ANTHROPIC_API_KEY if set.",
-        )
+        env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if env_key:
+            # On staging the config store exports the key into the environment,
+            # so nobody pastes a shared key into a browser. The field stays for
+            # local runs with no key set.
+            settings.caption("Anthropic API key: from environment")
+            api_key = env_key
+        else:
+            api_key = settings.text_input(
+                "Anthropic API key",
+                value="",
+                type="password",
+                help="Session-only — never written to disk. Or set ANTHROPIC_API_KEY before starting.",
+            )
         st.session_state["_key_set"] = bool(api_key)
         max_tokens = settings.number_input(
             "Max output tokens",
