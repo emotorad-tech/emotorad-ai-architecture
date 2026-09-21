@@ -396,6 +396,16 @@ ORDER_BLOCKED_MESSAGE = (
     "they can check the order and come back to you."
 )
 
+# Words that tell the customer the order they are hearing about existed
+# before this turn. On 2026-09-21 the tool returned the morning's order and
+# the model read "That's done, your battery is ordered" over it, to an address
+# the customer had not confirmed in that conversation. A reply about an
+# in-flight order must carry one of these or it is reporting the old order as
+# a new one. Hindi and Hinglish included: "pehle se" is how it is said.
+_ALREADY = re.compile(
+    r"\b(already|earlier|before|existing|previous(ly)?|in flight|pehle|pahle)\b", re.IGNORECASE
+)
+
 
 @dataclass(frozen=True)
 class OrderCheck:
@@ -413,12 +423,20 @@ def check_order_claim(reply: str, tool_results: Sequence[dict]) -> OrderCheck:
     a battery nobody is sending.
     """
     placed = set()
+    in_flight = None
     for result in tool_results:
         data = (result or {}).get("data") or {}
         order_id = data.get("order_id")
         if isinstance(order_id, str):
             placed.add(order_id)
+            if data.get("already_placed") is True:
+                in_flight = order_id
     for claimed in _ORDER_ID.findall(reply):
         if claimed not in placed:
             return OrderCheck(blocked=True, reason="order_claim_without_tool_result", claimed=claimed)
+    # The tool refused to place a second order and handed back the first. The
+    # reply must say so; a reply that does not is telling the customer a new
+    # order went to the address they just gave, when nothing did.
+    if in_flight is not None and not _ALREADY.search(reply or ""):
+        return OrderCheck(blocked=True, reason="existing_order_reported_as_new", claimed=in_flight)
     return OrderCheck(blocked=False)

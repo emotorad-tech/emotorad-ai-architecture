@@ -268,6 +268,16 @@ class InFlightTests(unittest.TestCase):
         self.assertTrue(second["already_placed"])
         self.assertEqual(second["order_id"], first["order_id"])
 
+    def test_an_in_flight_report_says_when_it_was_placed(self):
+        """The model has to tell the customer the order already exists, and
+        "earlier today" needs a wall-clock time; placed_at is monotonic."""
+        orders = ReplacementOrders(wall_clock=lambda: "2026-09-21T03:57:11+00:00")
+        registry = _registry(orders=orders)
+        _place(registry, _context())
+        second = _place(registry, _context(), idempotency_key="k-2")["data"]
+        self.assertEqual(second["placed_at_utc"], "2026-09-21T03:57:11+00:00")
+        self.assertEqual(second["delivery_address"], "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006")
+
     def test_the_same_idempotency_key_returns_the_same_envelope(self):
         registry = _registry()
         first = _place(registry, _context())

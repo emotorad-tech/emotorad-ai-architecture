@@ -1175,6 +1175,13 @@ def build_registry(
                         "item_code": existing.get("item_code"),
                         "delivery_address": existing.get("delivery_address"),
                         "already_placed": True,
+                        "placed_at_utc": existing.get("placed_at_utc"),
+                        "note": (
+                            "Nothing new was placed. A replacement for this bike and part was "
+                            "placed earlier, at the time and to the address above. Tell the "
+                            "customer it already exists, quote the order id and that address, "
+                            "and if they want the address changed, hand over to the support team."
+                        ),
                     }
                 )
 

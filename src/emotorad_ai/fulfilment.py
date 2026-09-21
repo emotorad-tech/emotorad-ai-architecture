@@ -17,6 +17,7 @@ import itertools
 import pathlib
 import threading
 import time
+from datetime import datetime, timezone
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
@@ -116,6 +117,10 @@ class ReplacementOrders:
     """
 
     clock: Callable[[], float] = time.monotonic
+    # Wall-clock time of placement, for telling a customer *when* an order they
+    # are hearing about again was placed. `placed_at` is monotonic and drives
+    # the in-flight window; it means nothing to a person.
+    wall_clock: Callable[[], str] = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     _orders: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     _counter: Any = field(default_factory=lambda: itertools.count(1))
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -123,7 +128,9 @@ class ReplacementOrders:
     def create(self, **payload: Any) -> Dict[str, Any]:
         with self._lock:
             order_id = "RO-%05d" % next(self._counter)
-            order = dict(payload, order_id=order_id, placed_at=self.clock())
+            order = dict(
+                payload, order_id=order_id, placed_at=self.clock(), placed_at_utc=self.wall_clock()
+            )
             order.setdefault("status", "pending_approval")
             self._orders[order_id] = order
             return dict(order)
