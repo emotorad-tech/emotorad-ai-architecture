@@ -450,7 +450,13 @@ class FlowHandoffTests(unittest.TestCase):
             if record.id == self.POINTS_AT
             for item in record.media
         }
-        self.assertEqual(media, {"melted_battery_vs_non_melted", "controller_melted_vs_non_melted"})
+        self.assertEqual(
+            media,
+            {
+                "afs/battery/photos/melted-battery-vs-non-melted.png",
+                "afs/battery/photos/controller-melted-vs-non-melted.png",
+            },
+        )
 
 
 class MigratedFlowsAreScopedTests(unittest.TestCase):

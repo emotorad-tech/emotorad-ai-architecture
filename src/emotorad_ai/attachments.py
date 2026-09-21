@@ -1,27 +1,39 @@
-"""Photos a customer sends, carried inline and never stored.
+"""What a customer's photo (or clip) becomes in the model's history.
 
-The agent's evidence gate asks for a picture before it will conclude a fault —
-a melted terminal looks nothing like an intact one, and the whole
-`battery-melted-terminal` record turns on that comparison. Until now there was
-no way to send one.
+Two callers, one module, one image-block builder.
 
-Nothing is persisted. The image rides in on the message, is handed to the model
-as vision content for that turn, and is gone. That is a deliberate trade: it
-keeps a storage decision, a retention policy and a deletion story off the
-critical path for a surface that is still internal-only. When photos need to
-outlive the turn — attached to a Zoho ticket, or reviewed by an engineer later —
-that is a different piece of work, and this module is where it starts.
+`/chat` carries a photo inline and stores it nowhere: `validate` is the whole
+security story for that path — allowed types, size, count, base64 that decodes —
+and `to_image_blocks` hands the result to the model as vision content for that
+turn. That trade is deliberate and documented in
+`docs/problems/2026-09-21-photo-evidence-and-video.md`: no storage decision, no
+retention policy, no deletion story on the critical path of an internal-only
+surface.
 
-The limits below are the whole security story for this path, so they are strict
-and they are in code rather than in a prompt.
+The media path carries `Attachment` objects instead, from three sources: a
+`data:` URL is decoded here; an `s3://<key>` uploaded through `POST /uploads` is
+fetched server-side through `fetch` (the instance role); an http(s) image is
+passed by URL. No S3 URL of any kind is ever handed to the model, and a fetch
+that fails becomes a sentence the model can read rather than an exception the
+customer sees. Video follows the playground's rule: stills plus the narration,
+and an unreadable clip says so instead of being silently "seen".
+
+Both paths go through `_image_block`, so every image the model sees has been
+through `fit_for_model` — one downscale rule, wherever the picture came from.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+
+from . import video
+from .contract import Attachment, InboundMessage
+
+# --- the inline /chat path -------------------------------------------------
 
 # What the model is being asked to look at. Anything else is either a mistake or
 # somebody finding out what the endpoint accepts.
@@ -38,17 +50,33 @@ MAX_ATTACHMENTS = 3
 
 _DATA_URI = re.compile(r"^data:(?P<media_type>[^;,]+);base64,(?P<payload>.*)$", re.S)
 
+# --- the media-store path --------------------------------------------------
+
+UNRETRIEVABLE = "[An attachment could not be retrieved; do not describe it.]"
+
+# Off by default in the API path: Whisper downloads a model on first use and
+# has no deadline, so an unbounded transcription here would hang a request
+# with no way for the caller to time it out. The playground calls
+# video.transcribe_audio directly and is unaffected by this flag.
+TRANSCRIBE_ENV = "EMOTORAD_AI_TRANSCRIBE_VIDEO"
+
+MAX_MODEL_EDGE = 1600
+MAX_MODEL_BYTES = 3 * 1024 * 1024
+
 
 class AttachmentError(Exception):
     """A refused attachment. Carries a message meant for the caller."""
 
 
 def validate(raw: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
-    """Check inbound attachments and return them normalised.
+    """Check inbound inline attachments and return them normalised.
 
-    Only inline data is accepted. A remote URL would make this endpoint fetch an
-    arbitrary address on the caller's behalf, which is a request forgery with
-    extra steps, and there is no reason for the page to send one.
+    Only inline data is accepted here. A remote URL would make this endpoint
+    fetch an arbitrary address on the caller's behalf, which is a request
+    forgery with extra steps, and there is no reason for the page to send one.
+    An `s3://` id from `POST /uploads` never reaches this function: it is
+    minted by the server, claimed against the session, and read through
+    `content_blocks` instead.
     """
     if not raw:
         return []
@@ -86,16 +114,168 @@ def validate(raw: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
     return out
 
 
+def fit_for_model(data: bytes, mime: str) -> Tuple[bytes, str]:
+    """Images go to the model at most 1600px on the long edge and under 3 MB,
+    re-encoded as JPEG when they were larger. Claude sees no more detail above
+    ~1600px, and the request limit is on base64 size, which is 4/3 of this."""
+    import io
+
+    from PIL import Image
+
+    if len(data) <= MAX_MODEL_BYTES:
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if max(image.size) <= MAX_MODEL_EDGE:
+                    return data, mime
+        except Exception:
+            return data, mime
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image = image.convert("RGB")
+            image.thumbnail((MAX_MODEL_EDGE, MAX_MODEL_EDGE))
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=85)
+            return out.getvalue(), "image/jpeg"
+    except Exception:
+        return data, mime
+
+
+def _image_block(data: bytes, mime: str) -> Dict[str, Any]:
+    """The one place an image becomes a content block, whichever path it came
+    in on, so the downscale rule cannot differ between them."""
+    fitted, fitted_mime = fit_for_model(data, mime)
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": fitted_mime,
+            "data": base64.b64encode(fitted).decode(),
+        },
+    }
+
+
 def to_image_blocks(attachments: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """Turn validated attachments into the content blocks the API takes."""
+    """Turn validated inline attachments into the content blocks the API takes."""
     return [
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": item["media_type"],
-                "data": item["data"],
-            },
-        }
+        _image_block(base64.b64decode(item["data"]), item["media_type"])
         for item in attachments
     ]
+
+
+def _payload(attachment: Attachment, fetch: Optional[Callable[[str], bytes]]) -> Union[bytes, str, None]:
+    """Bytes for data:/s3:// sources, the URL string for http(s), None to drop."""
+    url = attachment.url or ""
+    if url.startswith("data:"):
+        _, _, data = url.partition(",")
+        try:
+            return base64.b64decode(data)
+        except Exception:
+            return None
+    if url.startswith("s3://"):
+        if fetch is None:
+            return UNRETRIEVABLE
+        try:
+            return fetch(url[len("s3://"):])
+        except Exception:
+            return UNRETRIEVABLE
+    if url.startswith(("http://", "https://")):
+        return url
+    return None
+
+
+def _video_blocks(data: bytes, name: str) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    suffix = ".mp4"
+    wav = video.extract_audio(data, suffix)
+    transcript = video.transcribe_audio(wav) if wav and os.environ.get(TRANSCRIBE_ENV, "0") == "1" else None
+    if transcript and transcript.get("text"):
+        blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    "[What the customer says in the video '%s' (transcribed speech, detected "
+                    "language %s): \"%s\"  — this is their narration only. It is not a description "
+                    "of any sound the bike makes; you cannot hear the bike.]"
+                    % (name, transcript.get("language", "unknown"), transcript["text"])
+                ),
+            }
+        )
+    frames = video.extract_frames(data, suffix)
+    if not frames:
+        blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    "[The customer sent a video (%s) that could not be read here. Do not describe "
+                    "or assess it. Say you could not open it and ask for a photo of the same thing "
+                    "instead.]" % name
+                ),
+            }
+        )
+        return blocks
+    blocks.append(
+        {
+            "type": "text",
+            "text": (
+                "[%d still frames sampled evenly from the customer's video '%s', in order. You are "
+                "seeing stills, not the video: judge only what is visible in them.]" % (len(frames), name)
+            ),
+        }
+    )
+    for frame in frames:
+        blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame}})
+    return blocks
+
+
+def content_blocks(
+    attachments: Sequence[Attachment], fetch: Optional[Callable[[str], bytes]] = None
+) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        mime = (attachment.mime_type or "").lower()
+        if not mime and attachment.url.startswith("data:"):
+            mime = attachment.url[len("data:"):].split(";")[0].lower()
+        name = attachment.url.rsplit("/", 1)[-1][:80] if attachment.url.startswith("s3://") else "attachment"
+
+        payload = _payload(attachment, fetch)
+        if payload is None:
+            continue
+        if payload == UNRETRIEVABLE:
+            blocks.append({"type": "text", "text": UNRETRIEVABLE})
+            continue
+        if isinstance(payload, str):  # http(s) URL
+            if mime.startswith("image/"):
+                blocks.append({"type": "image", "source": {"type": "url", "url": payload}})
+            continue
+
+        if video.is_video(mime, name):
+            blocks.extend(_video_blocks(payload, name))
+        elif mime.startswith("image/"):
+            blocks.append(_image_block(payload, mime))
+        elif mime == "application/pdf":
+            blocks.append(
+                {
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": base64.b64encode(payload).decode()},
+                }
+            )
+    return blocks
+
+
+def user_content(message: InboundMessage, fetch: Optional[Callable[[str], bytes]] = None) -> Union[str, List[Dict[str, Any]]]:
+    """The customer's turn: their words, and whatever they sent with them.
+
+    A plain string when there is nothing attached, so every channel that has
+    never sent a photo is byte-for-byte unchanged. Otherwise blocks with the
+    text last, because the text usually refers to the picture ("here is the
+    terminal") and the words are often the half that names the symptom. A photo
+    sent on its own — tap attach, pick, send, no caption — goes as blocks alone:
+    the API rejects an empty text block, and inventing a caption would put words
+    in the customer's mouth.
+    """
+    blocks = content_blocks(message.attachments, fetch)
+    if not blocks:
+        return message.message_text
+    if (message.message_text or "").strip():
+        blocks.append({"type": "text", "text": message.message_text})
+    return blocks

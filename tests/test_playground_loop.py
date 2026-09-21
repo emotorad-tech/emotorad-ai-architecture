@@ -489,7 +489,7 @@ class StaticCorrectnessTests(unittest.TestCase):
         import sys
 
         result = subprocess.run(
-            [sys.executable, "-m", "pyflakes", "src/emotorad_ai", "scripts"],
+            [sys.executable, "-m", "pyflakes", "src/emotorad_ai", "scripts", "docker"],
             capture_output=True,
             text=True,
         )

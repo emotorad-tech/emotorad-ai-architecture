@@ -47,8 +47,19 @@ regression set gets built from.
 | `guardrails.py` | §4 | Safety branch and human handoff, matched in code |
 | `knowledge.py` | §5.4 | Battery retrieval — the one genuinely-RAG piece |
 | `observability.py` | §3.6 | JSONL event log with PII redaction |
+| `storage/` | media spec §7 | S3 media: key rules, the presigned client, the presign→attach registry |
+| `attachments.py` | media spec §7 | Inbound attachments (data URL, `s3://`, http) as Claude content blocks |
+| `video.py` | media spec §7 | Video evidence as sampled frames plus transcribed narration |
 | `runtime.py` | — | The wiring, in the order the design requires |
 | `llm.py` | §6 | Claude on Bedrock, plus scripted stand-ins for tests |
+
+## Media
+
+Guide photos/clips and customer-sent evidence live in one private S3 bucket per
+environment (`infra/media.yaml`), reached through a presign-and-attach flow: the client
+presigns, PUTs bytes straight to S3, then references the upload by id on `/message`.
+Setup, the upload flow, the Cloudinary migration and deletion-on-request are all in
+`docs/runbooks/media.md`.
 
 ## Guardrails that are code, not prompt
 

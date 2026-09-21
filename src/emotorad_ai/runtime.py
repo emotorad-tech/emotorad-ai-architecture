@@ -109,12 +109,14 @@ class Runtime:
         diagnostics_available: bool = False,
         self_service_identity: bool = False,
         phone_resolver: Optional[Callable[[str], Optional[str]]] = None,
+        media_store: Any = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
         self.log = log or EventLog(path=self.settings.log_path, to_stdout=self.settings.log_to_stdout)
         self.llm = llm if llm is not None else BedrockClaude(self.settings)
         self.resolver = resolver or IdentityResolver(self.registry)
+        self.media_store = media_store
         self.conversations = ConversationStore()
         self.enricher = ContextEnricher()
         self.triage = TriageAgent(TOPIC_AGENTS)
@@ -130,6 +132,9 @@ class Runtime:
                 name: self._with_identity_tools(definition)
                 for name, definition in definitions.items()
             }
+        # Evidence in S3 is fetched through the instance role and sent as base64;
+        # the model never sees a URL.
+        fetch = self.media_store.get_bytes if self.media_store is not None else None
         self.agents = {
             name: Agent(
                 definition,
@@ -138,6 +143,7 @@ class Runtime:
                 self.log,
                 self.settings,
                 phone_resolver=phone_resolver,
+                fetch=fetch,
             )
             for name, definition in definitions.items()
         }
@@ -412,6 +418,8 @@ class Runtime:
                     kind=item.get("kind") or "image",
                     url=item["url"],
                     mime_type=item.get("mime_type"),
+                    caption=item.get("caption"),
+                    poster=item.get("poster"),
                 )
                 for item in turn.attachments
                 if item.get("url")

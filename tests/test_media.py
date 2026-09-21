@@ -37,6 +37,26 @@ class _WithCloud:
         return False
 
 
+class _FakeStore:
+    """Stands in for S3Store: presigns deterministically, never touches AWS."""
+
+    def presign_get(self, key):
+        return "https://signed.test/" + key
+
+
+class _WithStore:
+    """Pin media.store_for_resolve() to a fake for the duration of a test."""
+
+    def __enter__(self):
+        self.previous = (media._store, media._store_loaded)
+        media._store, media._store_loaded = _FakeStore(), True
+        return self
+
+    def __exit__(self, *exc):
+        media._store, media._store_loaded = self.previous
+        return False
+
+
 class DeliveryUrlTests(unittest.TestCase):
     def test_an_id_becomes_an_image_url_with_the_delivery_transform(self):
         with _WithCloud("emotorad-demo"):
@@ -171,7 +191,7 @@ class CatalogueTests(unittest.TestCase):
 
         catalogue = load_catalogue()
         self.assertTrue(catalogue, "no guide media authored")
-        with _WithCloud("emotorad-demo"):
+        with _WithCloud("emotorad-demo"), _WithStore():
             for key, item in catalogue.items():
                 got = resolve(item)
                 self.assertFalse(got["unresolved"], "%s: %s" % (key, got.get("reason")))
@@ -254,7 +274,7 @@ class SendGuideMediaToolTests(unittest.TestCase):
     def test_sending_a_known_key_returns_renderable_media(self):
         from emotorad_ai.tools.registry import is_error
 
-        with _WithCloud("emotorad-demo"):
+        with _WithCloud("emotorad-demo"), _WithStore():
             envelope = self._send("soc_button")
         self.assertFalse(is_error(envelope))
         item = envelope["data"]["media"][0]
@@ -330,6 +350,11 @@ class RepeatedGuideMediaTests(unittest.TestCase):
         self.registry = build_registry(
             today=date.today(), guide_media=load_catalogue(), sent_media=self.sent
         )
+        self._store_ctx = _WithStore()
+        self._store_ctx.__enter__()
+
+    def tearDown(self):
+        self._store_ctx.__exit__(None, None, None)
 
     def _send(self, key, conversation="c1"):
         from emotorad_ai.tools.registry import ToolContext

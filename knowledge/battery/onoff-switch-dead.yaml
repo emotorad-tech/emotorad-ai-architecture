@@ -9,7 +9,7 @@ applies_to: {}
 excludes: {product_name: doodle}
 source: AFS battery hardware — on/off switch fault
 media:
-  - id: Battery_OnOff_switch
+  - id: afs/battery/photos/battery-onoff-switch.png
     kind: image
     caption: The battery On/Off switch — set it to ON before charging
 steps:

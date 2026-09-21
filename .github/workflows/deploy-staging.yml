@@ -6,17 +6,15 @@ name: Deploy to staging (EC2)
 on:
   workflow_dispatch: {}
 
+# The media bucket name below (EMOTORAD_AI_MEDIA_BUCKET) is not sensitive —
+# it is not a credential and grants no access on its own — so it is passed
+# straight through in the docker run line, same treatment as S3_BUCKET.
 env:
   AWS_REGION: ap-south-1
   S3_BUCKET: emotorad-ai-stage-851725486214
   INSTANCE_ID: i-02e7dc2874e0fdacb
-  # Cloudinary cloud name for the knowledge-base guide photos/clips
-  # (src/emotorad_ai/media.py, EMOTORAD_CLOUDINARY_CLOUD). Not a secret — it
-  # appears in every delivery URL the customer receives — so it lives here in
-  # plaintext alongside S3_BUCKET/INSTANCE_ID rather than in Actions secrets.
-  # Without it, cloud_name() returns "" and every guide image resolves as
-  # "unresolved", so the bot silently sends no picture.
-  EMOTORAD_CLOUDINARY_CLOUD: cjdq4bv8
+  # Secrets (Anthropic key, OMS key, playground auth) are NOT here. See
+  # docs/runbooks/config-store.md.
 
 permissions:
   id-token: write   # required for OIDC role assumption below
@@ -65,15 +63,10 @@ jobs:
           aws s3 cp app.tar.gz "s3://$S3_BUCKET/deploy/app.tar.gz"
 
       - name: Rebuild and restart the container on the instance (via SSM)
-        # PLAYGROUND_BASIC_AUTH_USER/PASSWORD are GitHub Actions repo secrets
-        # (Settings -> Environments -> staging), the same trust boundary as
-        # AWS_DEPLOY_ROLE_ARN. Caveat: passed as -e flags, they land in the
-        # SSM command's own parameters — visible via ssm:GetCommandInvocation
-        # to anyone with that IAM permission on the account, not just this
-        # workflow. Fine for a staging credential; harden later by moving
-        # them to SSM Parameter Store SecureStrings fetched by-instance-role
-        # inside the command (docs/Emotorad_AWS_Deployment_Plan.md §2.4) if
-        # that visibility ever stops being acceptable.
+        # No secrets in this command. The container reads them at startup from
+        # Secrets Manager (EMOTORAD_AI_SECRET_ID) through the instance role —
+        # docs/runbooks/config-store.md. Everything passed as -e here is safe to
+        # appear in SSM command history.
         run: |
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
@@ -84,7 +77,7 @@ jobs:
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e EMOTORAD_AI_MODE=offline -e EMOTORAD_CLOUDINARY_CLOUD=$EMOTORAD_CLOUDINARY_CLOUD -e EMOTORAD_AI_PLAYGROUND_USER='${{ secrets.PLAYGROUND_BASIC_AUTH_USER }}' -e EMOTORAD_AI_PLAYGROUND_PASSWORD='${{ secrets.PLAYGROUND_BASIC_AUTH_PASSWORD }}' emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"
@@ -104,5 +97,11 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 5
-          curl -sf https://ai-release-stage.emotorad.com/health
+          for attempt in $(seq 1 6); do
+            sleep 5
+            if curl -sf https://ai-release-stage.emotorad.com/health | tee /dev/stderr | grep -q '"secrets":"loaded"'; then
+              exit 0
+            fi
+            echo "health check attempt $attempt: not ready yet" >&2
+          done
+          exit 1

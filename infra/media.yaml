@@ -1,0 +1,90 @@
+# infra/media.yaml
+# The media bucket: guide assets and customer evidence, private, versioned,
+# with the two lifecycle rules and the CORS the browser needs to PUT directly.
+#
+#   aws cloudformation deploy --profile emotorad-staging --region ap-south-1 \
+#     --stack-name emotorad-ai-stage-media --template-file infra/media.yaml \
+#     --parameter-overrides Environment=stage InstanceRoleName=emotorad-ai-stage-ec2-role \
+#       "AllowedOrigins=https://ai-release-stage.emotorad.com,http://localhost:8000" \
+#     --capabilities CAPABILITY_NAMED_IAM
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EMotorad AI platform - media bucket (assets + customer evidence) and instance-role access
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [stage, prod]
+  InstanceRoleName:
+    Type: String
+    Default: emotorad-ai-stage-ec2-role
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Description: >-
+      Origins allowed to PUT/GET directly against the bucket (the web chat's
+      origins). Defaults to the deployed origin only; pass localhost origins
+      explicitly for local testing (see docs/runbooks/media.md §1) rather than
+      widening the default for everyone.
+    Default: "https://ai-release-stage.emotorad.com"
+
+Resources:
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub emotorad-ai-${Environment}-media
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: customer-evidence-180d
+            Status: Enabled
+            Prefix: customers/
+            ExpirationInDays: 180
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: abandoned-multipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 2
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT, GET, HEAD]
+            AllowedOrigins: !Ref AllowedOrigins
+            AllowedHeaders: [Content-Type, Content-Length]
+            ExposedHeaders: [ETag]
+            MaxAge: 3600
+      Tags:
+        - Key: service
+          Value: emotorad-ai
+        - Key: environment
+          Value: !Ref Environment
+
+  MediaAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub emotorad-ai-${Environment}-media-access
+      Roles:
+        - !Ref InstanceRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: [s3:PutObject, s3:GetObject]
+            Resource: !Sub arn:aws:s3:::emotorad-ai-${Environment}-media/*
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:aws:s3:::emotorad-ai-${Environment}-media
+
+Outputs:
+  BucketName:
+    Value: !Ref MediaBucket

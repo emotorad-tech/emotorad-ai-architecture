@@ -1,12 +1,13 @@
 """HTTP entrypoint — the same skeleton `cli.py` drives, served over HTTP so it
 can run as an ECS/EC2 service instead of only from a terminal.
 
-Defaults to the offline planner (no Bedrock, no AWS credentials, no tokens
-spent) via `EMOTORAD_AI_MODE` — matching `cli.py --offline` — because real
-Bedrock access is not wired up yet (see docs/Emotorad_AWS_Deployment_Plan.md).
-Flip to real Claude once that's ready:
+The model path is chosen by `EMOTORAD_AI_MODE` — matching `cli.py`'s own
+`--offline`/`--anthropic`/`--bedrock` flags: `offline` for local runs with no
+credentials (the default, and what a bare `uvicorn emotorad_ai.api:app`
+gives you), `anthropic` on the deploy, and `bedrock` via the instance role.
 
-    EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app
+    EMOTORAD_AI_MODE=anthropic ANTHROPIC_API_KEY=... uvicorn emotorad_ai.api:app   # deploy default
+    EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app                          # instance role
 
 Run locally:
 
@@ -32,7 +33,7 @@ import binascii
 import os
 import secrets
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import websockets
@@ -42,33 +43,49 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
-from .attachments import AttachmentError, validate as validate_attachments
-from .config import Settings, load_settings
+from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
+from .config import load_settings
+from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .identity import IdentityResolver
 from .address import PincodeDirectory
-from .llm import AnthropicClaude, OfflinePlanner
+from .llm import select_llm
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
 from .runtime import Runtime
+from .storage.keys import cluster_of, is_customer_key, is_valid_key
+from .storage.s3 import store_from_env
+from .storage.uploads import UploadError, UploadRegistry
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 from .tools.verification import VerificationStore, apply_verified_identity
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
-
-def _build_llm(mode: str, settings: Settings) -> Optional[object]:
-    if mode == "offline":
-        return OfflinePlanner()
-    if mode == "anthropic":
-        return AnthropicClaude(settings)
-    return None  # Runtime constructs BedrockClaude
-
+# Set by docker/start.py's loader to the number of names it exported (as a
+# string), after load_into_environ() succeeds. Reported by /health so a
+# container that started without its secret — or whose secret exported
+# nothing — is visible from the deploy log, distinct from one that never had
+# a secret configured at all. The secret ID must be set for a secret to be
+# configured; no secret ID means nothing was configured, so we check that
+# first before looking at the export count.
+_CONFIG_EXPORTED = os.environ.get("EMOTORAD_AI_CONFIG_EXPORTED")
+if not os.environ.get(SECRET_ID_ENV):
+    SECRETS_STATE = "not configured"
+elif _CONFIG_EXPORTED and int(_CONFIG_EXPORTED) > 0:
+    SECRETS_STATE = "loaded"
+else:
+    SECRETS_STATE = "empty"
 
 settings = load_settings()
+
+# Media: None when EMOTORAD_AI_MEDIA_BUCKET is unset. Then /uploads and /media
+# answer 503 with the reason, and the runtime sends no S3 evidence to the model.
+MEDIA_STORE = store_from_env()
+UPLOADS = UploadRegistry(MEDIA_STORE) if MEDIA_STORE is not None else None
+
 # Verification is per conversation and has to outlive a single request, so the
 # store is module-level. Without one, `build_registry` does not register
 # `request_identity_verification` or `verify_identity` at all, and an anonymous
@@ -76,7 +93,10 @@ settings = load_settings()
 verification_store = VerificationStore()
 
 # The guide photos and clips the agent may show. Loaded once: it is authored
-# content in the repo, not per-request state.
+# content in the repo, not per-request state. load_catalogue() raises on a
+# malformed catalogue, and that is deliberate: a broken catalogue should fail
+# the deploy's health check, not silently drop guide pictures from every
+# conversation.
 #
 # `send_guide_media` was named in the agents' TOOL_NAMES all along, but no
 # catalogue was ever passed here, so the tool was never registered and was
@@ -147,9 +167,10 @@ runtime = Runtime(
     # anthropic -> Claude via the Anthropic API, keyed from the environment.
     #              Temporary, and the transport every tuned prompt was tuned
     #              against. See AnthropicClaude for why it exists.
-    # bedrock   -> None, so Runtime builds BedrockClaude: the architecture's
-    #              answer, waiting on AWS access.
-    llm=_build_llm(MODE, settings),
+    # bedrock   -> BedrockClaude through the instance role.
+    # select_llm raises LLMConfigError at import when the mode cannot be served,
+    # so the deploy's health check fails instead of the first customer message.
+    llm=select_llm(MODE, settings),
     log=log,
     resolver=resolver,
     # Website chat is the one surface that arrives anonymous. Every other
@@ -162,8 +183,12 @@ runtime = Runtime(
     # looks the customer up in the same assistant turn, so a phone snapshotted
     # before the first tool ran is already stale by the second one.
     phone_resolver=verification_store.verified_phone,
+    media_store=MEDIA_STORE,
 )
 adapter = WebsiteChatAdapter(resolver)
+
+# Claimed-attachment kind, as the adapter expects it — never string tricks.
+_ATTACHMENT_KIND = {"images": "image", "videos": "video", "docs": "document"}
 
 app = FastAPI(title="Emotorad AI — battery support")
 
@@ -184,10 +209,19 @@ class MessageIn(BaseModel):
     em_aid: Optional[str] = None
     text: str
     pill: Optional[str] = None
-    # Photos the customer sent, inline and never stored. The evidence gate asks
-    # for a picture of the terminal before it will conclude a fault, and until
-    # this field existed there was no way to answer it. See attachments.py for
-    # the limits, which are the whole security story for this path.
+    # What the customer sent with the message. Two shapes, one field:
+    #
+    #   {"kind": "image", "url": "data:image/jpeg;base64,..."}
+    #       Inline and never stored. The evidence gate asks for a picture of the
+    #       terminal before it will conclude a fault, and this is how the chat
+    #       page answers it. `attachments.validate` holds the limits, which are
+    #       the whole security story for that path.
+    #   {"upload_id": "upl_..."}
+    #       An object already PUT to S3 through `POST /uploads`. The id is minted
+    #       by the server, claimed once, and becomes an `s3://` attachment the
+    #       runtime fetches with the instance role. Needs media configured.
+    #
+    # They mix freely in one message; `_inbound_attachments` splits them.
     attachments: Optional[List[dict]] = None
     # Pin the conversation to one sub-agent, the way the playground's sidebar
     # picks one. Triage only runs while `state.agent is None`, so naming an
@@ -240,6 +274,8 @@ class AttachmentOut(BaseModel):
     kind: str
     url: str
     mime_type: Optional[str] = None
+    caption: Optional[str] = None
+    poster: Optional[str] = None
 
 
 class MessageOut(BaseModel):
@@ -258,9 +294,150 @@ class MessageOut(BaseModel):
     actions: List[dict] = []
 
 
+class AssetPath(BaseModel):
+    programme: str
+    category: str
+    kind: str
+    slug: str
+
+
+class UploadIn(BaseModel):
+    session_token: str = ""
+    conversation_id: Optional[str] = None
+    tree: str
+    mime_type: str
+    size_bytes: int
+    path: Optional[AssetPath] = None
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "mode": MODE}
+    return {
+        "status": "ok",
+        "mode": MODE,
+        "secrets": SECRETS_STATE,
+        "media": "configured" if MEDIA_STORE is not None else "not configured",
+    }
+
+
+def _require_media() -> None:
+    if MEDIA_STORE is None or UPLOADS is None:
+        raise HTTPException(503, "Media storage is not configured on this deployment (EMOTORAD_AI_MEDIA_BUCKET).")
+
+
+def _cluster_for_session(session_token: str) -> str:
+    """The identity-graph cluster the session resolves to. Never the phone."""
+    _, identity = resolver.resolve_website(None, session_token or None)
+    if not identity.cluster_id:
+        raise HTTPException(400, "session does not resolve to a customer")
+    return identity.cluster_id
+
+
+@app.post("/uploads")
+def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
+    _require_media()
+    try:
+        if body.tree == "customers":
+            if not body.conversation_id:
+                raise HTTPException(400, "conversation_id is required for customer uploads")
+            cluster_id = _cluster_for_session(body.session_token)
+            # A conversation id that already exists must have been started under
+            # the same cluster; a brand new one is accepted as-is (minted by the
+            # client on turn one, before /message has ever seen it).
+            existing = runtime.conversations.peek(body.conversation_id)
+            if existing is not None and existing.cluster_id is not None and existing.cluster_id != cluster_id:
+                raise HTTPException(403, "not your conversation")
+            pending, presign = UPLOADS.begin_customer(cluster_id, body.conversation_id, body.mime_type, body.size_bytes)
+        elif body.tree == "assets":
+            require_playground_auth(request)
+            if body.path is None:
+                raise HTTPException(400, "path is required for asset uploads")
+            pending, presign = UPLOADS.begin_asset(
+                body.path.programme, body.path.category, body.path.kind, body.path.slug, body.mime_type, body.size_bytes
+            )
+        else:
+            raise HTTPException(400, "tree must be 'customers' or 'assets'")
+    except UploadError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    return {"upload_id": pending.upload_id, "key": pending.key, **presign}
+
+
+@app.get("/media/{key:path}")
+def get_media(key: str, session_token: str = "") -> RedirectResponse:
+    _require_media()
+    if not is_valid_key(key):
+        # A prefix test (is_customer_key/is_asset_key) lets a path like
+        # `assets/../customers/...` through; the full grammar does not.
+        raise HTTPException(404, "no such media")
+    if is_customer_key(key):
+        if cluster_of(key) != _cluster_for_session(session_token):
+            raise HTTPException(403, "not your attachment")
+    # A fresh 15-minute link every time, so a transcript rendered later still loads.
+    return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)
+
+
+def _inbound_attachments(body: MessageIn) -> List[Dict[str, Any]]:
+    """What the customer sent, in the shape the adapter takes, in the order they
+    sent it.
+
+    Two ways in, and a message may mix them. An inline `data:` URL is the
+    website chat's photo-evidence path: validated here against
+    `attachments.validate` — type, size, count, base64 that decodes — carried in
+    the request and stored nowhere. An `{"upload_id": ...}` is an object already
+    PUT to S3 through `POST /uploads`; it is checked against this session and
+    claimed once, and becomes an `s3://` key the runtime reads with the instance
+    role. No S3 URL ever reaches the model either way.
+
+    The count limit is on the total, not on each path, so adding the presigned
+    route cannot be used to send more pictures than the inline one allows.
+    """
+    items = [item for item in (body.attachments or []) if item]
+    if not items:
+        return []
+    if len(items) > MAX_ATTACHMENTS:
+        raise AttachmentError(
+            "Too many attachments: %d sent, %d allowed." % (len(items), MAX_ATTACHMENTS)
+        )
+
+    # Validated as a batch, because that is where the count and type rules live.
+    # The originals are then passed through unchanged, exactly as the inline path
+    # did before: `user_content` decodes the data URL when the turn is built.
+    inline = [item for item in items if not item.get("upload_id")]
+    validate_attachments(inline)
+
+    uploaded = [item for item in items if item.get("upload_id")]
+    claims: Dict[str, Dict[str, Any]] = {}
+    if uploaded:
+        _require_media()
+        caller_cluster = _cluster_for_session(body.session_token)
+        try:
+            for item in uploaded:
+                upload_id = item["upload_id"]
+                # Check ownership on the read-only `peek` before ever calling
+                # `claim`: `claim` pops the pending entry, so if we claimed
+                # first, a 403 for the wrong session (or a stale/foreign
+                # token) would have already destroyed the id and the
+                # rightful owner's retry would 404.
+                pending = UPLOADS.peek(upload_id)
+                if pending is None:
+                    raise HTTPException(404, "unknown or expired upload id")
+                if pending.tree != "customers" or cluster_of(pending.key) != caller_cluster:
+                    # Not a customer upload at all (e.g. an assets/ upload id) or
+                    # a customer upload from a different cluster: either way,
+                    # this session did not upload it. No claim happens, so the
+                    # id is still there for whoever actually owns it.
+                    raise HTTPException(403, "not your upload")
+                claimed = UPLOADS.claim(upload_id)
+                assert is_customer_key(claimed.key) and cluster_of(claimed.key) == caller_cluster
+                claims[upload_id] = {
+                    "kind": _ATTACHMENT_KIND[claimed.kind],
+                    "url": "s3://" + claimed.key,
+                    "mime_type": claimed.mime,
+                }
+        except UploadError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+
+    return [claims[item["upload_id"]] if item.get("upload_id") else item for item in items]
 
 
 @app.post("/message", response_model=MessageOut)
@@ -272,7 +449,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     conversation_id = body.conversation_id or new_conversation_id()
     try:
-        validate_attachments(body.attachments)
+        attachments = _inbound_attachments(body)
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     text = body.text
@@ -283,6 +460,21 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
             body.location.latitude, body.location.longitude, geocoder, pincode_directory
         )
         text = describe_location(located)
+
+    # Record which cluster started this conversation, the first time we see
+    # it, so a later presign under the same conversation id can be checked
+    # against who actually owns it (see post_upload). Best-effort: a session
+    # that does not resolve to a customer is a legitimate anonymous chat and
+    # must not 400 here just because we tried to attribute a cluster to it.
+    try:
+        message_cluster = _cluster_for_session(body.session_token)
+    except HTTPException:
+        message_cluster = None
+    if message_cluster is not None:
+        state = runtime.conversations.get(conversation_id)
+        if state.cluster_id is None:
+            state.cluster_id = message_cluster
+
     message = adapter.to_message(
         {
             "conversation_id": conversation_id,
@@ -290,7 +482,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
             "em_aid": body.em_aid,
             "text": text,
             "pill": body.pill,
-            "attachments": body.attachments or [],
+            "attachments": attachments,
         }
     )
     # The proof this conversation has already given. Without this the customer
@@ -314,8 +506,14 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         ticket_id=reply.ticket_id,
         handled_by=reply.handled_by,
         attachments=[
-            AttachmentOut(kind=a.kind, url=a.url, mime_type=a.mime_type)
-            for a in reply.attachments
+            AttachmentOut(
+                kind=attachment.kind,
+                url=attachment.url,
+                mime_type=attachment.mime_type,
+                caption=attachment.caption,
+                poster=attachment.poster,
+            )
+            for attachment in reply.attachments
         ],
         actions=list(reply.actions),
     )

@@ -1,29 +1,54 @@
-"""Photos a customer sends, and the limits on them.
+"""What an attachment becomes in the model's history — in production, not only
+in the playground.
 
-The agent's evidence gate asks for a picture of the terminal before it will
-conclude a fault, and until now there was no way to send one: the attach button
-dropped a text note and the conversation walled up. The handoff of 2026-09-20
-called this the largest remaining gap.
-
-Nothing is stored. The image is carried inline, passed to the model as vision
-content for that turn, and then it is gone. That keeps a storage and retention
-decision off the critical path for a surface that is still internal-only.
+Two inbound paths meet in one module, so they are tested together here. The
+inline `/chat` path (`validate` + `to_image_blocks`) carries a photo in the
+request and stores it nowhere; the media path (`content_blocks` /
+`user_content`) carries `Attachment` objects from a `data:` URL, an `s3://` id
+minted by `POST /uploads`, or an http(s) URL. Text-only turns keep the plain
+string shape they had, on both.
 """
 
 import base64
+import io
+import os
 import unittest
+from unittest import mock
 
+from PIL import Image
+
+from emotorad_ai import attachments
 from emotorad_ai.attachments import (
     MAX_ATTACHMENTS,
     MAX_BYTES,
+    TRANSCRIBE_ENV,
     AttachmentError,
+    content_blocks,
+    fit_for_model,
     to_image_blocks,
+    user_content,
     validate,
 )
+from emotorad_ai.contract import VERIFIED, Attachment, Identity, InboundMessage
 
 # The smallest valid JPEG header is enough: nothing here decodes the pixels.
 _JPEG = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 fake jpeg").decode()
 _PNG = "data:image/png;base64," + base64.b64encode(b"\x89PNG fake").decode()
+
+PNG = base64.b64encode(b"\x89PNG fake").decode()
+
+
+def _png_bytes(width, height):
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), color=(10, 20, 30)).save(out, format="PNG")
+    return out.getvalue()
+
+
+def message(text, attachments=()):
+    return InboundMessage(
+        "c1", "customer", Identity(strength=VERIFIED, phone="+919876543210"), "website_chat", text,
+        attachments=list(attachments),
+    )
 
 
 class ValidationTests(unittest.TestCase):
@@ -163,6 +188,108 @@ class TheModelActuallySeesThePhotoTests(unittest.TestCase):
         """Every existing channel sends plain text and must keep working
         exactly as it did."""
         self.assertEqual(self._run([])[-1]["content"], "here is the terminal")
+
+
+class UserContentTests(unittest.TestCase):
+    def test_text_only_is_still_a_plain_string(self):
+        self.assertEqual(user_content(message("battery won't charge")), "battery won't charge")
+
+    def test_a_data_url_image_becomes_a_base64_block_before_the_text(self):
+        content = user_content(message("what is this light", [Attachment("image", "data:image/png;base64," + PNG, "image/png")]))
+        self.assertEqual(content[0], {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG}})
+        self.assertEqual(content[-1], {"type": "text", "text": "what is this light"})
+
+    def test_an_s3_key_is_fetched_server_side_and_sent_as_base64(self):
+        fetched = []
+
+        def fetch(key):
+            fetched.append(key)
+            return b"\x89PNG fake"
+
+        content = user_content(message("", [Attachment("image", "s3://customers/clu_1/conv_1/images/upl_1.png", "image/png")]), fetch=fetch)
+        self.assertEqual(fetched, ["customers/clu_1/conv_1/images/upl_1.png"])
+        self.assertEqual(content[0]["source"], {"type": "base64", "media_type": "image/png", "data": PNG})
+        # No caption, so no text block: the merged module follows the inline
+        # path's rule rather than inventing an "(attachment)" placeholder the
+        # customer never typed.
+        self.assertEqual(len(content), 1)
+
+    def test_a_pdf_becomes_a_document_block(self):
+        content = content_blocks([Attachment("document", "data:application/pdf;base64,QUJD", "application/pdf")])
+        self.assertEqual(content[0]["type"], "document")
+        self.assertEqual(content[0]["source"]["media_type"], "application/pdf")
+
+    def test_an_http_image_is_passed_by_url(self):
+        content = content_blocks([Attachment("image", "https://cdn.test/a.jpg", "image/jpeg")])
+        self.assertEqual(content, [{"type": "image", "source": {"type": "url", "url": "https://cdn.test/a.jpg"}}])
+
+    def test_a_fetch_failure_becomes_a_warning_block_not_an_exception(self):
+        def fetch(key):
+            raise RuntimeError("boom")
+
+        content = content_blocks([Attachment("image", "s3://customers/x/y/images/z.png", "image/png")], fetch=fetch)
+        self.assertEqual(content, [{"type": "text", "text": "[An attachment could not be retrieved; do not describe it.]"}])
+
+    def test_an_s3_key_with_no_fetcher_is_a_warning_block(self):
+        content = content_blocks([Attachment("image", "s3://customers/x/y/images/z.png", "image/png")])
+        self.assertEqual(content[0]["type"], "text")
+
+    def test_an_unreadable_video_says_so(self):
+        content = content_blocks([Attachment("video", "data:video/mp4;base64,AAAA", "video/mp4")])
+        self.assertEqual(len(content), 1)
+        self.assertIn("could not be read", content[0]["text"])
+
+    def test_unknown_types_are_dropped(self):
+        self.assertEqual(content_blocks([Attachment("document", "data:text/csv;base64,QQ==", "text/csv")]), [])
+
+
+class FitForModelTests(unittest.TestCase):
+    def test_a_large_image_is_downscaled_to_jpeg_within_the_edge_cap(self):
+        data, mime = fit_for_model(_png_bytes(4000, 3000), "image/png")
+        self.assertEqual(mime, "image/jpeg")
+        with Image.open(io.BytesIO(data)) as image:
+            self.assertLessEqual(max(image.size), 1600)
+
+    def test_a_small_image_passes_through_unchanged(self):
+        original = _png_bytes(200, 200)
+        data, mime = fit_for_model(original, "image/png")
+        self.assertEqual(mime, "image/png")
+        self.assertEqual(data, original)
+
+
+class TranscriptionGateTests(unittest.TestCase):
+    def _video_content(self):
+        with mock.patch.object(attachments.video, "extract_audio", return_value=b"fake wav"), mock.patch.object(
+            attachments.video, "extract_frames", return_value=["deadbeef"]
+        ), mock.patch.object(
+            attachments.video, "transcribe_audio", return_value={"text": "it wheezes", "language": "hi"}
+        ) as transcribe:
+            content = content_blocks([Attachment("video", "data:video/mp4;base64,AAAA", "video/mp4")])
+        return content, transcribe
+
+    def test_transcription_is_off_by_default_in_the_api_path(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(TRANSCRIBE_ENV, None)
+            content, transcribe = self._video_content()
+        transcribe.assert_not_called()
+        self.assertFalse(any("wheezes" in block.get("text", "") for block in content))
+
+    def test_transcription_runs_when_the_env_var_is_set(self):
+        with mock.patch.dict(os.environ, {TRANSCRIBE_ENV: "1"}):
+            content, transcribe = self._video_content()
+        transcribe.assert_called_once()
+        self.assertTrue(any("wheezes" in block.get("text", "") for block in content))
+
+
+class PlaygroundCompatibilityTests(unittest.TestCase):
+    def test_the_playground_still_exposes_its_helper_names(self):
+        from emotorad_ai import playground, video
+
+        self.assertIs(playground._transcribe_audio, video.transcribe_audio)
+        self.assertEqual(playground.VIDEO_FRAMES, video.VIDEO_FRAMES)
+        self.assertTrue(callable(playground._extract_frames))
+        self.assertTrue(playground._is_video({"mime_type": "video/mp4"}))
+
 
 if __name__ == "__main__":
     unittest.main()

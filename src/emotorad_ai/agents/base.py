@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from ..attachments import to_image_blocks, validate
+from ..attachments import user_content
 from ..config import Settings
 from ..conversation import HISTORY_TURNS, trim_history
 from ..contract import InboundMessage
@@ -62,6 +62,7 @@ class Agent:
         log: EventLog,
         settings: Settings,
         phone_resolver: Optional[Callable[[str], Optional[str]]] = None,
+        fetch: Optional[Callable[[str], bytes]] = None,
     ) -> None:
         self.definition = definition
         self.registry = registry
@@ -72,6 +73,9 @@ class Agent:
         # the phone late, because the model proves it and uses it in the same
         # turn. None for every channel that arrives already resolved.
         self.phone_resolver = phone_resolver
+        # Server-side reader for an `s3://` attachment the customer uploaded
+        # through /uploads. None on a surface that only carries inline data.
+        self.fetch = fetch
 
     def _late_facts(
         self, conversation_id: str, facts: Optional[Dict[str, Callable[[], Any]]]
@@ -91,27 +95,6 @@ class Agent:
         if self.phone_resolver is not None:
             late["phone"] = lambda: self.phone_resolver(conversation_id)
         return late
-
-    @staticmethod
-    def _user_content(message: InboundMessage) -> Any:
-        """The customer's turn: their words, and any photo they sent with them.
-
-        Plain text when there is no photo, so every channel that has never sent
-        one is byte-for-byte unchanged. The image goes first because the text
-        usually refers to it ("here is the terminal"), and the words go with it
-        rather than being dropped — they are often the half that names the
-        symptom.
-        """
-        if not message.attachments:
-            return message.message_text
-        blocks = to_image_blocks(validate([a.to_dict() for a in message.attachments]))
-        if not blocks:
-            return message.message_text
-        # A photo sent on its own — tap attach, pick, send, no caption — goes as
-        # image blocks alone. The API rejects an empty text block.
-        if message.message_text.strip():
-            blocks.append({"type": "text", "text": message.message_text})
-        return blocks
 
     def run(
         self,
@@ -137,7 +120,7 @@ class Agent:
         # the conversation's own history list and the store hands out the same
         # object every turn.
         history[:] = trim_history(history, HISTORY_TURNS - 1)
-        history.append({"role": "user", "content": self._user_content(message)})
+        history.append({"role": "user", "content": user_content(message, self.fetch)})
 
         turn = AgentTurn(text="", agent=self.definition.name)
         # Everything the model writes during the turn, in the order it wrote it.

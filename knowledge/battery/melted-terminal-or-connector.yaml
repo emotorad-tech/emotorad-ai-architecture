@@ -11,13 +11,13 @@ symptoms: [melted, burnt, burnt smell, fused, melted terminal, melted connector,
 applies_to: {}
 source: AFS battery diagnostic — melting, both ends
 media:
-  - id: melted_battery_vs_non_melted
+  - id: afs/battery/photos/melted-battery-vs-non-melted.png
     kind: image
     caption: >-
       Battery terminal, melted versus normal. A damaged one shows fused metal pins and
       blackened plastic; an intact one has four clean, evenly spaced contacts with the
       + and - markings still readable.
-  - id: controller_melted_vs_non_melted
+  - id: afs/battery/photos/controller-melted-vs-non-melted.png
     kind: image
     caption: >-
       Controller battery connector, normal versus melted. The failed one shows fused pins,
