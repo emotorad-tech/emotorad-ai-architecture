@@ -194,6 +194,37 @@ missed. Added as its own pattern, requiring an explicit request verb so that "my
 said I get 5% off" reads as a discount argument (which the money guardrails already refuse) rather
 than a transfer request.
 
+**Website chat on a real phone, and the first replacement order, 2026-09-20.** 715 tests.
+Read `docs/handoff-2026-09-21-fulfilment.md` before touching anything; it carries the run
+command, the never-do list, the open bugs and the owner's open decisions. In brief:
+
+- `/chat` establishes identity itself (`Runtime(self_service_identity=True)`, one-time code
+  read off a dev endpoint because no SMS exists), carries the proved phone onto the identity,
+  and resolves facts a tool needs at call time via `ToolContext.late`, because the model
+  verifies and looks up in the same turn. The chat page fills a phone, opens photos full
+  screen, keeps its composer mounted, renders markdown (no links, on purpose), and sends
+  the customer's photos to Claude as vision content, stored nowhere.
+- Three conversational bugs found only by running it on a handset, all fixed in code: the
+  agent sent only the last block the model wrote; the coverage post-check saw one turn's
+  tools when the fact was three turns back; and it read "chargeable even within warranty"
+  as a denial of cover. Coverage is two questions, and the check knows that now.
+- **Replacement fulfilment, first build**: spec `docs/superpowers/specs/2026-09-20-replacement-fulfilment-design.md`.
+  `place_replacement_order` is the one write. Code decides technician-or-not
+  (`knowledge/_replacement/parts.yaml`), item code, in flight (48 h), "sure" (four runtime
+  facts, never the model's confidence) and the approval mode (`EMOTORAD_AI_APPROVAL_MODE`:
+  `bot` / `reasonable` / `human`). Battery and charger only. Every write is a mock. The spec's
+  fourth "sure" fact is not implemented; `is_sure` says so; do not launch on `bot`.
+- Owner policy in the records: a melted terminal is a defect, never impact damage, and in
+  warranty means a replacement placed from the conversation, free.
+- The address backstop is per word plus a required pincode, and a spent one-time code does
+  not count, because the live model dropped the pincode to get past the old check and the
+  customer types their code into the same conversation.
+
+**Two rules that earned their place on the 20th.** Guardrails in code, not prompted: the model
+ignored a "wait a turn" instruction within the hour. And a front-end change is reviewed on the
+device it ships to: four days of reading the code missed three defects that two minutes on a
+phone found.
+
 Still not built: real integrations behind the mocks, and a vector index — retrieval is still keyword
 scoring over the authored records (`_score` is the single seam).
 
