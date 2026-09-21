@@ -124,6 +124,21 @@ class FailureTests(unittest.TestCase):
             load_into_environ(SECRET_ID, client=stubbed(error="AccessDeniedException"), environ=env)
         self.assertEqual(env, {"KEEP": "me"})
 
+    def test_a_botocore_client_error_includes_its_error_code(self):
+        with self.assertRaises(ConfigStoreError) as caught:
+            load_into_environ(SECRET_ID, client=stubbed(error="ResourceNotFoundException"), environ={})
+        self.assertIn("(ResourceNotFoundException)", str(caught.exception))
+
+    def test_a_non_client_error_yields_only_the_class_name(self):
+        class _Boom:
+            def get_secret_value(self, **kwargs):
+                raise RuntimeError("network is down")
+
+        with self.assertRaises(ConfigStoreError) as caught:
+            load_into_environ(SECRET_ID, client=_Boom(), environ={})
+        self.assertIn("RuntimeError", str(caught.exception))
+        self.assertNotIn("network is down", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

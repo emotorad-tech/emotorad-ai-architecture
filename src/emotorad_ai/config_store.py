@@ -88,9 +88,15 @@ def _fetch(secret_id: str, client: Any) -> Dict[str, Any]:
     try:
         response = client.get_secret_value(SecretId=secret_id)
     except Exception as exc:  # botocore's exceptions are generated classes; one net is honest here
-        raise ConfigStoreError(
-            "could not read secret %r: %s" % (secret_id, type(exc).__name__)
-        ) from None
+        # A botocore ClientError carries a service error code (metadata, not a
+        # value) in exc.response["Error"]["Code"] — surface it so "the secret
+        # doesn't exist" and "the role can't read it" don't look identical.
+        code = None
+        response_attr = getattr(exc, "response", None)
+        if isinstance(response_attr, dict):
+            code = response_attr.get("Error", {}).get("Code")
+        label = "%s (%s)" % (type(exc).__name__, code) if code else type(exc).__name__
+        raise ConfigStoreError("could not read secret %r: %s" % (secret_id, label)) from None
 
     raw = response.get("SecretString")
     if raw is None:
