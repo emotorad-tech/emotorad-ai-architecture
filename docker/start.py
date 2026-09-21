@@ -64,6 +64,10 @@ def main() -> int:
         print("startup config: %s" % exc, file=sys.stderr)
         return 1
     print("startup config: exported %s" % (", ".join(exported) or "nothing (no secret id set)"))
+    # Read by api.py's /health, before either child starts, so a container
+    # that came up with a secret that exported nothing is visible as "empty"
+    # rather than looking identical to "loaded".
+    os.environ["EMOTORAD_AI_CONFIG_EXPORTED"] = str(len(exported))
 
     child = subprocess.Popen(streamlit_command())
     try:

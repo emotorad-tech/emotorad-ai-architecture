@@ -43,7 +43,6 @@ from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
 from .config import load_settings
-from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .identity import IdentityResolver
 from .llm import select_llm
@@ -52,9 +51,18 @@ from .runtime import Runtime
 from .tools.mocks import build_registry
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
-# Set by docker/start.py's loader. Reported by /health so a container that
-# started without its secret is visible from the deploy log.
-SECRETS_STATE = "loaded" if os.environ.get(SECRET_ID_ENV) else "not configured"
+# Set by docker/start.py's loader to the number of names it exported (as a
+# string), after load_into_environ() succeeds. Reported by /health so a
+# container that started without its secret — or whose secret exported
+# nothing — is visible from the deploy log, distinct from one that never had
+# a secret configured at all.
+_CONFIG_EXPORTED = os.environ.get("EMOTORAD_AI_CONFIG_EXPORTED")
+if _CONFIG_EXPORTED is None:
+    SECRETS_STATE = "not configured"
+elif _CONFIG_EXPORTED == "0":
+    SECRETS_STATE = "empty"
+else:
+    SECRETS_STATE = "loaded"
 
 settings = load_settings()
 registry = build_registry()

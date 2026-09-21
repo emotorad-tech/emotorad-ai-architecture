@@ -70,6 +70,19 @@ class MainTests(unittest.TestCase):
         self.assertEqual(calls[1], ("exec", start.uvicorn_command()))
         self.assertIn("exported A", stdout.getvalue())
 
+    def test_a_successful_load_exports_the_count_for_health(self):
+        start = load_start()
+        child = mock.Mock()
+        with mock.patch.dict(start.os.environ, {}, clear=False), \
+             mock.patch.object(start, "load_into_environ", return_value=["A", "B", "C"]), \
+             mock.patch.object(start.subprocess, "Popen", return_value=child), \
+             mock.patch.object(start.os, "execvp", side_effect=lambda f, argv: None):
+            start.os.environ.pop("EMOTORAD_AI_CONFIG_EXPORTED", None)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(start.main(), 0)
+            self.assertEqual(start.os.environ["EMOTORAD_AI_CONFIG_EXPORTED"], "3")
+
     def test_a_config_failure_stops_before_anything_launches(self):
         start = load_start()
         with mock.patch.object(start, "load_into_environ", side_effect=start.ConfigStoreError("could not read secret 'x': Boom")), \

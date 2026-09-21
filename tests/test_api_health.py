@@ -21,8 +21,24 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(api.health(), {"status": "ok", "mode": "offline", "secrets": "not configured"})
 
     def test_a_secret_id_reports_loaded(self):
-        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "/emotorad/stage/ai/app"})
+        api = fresh_api(
+            {
+                "EMOTORAD_AI_MODE": "offline",
+                "EMOTORAD_AI_SECRET_ID": "/emotorad/stage/ai/app",
+                "EMOTORAD_AI_CONFIG_EXPORTED": "5",
+            }
+        )
         self.assertEqual(api.health()["secrets"], "loaded")
+
+    def test_a_secret_that_exported_nothing_reports_empty(self):
+        api = fresh_api(
+            {
+                "EMOTORAD_AI_MODE": "offline",
+                "EMOTORAD_AI_SECRET_ID": "/emotorad/stage/ai/app",
+                "EMOTORAD_AI_CONFIG_EXPORTED": "0",
+            }
+        )
+        self.assertEqual(api.health()["secrets"], "empty")
 
     def test_anthropic_mode_without_a_key_fails_at_import(self):
         from emotorad_ai.llm import LLMConfigError
