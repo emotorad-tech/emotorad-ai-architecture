@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .config import Settings
 
@@ -38,6 +39,44 @@ class LLMResponse:
         return self.stop_reason == "tool_use"
 
 
+def response_to_llm(response: Any) -> LLMResponse:
+    """The SDK message -> our LLMResponse. One mapping for both clients, so the
+    Anthropic API path and the Bedrock path cannot disagree about what a tool
+    call looks like."""
+    api_content: List[Dict[str, Any]] = []
+    text_parts: List[str] = []
+    tool_uses: List[ToolUse] = []
+    for block in response.content:
+        api_content.append(block.model_dump(exclude_none=True))
+        if block.type == "text":
+            text_parts.append(block.text)
+        elif block.type == "tool_use":
+            tool_uses.append(ToolUse(id=block.id, name=block.name, arguments=dict(block.input or {})))
+
+    return LLMResponse(
+        stop_reason=response.stop_reason or "end_turn",
+        text="\n".join(part for part in text_parts if part).strip(),
+        tool_uses=tool_uses,
+        api_content=api_content,
+        usage=response.usage.model_dump() if response.usage else None,
+    )
+
+
+def _create(client: Any, model: str, settings: Settings, system: str, messages: Sequence[Dict[str, Any]], tools: Sequence[Dict[str, Any]]) -> LLMResponse:
+    response = client.messages.create(
+        model=model,
+        max_tokens=settings.max_tokens,
+        system=system,
+        messages=list(messages),
+        tools=list(tools),
+        # Adaptive thinking with a low effort default: battery triage is a
+        # bounded problem and the turn is in front of a waiting customer.
+        thinking={"type": "adaptive"},
+        output_config={"effort": settings.effort},
+    )
+    return response_to_llm(response)
+
+
 class BedrockClaude:
     """Claude via Bedrock, in Emotorad's own AWS account and region."""
 
@@ -56,35 +95,65 @@ class BedrockClaude:
         messages: Sequence[Dict[str, Any]],
         tools: Sequence[Dict[str, Any]],
     ) -> LLMResponse:
-        response = self._client.messages.create(
-            model=self.settings.model,
-            max_tokens=self.settings.max_tokens,
-            system=system,
-            messages=list(messages),
-            tools=list(tools),
-            # Adaptive thinking with a low effort default: battery triage is a
-            # bounded problem and the turn is in front of a waiting customer.
-            thinking={"type": "adaptive"},
-            output_config={"effort": self.settings.effort},
-        )
+        return _create(self._client, self.settings.model, self.settings, system, messages, tools)
 
-        api_content: List[Dict[str, Any]] = []
-        text_parts: List[str] = []
-        tool_uses: List[ToolUse] = []
-        for block in response.content:
-            api_content.append(block.model_dump(exclude_none=True))
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_uses.append(ToolUse(id=block.id, name=block.name, arguments=dict(block.input or {})))
 
-        return LLMResponse(
-            stop_reason=response.stop_reason or "end_turn",
-            text="\n".join(part for part in text_parts if part).strip(),
-            tool_uses=tool_uses,
-            api_content=api_content,
-            usage=response.usage.model_dump() if response.usage else None,
-        )
+class AnthropicClaude:
+    """Claude via the first-party Anthropic API.
+
+    The deploy default since 2026-09-21 (spec: app-config-store). Same request
+    shape as BedrockClaude on purpose, so switching between them is a change of
+    EMOTORAD_AI_MODE and nothing else. The key is held in memory for the
+    process and never logged.
+    """
+
+    def __init__(self, settings: Settings, api_key: str, model: Optional[str] = None, client: Any = None) -> None:
+        self.settings = settings
+        self.model = model or settings.model
+        if client is not None:
+            self._client = client
+        else:
+            import anthropic  # imported lazily: tests never need it
+
+            self._client = anthropic.Anthropic(api_key=api_key)
+
+    def create(
+        self,
+        system: str,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+    ) -> LLMResponse:
+        return _create(self._client, self.model, self.settings, system, messages, tools)
+
+
+MODES = ("offline", "anthropic", "bedrock")
+
+
+class LLMConfigError(Exception):
+    """EMOTORAD_AI_MODE names a path this process cannot serve. Raised at startup."""
+
+
+def select_llm(mode: str, settings: Settings, environ: Optional[Mapping[str, str]] = None, client: Any = None) -> Any:
+    """The model client for EMOTORAD_AI_MODE, or a named error before any request.
+
+    A missing key must fail here, at import of api.py, not on the first customer
+    message: the health check then fails the deploy instead of the customer
+    finding out.
+    """
+    env = environ if environ is not None else os.environ
+    if mode == "offline":
+        return OfflinePlanner()
+    if mode == "anthropic":
+        key = env.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            raise LLMConfigError(
+                "EMOTORAD_AI_MODE=anthropic but ANTHROPIC_API_KEY is not set "
+                "(the config store exports it from API_KEY_CLAUDE)"
+            )
+        return AnthropicClaude(settings, api_key=key, client=client)
+    if mode == "bedrock":
+        return BedrockClaude(settings, client=client)
+    raise LLMConfigError("unknown EMOTORAD_AI_MODE %r; expected one of %s" % (mode, ", ".join(MODES)))
 
 
 class ScriptedClaude:
