@@ -630,9 +630,22 @@ _HOP_BY_HOP_HEADERS = {
 }
 
 
-@app.api_route("/playground", methods=["GET", "POST", "HEAD"], dependencies=[Depends(require_playground_auth)])
+# Streamlit's file uploader (1.64) sends the file with PUT to
+# /_stcore/upload_file/<session>/<file_id> and removes it with DELETE; PATCH
+# and OPTIONS are included so the proxy doesn't have to be revisited for the
+# next Streamlit upstream call it happens to use. A proxy that only forwards
+# GET/POST/HEAD answers those with 405 before Streamlit ever sees them,
+# silently breaking every file upload in the playground (admin media-upload
+# form and the chat's photo/video attachment alike).
 @app.api_route(
-    "/playground/{rest:path}", methods=["GET", "POST", "HEAD"], dependencies=[Depends(require_playground_auth)]
+    "/playground",
+    methods=["GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    dependencies=[Depends(require_playground_auth)],
+)
+@app.api_route(
+    "/playground/{rest:path}",
+    methods=["GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    dependencies=[Depends(require_playground_auth)],
 )
 async def playground_http_proxy(request: Request, rest: str = "") -> StreamingResponse:
     upstream_request = _playground_client.build_request(

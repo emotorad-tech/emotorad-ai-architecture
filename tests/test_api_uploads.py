@@ -245,6 +245,32 @@ class ReplyAttachmentsOnMessageTests(unittest.TestCase):
         )
 
 
+class PlaygroundProxyMethodsTests(unittest.TestCase):
+    """The playground reverse proxy's route table.
+
+    Streamlit's file uploader (1.64) sends the file with PUT and removes it
+    with DELETE. A proxy route that only lists GET/POST/HEAD answers those
+    with 405 before Streamlit ever sees the request, which silently breaks
+    every file upload in the playground. This asserts on the route table
+    itself, not a live upstream call, so a future tidy-up of the method list
+    cannot narrow it again without a test going red.
+    """
+
+    def test_playground_routes_accept_put_and_delete(self):
+        api = fresh_api(None)
+        wanted = {"GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"}
+        checked = 0
+        for route in api.app.routes:
+            # The websocket route shares the /playground/{rest:path} path but
+            # has no `methods` (it isn't an HTTP verb route) — skip it.
+            if getattr(route, "path", None) in ("/playground", "/playground/{rest:path}") and hasattr(
+                route, "methods"
+            ):
+                self.assertLessEqual(wanted, set(route.methods), route.path)
+                checked += 1
+        self.assertEqual(checked, 2)
+
+
 class NoBucketTests(unittest.TestCase):
     def test_uploads_and_media_are_503_without_a_bucket(self):
         api = fresh_api(None)
