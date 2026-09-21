@@ -1,0 +1,105 @@
+"""Keys are derived by code from closed vocabularies. The client never chooses
+one, and a phone number can never end up in one."""
+
+import re
+import unittest
+
+from emotorad_ai.storage.keys import (
+    ASSET_KINDS,
+    CUSTOMER_KINDS,
+    PROGRAMMES,
+    SIZE_CAPS,
+    KeyValidationError,
+    asset_key,
+    cluster_of,
+    customer_key,
+    customer_kind_for,
+    derivative_keys,
+    extension_for,
+    is_asset_key,
+    is_customer_key,
+    new_upload_id,
+)
+
+
+class VocabularyTests(unittest.TestCase):
+    def test_the_vocabularies_are_the_ones_in_the_spec(self):
+        self.assertEqual(PROGRAMMES, ("afs", "presales", "dealer"))
+        self.assertEqual(ASSET_KINDS, ("photos", "videos", "tips", "docs"))
+        self.assertEqual(CUSTOMER_KINDS, ("images", "videos", "docs"))
+        self.assertEqual(SIZE_CAPS, {"images": 10 * 1024 * 1024, "videos": 100 * 1024 * 1024, "docs": 10 * 1024 * 1024})
+
+    def test_extension_comes_from_the_mime_type(self):
+        self.assertEqual(extension_for("image/jpeg"), "jpg")
+        self.assertEqual(extension_for("image/png"), "png")
+        self.assertEqual(extension_for("image/webp"), "webp")
+        self.assertEqual(extension_for("video/mp4"), "mp4")
+        self.assertEqual(extension_for("application/pdf"), "pdf")
+        with self.assertRaises(KeyValidationError):
+            extension_for("image/gif")
+
+    def test_customer_kind_follows_the_mime_type(self):
+        self.assertEqual(customer_kind_for("image/png"), "images")
+        self.assertEqual(customer_kind_for("video/mp4"), "videos")
+        self.assertEqual(customer_kind_for("application/pdf"), "docs")
+
+
+class AssetKeyTests(unittest.TestCase):
+    def test_a_well_formed_asset_key(self):
+        self.assertEqual(
+            asset_key("afs", "battery", "photos", "soc-button", "image/jpeg"),
+            "assets/afs/battery/photos/soc-button.jpg",
+        )
+
+    def test_every_segment_is_validated(self):
+        with self.assertRaises(KeyValidationError):
+            asset_key("marketing", "battery", "photos", "x", "image/jpeg")
+        with self.assertRaises(KeyValidationError):
+            asset_key("afs", "Battery", "photos", "x", "image/jpeg")
+        with self.assertRaises(KeyValidationError):
+            asset_key("afs", "battery", "pictures", "x", "image/jpeg")
+        with self.assertRaises(KeyValidationError):
+            asset_key("afs", "battery", "photos", "SOC Button", "image/jpeg")
+        with self.assertRaises(KeyValidationError):
+            asset_key("afs", "../battery", "photos", "x", "image/jpeg")
+
+    def test_derivatives_for_an_image_and_a_video(self):
+        self.assertEqual(
+            derivative_keys("assets/afs/battery/photos/soc-button.jpg"),
+            {"w900": "assets/afs/battery/photos/soc-button.w900.webp"},
+        )
+        self.assertEqual(
+            derivative_keys("assets/afs/battery/videos/key-turn.mp4"),
+            {"poster": "assets/afs/battery/videos/key-turn.poster.jpg"},
+        )
+        self.assertEqual(derivative_keys("assets/afs/battery/docs/manual.pdf"), {})
+
+
+class CustomerKeyTests(unittest.TestCase):
+    def test_a_well_formed_customer_key(self):
+        key = customer_key("clu_8f3a12", "conv_01J9K3", "images", "upl_01J9K4ab", "image/jpeg")
+        self.assertEqual(key, "customers/clu_8f3a12/conv_01J9K3/images/upl_01J9K4ab.jpg")
+        self.assertTrue(is_customer_key(key))
+        self.assertFalse(is_asset_key(key))
+        self.assertEqual(cluster_of(key), "clu_8f3a12")
+
+    def test_a_phone_number_is_refused_as_a_cluster_id(self):
+        for bad in ("+919876543210", "919876543210", "9876543210"):
+            with self.assertRaises(KeyValidationError):
+                customer_key(bad, "conv_1", "images", "upl_1", "image/jpeg")
+
+    def test_kind_must_match_the_mime_type(self):
+        with self.assertRaises(KeyValidationError):
+            customer_key("clu_1", "conv_1", "videos", "upl_1", "image/jpeg")
+
+    def test_upload_ids_sort_by_time(self):
+        a = new_upload_id()
+        b = new_upload_id()
+        self.assertTrue(a.startswith("upl_") and b.startswith("upl_"))
+        self.assertLessEqual(a[:14], b[:14])
+        self.assertRegex(a, r"^upl_[0-9a-z]{10}[0-9a-z]{8}$")
+        self.assertNotEqual(a, b)
+
+
+if __name__ == "__main__":
+    unittest.main()
