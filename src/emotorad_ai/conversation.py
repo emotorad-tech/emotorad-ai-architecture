@@ -32,6 +32,11 @@ class ConversationState:
 
     conversation_id: str
     phase: str = GREETING
+    # The identity-graph cluster that started this conversation, recorded the
+    # first time /message sees it. Lets a later presign under the same
+    # conversation id be checked against who actually owns it — see
+    # api.post_upload. None until a resolvable session has sent a message.
+    cluster_id: Optional[str] = None
     # The bike under discussion. A frame number, always taken from the owned set
     # — never from what the customer typed, and never guessed when several exist.
     selected_frame: Optional[str] = None
@@ -110,6 +115,11 @@ class ConversationStore:
             state = ConversationState(conversation_id=conversation_id)
             self._states[conversation_id] = state
         return state
+
+    def peek(self, conversation_id: str) -> Optional[ConversationState]:
+        """Like `get`, but never creates a state — a presign checking who owns
+        a conversation must not itself count as that conversation starting."""
+        return self._states.get(conversation_id)
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history

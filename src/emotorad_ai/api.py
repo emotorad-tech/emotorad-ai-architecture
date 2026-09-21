@@ -165,6 +165,12 @@ def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
             if not body.conversation_id:
                 raise HTTPException(400, "conversation_id is required for customer uploads")
             cluster_id = _cluster_for_session(body.session_token)
+            # A conversation id that already exists must have been started under
+            # the same cluster; a brand new one is accepted as-is (minted by the
+            # client on turn one, before /message has ever seen it).
+            existing = runtime.conversations.peek(body.conversation_id)
+            if existing is not None and existing.cluster_id is not None and existing.cluster_id != cluster_id:
+                raise HTTPException(403, "not your conversation")
             pending, presign = UPLOADS.begin_customer(cluster_id, body.conversation_id, body.mime_type, body.size_bytes)
         elif body.tree == "assets":
             require_playground_auth(request)
@@ -197,6 +203,20 @@ def get_media(key: str, session_token: str = "") -> RedirectResponse:
 @app.post("/message", response_model=MessageOut)
 def post_message(body: MessageIn) -> MessageOut:
     conversation_id = body.conversation_id or new_conversation_id()
+
+    # Record which cluster started this conversation, the first time we see
+    # it, so a later presign under the same conversation id can be checked
+    # against who actually owns it (see post_upload). Best-effort: a session
+    # that does not resolve to a customer is a legitimate anonymous chat and
+    # must not 400 here just because we tried to attribute a cluster to it.
+    try:
+        message_cluster = _cluster_for_session(body.session_token)
+    except HTTPException:
+        message_cluster = None
+    if message_cluster is not None:
+        state = runtime.conversations.get(conversation_id)
+        if state.cluster_id is None:
+            state.cluster_id = message_cluster
 
     attachments: List[Dict[str, Any]] = []
     if body.attachments:

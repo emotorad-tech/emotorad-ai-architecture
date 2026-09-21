@@ -108,6 +108,12 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.store.fetched, [])
 
+    def test_presign_refuses_a_conversation_started_by_another_session(self):
+        r = self.client.post("/message", json={"conversation_id": "c-a", "session_token": "sess-ananya", "text": "hi"})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post("/uploads", json={"session_token": "sess-rohit", "conversation_id": "c-a", "tree": "customers", "mime_type": "image/png", "size_bytes": 9})
+        self.assertEqual(r.status_code, 403)
+
     def test_message_with_an_asset_upload_id_is_403_not_500(self):
         asset_body = {"tree": "assets", "mime_type": "image/png", "size_bytes": 9, "path": {"programme": "afs", "category": "battery", "kind": "photos", "slug": "soc-button"}}
         body = self.client.post("/uploads", json=asset_body, headers=AUTH).json()
