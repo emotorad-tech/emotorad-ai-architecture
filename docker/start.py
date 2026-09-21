@@ -61,9 +61,9 @@ def main() -> int:
         exported = load_into_environ()
     except ConfigStoreError as exc:
         # Names only, never values — this line lands in CloudWatch.
-        print("startup config: %s" % exc, file=sys.stderr)
+        print("startup config: %s" % exc, file=sys.stderr, flush=True)
         return 1
-    print("startup config: exported %s" % (", ".join(exported) or "nothing (no secret id set)"))
+    print("startup config: exported %s" % (", ".join(exported) or "nothing (no secret id set)"), flush=True)
     # Read by api.py's /health, before either child starts, so a container
     # that came up with a secret that exported nothing is visible as "empty"
     # rather than looking identical to "loaded".
@@ -73,7 +73,7 @@ def main() -> int:
     try:
         os.execvp("uvicorn", uvicorn_command())
     except OSError as exc:
-        print("startup: could not exec uvicorn: %s" % type(exc).__name__, file=sys.stderr)
+        print("startup: could not exec uvicorn: %s" % type(exc).__name__, file=sys.stderr, flush=True)
         child.terminate()
         return 1
     return 0  # unreachable after a successful exec; kept for the tests' patched path

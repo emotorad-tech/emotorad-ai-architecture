@@ -110,6 +110,45 @@ class MainTests(unittest.TestCase):
         child.terminate.assert_called_once_with()
         self.assertIn("could not exec uvicorn: OSError", stderr.getvalue())
 
+    def test_all_prints_are_flushed_on_success(self):
+        start = load_start()
+        child = mock.Mock()
+        with mock.patch.object(start, "load_into_environ", return_value=["A"]), \
+             mock.patch.object(start.subprocess, "Popen", return_value=child), \
+             mock.patch.object(start.os, "execvp", side_effect=lambda f, argv: None), \
+             mock.patch("builtins.print") as fake_print:
+            self.assertEqual(start.main(), 0)
+        # Verify at least one print call happened
+        self.assertGreater(fake_print.call_count, 0)
+        # Verify all print calls were made with flush=True
+        for call in fake_print.call_args_list:
+            self.assertTrue(call.kwargs.get("flush"), f"Print call {call} was not made with flush=True")
+
+    def test_all_prints_are_flushed_on_config_error(self):
+        start = load_start()
+        with mock.patch.object(start, "load_into_environ", side_effect=start.ConfigStoreError("test error")), \
+             mock.patch("builtins.print") as fake_print:
+            self.assertEqual(start.main(), 1)
+        # Verify print was called for the error
+        self.assertGreater(fake_print.call_count, 0)
+        # Verify all print calls were made with flush=True
+        for call in fake_print.call_args_list:
+            self.assertTrue(call.kwargs.get("flush"), f"Print call {call} was not made with flush=True")
+
+    def test_all_prints_are_flushed_on_exec_error(self):
+        start = load_start()
+        child = mock.Mock()
+        with mock.patch.object(start, "load_into_environ", return_value=["A"]), \
+             mock.patch.object(start.subprocess, "Popen", return_value=child), \
+             mock.patch.object(start.os, "execvp", side_effect=OSError("exec failed")), \
+             mock.patch("builtins.print") as fake_print:
+            self.assertEqual(start.main(), 1)
+        # Verify print was called for the error
+        self.assertGreater(fake_print.call_count, 0)
+        # Verify all print calls were made with flush=True
+        for call in fake_print.call_args_list:
+            self.assertTrue(call.kwargs.get("flush"), f"Print call {call} was not made with flush=True")
+
 
 if __name__ == "__main__":
     unittest.main()
