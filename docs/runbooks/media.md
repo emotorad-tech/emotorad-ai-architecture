@@ -24,6 +24,11 @@ aws cloudformation deploy --profile emotorad-staging --region ap-south-1 \
 For prod: `Environment=prod`, the prod instance role name, and the prod origins in
 `AllowedOrigins` — stack `emotorad-ai-prod-media`.
 
+`AllowedOrigins` defaults to the deployed origin only. For local testing against the
+real bucket, pass `http://localhost:8000` (or wherever the local server runs) explicitly
+in `--parameter-overrides`, as the command above does — it is not part of the default,
+so a deploy that omits it never opens the bucket to localhost.
+
 ## 2. Configure the service
 
 The workflow's `docker run` line sets `EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media`.

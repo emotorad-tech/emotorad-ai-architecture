@@ -19,13 +19,18 @@ Parameters:
     Default: emotorad-ai-stage-ec2-role
   AllowedOrigins:
     Type: CommaDelimitedList
-    Description: Origins allowed to PUT/GET directly against the bucket (the web chat's origins)
-    Default: "https://ai-release-stage.emotorad.com,http://localhost:8000"
+    Description: >-
+      Origins allowed to PUT/GET directly against the bucket (the web chat's
+      origins). Defaults to the deployed origin only; pass localhost origins
+      explicitly for local testing (see docs/runbooks/media.md §1) rather than
+      widening the default for everyone.
+    Default: "https://ai-release-stage.emotorad.com"
 
 Resources:
   MediaBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub emotorad-ai-${Environment}-media
       PublicAccessBlockConfiguration:
