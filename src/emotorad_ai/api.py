@@ -32,7 +32,7 @@ import base64
 import binascii
 import os
 import secrets
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import websockets
@@ -49,6 +49,9 @@ from .identity import IdentityResolver
 from .llm import select_llm
 from .observability import EventLog
 from .runtime import Runtime
+from .storage.keys import cluster_of, is_asset_key, is_customer_key
+from .storage.s3 import store_from_env
+from .storage.uploads import UploadError, UploadRegistry
 from .tools.mocks import build_registry
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
@@ -68,6 +71,12 @@ else:
     SECRETS_STATE = "empty"
 
 settings = load_settings()
+
+# Media: None when EMOTORAD_AI_MEDIA_BUCKET is unset. Then /uploads and /media
+# answer 503 with the reason, and the runtime sends no S3 evidence to the model.
+MEDIA_STORE = store_from_env()
+UPLOADS = UploadRegistry(MEDIA_STORE) if MEDIA_STORE is not None else None
+
 registry = build_registry()
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
@@ -79,10 +88,18 @@ runtime = Runtime(
     llm=select_llm(MODE, settings),
     log=log,
     resolver=resolver,
+    media_store=MEDIA_STORE,
 )
 adapter = WebsiteChatAdapter(resolver)
 
+# Claimed-attachment kind, as the adapter expects it — never string tricks.
+_ATTACHMENT_KIND = {"images": "image", "videos": "video", "docs": "document"}
+
 app = FastAPI(title="Emotorad AI — battery support")
+
+
+class AttachmentIn(BaseModel):
+    upload_id: str
 
 
 class MessageIn(BaseModel):
@@ -90,6 +107,7 @@ class MessageIn(BaseModel):
     session_token: str = "sess-ananya"
     text: str
     pill: Optional[str] = None
+    attachments: List[AttachmentIn] = []
 
 
 class MessageOut(BaseModel):
@@ -100,20 +118,107 @@ class MessageOut(BaseModel):
     handled_by: Optional[str]
 
 
+class AssetPath(BaseModel):
+    programme: str
+    category: str
+    kind: str
+    slug: str
+
+
+class UploadIn(BaseModel):
+    session_token: str = ""
+    conversation_id: Optional[str] = None
+    tree: str
+    mime_type: str
+    size_bytes: int
+    path: Optional[AssetPath] = None
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "mode": MODE, "secrets": SECRETS_STATE}
+    return {
+        "status": "ok",
+        "mode": MODE,
+        "secrets": SECRETS_STATE,
+        "media": "configured" if MEDIA_STORE is not None else "not configured",
+    }
+
+
+def _require_media() -> None:
+    if MEDIA_STORE is None or UPLOADS is None:
+        raise HTTPException(503, "Media storage is not configured on this deployment (EMOTORAD_AI_MEDIA_BUCKET).")
+
+
+def _cluster_for_session(session_token: str) -> str:
+    """The identity-graph cluster the session resolves to. Never the phone."""
+    _, identity = resolver.resolve_website(None, session_token or None)
+    if not identity.cluster_id:
+        raise HTTPException(400, "session does not resolve to a customer")
+    return identity.cluster_id
+
+
+@app.post("/uploads")
+def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
+    _require_media()
+    try:
+        if body.tree == "customers":
+            if not body.conversation_id:
+                raise HTTPException(400, "conversation_id is required for customer uploads")
+            cluster_id = _cluster_for_session(body.session_token)
+            pending, presign = UPLOADS.begin_customer(cluster_id, body.conversation_id, body.mime_type, body.size_bytes)
+        elif body.tree == "assets":
+            require_playground_auth(request)
+            if body.path is None:
+                raise HTTPException(400, "path is required for asset uploads")
+            pending, presign = UPLOADS.begin_asset(
+                body.path.programme, body.path.category, body.path.kind, body.path.slug, body.mime_type, body.size_bytes
+            )
+        else:
+            raise HTTPException(400, "tree must be 'customers' or 'assets'")
+    except UploadError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    return {"upload_id": pending.upload_id, "key": pending.key, **presign}
+
+
+@app.get("/media/{key:path}")
+def get_media(key: str, session_token: str = "") -> RedirectResponse:
+    _require_media()
+    if is_customer_key(key):
+        if cluster_of(key) != _cluster_for_session(session_token):
+            raise HTTPException(403, "not your attachment")
+    elif not is_asset_key(key):
+        raise HTTPException(404, "no such media")
+    # A fresh 15-minute link every time, so a transcript rendered later still loads.
+    return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)
 
 
 @app.post("/message", response_model=MessageOut)
 def post_message(body: MessageIn) -> MessageOut:
     conversation_id = body.conversation_id or new_conversation_id()
+
+    attachments: List[Dict[str, Any]] = []
+    if body.attachments:
+        _require_media()
+        try:
+            for item in body.attachments:
+                claimed = UPLOADS.claim(item.upload_id)
+                attachments.append(
+                    {
+                        "kind": _ATTACHMENT_KIND[claimed.kind],
+                        "url": "s3://" + claimed.key,
+                        "mime_type": claimed.mime,
+                    }
+                )
+        except UploadError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+
     message = adapter.to_message(
         {
             "conversation_id": conversation_id,
             "session_token": body.session_token,
             "text": body.text,
             "pill": body.pill,
+            "attachments": attachments,
         }
     )
     reply = runtime.handle(message)

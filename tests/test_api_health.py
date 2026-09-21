@@ -18,7 +18,10 @@ def fresh_api(env):
 class HealthTests(unittest.TestCase):
     def test_offline_reports_no_secret(self):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
-        self.assertEqual(api.health(), {"status": "ok", "mode": "offline", "secrets": "not configured"})
+        self.assertEqual(
+            api.health(),
+            {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured"},
+        )
 
     def test_a_secret_id_reports_loaded(self):
         api = fresh_api(
