@@ -6,6 +6,9 @@ name: Deploy to staging (EC2)
 on:
   workflow_dispatch: {}
 
+# The media bucket name below (EMOTORAD_AI_MEDIA_BUCKET) is not sensitive —
+# it is not a credential and grants no access on its own — so it is passed
+# straight through in the docker run line, same treatment as S3_BUCKET.
 env:
   AWS_REGION: ap-south-1
   S3_BUCKET: emotorad-ai-stage-851725486214
@@ -81,7 +84,7 @@ jobs:
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_CLOUDINARY_CLOUD=$EMOTORAD_CLOUDINARY_CLOUD emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_CLOUDINARY_CLOUD=$EMOTORAD_CLOUDINARY_CLOUD -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"
