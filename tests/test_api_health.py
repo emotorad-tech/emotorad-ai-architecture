@@ -23,6 +23,13 @@ class HealthTests(unittest.TestCase):
             {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured"},
         )
 
+    def test_registry_offers_the_guide_media_tool(self):
+        # The playground wires guide_media into build_registry so the model can
+        # send pictures. Production has to do the same, or a deployed agent
+        # can be asked for a picture and simply has no tool to send one with.
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline"})
+        self.assertIn("send_guide_media", api.registry.specs)
+
     def test_a_secret_id_reports_loaded(self):
         api = fresh_api(
             {

@@ -47,6 +47,7 @@ from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .identity import IdentityResolver
 from .llm import select_llm
+from .media import load_catalogue
 from .observability import EventLog
 from .runtime import Runtime
 from .storage.keys import cluster_of, is_customer_key, is_valid_key
@@ -77,7 +78,14 @@ settings = load_settings()
 MEDIA_STORE = store_from_env()
 UPLOADS = UploadRegistry(MEDIA_STORE) if MEDIA_STORE is not None else None
 
-registry = build_registry()
+# Per-conversation "already sent" state for send_guide_media, so the same
+# picture is not sent twice. In-memory like ConversationStore — module-level
+# is fine, matching how the playground keeps its own sent_media dict.
+SENT_GUIDE_MEDIA: Dict[str, set] = {}
+# load_catalogue() raises on a malformed catalogue, and that's deliberate: a
+# broken catalogue should fail the deploy's health check, not silently drop
+# guide pictures from every conversation.
+registry = build_registry(guide_media=load_catalogue(), sent_media=SENT_GUIDE_MEDIA)
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 runtime = Runtime(
