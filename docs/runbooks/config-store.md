@@ -11,6 +11,14 @@ a flat JSON object. Field names are the environment variables the code reads:
 | `EMOTORAD_AI_PLAYGROUND_USER` | `api.py` basic auth on `/playground` |
 | `EMOTORAD_AI_PLAYGROUND_PASSWORD` | `api.py` basic auth on `/playground` |
 
+### Note on EMOTORAD_OMS_API_KEY
+
+The entrypoint exports every field to the Streamlit child too, so with this field set,
+anyone holding the staging playground login can look up real customer warranties and
+orders by phone number in the playground's Live customer mode. Leave the field out of the
+secret until that exposure has been accepted; the API still starts without it — the OMS
+client raises a named error only when a tool needs it.
+
 Every command below uses `--profile emotorad-staging --region ap-south-1`. Set them once:
 
 ```bash
