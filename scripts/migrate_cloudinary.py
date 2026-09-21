@@ -88,10 +88,14 @@ def collect() -> List[Dict[str, str]]:
 
 
 def rewrite_ids(text: str, mapping: Dict[str, str]) -> str:
+    # Media ids only ever appear indented: `  - id:` list items in a record's
+    # `media:` list, or `  id:` mapping values in catalogue.yaml. A record's own
+    # stable top-level `id:` starts at column 0 and must never be rewritten, so
+    # leading whitespace is required, not just optional.
     def replace(match: "re.Match[str]") -> str:
         return match.group(1) + mapping.get(match.group(2), match.group(2))
 
-    return re.sub(r"^(\s*(?:-\s*)?id:\s*)(\S+)\s*$", replace, text, flags=re.MULTILINE)
+    return re.sub(r"^(\s+(?:-\s*)?id:\s*)(\S+)\s*$", replace, text, flags=re.MULTILINE)
 
 
 def main(argv=None) -> int:

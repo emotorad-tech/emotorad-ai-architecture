@@ -52,6 +52,14 @@ class MigrateTests(unittest.TestCase):
         self.assertIn("  - id: afs/battery/photos/soc-button-non-doodle.jpg\n", out)
         self.assertIn("caption: SOC_Button_non_doodle", out)
 
+    def test_rewrite_ids_does_not_touch_a_records_own_top_level_id(self):
+        migrate = load("migrate_cloudinary")
+        text = "id: SOC_Button_non_doodle\nmedia:\n  - id: SOC_Button_non_doodle\n    caption: x\n"
+        out = migrate.rewrite_ids(text, {"SOC_Button_non_doodle": "afs/battery/photos/soc-button-non-doodle.jpg"})
+        self.assertTrue(out.startswith("id: SOC_Button_non_doodle\n"))
+        self.assertIn("  - id: afs/battery/photos/soc-button-non-doodle.jpg\n", out)
+
+
 class SniffExtTests(unittest.TestCase):
     def test_sniff_ext_detects_a_png_regardless_of_the_planned_extension(self):
         migrate = load("migrate_cloudinary")
