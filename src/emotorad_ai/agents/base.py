@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from ..attachments import user_content
 from ..config import Settings
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
@@ -56,12 +57,14 @@ class Agent:
         llm: Any,
         log: EventLog,
         settings: Settings,
+        fetch: Optional[Callable[[str], bytes]] = None,
     ) -> None:
         self.definition = definition
         self.registry = registry
         self.llm = llm
         self.log = log
         self.settings = settings
+        self.fetch = fetch
 
     def run(
         self,
@@ -80,7 +83,7 @@ class Agent:
             cluster_id=resolved.cluster_id,
         )
 
-        history.append({"role": "user", "content": message.message_text})
+        history.append({"role": "user", "content": user_content(message, self.fetch)})
 
         turn = AgentTurn(text="", agent=self.definition.name)
         # Same tool, same arguments, twice: the model is stuck, and the remaining

@@ -74,12 +74,14 @@ class Runtime:
         log: Optional[EventLog] = None,
         resolver: Optional[IdentityResolver] = None,
         diagnostics_available: bool = False,
+        media_store: Any = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
         self.log = log or EventLog(path=self.settings.log_path, to_stdout=self.settings.log_to_stdout)
         self.llm = llm if llm is not None else BedrockClaude(self.settings)
         self.resolver = resolver or IdentityResolver(self.registry)
+        self.media_store = media_store
         self.conversations = ConversationStore()
         self.enricher = ContextEnricher()
         self.triage = TriageAgent(TOPIC_AGENTS)
@@ -90,8 +92,11 @@ class Runtime:
             LATE_WARRANTY: LATE_WARRANTY_DEFINITION,
             DEALER_ORDERS: DEALER_ORDERS_DEFINITION,
         }
+        # Evidence in S3 is fetched through the instance role and sent as base64;
+        # the model never sees a URL.
+        fetch = self.media_store.get_bytes if self.media_store is not None else None
         self.agents = {
-            name: Agent(definition, self.registry, self.llm, self.log, self.settings)
+            name: Agent(definition, self.registry, self.llm, self.log, self.settings, fetch=fetch)
             for name, definition in definitions.items()
         }
 
