@@ -69,6 +69,7 @@ S3, send the message with the upload id, read the delivered media back.
 # 1. presign
 curl -s -X POST http://127.0.0.1:8000/uploads -H 'Content-Type: application/json' \
   -d '{"session_token":"sess-ananya","conversation_id":"c1","tree":"customers","mime_type":"image/png","size_bytes":'"$(stat -f%z photo.png)"'}'
+# On Linux use `stat -c%s photo.png`.
 # 2. PUT the bytes to the returned url with the returned headers
 curl -s -X PUT "<url>" -H 'Content-Type: image/png' --data-binary @photo.png
 # 3. send the message with the upload id
