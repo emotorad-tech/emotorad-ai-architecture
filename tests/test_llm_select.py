@@ -111,6 +111,16 @@ class SelectTests(unittest.TestCase):
             select_llm("cloud", Settings(), environ={})
         self.assertIn("cloud", str(caught.exception))
 
+    def test_each_mode_gets_its_own_default_model_id(self):
+        a = select_llm("anthropic", Settings(), environ={"ANTHROPIC_API_KEY": "k"}, client=_Client(TOOL))
+        b = select_llm("bedrock", Settings(), environ={}, client=_Client(TOOL))
+        self.assertEqual(a.model, "claude-opus-5")
+        self.assertEqual(b.settings.model, "anthropic.claude-opus-5")
+
+    def test_emotorad_ai_model_overrides_the_default_for_the_active_mode(self):
+        a = select_llm("anthropic", Settings(), environ={"ANTHROPIC_API_KEY": "k", "EMOTORAD_AI_MODEL": "claude-sonnet-5"}, client=_Client(TOOL))
+        self.assertEqual(a.model, "claude-sonnet-5")
+
 
 if __name__ == "__main__":
     unittest.main()

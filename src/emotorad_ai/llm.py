@@ -11,10 +11,17 @@ from __future__ import annotations
 import itertools
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .config import Settings
+
+# Bedrock model IDs carry the `anthropic.` prefix; the first-party Anthropic
+# API does not. Settings.model (config.py, not changed here) defaults to the
+# Bedrock shape, so flipping EMOTORAD_AI_MODE=bedrock alone, with
+# EMOTORAD_AI_MODEL pinned to the Anthropic id for the anthropic path, would
+# otherwise send the unprefixed id to Bedrock. Each mode gets its own default.
+DEFAULT_MODELS: Dict[str, str] = {"anthropic": "claude-opus-5", "bedrock": "anthropic.claude-opus-5"}
 
 
 @dataclass(frozen=True)
@@ -157,9 +164,11 @@ def select_llm(mode: str, settings: Settings, environ: Optional[Mapping[str, str
                 "EMOTORAD_AI_MODE=anthropic but ANTHROPIC_API_KEY is not set "
                 "(the config store exports it from API_KEY_CLAUDE)"
             )
-        return AnthropicClaude(settings, api_key=key, client=client)
+        model = env.get("EMOTORAD_AI_MODEL") or DEFAULT_MODELS["anthropic"]
+        return AnthropicClaude(settings, api_key=key, model=model, client=client)
     if mode == "bedrock":
-        return BedrockClaude(settings, client=client)
+        model = env.get("EMOTORAD_AI_MODEL") or DEFAULT_MODELS["bedrock"]
+        return BedrockClaude(replace(settings, model=model), client=client)
     raise LLMConfigError("unknown EMOTORAD_AI_MODE %r; expected one of %s" % (mode, ", ".join(MODES)))
 
 

@@ -83,3 +83,9 @@ at container start.
 `EMOTORAD_AI_MODE` in the workflow's `docker run` line: `anthropic` (default), `bedrock`
 (needs `bedrock:InvokeModel` on the inference profile, see the deployment plan §1.1 and
 §2.1), or `offline`.
+
+`EMOTORAD_AI_MODE=bedrock` uses `anthropic.claude-opus-5` by default — the Bedrock-shaped
+model id, distinct from the Anthropic path's default of `claude-opus-5`. `EMOTORAD_AI_MODEL`,
+if set, overrides the default for whichever mode is active, so it must match that path's id
+format: the unprefixed id (`claude-opus-5`, `claude-sonnet-5`, …) for `anthropic`, the
+`anthropic.`-prefixed id for `bedrock`.
