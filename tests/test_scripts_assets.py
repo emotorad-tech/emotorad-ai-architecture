@@ -52,6 +52,33 @@ class MigrateTests(unittest.TestCase):
         self.assertIn("  - id: afs/battery/photos/soc-button-non-doodle.jpg\n", out)
         self.assertIn("caption: SOC_Button_non_doodle", out)
 
+class SniffExtTests(unittest.TestCase):
+    def test_sniff_ext_detects_a_png_regardless_of_the_planned_extension(self):
+        migrate = load("migrate_cloudinary")
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10)).save(buf, format="PNG")
+        self.assertEqual(migrate.sniff_ext(buf.getvalue()), "png")
+
+    def test_sniff_ext_detects_a_jpeg(self):
+        migrate = load("migrate_cloudinary")
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10)).save(buf, format="JPEG")
+        self.assertEqual(migrate.sniff_ext(buf.getvalue()), "jpg")
+
+    def test_sniff_ext_rejects_an_unsupported_format(self):
+        migrate = load("migrate_cloudinary")
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10)).save(buf, format="BMP")
+        with self.assertRaises(ValueError):
+            migrate.sniff_ext(buf.getvalue())
+
+    def test_with_sniffed_ext_replaces_the_extension_on_the_new_id(self):
+        migrate = load("migrate_cloudinary")
+        self.assertEqual(
+            migrate.with_sniffed_ext("afs/battery/photos/x.jpg", "png"),
+            "afs/battery/photos/x.png",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

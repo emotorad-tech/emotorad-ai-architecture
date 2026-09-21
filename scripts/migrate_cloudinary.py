@@ -12,6 +12,7 @@ lines are rewritten in place so nothing else changes. Review the diff, commit.
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import re
 import sys
@@ -22,12 +23,32 @@ from typing import Dict, List, Tuple
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "src"))
 
 import yaml  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from emotorad_ai import media  # noqa: E402
 from emotorad_ai.storage.s3 import BUCKET_ENV, S3Store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE = ROOT / "knowledge"
+
+# Cloudinary's delivery URL in main() carries an empty transform, so the bytes
+# come back in the source's own format, not the .jpg plan() always guesses for
+# images. Sniffing the true format after download is what stops a PNG being
+# uploaded and served as image/jpeg.
+_FORMAT_TO_EXT = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
+
+
+def sniff_ext(data: bytes) -> str:
+    fmt = Image.open(io.BytesIO(data)).format
+    try:
+        return _FORMAT_TO_EXT[fmt]
+    except KeyError:
+        raise ValueError("unsupported image format %r" % fmt) from None
+
+
+def with_sniffed_ext(new_id: str, ext: str) -> str:
+    stem, _, _old_ext = new_id.rpartition(".")
+    return "%s.%s" % (stem, ext)
 
 
 def slugify(public_id: str) -> str:
@@ -92,6 +113,15 @@ def main(argv=None) -> int:
         kind = "video" if new.split("/")[2] == "videos" else "image"
         url = media._delivery(kind, "", old)
         data = urllib.request.urlopen(url, timeout=120).read()
+        if kind == "image":
+            # The transform is empty, so Cloudinary returns the source's native
+            # format, not the .jpg every image is planned with. Sniff the real
+            # bytes and correct the id (and the mapping used to rewrite the
+            # YAML below) before anything is written or uploaded.
+            ext = sniff_ext(data)
+            if not new.endswith("." + ext):
+                new = with_sniffed_ext(new, ext)
+                mapping[old] = new
         programme, topic, folder, filename = new.split("/")
         local = ROOT / ".playground" / "migrate" / filename
         local.parent.mkdir(parents=True, exist_ok=True)
