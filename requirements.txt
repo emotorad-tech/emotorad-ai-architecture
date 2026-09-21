@@ -37,3 +37,8 @@ imageio-ffmpeg>=0.5
 # Droppable like the imageio lines above: without it, videos still send frames
 # and the narration is simply absent.
 faster-whisper>=1.0
+
+# Startup config: src/emotorad_ai/config_store.py reads one Secrets Manager
+# secret through the instance role and exports its fields as env vars. Local
+# runs without EMOTORAD_AI_SECRET_ID never import boto3's network paths.
+boto3>=1.34
