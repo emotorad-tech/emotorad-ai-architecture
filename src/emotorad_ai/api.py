@@ -1,10 +1,10 @@
 """HTTP entrypoint — the same skeleton `cli.py` drives, served over HTTP so it
 can run as an ECS/EC2 service instead of only from a terminal.
 
-Defaults to the offline planner (no Bedrock, no AWS credentials, no tokens
-spent) via `EMOTORAD_AI_MODE` — matching `cli.py --offline` — because real
-Bedrock access is not wired up yet (see docs/Emotorad_AWS_Deployment_Plan.md).
-Flip to real Claude once that's ready:
+The model path is chosen by `EMOTORAD_AI_MODE` — matching `cli.py`'s own
+`--offline`/`--anthropic`/`--bedrock` flags: `offline` for local runs with no
+credentials (the default, and what a bare `uvicorn emotorad_ai.api:app`
+gives you), `anthropic` on the deploy, and `bedrock` via the instance role.
 
     EMOTORAD_AI_MODE=anthropic ANTHROPIC_API_KEY=... uvicorn emotorad_ai.api:app   # deploy default
     EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app                          # instance role
