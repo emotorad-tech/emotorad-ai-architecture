@@ -72,6 +72,36 @@ class LoadTests(unittest.TestCase):
         load_into_environ(SECRET_ID, client=stubbed(json.dumps({"API_KEY_CLAUDE": 123})), environ=env)
         self.assertEqual(env["API_KEY_CLAUDE"], "123")
 
+    def test_a_null_field_is_skipped_not_exported_as_the_string_none(self):
+        env = {}
+        exported = load_into_environ(SECRET_ID, client=stubbed(json.dumps(dict(FIELDS, API_KEY_CLAUDE=None))), environ=env)
+        self.assertNotIn("API_KEY_CLAUDE", env)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("API_KEY_CLAUDE", exported)
+        self.assertEqual(env["EMOTORAD_OMS_API_KEY"], "oms-test")
+
+    def test_a_non_scalar_field_raises_before_anything_is_exported(self):
+        env = {}
+        with self.assertRaises(ConfigStoreError) as caught:
+            load_into_environ(SECRET_ID, client=stubbed(json.dumps(dict(FIELDS, API_KEY_CLAUDE={"nested": 1}))), environ=env)
+        self.assertIn("API_KEY_CLAUDE", str(caught.exception))
+        self.assertNotIn("nested", str(caught.exception))
+        self.assertEqual(env, {})
+
+    def test_the_real_os_environ_path_is_exercised(self):
+        from unittest import mock
+        import os
+        with mock.patch.dict(os.environ, {"EMOTORAD_AI_SECRET_ID": SECRET_ID}, clear=False):
+            for name in list(FIELDS) + ["ANTHROPIC_API_KEY"]:
+                os.environ.pop(name, None)
+            exported = load_into_environ(client=stubbed(json.dumps(FIELDS)))
+            try:
+                self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-ant-test")
+                self.assertIn("API_KEY_CLAUDE", exported)
+            finally:
+                for name in list(FIELDS) + ["ANTHROPIC_API_KEY"]:
+                    os.environ.pop(name, None)
+
 
 class FailureTests(unittest.TestCase):
     def test_a_missing_secret_raises_a_named_error(self):

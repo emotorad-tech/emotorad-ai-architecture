@@ -57,8 +57,21 @@ def load_into_environ(
 
     fields = _fetch(secret_id, client)
 
+    # Validate every field before exporting any of it, so a bad field later in
+    # the dict never leaves earlier fields already exported — a partial export
+    # is worse than none, because the caller has no way to tell it happened.
+    for name, value in fields.items():
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ConfigStoreError("secret %r: field %r must be a scalar" % (secret_id, name))
+
     exported: List[str] = []
     for name, value in fields.items():
+        if value is None:
+            # A JSON null means "not set". str(None) would export the literal
+            # string "None", which passes a truthiness/presence check further
+            # down the line and becomes a guessable credential (e.g. a
+            # playground password of "None").
+            continue
         for target in (name,) + ALIASES.get(name, ()):
             if target in env:
                 continue
