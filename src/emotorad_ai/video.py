@@ -143,17 +143,35 @@ def extract_frames(data: bytes, suffix: str, count: int = VIDEO_FRAMES) -> List[
     except ImportError:
         return []
 
+    import gc
+    import warnings
+
     frames: List[str] = []
-    try:
-        with tempfile.NamedTemporaryFile(suffix=suffix or ".mp4", delete=True) as handle:
-            handle.write(data)
-            handle.flush()
-            reader = imageio.get_reader(handle.name, "ffmpeg")
-            try:
+    reader = None
+    failed = False
+    # A corrupt clip makes ffmpeg exit immediately with an error, and
+    # imageio_ffmpeg's own cleanup only closes the subprocess's stdin/stdout
+    # pipes when the process is still running (it checks `process.poll() is
+    # None`) — so on that path `reader` is never even bound (get_reader()
+    # raised before returning) and those pipes are only reachable from the
+    # failed call, for the GC to notice and warn about at some unrelated
+    # later line, on some unrelated later test. The warning is suppressed
+    # for this whole attempt because it is reporting a close we were never
+    # in a position to make ourselves; gc.collect() below still finalizes
+    # the pipes deterministically, here, rather than leaving that to chance.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ResourceWarning)
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix or ".mp4", delete=True) as handle:
+                handle.write(data)
+                handle.flush()
+                # reader is bound before any of this can raise, so the finally
+                # below closes it however we leave this block.
+                reader = imageio.get_reader(handle.name, "ffmpeg")
                 meta = reader.get_meta_data()
-                # Estimated from duration × fps rather than count_frames(), which
-                # decodes the whole file to answer. Seeking to an index past the
-                # end raises, and that is caught per frame below.
+                # Estimated from duration × fps rather than count_frames(),
+                # which decodes the whole file to answer. Seeking to an index
+                # past the end raises, and that is caught per frame below.
                 total = int((meta.get("duration") or 0) * (meta.get("fps") or 0)) or 0
                 step = max(total // count, 1) if total else 1
                 for i in range(count):
@@ -166,8 +184,12 @@ def extract_frames(data: bytes, suffix: str, count: int = VIDEO_FRAMES) -> List[
                     buffer = io.BytesIO()
                     image.convert("RGB").save(buffer, format="JPEG", quality=80)
                     frames.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
-            finally:
+        except Exception:
+            failed = True
+        finally:
+            if reader is not None:
                 reader.close()
-    except Exception:
+        gc.collect()
+    if failed:
         return []
     return frames
