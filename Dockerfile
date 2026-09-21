@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
 COPY knowledge/ knowledge/
+COPY web/ web/
 COPY docker/start.py start.py
 
 ENV PYTHONPATH=/app/src

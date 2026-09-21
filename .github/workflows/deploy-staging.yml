@@ -55,7 +55,7 @@ jobs:
         run: |
           tar --exclude='.git' --exclude='tests' --exclude='docs' --exclude='logs' \
               --exclude='.playground' --exclude='requirements-dev.txt' --exclude='__pycache__' \
-              -czf app.tar.gz Dockerfile docker requirements.txt src knowledge
+              -czf app.tar.gz Dockerfile docker requirements.txt src knowledge web
 
       - name: Upload to S3 (versioned by commit, plus a "latest" pointer)
         run: |

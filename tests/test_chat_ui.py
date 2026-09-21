@@ -269,5 +269,27 @@ class LocationSharingTests(ChatPageTests):
         self.assertIn("Shared my location", self.html)
 
 
+class PackagingTests(unittest.TestCase):
+    """/chat reads web/emotorad-support-chat-dev.html (see api.py, CHAT_FILE),
+    but neither the Dockerfile nor the deploy tarball shipped web/ — the route
+    404s in a built image and would on staging too. Nothing else catches a
+    file that exists in the repo but not in the image."""
+
+    ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+    def test_the_chat_file_the_route_reads_is_inside_repo_web(self):
+        self.assertEqual(CHAT.parent, self.ROOT / "web")
+
+    def test_the_dockerfile_copies_web(self):
+        dockerfile = (self.ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertRegex(dockerfile, r"COPY web/")
+
+    def test_the_deploy_workflow_packages_web(self):
+        workflow = (self.ROOT / ".github" / "workflows" / "deploy-staging.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(" web", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()
