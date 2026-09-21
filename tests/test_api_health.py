@@ -1,0 +1,39 @@
+"""The health check is what the deploy workflow reads. It has to say which model
+path is live and whether the config store was used, so a container that started
+without its secret is visible in the workflow log rather than in a customer chat."""
+
+import importlib
+import os
+import unittest
+from unittest import mock
+
+
+def fresh_api(env):
+    with mock.patch.dict(os.environ, env, clear=False):
+        import emotorad_ai.api as api
+
+        return importlib.reload(api)
+
+
+class HealthTests(unittest.TestCase):
+    def test_offline_reports_no_secret(self):
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
+        self.assertEqual(api.health(), {"status": "ok", "mode": "offline", "secrets": "not configured"})
+
+    def test_a_secret_id_reports_loaded(self):
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "/emotorad/stage/ai/app"})
+        self.assertEqual(api.health()["secrets"], "loaded")
+
+    def test_anthropic_mode_without_a_key_fails_at_import(self):
+        from emotorad_ai.llm import LLMConfigError
+
+        with self.assertRaises(LLMConfigError):
+            fresh_api({"EMOTORAD_AI_MODE": "anthropic", "ANTHROPIC_API_KEY": ""})
+
+    @classmethod
+    def tearDownClass(cls):
+        fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
+
+
+if __name__ == "__main__":
+    unittest.main()

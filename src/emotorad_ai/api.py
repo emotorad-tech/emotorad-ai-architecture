@@ -6,7 +6,8 @@ spent) via `EMOTORAD_AI_MODE` — matching `cli.py --offline` — because real
 Bedrock access is not wired up yet (see docs/Emotorad_AWS_Deployment_Plan.md).
 Flip to real Claude once that's ready:
 
-    EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app
+    EMOTORAD_AI_MODE=anthropic ANTHROPIC_API_KEY=... uvicorn emotorad_ai.api:app   # deploy default
+    EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app                          # instance role
 
 Run locally:
 
@@ -42,14 +43,18 @@ from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
 from .config import load_settings
+from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .identity import IdentityResolver
-from .llm import OfflinePlanner
+from .llm import select_llm
 from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
+# Set by docker/start.py's loader. Reported by /health so a container that
+# started without its secret is visible from the deploy log.
+SECRETS_STATE = "loaded" if os.environ.get(SECRET_ID_ENV) else "not configured"
 
 settings = load_settings()
 registry = build_registry()
@@ -58,7 +63,9 @@ log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 runtime = Runtime(
     settings=settings,
     registry=registry,
-    llm=OfflinePlanner() if MODE == "offline" else None,
+    # Raises LLMConfigError at import when the mode cannot be served, so the
+    # deploy's health check fails instead of the first customer message.
+    llm=select_llm(MODE, settings),
     log=log,
     resolver=resolver,
 )
@@ -84,7 +91,7 @@ class MessageOut(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "mode": MODE}
+    return {"status": "ok", "mode": MODE, "secrets": SECRETS_STATE}
 
 
 @app.post("/message", response_model=MessageOut)
