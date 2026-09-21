@@ -18,6 +18,11 @@ logs/
 *.dump
 # ...except the dealer flow spec, which is documentation, not data.
 !docs/dealer-whatsapp-flows/*.xlsx
+# ...and the India Post pincode directory, which is public reference data
+# from data.gov.in, not a customer export. `*.csv` silently kept it out of
+# the repo, so a fresh clone cannot import emotorad_ai.api at all:
+# build_registry() loads it eagerly and raises FileNotFoundError.
+!knowledge/_replacement/pincodes.csv
 
 # Never commit credentials.
 .env
