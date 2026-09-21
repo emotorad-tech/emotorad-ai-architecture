@@ -18,6 +18,7 @@ from emotorad_ai.storage.keys import (
     extension_for,
     is_asset_key,
     is_customer_key,
+    is_valid_key,
     new_upload_id,
     playground_key,
 )
@@ -112,6 +113,26 @@ class PlaygroundKeyTests(unittest.TestCase):
     def test_a_chat_id_with_a_slash_is_refused(self):
         with self.assertRaises(KeyValidationError):
             playground_key("20260921/ab12cd34", "images", "deadbeef", "image/png")
+
+
+class IsValidKeyTests(unittest.TestCase):
+    def test_accepts_a_customer_key(self):
+        self.assertTrue(is_valid_key("customers/clu_1/conv_1/images/upl_1.jpg"))
+
+    def test_accepts_an_asset_key_and_its_derivatives(self):
+        self.assertTrue(is_valid_key("assets/afs/battery/photos/soc-button.jpg"))
+        self.assertTrue(is_valid_key("assets/afs/battery/photos/soc-button.w900.webp"))
+        self.assertTrue(is_valid_key("assets/afs/battery/videos/key-turn.poster.jpg"))
+
+    def test_rejects_a_prefix_only_match(self):
+        self.assertFalse(is_valid_key("assets/../customers/x/y/images/z.jpg"))
+        self.assertFalse(is_valid_key("assets/%2e%2e/customers/x/y/images/z.jpg"))
+
+    def test_rejects_an_unknown_extension(self):
+        self.assertFalse(is_valid_key("customers/clu/conv/images/z.exe"))
+
+    def test_rejects_anything_outside_the_two_trees(self):
+        self.assertFalse(is_valid_key("deploy/app.tar.gz"))
 
 
 if __name__ == "__main__":

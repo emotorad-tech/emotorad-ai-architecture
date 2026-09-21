@@ -49,7 +49,7 @@ from .identity import IdentityResolver
 from .llm import select_llm
 from .observability import EventLog
 from .runtime import Runtime
-from .storage.keys import cluster_of, is_asset_key, is_customer_key
+from .storage.keys import cluster_of, is_customer_key, is_valid_key
 from .storage.s3 import store_from_env
 from .storage.uploads import UploadError, UploadRegistry
 from .tools.mocks import build_registry
@@ -183,11 +183,13 @@ def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
 @app.get("/media/{key:path}")
 def get_media(key: str, session_token: str = "") -> RedirectResponse:
     _require_media()
+    if not is_valid_key(key):
+        # A prefix test (is_customer_key/is_asset_key) lets a path like
+        # `assets/../customers/...` through; the full grammar does not.
+        raise HTTPException(404, "no such media")
     if is_customer_key(key):
         if cluster_of(key) != _cluster_for_session(session_token):
             raise HTTPException(403, "not your attachment")
-    elif not is_asset_key(key):
-        raise HTTPException(404, "no such media")
     # A fresh 15-minute link every time, so a transcript rendered later still loads.
     return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)
 

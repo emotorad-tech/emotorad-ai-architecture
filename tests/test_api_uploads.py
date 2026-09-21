@@ -94,6 +94,12 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(r.status_code, 302)
         self.assertEqual(self.client.get("/media/deploy/app.tar.gz", follow_redirects=False).status_code, 404)
 
+    def test_media_rejects_a_key_that_only_matches_by_prefix(self):
+        r = self.client.get("/media/assets/%2e%2e/customers/clu_1/c1/images/u.jpg", follow_redirects=False)
+        self.assertEqual(r.status_code, 404)
+        r = self.client.get("/media/assets%2f..%2fcustomers/x/y/images/z.jpg", follow_redirects=False)
+        self.assertEqual(r.status_code, 404)
+
 
     def test_message_refuses_another_sessions_upload(self):
         body = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "image/png", "size_bytes": 9}).json()

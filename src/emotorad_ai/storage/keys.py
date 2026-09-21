@@ -148,3 +148,13 @@ def cluster_of(key: str) -> str:
     if not is_customer_key(key):
         raise KeyValidationError("not a customer key: %r" % key)
     return key.split("/", 2)[1]
+
+
+_CUSTOMER_KEY = re.compile(r"^customers/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/(?:images|videos|docs)/[A-Za-z0-9_-]+\.(?:jpg|png|webp|mp4|pdf)$")
+_ASSET_KEY = re.compile(r"^assets/(?:afs|presales|dealer)/[a-z0-9][a-z0-9-]*/(?:photos|videos|tips|docs)/[a-z0-9][a-z0-9-]*(?:\.w900|\.poster)?\.(?:jpg|png|webp|mp4|pdf)$")
+
+
+def is_valid_key(key: str) -> bool:
+    """The full grammar this module produces. `/media` must accept nothing
+    else: a prefix test lets `assets/../customers/...` through."""
+    return bool(_CUSTOMER_KEY.match(key) or _ASSET_KEY.match(key))
