@@ -24,8 +24,9 @@ it is a day of work and unblocks the playground on staging immediately.
 
 ## 2. The secret
 
-One Secrets Manager secret per environment, named `emotorad-ai/<env>/app`, in
-`ap-south-1`. The value is a flat JSON object. Field names are the environment variable
+One Secrets Manager secret per environment, named `/emotorad/<env>/ai/app`, in
+`ap-south-1`, following the account's existing convention (`/emotorad/stage/website/api`,
+`/emotorad/prod/website/api`). The value is a flat JSON object. Field names are the environment variable
 names the code already reads, except the Anthropic key, which is stored under the name
 the team uses for it:
 
@@ -114,7 +115,7 @@ says "Key from environment". The text box stays for local use with no key set.
 `.github/workflows/deploy-staging.yml`:
 
 - Remove `-e EMOTORAD_AI_PLAYGROUND_USER=...` and `-e EMOTORAD_AI_PLAYGROUND_PASSWORD=...`.
-- Add `-e EMOTORAD_AI_SECRET_ID=emotorad-ai/stage/app -e EMOTORAD_AI_MODE=anthropic
+- Add `-e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic
   -e EMOTORAD_AI_MODEL=claude-opus-5`. Neither value is sensitive.
 - Delete the GitHub Actions secrets `PLAYGROUND_BASIC_AUTH_USER` and
   `PLAYGROUND_BASIC_AUTH_PASSWORD` once the first deploy with the loader succeeds (manual
@@ -124,13 +125,17 @@ says "Key from environment". The text box stays for local use with no key set.
 
 ## 6. Infrastructure: `infra/config-store.yaml` and a runbook
 
-No AWS credentials exist on the engineering Mac and the AWS MCP server cannot connect, so
-the code cannot create anything. The change ships a CloudFormation template and a runbook
-a person with account access runs once per environment:
+Account facts, read on 2026-09-21 with the `emotorad-staging` CLI profile (account
+`851725486214`): the instance role is `emotorad-ai-stage-ec2-role` (inline policy
+`emotorad-ai-stage-inline`: S3 on the deploy bucket, CloudWatch logs; no Secrets Manager,
+no Bedrock). The GitHub deploy role `emotorad-ai-github-deploy` needs no change. The change
+ships a CloudFormation template, applied with `aws cloudformation deploy` from the CLI for
+staging now and re-run with one parameter for prod:
 
 - `infra/config-store.yaml`: the `AWS::SecretsManager::Secret` shell (no value), and an
   `AWS::IAM::ManagedPolicy` granting `secretsmanager:GetSecretValue` on that one ARN,
-  attached to the existing instance role by name (parameter).
+  attached to the existing instance role by name (parameter, default
+  `emotorad-ai-stage-ec2-role`).
 - `docs/runbooks/config-store.md`: deploy the stack, set the value with `put-secret-value`
   from a JSON file that is then shredded, redeploy, confirm `/health` reports
   `secrets: loaded`, delete the two Actions secrets. Rotation is the same page.

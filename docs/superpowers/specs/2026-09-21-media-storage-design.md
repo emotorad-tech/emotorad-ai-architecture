@@ -159,9 +159,16 @@ Configuration: `EMOTORAD_AI_MEDIA_BUCKET` (unset → uploads disabled, `/uploads
 `infra/media.yaml` (CloudFormation): the bucket with public-access block, versioning,
 SSE-S3, the two lifecycle rules, CORS with the origin as a parameter; a managed policy
 with `s3:PutObject`, `s3:GetObject`, `s3:HeadObject` on `arn:aws:s3:::<bucket>/*` and
-`s3:ListBucket` on the bucket, attached to the instance role. Runbook in
-`docs/runbooks/media.md`. Run by a person with account access; nothing in code creates
-infrastructure.
+`s3:ListBucket` on the bucket, attached to the instance role `emotorad-ai-stage-ec2-role`
+(parameter). Applied with `aws cloudformation deploy` from the CLI (`emotorad-staging`
+profile) for staging; prod is a re-run with the environment parameter. Runbook in
+`docs/runbooks/media.md`.
+
+Decided 2026-09-21: a **new** bucket, not the existing `emotorad-ai-stage-851725486214`,
+which holds deploy tarballs and has no versioning, lifecycle or CORS. Customer evidence is
+personal data and gets its own bucket, rules and future prod split. The one orphan object
+under `playground-uploads/` in the old bucket (2026-08-25, referenced by no code on `main`)
+is deleted in the runbook.
 
 ## 9. Testing
 
