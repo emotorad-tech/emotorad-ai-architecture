@@ -19,6 +19,20 @@ export AWS_PROFILE=emotorad-staging AWS_REGION=ap-south-1
 
 ## 1. Create the secret shell and the role permission (once per environment)
 
+### Pre-flight: IMDS hop limit
+
+The container fetches instance-role credentials through Docker's bridge network, which
+needs `HttpPutResponseHopLimit` of at least 2 on the instance.
+
+```bash
+aws ec2 describe-instances --instance-ids i-02e7dc2874e0fdacb \
+  --query 'Reservations[0].Instances[0].MetadataOptions.[HttpTokens,HttpPutResponseHopLimit]' --output text
+```
+
+The hop limit must be 2 or more, or the container cannot reach the instance role and will
+restart-loop after the deploy has already removed the old container. Raise it with
+`aws ec2 modify-instance-metadata-options --instance-id i-02e7dc2874e0fdacb --http-put-response-hop-limit 2 --http-tokens required`.
+
 ```bash
 aws cloudformation deploy \
   --stack-name emotorad-ai-stage-config-store \
