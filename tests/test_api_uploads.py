@@ -95,6 +95,22 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(self.client.get("/media/deploy/app.tar.gz", follow_redirects=False).status_code, 404)
 
 
+    def test_message_refuses_another_sessions_upload(self):
+        body = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "image/png", "size_bytes": 9}).json()
+        self.store.objects[body["key"]] = {"size": 9, "mime": "image/png"}
+        r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-rohit", "text": "x", "attachments": [{"upload_id": body["upload_id"]}]})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.store.fetched, [])
+
+    def test_message_with_an_asset_upload_id_is_403_not_500(self):
+        asset_body = {"tree": "assets", "mime_type": "image/png", "size_bytes": 9, "path": {"programme": "afs", "category": "battery", "kind": "photos", "slug": "soc-button"}}
+        body = self.client.post("/uploads", json=asset_body, headers=AUTH).json()
+        self.store.objects[body["key"]] = {"size": 9, "mime": "image/png"}
+        r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya", "text": "x", "attachments": [{"upload_id": body["upload_id"]}]})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.store.fetched, [])
+
+
 class NoBucketTests(unittest.TestCase):
     def test_uploads_and_media_are_503_without_a_bucket(self):
         api = fresh_api(None)

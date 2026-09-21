@@ -199,9 +199,15 @@ def post_message(body: MessageIn) -> MessageOut:
     attachments: List[Dict[str, Any]] = []
     if body.attachments:
         _require_media()
+        caller_cluster = _cluster_for_session(body.session_token)
         try:
             for item in body.attachments:
                 claimed = UPLOADS.claim(item.upload_id)
+                if not is_customer_key(claimed.key) or cluster_of(claimed.key) != caller_cluster:
+                    # Not a customer key at all (e.g. an assets/ upload id) or a
+                    # customer key from a different cluster: either way, this
+                    # session did not upload it.
+                    raise HTTPException(403, "not your upload")
                 attachments.append(
                     {
                         "kind": _ATTACHMENT_KIND[claimed.kind],
