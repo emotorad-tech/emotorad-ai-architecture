@@ -79,7 +79,9 @@ from emotorad_ai.errorcodes import load_table as load_error_codes
 from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE, check_evidence
 from emotorad_ai.identity import IdentityResolver, ResolvedIdentity
 from emotorad_ai.playground_version import CHANGELOG, PLAYGROUND_VERSION
+from emotorad_ai import media
 from emotorad_ai.media import load_catalogue
+from emotorad_ai.storage import keys as storage_keys
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import (
     LOOKUP_ERROR_CODE,
@@ -410,16 +412,56 @@ def _get_blob(attachment: Dict[str, Any]) -> str:
     try:
         return _blob_path(blob_id).read_text()
     except OSError:
+        pass
+    # The local cache file is gone (e.g. a redeploy on staging wiped the
+    # container's disk). Refill it from S3 when this attachment was mirrored
+    # there, so the next read is local again.
+    s3_key = attachment.get("s3_key")
+    if not s3_key:
+        return ""
+    try:
+        store = media.store_for_resolve()
+        if store is None:
+            return ""
+        data_b64 = base64.b64encode(store.get_bytes(s3_key)).decode()
+        _blob_path(blob_id).write_text(data_b64)
+        return data_b64
+    except Exception:
         return ""
 
 
-def _externalise_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _externalise_attachments(attachments: List[Dict[str, Any]], chat_id: str = "") -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for attachment in attachments:
         record = {k: v for k, v in attachment.items() if k != "data"}
         data = attachment.get("data")
         if data:
             record["blob_id"] = _put_blob(data)
+            store = media.store_for_resolve()
+            if store is not None:
+                # Staging: the container is rebuilt on every deploy, so a blob on
+                # disk is gone by next week. The bytes go to S3 under a
+                # playground-only prefix; the local file is a cache.
+                mime = attachment.get("mime_type") or "application/octet-stream"
+                try:
+                    ext = storage_keys.extension_for(mime)
+                except storage_keys.KeyValidationError:
+                    ext = "bin"
+                key = "customers/playground/%s/%s/%s.%s" % (
+                    chat_id or "unknown",
+                    storage_keys.customer_kind_for(mime),
+                    record["blob_id"],
+                    ext,
+                )
+                try:
+                    store.put_bytes(key, base64.b64decode(data), mime)
+                except Exception:
+                    # The local file was already written above; a store failure
+                    # must not lose the attachment, so nothing is recorded and
+                    # the blob simply stays local-only for now.
+                    pass
+                else:
+                    record["s3_key"] = key
             if _is_video(attachment):
                 # Sampled once, here, and stored by reference. Decoding is slow
                 # and deterministic, and the alternative is re-running ffmpeg on
@@ -504,7 +546,7 @@ def _migrate_legacy_chat(agent_name: str) -> None:
     loaded.setdefault("chat_id", _new_chat_id())
     loaded.setdefault("started_at", "")
     loaded["turns"] = [
-        dict(turn, attachments=_externalise_attachments(turn.get("attachments") or []))
+        dict(turn, attachments=_externalise_attachments(turn.get("attachments") or [], loaded["chat_id"]))
         for turn in loaded["turns"]
     ]
     _save_chat(agent_name, loaded)
@@ -1587,7 +1629,7 @@ def main() -> None:
                 "content": user_text.strip() if user_text else "(Uploaded file(s) for review)",
                 "proof_note": proof_note,
                 # Bytes go to the blob store; the turn keeps only a reference.
-                "attachments": _externalise_attachments(attachments),
+                "attachments": _externalise_attachments(attachments, chat["chat_id"]),
                 "prompt_version": _prompt_version_label(agent_name, edited_prompt),
             })
 
