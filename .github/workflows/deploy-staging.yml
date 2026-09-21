@@ -101,5 +101,11 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 5
-          curl -sf https://ai-release-stage.emotorad.com/health | tee /dev/stderr | grep -q '"secrets":"loaded"'
+          for attempt in $(seq 1 6); do
+            sleep 5
+            if curl -sf https://ai-release-stage.emotorad.com/health | tee /dev/stderr | grep -q '"secrets":"loaded"'; then
+              exit 0
+            fi
+            echo "health check attempt $attempt: not ready yet" >&2
+          done
+          exit 1
