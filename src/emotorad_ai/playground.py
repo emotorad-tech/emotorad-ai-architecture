@@ -429,7 +429,8 @@ def _get_blob(attachment: Dict[str, Any]) -> str:
         data_b64 = base64.b64encode(store.get_bytes(s3_key)).decode()
         _blob_path(blob_id).write_text(data_b64)
         return data_b64
-    except Exception:
+    except Exception as exc:
+        _log.warning("playground media: get failed for %s: %s", s3_key, type(exc).__name__)
         return ""
 
 
@@ -455,11 +456,11 @@ def _externalise_attachments(attachments: List[Dict[str, Any]], chat_id: str = "
                 else:
                     try:
                         store.put_bytes(key, base64.b64decode(data), mime)
-                    except Exception:
+                    except Exception as exc:
                         # The local file was already written above; a store
                         # failure must not lose the attachment, so nothing is
                         # recorded and the blob simply stays local-only for now.
-                        pass
+                        _log.warning("playground media: put failed for %s: %s", key, type(exc).__name__)
                     else:
                         record["s3_key"] = key
             if _is_video(attachment):

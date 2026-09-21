@@ -23,6 +23,16 @@ class _Store:
         return self.objects[key][0]
 
 
+class _BrokenStore:
+    """Every call raises, to exercise the failure paths in isolation."""
+
+    def put_bytes(self, key, data, mime):
+        raise RuntimeError("put boom")
+
+    def get_bytes(self, key):
+        raise RuntimeError("get boom")
+
+
 class BlobTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -69,6 +79,25 @@ class BlobTests(unittest.TestCase):
             blocks = playground._attachment_blocks([attachment])
         self.assertTrue(any(b.get("type") == "image" for b in blocks))
         self.assertFalse(any("could not be read" in b.get("text", "") for b in blocks))
+
+    def test_a_put_failure_is_logged_with_the_key_not_swallowed(self):
+        broken = _BrokenStore()
+        with mock.patch.object(playground, "BLOB_DIR", self.blob_dir), mock.patch.object(media, "store_for_resolve", return_value=broken):
+            with self.assertLogs(playground.__name__, level="WARNING") as log:
+                records = playground._externalise_attachments([{"name": "a.png", "kind": "image", "mime_type": "image/png", "data": PNG_B64}], "chat-1")
+        self.assertNotIn("s3_key", records[0])
+        self.assertTrue(any("put failed" in line and "customers/playground/chat-1" in line for line in log.output))
+        # Never the bytes themselves, only the key and the exception type.
+        self.assertFalse(any("PNG fake" in line for line in log.output))
+
+    def test_a_get_failure_is_logged_with_the_key_not_swallowed(self):
+        broken = _BrokenStore()
+        with mock.patch.object(playground, "BLOB_DIR", self.blob_dir), mock.patch.object(media, "store_for_resolve", return_value=broken):
+            attachment = {"blob_id": "missing-blob", "s3_key": "customers/playground/chat-1/images/missing-blob.png"}
+            with self.assertLogs(playground.__name__, level="WARNING") as log:
+                result = playground._get_blob(attachment)
+        self.assertEqual(result, "")
+        self.assertTrue(any("get failed" in line and "missing-blob.png" in line for line in log.output))
 
 
 if __name__ == "__main__":
