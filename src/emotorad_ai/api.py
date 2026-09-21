@@ -43,6 +43,7 @@ from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
 from .config import load_settings
+from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .identity import IdentityResolver
 from .llm import select_llm
@@ -55,14 +56,16 @@ MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 # string), after load_into_environ() succeeds. Reported by /health so a
 # container that started without its secret — or whose secret exported
 # nothing — is visible from the deploy log, distinct from one that never had
-# a secret configured at all.
+# a secret configured at all. The secret ID must be set for a secret to be
+# configured; no secret ID means nothing was configured, so we check that
+# first before looking at the export count.
 _CONFIG_EXPORTED = os.environ.get("EMOTORAD_AI_CONFIG_EXPORTED")
-if _CONFIG_EXPORTED is None:
+if not os.environ.get(SECRET_ID_ENV):
     SECRETS_STATE = "not configured"
-elif _CONFIG_EXPORTED == "0":
-    SECRETS_STATE = "empty"
-else:
+elif _CONFIG_EXPORTED and int(_CONFIG_EXPORTED) > 0:
     SECRETS_STATE = "loaded"
+else:
+    SECRETS_STATE = "empty"
 
 settings = load_settings()
 registry = build_registry()
