@@ -116,6 +116,10 @@ record is migrated and confirmed serving from S3, remove `EMOTORAD_CLOUDINARY_CL
 aws s3 rm --recursive s3://emotorad-ai-stage-media/customers/<cluster_id>/
 ```
 
+Run this with a person's own admin credentials, not the instance role — the role's
+policy only grants `PutObject`/`GetObject`/`ListBucket` (see `MediaAccessPolicy` in
+`infra/media.yaml`), on purpose, so a compromised instance cannot delete evidence.
+
 The 180-day lifecycle rule (`customer-evidence-180d`) handles the routine case; this is
 for an explicit deletion request ahead of that.
 

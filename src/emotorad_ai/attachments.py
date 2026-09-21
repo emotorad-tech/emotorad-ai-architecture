@@ -78,7 +78,7 @@ def _payload(attachment: Attachment, fetch: Optional[Callable[[str], bytes]]) ->
     return None
 
 
-def _video_blocks(data: bytes, mime: str, name: str) -> List[Dict[str, Any]]:
+def _video_blocks(data: bytes, name: str) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
     suffix = ".mp4"
     wav = video.extract_audio(data, suffix)
@@ -144,7 +144,7 @@ def content_blocks(
             continue
 
         if video.is_video(mime, name):
-            blocks.extend(_video_blocks(payload, mime, name))
+            blocks.extend(_video_blocks(payload, name))
         elif mime.startswith("image/"):
             fitted, fitted_mime = fit_for_model(payload, mime)
             blocks.append(

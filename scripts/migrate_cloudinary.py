@@ -15,6 +15,7 @@ import argparse
 import io
 import os
 import re
+import shutil
 import sys
 import urllib.request
 from pathlib import Path
@@ -138,6 +139,11 @@ def main(argv=None) -> int:
         if new_text != text:
             path.write_text(new_text)
             print("rewrote %s" % path.relative_to(ROOT))
+    # Everything uploaded and every YAML id rewritten: the local downloads
+    # were only ever a staging area for upload_asset, not an artifact worth
+    # keeping. ignore_errors so a half-cleaned or already-absent directory
+    # never turns a successful migration into a failing one.
+    shutil.rmtree(ROOT / ".playground" / "migrate", ignore_errors=True)
     return 0
 
 
