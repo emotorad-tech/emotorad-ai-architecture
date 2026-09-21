@@ -61,8 +61,10 @@ assets/presales/emx-plus/photos/front-view.jpg
 - `slug` is `[a-z0-9-]+`. Extension is derived from the MIME type, never from the file
   name.
 - Knowledge records keep `id:` as `media.py` already requires. The id **is** the key
-  without the `assets/` prefix and extension: `id: afs/battery/photos/soc-button`. One
-  line in a YAML record, resolved in one place.
+  without the `assets/` prefix, extension included: `id: afs/battery/photos/soc-button.jpg`.
+  An id is an S3 asset only when its first segment is a programme (`afs`, `presales`,
+  `dealer`) and it ends in a known extension; anything else is a Cloudinary public id.
+  One line in a YAML record, resolved in one place.
 
 ### 3.2 `customers/` — uploaded by customers, private evidence
 

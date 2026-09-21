@@ -54,6 +54,22 @@ class S3IdTests(unittest.TestCase):
         self.assertFalse(is_asset_id("afs"))
         self.assertFalse(is_asset_id("SOC_Button_non_doodle"))
 
+    def test_is_asset_id_needs_a_known_extension_too(self):
+        from emotorad_ai.media import is_asset_id
+
+        # A programme prefix without a known extension on the last segment is
+        # not enough: without this check, `resolve` falls through to the
+        # Cloudinary path exactly as an id without a programme prefix does.
+        self.assertFalse(is_asset_id("afs/battery/photos/soc-button"))
+
+    def test_an_asset_id_without_an_extension_is_unresolved(self):
+        with mock.patch.dict("os.environ", {"EMOTORAD_CLOUDINARY_CLOUD": ""}):
+            out = resolve({"id": "afs/battery/photos/soc-button", "caption": "c"}, store=_Store())
+        from emotorad_ai.media import is_asset_id
+
+        self.assertFalse(is_asset_id("afs/battery/photos/soc-button"))
+        self.assertTrue(out["unresolved"])
+
 
 if __name__ == "__main__":
     unittest.main()

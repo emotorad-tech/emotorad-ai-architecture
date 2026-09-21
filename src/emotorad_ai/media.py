@@ -87,12 +87,20 @@ def cloud_name() -> str:
     return os.environ.get(CLOUD_NAME_ENV, "")
 
 
+_KNOWN_EXTENSIONS = tuple(storage_keys.MIME_TYPES.values())
+
+
 def is_asset_id(public_id: str) -> bool:
     """S3 asset ids are `<programme>/<category>/<kind>/<slug>.<ext>`; the leading
     programme segment is the discriminator. Cloudinary ids may contain slashes
-    (Media Library folders), so a bare slash proves nothing."""
+    (Media Library folders), so a bare slash proves nothing — and neither does
+    the programme prefix alone: without also requiring a known extension on the
+    last segment, `resolve` would fall through to the Cloudinary path exactly as
+    an id without a programme prefix does."""
     head, sep, _ = public_id.partition("/")
-    return bool(sep) and head in storage_keys.PROGRAMMES
+    if not sep or head not in storage_keys.PROGRAMMES:
+        return False
+    return public_id.endswith(tuple("." + ext for ext in _KNOWN_EXTENSIONS))
 
 
 def _delivery(kind: str, transform: str, public_id: str) -> Optional[str]:
