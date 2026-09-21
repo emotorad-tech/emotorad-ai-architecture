@@ -14,6 +14,9 @@ logs/
 *.xlsx
 *.xls
 *.csv
+# The one CSV that is public data, not customer data: India Post's pincode
+# directory, which address.py needs at startup.
+!knowledge/_replacement/pincodes.csv
 *.sql
 *.dump
 # ...except the dealer flow spec, which is documentation, not data.
