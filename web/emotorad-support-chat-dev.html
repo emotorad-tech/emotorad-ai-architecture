@@ -153,6 +153,13 @@
      somebody is holding their own battery up against one. Still tappable for
      the full-screen view. */
   .bubble-media { max-width: 240px; border-radius: 16px; display: block; cursor: zoom-in; }
+  /* A control the bot offered under its reply, such as "Share my location".
+     A chip, not a link: it does something on this page rather than leaving it. */
+  .action-chip { display: inline-flex; align-items: center; gap: 6px; margin: 2px 0 4px 34px;
+    padding: 9px 14px; border-radius: 999px; border: 1.5px solid var(--accent); color: var(--accent);
+    background: #FFFFFF; font-size: 14px; font-weight: 600; cursor: pointer; user-select: none; }
+  .action-chip:active { background: #FFF7F2; }
+  .action-chip.is-used { opacity: 0.45; pointer-events: none; }
 
   /* A photo that has been picked and not yet sent. Sits between the chat and
      the composer, so what is about to go out is visible before it goes. */
@@ -532,6 +539,17 @@ function aiAvatar(size) {
 function renderAiTurnHtml(turn) {
   var html = '<div class="msg-row ai">' + aiAvatar("sm") +
     '<div class="bubble-text bubble-ai">' + renderMarkdown(turn.text) + "</div></div>";
+  // Controls the agent offered. The tool named the action; the page decides
+  // what it does. Only kinds this page knows are rendered, so a new kind on
+  // the server is invisible here rather than a broken button.
+  (turn.actions || []).forEach(function (a) {
+    if (a.kind === "request_location") {
+      html += '<div class="msg-row ai"><div class="action-chip' + (turn.actionUsed ? " is-used" : "") +
+        '" data-action="request_location">' +
+        '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>' +
+        esc(a.label || "Share my location") + "</div></div>";
+    }
+  });
   // Guide photos and clips the agent chose to send. It picks a catalogue key;
   // code resolves the URL, so nothing here is ever a link the model typed.
   (turn.attachments || []).forEach(function (a) {
@@ -582,8 +600,39 @@ function render() {
   Array.prototype.forEach.call(scroll.querySelectorAll(".bubble-media"), function (img) {
     img.addEventListener("click", function () { openLightbox(img.getAttribute("data-full")); });
   });
+  Array.prototype.forEach.call(scroll.querySelectorAll('[data-action="request_location"]'), function (chip) {
+    chip.addEventListener("click", shareLocation);
+  });
   pinToBottom();
   renderFooter();
+}
+
+/* "Share my location": one permission prompt, one position, one request. The
+   coordinates go in the request body and nowhere else; the server turns them
+   into a pincode and the transcript shows only that the location was shared.
+   Every failure (no geolocation, permission refused, timeout) ends the same
+   way: a local note to type the pincode, and the conversation carries on. */
+function shareLocation() {
+  if (state.busy) return;
+  var fallback = "I couldn't get your location from the phone. Please type the pincode instead.";
+  function markUsed() {
+    for (var i = state.turns.length - 1; i >= 0; i--) {
+      if (!state.turns[i].isUser && (state.turns[i].actions || []).length) { state.turns[i].actionUsed = true; break; }
+    }
+  }
+  if (!navigator.geolocation) {
+    state.turns.push({ isUser: false, text: fallback, attachments: [] });
+    render();
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(function (pos) {
+    markUsed();
+    state.turns.push({ isUser: true, text: "Shared my location" });
+    ask("", { latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+  }, function () {
+    state.turns.push({ isUser: false, text: fallback, attachments: [] });
+    render();
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
 }
 
 /* Keep the newest message against the composer. Called after every render and
@@ -658,8 +707,9 @@ function composerDisabled(busy) {
   paintSendButton();
 }
 
-/* The one real integration: ask the agent, render what comes back. */
-function ask(text) {
+/* The one real integration: ask the agent, render what comes back. `location`
+   is set only by shareLocation; it is sent once and not kept anywhere. */
+function ask(text, location) {
   state.busy = true;
   render();
   // Cleared here rather than in the response handler: it has already been put
@@ -676,7 +726,8 @@ function ask(text) {
       em_aid: emAid(),
       agent: "battery_support",
       text: text,
-      attachments: sentPhoto ? [{ kind: "image", url: sentPhoto }] : []
+      attachments: sentPhoto ? [{ kind: "image", url: sentPhoto }] : [],
+      location: location || null
     })
   }).then(function (r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -684,7 +735,7 @@ function ask(text) {
   }).then(function (reply) {
     state.conversationId = reply.conversation_id;
     state.busy = false;
-    state.turns.push({ isUser: false, text: reply.text, attachments: reply.attachments || [] });
+    state.turns.push({ isUser: false, text: reply.text, attachments: reply.attachments || [], actions: reply.actions || [] });
     render();
     pollDevCode();
   }).catch(function (err) {

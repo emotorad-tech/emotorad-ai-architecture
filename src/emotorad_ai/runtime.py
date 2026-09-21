@@ -55,6 +55,7 @@ from .observability import EventLog
 from .tools.mocks import (
     CREATE_SUPPORT_TICKET,
     LOOKUP_WARRANTY_RECORD,
+    OFFER_LOCATION_SHARE,
     PLACE_REPLACEMENT_ORDER,
     RAISE_INTAKE_TICKET,
     build_registry,
@@ -90,6 +91,11 @@ SELF_SERVICE_IDENTITY_TOOLS = (
     FIND_ACCOUNT_BY_CODE,
     RAISE_INTAKE_TICKET,
 )
+
+# Tools that exist because of what the surface can render, not who the
+# customer is. Added to the slice the same way: only when the registry holds
+# them, which it does only when the surface asked for them.
+SELF_SERVICE_SURFACE_TOOLS = (OFFER_LOCATION_SHARE,)
 
 
 class Runtime:
@@ -150,7 +156,7 @@ class Runtime:
         unregistered tool would advertise one the model cannot call.
         """
         names = list(definition.tool_names)
-        for extra in SELF_SERVICE_IDENTITY_TOOLS:
+        for extra in SELF_SERVICE_IDENTITY_TOOLS + SELF_SERVICE_SURFACE_TOOLS:
             if extra in self.registry.specs and extra not in names:
                 names.append(extra)
         return replace(definition, tool_names=tuple(names))
@@ -410,6 +416,7 @@ class Runtime:
                 for item in turn.attachments
                 if item.get("url")
             ],
+            actions=list(turn.actions),
             metadata={"tool_calls": [c["tool"] for c in turn.tool_calls], "iterations": turn.iterations},
         )
 

@@ -168,6 +168,10 @@ class Reply:
     # someone where the charger seats beats describing it, and without this field
     # the media authored into the knowledge base has nowhere to go.
     attachments: List[Attachment] = field(default_factory=list)
+    # Controls for the surface to render under the reply, such as a "Share my
+    # location" button: {"kind": ..., "label": ...}. Empty on every channel
+    # that has nothing to render them with.
+    actions: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

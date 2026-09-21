@@ -244,5 +244,30 @@ class AttachSheetTests(ChatPageTests):
         self.assertIn("pendingPhoto", body)
 
 
+class LocationSharingTests(ChatPageTests):
+    """The Zomato entry point: the bot offers a button, the phone supplies the
+    coordinates once, and the pincode comes back in the bot's next question.
+    Asked for on 2026-09-21 when the tester saw the bot ask for a pincode."""
+
+    def test_a_request_location_action_renders_a_button(self):
+        self.assertIn('"request_location"', self.html)
+        self.assertIn("action-chip", self.html)
+
+    def test_the_button_uses_the_browsers_geolocation(self):
+        self.assertIn("navigator.geolocation.getCurrentPosition", self.html)
+
+    def test_coordinates_are_posted_and_nothing_else_about_them_is_kept(self):
+        body = self.html[self.html.index("function ask("):]
+        body = body[:body.index("\n}", 1)]
+        self.assertIn("location:", body)
+        self.assertNotIn("localStorage", body)
+
+    def test_a_refused_permission_tells_the_customer_to_type_the_pincode(self):
+        self.assertIn("type the pincode", self.html)
+
+    def test_the_transcript_shows_the_share_as_the_customers_turn(self):
+        self.assertIn("Shared my location", self.html)
+
+
 if __name__ == "__main__":
     unittest.main()

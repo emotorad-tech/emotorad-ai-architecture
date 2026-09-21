@@ -48,6 +48,9 @@ class AgentTurn:
     # left to the model, which cannot see images and would have to be trusted to
     # copy a URL correctly.
     attachments: List[Dict[str, Any]] = field(default_factory=list)
+    # Things the surface should render as controls, not text: a "Share my
+    # location" button. Named by code inside a tool result, never by the model.
+    actions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class Agent:
@@ -238,6 +241,9 @@ class Agent:
                     for item in (envelope.get("data") or {}).get("media", []) or []:
                         if item not in turn.attachments:
                             turn.attachments.append(item)
+                    action = (envelope.get("data") or {}).get("action")
+                    if isinstance(action, dict) and action not in turn.actions:
+                        turn.actions.append(action)
 
                 results.append(
                     {

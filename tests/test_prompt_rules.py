@@ -33,6 +33,11 @@ class PromptRuleTests(unittest.TestCase):
                      "pincode_invalid", "pincode_unknown", "city_required", "address_unconfirmed"):
             self.assertIn("`%s`" % code, self.text)
 
+    def test_the_location_button_is_offered_with_the_pincode_question(self):
+        """offer_location_share puts the button under the reply; nothing else does."""
+        self.assertIn("call `offer_location_share`", self.text)
+        self.assertIn('"I shared my location"', self.text)
+
     def test_an_in_flight_order_is_reported_as_existing(self):
         """The order post-check blocks 'done' on an already_placed turn."""
         self.assertIn("nothing new was placed", self.text)

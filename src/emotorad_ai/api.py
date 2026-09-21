@@ -38,7 +38,7 @@ import httpx
 import websockets
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
@@ -48,7 +48,9 @@ from .contract import new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .identity import IdentityResolver
+from .address import PincodeDirectory
 from .llm import AnthropicClaude, OfflinePlanner
+from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
 from .runtime import Runtime
@@ -112,6 +114,7 @@ def _build_registry():
             replacement_orders=replacement_orders,
             item_codes=ItemCodes(),
             approval_mode=settings.approval_mode,
+            location_sharing=True,
         )
     client = OMSClient()
     return build_registry(
@@ -123,10 +126,18 @@ def _build_registry():
         replacement_orders=replacement_orders,
         item_codes=ItemCodes(),
         approval_mode=settings.approval_mode,
+        location_sharing=True,
     )
 
 
 registry = _build_registry()
+
+# The reverse geocoder behind "Share my location". OpenStreetMap's public
+# service for this LAN test server; a production provider swaps in here. The
+# tests replace it with a fake. See location.py for what is and is not trusted
+# from it.
+geocoder = NominatimGeocoder()
+pincode_directory = PincodeDirectory.load()
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 runtime = Runtime(
@@ -189,6 +200,18 @@ class MessageIn(BaseModel):
     # and the None branch re-asks the same sentence forever. Its own docstring
     # says None means "the model decides", and nothing asks the model yet.
     agent: Optional[str] = None
+    # A tapped "Share my location". Turned into the customer's own message
+    # (pincode and area) before anything else sees it; the coordinates are
+    # used once for that and kept nowhere. See location.py.
+    location: Optional["LocationIn"] = None
+
+
+class LocationIn(BaseModel):
+    latitude: float = Field(ge=-90.0, le=90.0)
+    longitude: float = Field(ge=-180.0, le=180.0)
+
+
+MessageIn.model_rebuild()
 
 
 # The agents this surface may pin. Website chat serves customers, so the dealer
@@ -229,6 +252,10 @@ class MessageOut(BaseModel):
     # all along; this layer computed them and then dropped them on the floor, so
     # over HTTP the bot could never show anyone the SOC button it was describing.
     attachments: List[AttachmentOut] = []
+    # Controls to render under the reply, such as the "Share my location"
+    # button: {"kind": "request_location", "label": ...}. Named by code in a
+    # tool result, never typed by the model.
+    actions: List[dict] = []
 
 
 @app.get("/health")
@@ -248,12 +275,20 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         validate_attachments(body.attachments)
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    text = body.text
+    if body.location is not None:
+        # Resolved here, before the message exists, so the coordinates never
+        # become part of anything that is logged or handed to the model.
+        located = resolve_location(
+            body.location.latitude, body.location.longitude, geocoder, pincode_directory
+        )
+        text = describe_location(located)
     message = adapter.to_message(
         {
             "conversation_id": conversation_id,
             "session_token": body.session_token,
             "em_aid": body.em_aid,
-            "text": body.text,
+            "text": text,
             "pill": body.pill,
             "attachments": body.attachments or [],
         }
@@ -282,6 +317,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
             AttachmentOut(kind=a.kind, url=a.url, mime_type=a.mime_type)
             for a in reply.attachments
         ],
+        actions=list(reply.actions),
     )
 
 

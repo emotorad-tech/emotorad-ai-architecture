@@ -41,6 +41,7 @@ RAISE_INTAKE_TICKET = "raise_intake_ticket"
 # knowledge record whose steps it illustrates, and moves there once the flow
 # is lifted out of the prompt.
 SEND_GUIDE_MEDIA = "send_guide_media"
+OFFER_LOCATION_SHARE = "offer_location_share"
 # Display error code -> what it means on *this* bike. Exact lookup, never a
 # near match: a confidently wrong diagnosis is the worst output available.
 LOOKUP_ERROR_CODE = "lookup_error_code"
@@ -379,6 +380,10 @@ def build_registry(
     replacement_orders: Optional["ReplacementOrders"] = None,
     item_codes: Optional["ItemCodes"] = None,
     approval_mode: str = "reasonable",
+    # True only on a surface with a location button (the website chat).
+    # WhatsApp shares location natively and IVR cannot; neither is offered a
+    # button that does not exist there.
+    location_sharing: bool = False,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -1025,6 +1030,25 @@ def build_registry(
                 "credit_available_after": priced["credit_available"] - priced["total"],
             }
         )
+
+    if location_sharing:
+
+        @registry.register(
+            OFFER_LOCATION_SHARE,
+            "Put a 'Share my location' button under your reply. Call it in the same turn as "
+            "asking for the delivery pincode, so the customer can tap instead of typing. "
+            "If they use it, their next message carries the pincode and area it resolved "
+            "to; treat that pincode as given and confirm the area. No arguments.",
+            parameters={},
+            required=(),
+            injects=("conversation_id",),
+        )
+        def offer_location_share(conversation_id: str) -> Dict[str, Any]:
+            # The action is what the page renders; the model gets told it is
+            # there and nothing else. Code names the action, the way code
+            # resolves a guide photo's URL: nothing here is a string the model
+            # chose.
+            return ok({"offered": True, "action": {"kind": "request_location", "label": "Share my location"}})
 
     if replacement_orders is not None:
         parts_table = load_parts_table()
