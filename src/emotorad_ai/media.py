@@ -7,8 +7,16 @@ alongside the steps they illustrate, and reach the customer through
 ``OutboundMessage.attachments``. Nothing here is model-supplied: the model reads
 captions and chooses a *record*, never a URL, so it cannot invent one.
 
-**Records store an id, not a URL.** ``emotorad/kb/battery/soc-button`` rather
-than ``https://res.cloudinary.com/<cloud>/image/upload/f_auto,q_auto,w_900/...``.
+**Records store an id, not a URL.** An id is an S3 asset key when its first
+path segment is a programme from ``storage.keys.PROGRAMMES`` (``afs``,
+``presales``, ``dealer``) — see ``is_asset_id()``. Such an id is looked up
+under ``assets/`` (extension included), signed through the store from
+``storage.s3``, with derivatives from ``storage.keys.derivative_keys``. Every
+other id is a Cloudinary public id, e.g. ``SOC_Button_non_doodle`` or the
+folder-qualified ``emotorad/kb/battery/soc-button`` — Cloudinary ids may
+themselves contain slashes (Media Library folders), so a bare slash proves
+nothing — rather than
+``https://res.cloudinary.com/<cloud>/image/upload/f_auto,q_auto,w_900/...``.
 The cloud name, the transformations and the format live here, in one place, so
 changing any of them — or moving off Cloudinary entirely — is an edit to this
 module rather than a hunt through every content file. Same reasoning as
@@ -27,8 +35,26 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Mapping, Optional
 
+from .storage import keys as storage_keys
+
 CLOUD_NAME_ENV = "EMOTORAD_CLOUDINARY_CLOUD"
 BASE = "https://res.cloudinary.com"
+
+_store: Any = None
+_store_loaded = False
+
+
+def store_for_resolve() -> Any:
+    """The S3 store from the environment, built once per process. Tests reset
+    `_store`/`_store_loaded` to force a rebuild."""
+    global _store, _store_loaded
+    if not _store_loaded:
+        from .storage.s3 import store_from_env
+
+        _store = store_from_env()
+        _store_loaded = True
+    return _store
+
 
 # `f_auto` serves WebP/AVIF to clients that take them and JPEG to those that do
 # not; `q_auto` picks a quality per image. Both matter more than they sound on
@@ -61,6 +87,14 @@ def cloud_name() -> str:
     return os.environ.get(CLOUD_NAME_ENV, "")
 
 
+def is_asset_id(public_id: str) -> bool:
+    """S3 asset ids are `<programme>/<category>/<kind>/<slug>.<ext>`; the leading
+    programme segment is the discriminator. Cloudinary ids may contain slashes
+    (Media Library folders), so a bare slash proves nothing."""
+    head, sep, _ = public_id.partition("/")
+    return bool(sep) and head in storage_keys.PROGRAMMES
+
+
 def _delivery(kind: str, transform: str, public_id: str) -> Optional[str]:
     cloud = cloud_name()
     if not cloud:
@@ -71,7 +105,7 @@ def _delivery(kind: str, transform: str, public_id: str) -> Optional[str]:
     return "/".join(part for part in segments if part)
 
 
-def resolve(item: Mapping[str, Any]) -> Dict[str, Any]:
+def resolve(item: Mapping[str, Any], store: Any = None) -> Dict[str, Any]:
     """One authored media item as something a chat client can render.
 
     Always returns a dict rather than raising or dropping the item. A photo that
@@ -96,6 +130,42 @@ def resolve(item: Mapping[str, Any]) -> Dict[str, Any]:
     public_id = item.get("id")
     if not public_id:
         resolved.update({"url": None, "unresolved": True, "reason": "no id or url on this media item"})
+        return resolved
+
+    if is_asset_id(public_id):
+        # An S3 asset key (without the assets/ prefix). Everything else, slash
+        # or not, is a Cloudinary public id and keeps working unchanged.
+        s3 = store if store is not None else store_for_resolve()
+        if s3 is None:
+            resolved.update(
+                {
+                    "url": None,
+                    "unresolved": True,
+                    "reason": "%s is not set, so %r cannot be turned into a URL"
+                    % ("EMOTORAD_AI_MEDIA_BUCKET", public_id),
+                }
+            )
+            return resolved
+        key = "assets/" + public_id.lstrip("/")
+        derivatives = storage_keys.derivative_keys(key)
+        original = s3.presign_get(key)
+        if kind == "video":
+            resolved.update(
+                {
+                    "url": original,
+                    "fallback": original,
+                    "poster": s3.presign_get(derivatives["poster"]) if "poster" in derivatives else None,
+                    "unresolved": False,
+                }
+            )
+        else:
+            resolved.update(
+                {
+                    "url": s3.presign_get(derivatives["w900"]) if "w900" in derivatives else original,
+                    "fallback": original,
+                    "unresolved": False,
+                }
+            )
         return resolved
 
     delivery = _delivery(kind, VIDEO_TRANSFORM if kind == "video" else IMAGE_TRANSFORM, public_id)
