@@ -28,8 +28,18 @@ class S3Store:
             self._client = client
         else:
             import boto3  # imported lazily: tests inject a client
+            from botocore.config import Config
 
-            self._client = boto3.client("s3", region_name=region or os.environ.get("AWS_REGION", "ap-south-1"))
+            region = region or os.environ.get("AWS_REGION", "ap-south-1")
+            # SigV4 plus the regional endpoint: without both, botocore signs presigned
+            # URLs against bucket.s3.amazonaws.com and S3 answers 307 for a bucket in
+            # ap-south-1, which a browser PUT will not follow with its body.
+            self._client = boto3.client(
+                "s3",
+                region_name=region,
+                endpoint_url="https://s3.%s.amazonaws.com" % region,
+                config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+            )
 
     def presign_put(self, key: str, mime: str, size: int) -> Dict[str, Any]:
         url = self._client.generate_presigned_url(

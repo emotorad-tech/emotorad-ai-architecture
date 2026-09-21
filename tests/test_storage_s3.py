@@ -75,6 +75,18 @@ class ObjectTests(unittest.TestCase):
         stub.assert_no_pending_responses()
 
 
+class RealClientTests(unittest.TestCase):
+    def test_presign_get_uses_sigv4_and_the_regional_endpoint(self):
+        # No injected client: this exercises the real boto3.client(...) construction
+        # in S3Store.__init__, which is what actually produced 307s against the
+        # global endpoint for the ap-south-1 bucket.
+        with mock.patch.dict("os.environ", {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}):
+            store = S3Store("emotorad-ai-stage-media", region="ap-south-1")
+            url = store.presign_get("k")
+        self.assertIn("emotorad-ai-stage-media.s3.ap-south-1.amazonaws.com", url)
+        self.assertIn("X-Amz-Algorithm=AWS4-HMAC-SHA256", url)
+
+
 class FromEnvTests(unittest.TestCase):
     def test_no_bucket_means_no_store(self):
         self.assertIsNone(store_from_env(environ={}))
