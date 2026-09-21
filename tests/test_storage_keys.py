@@ -19,6 +19,7 @@ from emotorad_ai.storage.keys import (
     is_asset_key,
     is_customer_key,
     new_upload_id,
+    playground_key,
 )
 
 
@@ -99,6 +100,18 @@ class CustomerKeyTests(unittest.TestCase):
         self.assertLessEqual(a[:14], b[:14])
         self.assertRegex(a, r"^upl_[0-9a-z]{10}[0-9a-z]{8}$")
         self.assertNotEqual(a, b)
+
+
+class PlaygroundKeyTests(unittest.TestCase):
+    def test_a_well_formed_playground_key(self):
+        self.assertEqual(
+            playground_key("20260921-ab12cd34", "images", "deadbeef", "image/png"),
+            "customers/playground/20260921-ab12cd34/images/deadbeef.png",
+        )
+
+    def test_a_chat_id_with_a_slash_is_refused(self):
+        with self.assertRaises(KeyValidationError):
+            playground_key("20260921/ab12cd34", "images", "deadbeef", "image/png")
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ import difflib
 import hashlib
 import importlib
 import json
+import logging
 import mimetypes
 import os
 import sys
@@ -102,6 +103,8 @@ from emotorad_ai.tools.verification import (
 
 from emotorad_ai import video
 from emotorad_ai.video import FRAME_MAX_EDGE, VIDEO_FRAMES, VIDEO_TYPES, WHISPER_MODEL  # noqa: F401  (kept for callers)
+
+_log = logging.getLogger(__name__)
 
 _ffmpeg_exe = video.ffmpeg_exe
 _transcribe_audio = video.transcribe_audio
@@ -444,24 +447,21 @@ def _externalise_attachments(attachments: List[Dict[str, Any]], chat_id: str = "
                 # playground-only prefix; the local file is a cache.
                 mime = attachment.get("mime_type") or "application/octet-stream"
                 try:
-                    ext = storage_keys.extension_for(mime)
-                except storage_keys.KeyValidationError:
-                    ext = "bin"
-                key = "customers/playground/%s/%s/%s.%s" % (
-                    chat_id or "unknown",
-                    storage_keys.customer_kind_for(mime),
-                    record["blob_id"],
-                    ext,
-                )
-                try:
-                    store.put_bytes(key, base64.b64decode(data), mime)
-                except Exception:
-                    # The local file was already written above; a store failure
-                    # must not lose the attachment, so nothing is recorded and
-                    # the blob simply stays local-only for now.
-                    pass
+                    key = storage_keys.playground_key(chat_id or "unknown", storage_keys.customer_kind_for(mime), record["blob_id"], mime)
+                except storage_keys.KeyValidationError as exc:
+                    # An unsupported MIME type or an odd chat id means "do not
+                    # mirror" — the blob simply stays local-only for now.
+                    _log.warning("playground media: key failed for chat %s: %s", chat_id or "unknown", type(exc).__name__)
                 else:
-                    record["s3_key"] = key
+                    try:
+                        store.put_bytes(key, base64.b64decode(data), mime)
+                    except Exception:
+                        # The local file was already written above; a store
+                        # failure must not lose the attachment, so nothing is
+                        # recorded and the blob simply stays local-only for now.
+                        pass
+                    else:
+                        record["s3_key"] = key
             if _is_video(attachment):
                 # Sampled once, here, and stored by reference. Decoding is slow
                 # and deterministic, and the alternative is re-running ffmpeg on
