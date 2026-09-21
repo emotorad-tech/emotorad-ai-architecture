@@ -21,10 +21,21 @@ class PromptRuleTests(unittest.TestCase):
 
     def test_the_address_is_read_back_once_before_ordering(self):
         """The provenance check accepts a read-back the customer agreed to."""
-        self.assertIn("read the whole address back once", self.text)
+        self.assertIn("read that back once", self.text)
 
-    def test_pincode_required_is_handled(self):
-        self.assertIn("`pincode_required`", self.text)
+    def test_the_city_and_state_are_never_asked_for(self):
+        """The pincode directory fills them; a typed city fails provenance."""
+        self.assertIn("Do not ask for the city or state", self.text)
+
+    def test_every_address_error_code_is_handled(self):
+        """The codes place_replacement_order raises for an address."""
+        for code in ("address_required", "record_address_missing", "address_incomplete",
+                     "pincode_invalid", "pincode_unknown", "city_required", "address_unconfirmed"):
+            self.assertIn("`%s`" % code, self.text)
+
+    def test_an_in_flight_order_is_reported_as_existing(self):
+        """The order post-check blocks 'done' on an already_placed turn."""
+        self.assertIn("nothing new was placed", self.text)
 
     def test_a_picture_is_not_narrated_as_arriving(self):
         """Seen live: 'That comparison photo is on its way to you now', twice."""

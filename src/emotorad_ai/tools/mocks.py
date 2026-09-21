@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
 from .. import media as media_module
+from ..address import AddressError, PincodeDirectory, assemble, parse_address
 from ..conversation import address_tokens
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
@@ -1028,6 +1029,8 @@ def build_registry(
     if replacement_orders is not None:
         parts_table = load_parts_table()
         codes = item_codes or ItemCodes()
+        # Loaded once per process and shared; 19,584 rows, under a megabyte.
+        pincodes = PincodeDirectory.load()
 
         @registry.register(
             PLACE_REPLACEMENT_ORDER,
@@ -1052,19 +1055,43 @@ def build_registry(
                     "enum": sorted(p for p, r in parts_table.items() if not r.technician and not r.ask),
                     "description": "The part the flow concluded needs replacing.",
                 },
-                "confirmed_address": {
-                    "type": "string",
+                "use_record_address": {
+                    "type": "boolean",
                     "description": (
-                        "The delivery address the customer confirmed in this conversation: the one from "
-                        "lookup_warranty_record if they said it is still right, or the one they gave instead."
+                        "True when the customer said the delivery_address from lookup_warranty_record "
+                        "is still right. Ships to that address as it stands on the record."
                     ),
+                },
+                "address": {
+                    "type": "object",
+                    "description": (
+                        "A delivery address the customer gave in this conversation, field by field, "
+                        "after you read the assembled address back and they agreed. City and state "
+                        "are not fields: they come from the pincode. Every value must be the "
+                        "customer's own words."
+                    ),
+                    "properties": {
+                        "house_or_flat": {"type": "string", "description": "House, flat or plot number, with tower or wing if any."},
+                        "building_or_street": {"type": "string", "description": "Building or society name, or the street."},
+                        "area": {"type": "string", "description": "Area, sector, locality or village."},
+                        "landmark": {"type": "string", "description": "Optional. A nearby landmark, in the customer's words."},
+                        "pincode": {"type": "string", "description": "Six-digit pincode."},
+                        "city": {
+                            "type": "string",
+                            "description": (
+                                "Only when the tool answered city_required: the district the customer "
+                                "picked from the options it listed."
+                            ),
+                        },
+                    },
+                    "required": ["house_or_flat", "building_or_street", "area", "pincode"],
                 },
                 "idempotency_key": {
                     "type": "string",
                     "description": "Stable key for this order, so a retry does not place it twice.",
                 },
             },
-            required=("part", "confirmed_address", "idempotency_key"),
+            required=("part", "idempotency_key"),
             injects=("phone", "conversation_id", "evidence_seen", "coverage_result", "customer_messages"),
             write=True,
         )
@@ -1075,9 +1102,10 @@ def build_registry(
             coverage_result: Dict[str, Any],
             customer_messages: List[str],
             part: str,
-            confirmed_address: str,
             idempotency_key: str,
             frame_number: Optional[str] = None,
+            use_record_address: bool = False,
+            address: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
             rule = parts_table.get(part)
             if rule is None:
@@ -1096,10 +1124,11 @@ def build_registry(
                     "ordering it to an address is a later build." % part,
                     remedy="human_handoff",
                 )
-            if not (confirmed_address or "").strip():
+            if not use_record_address and not address:
                 raise ToolError(
                     "address_required",
-                    "Read the delivery address back to the customer and pass what they confirmed.",
+                    "Pass use_record_address if the customer said the record's address is still "
+                    "right, or the address they gave, field by field, after reading it back.",
                 )
 
             bike = _owned_bike(phone, frame_number, bikes_on)
@@ -1107,42 +1136,79 @@ def build_registry(
                 raise ToolError("frame_number_required", "No bike could be resolved for this order.")
             frame = bike["frame_number"]
 
-            # The address backstop, in two parts.
+            # The address backstop. Two ways in, both decided here.
             #
-            # First, a pincode. An Indian delivery address without one is
-            # undeliverable, and on 2026-09-20 the model shipped an order
-            # without one because dropping the pincode was the only way past
-            # the old check. A refusal a model can route around by degrading
-            # its input is worse than no check; this one cannot be.
-            if not _PINCODE.search(confirmed_address):
-                raise ToolError(
-                    "pincode_required",
-                    "The delivery address needs a six-digit pincode. Ask for it and pass the "
-                    "full address with the pincode included.",
-                )
-
-            # Second, provenance. Every word of the address must have been
-            # typed by the customer somewhere in this conversation, or be on
-            # the record. Compared as a set of words, because the customer
-            # gives the street in one message and the pincode in another and
-            # the model reorders them into a postal shape. Without this a model
-            # could invent an address and the tool would ship to it on the
-            # model's word alone.
-            wanted = address_tokens(confirmed_address)
+            # The record's address ships as it stands: the customer said it is
+            # still right, and nothing in it is the model's. A record with no
+            # address (Krishna's OMS row) is a refusal, not an empty line.
+            #
+            # An address from the conversation is structured, so every field
+            # is required by name; on 2026-09-20 the model shipped an order
+            # without a pincode because dropping it was the only way past the
+            # old check, and on the 21st it shipped one without a city or
+            # state because nothing asked for either. A refusal a model can
+            # route around by degrading its input is worse than no check.
+            #
+            # Provenance is per field: every word the customer is said to have
+            # given must have been typed by them somewhere in this
+            # conversation, or be on the record. City and state are never
+            # typed; the pincode directory supplies them, and where a pincode
+            # straddles two states the customer picks from that set.
+            #
             # `full_address` is the raw record's field name; `_coverage()`
             # renames it to `delivery_address` for the model-facing lookup
             # result, but this reads the same record directly.
-            known = address_tokens(_clean(bike.get("full_address")) or "")
-            for message in customer_messages:
-                known |= address_tokens(message)
-            unknown = sorted(wanted - known)
-            if unknown:
-                raise ToolError(
-                    "address_unconfirmed",
-                    "These parts of the address were not typed by the customer and are not on "
-                    "the record: %s. Read the address back and pass what they confirmed."
-                    % ", ".join(unknown),
-                )
+            record_address = _clean(bike.get("full_address")) or ""
+            if use_record_address:
+                if not record_address.strip():
+                    raise ToolError(
+                        "record_address_missing",
+                        "There is no delivery address on this customer's record. Collect one, "
+                        "field by field, and pass it as address.",
+                    )
+                delivery_address = record_address.strip()
+            else:
+                try:
+                    parsed = parse_address(address or {})
+                except AddressError as exc:
+                    raise ToolError(exc.code, exc.message)
+                known = address_tokens(record_address)
+                for message in customer_messages:
+                    known |= address_tokens(message)
+                unconfirmed = []
+                for name, value in parsed.customer_fields().items():
+                    unknown = sorted(address_tokens(value) - known)
+                    if unknown:
+                        unconfirmed.append("%s: %s" % (name, ", ".join(unknown)))
+                if unconfirmed:
+                    raise ToolError(
+                        "address_unconfirmed",
+                        "These parts of the address were not typed by the customer and are not on "
+                        "the record (%s). Read the address back and pass what they confirmed."
+                        % "; ".join(unconfirmed),
+                    )
+                places = pincodes.lookup(parsed.pincode)
+                if not places:
+                    raise ToolError(
+                        "pincode_unknown",
+                        "%s is not a pincode India Post delivers to. Ask the customer to check it."
+                        % parsed.pincode,
+                    )
+                states = sorted({place.state for place in places})
+                picked = (address or {}).get("city")
+                if len(states) > 1:
+                    options = "; ".join("%s, %s" % (p.district, p.state) for p in places)
+                    match = [p for p in places if picked and p.district.lower() == str(picked).strip().lower()]
+                    if not match:
+                        raise ToolError(
+                            "city_required",
+                            "Pincode %s is served from more than one state. Ask the customer which of "
+                            "these it is and pass the district as city: %s." % (parsed.pincode, options),
+                        )
+                    place = match[0]
+                else:
+                    place = places[0]
+                delivery_address = assemble(parsed, place)
 
             # Coverage, from the lookup the runtime remembered. Chargeable is a
             # later build; refusing it here keeps the model from improvising a
@@ -1199,7 +1265,7 @@ def build_registry(
                 frame_number=frame,
                 part=part,
                 item_code=item_code,
-                delivery_address=confirmed_address.strip(),
+                delivery_address=delivery_address,
                 phone=phone,
                 conversation_id=conversation_id,
                 sure=sure,

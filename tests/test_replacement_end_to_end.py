@@ -56,7 +56,7 @@ class KrishnaTests(unittest.TestCase):
             call_tool("lookup_warranty_record", {}),
             say("Found your EMX Plus. Could you send a photo of the battery terminal?"),
             say("That terminal is heat damaged, which is a defect and is covered. Is this still the right address: " + ADDRESS + "?"),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "conv-1-battery"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "conv-1-battery"}),
             say("Done. Order RO-00001 is on its way to " + ADDRESS + ". Keep the old battery off the bike."),
         ])
         _send(runtime, adapter, "my battery terminal has melted")
@@ -73,7 +73,7 @@ class KrishnaTests(unittest.TestCase):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it."),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "k"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "k"}),
             say("I have raised order RO-00001; someone will confirm it."),
         ])
         _send(runtime, adapter, "my battery is dead, just replace it")
@@ -101,7 +101,7 @@ class KrishnaTests(unittest.TestCase):
             call_tool("lookup_warranty_record", {}),
             call_tool(
                 PLACE_REPLACEMENT_ORDER,
-                {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "one-turn"},
+                {"part": "battery", "use_record_address": True, "idempotency_key": "one-turn"},
             ),
             say("Done. Order RO-00001 is on its way."),
         ])
@@ -116,7 +116,7 @@ class KrishnaTests(unittest.TestCase):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it. Address still right: " + ADDRESS + "?"),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "a"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "a"}),
             say("Order RO-00001 placed."),
             say("It was RO-00001."),
         ])
@@ -137,7 +137,7 @@ class KrishnaTests(unittest.TestCase):
             llm=ScriptedClaude([
                 call_tool("lookup_warranty_record", {}),
                 say("Found it. Address still right: " + ADDRESS + "?"),
-                call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "a"}),
+                call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "a"}),
                 say("Order RO-00001 placed."),
                 say("Your order RO-00001 is on its way."),
             ]),
@@ -164,9 +164,9 @@ class KrishnaTests(unittest.TestCase):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it. Address still right: " + ADDRESS + "?"),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "a"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "a"}),
             say("Order RO-00001 placed."),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "confirmed_address": ADDRESS, "idempotency_key": "b"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "b"}),
             say("That is already on its way as RO-00001."),
         ])
         _send(runtime, adapter, "melted terminal", photo=True)
@@ -239,7 +239,8 @@ class AddressFromTheConversationTests(unittest.TestCase):
                     PLACE_REPLACEMENT_ORDER,
                     {
                         "part": "battery",
-                        "confirmed_address": "A1102 Park view city 1, 482913",
+                        "address": {"house_or_flat": "A1102", "building_or_street": "Park view city 1",
+                                    "area": "Sector 49", "pincode": "482913"},
                         "idempotency_key": "c1",
                     },
                 ),
@@ -275,14 +276,15 @@ class AddressFromTheConversationTests(unittest.TestCase):
                     PLACE_REPLACEMENT_ORDER,
                     {
                         "part": "battery",
-                        "confirmed_address": "A1102 Park view city 1, 122018",
+                        "address": {"house_or_flat": "A1102", "building_or_street": "Park view city 1",
+                                    "area": "Sector 49", "pincode": "122018"},
                         "idempotency_key": "EMXP2025004417-battery",
                     },
                 ),
                 say("Done. Order RO-00001 is on its way."),
             ]
         )
-        _send(runtime, adapter, "It's A1102 Park view city 1", photo=True)
+        _send(runtime, adapter, "It's A1102 Park view city 1, Sector 49", photo=True)
         _send(runtime, adapter, "122018")
         reply = _send(runtime, adapter, "Yes")
 
@@ -290,7 +292,7 @@ class AddressFromTheConversationTests(unittest.TestCase):
         self.assertIn("RO-00001", reply.text)
         placed = orders.in_flight("EMXP2025004417", "battery")
         self.assertIsNotNone(placed)
-        self.assertEqual(placed["delivery_address"], "A1102 Park view city 1, 122018")
+        self.assertEqual(placed["delivery_address"], "A1102, Park view city 1, Sector 49, Gurugram, Haryana, 122018")
 
 
 if __name__ == "__main__":

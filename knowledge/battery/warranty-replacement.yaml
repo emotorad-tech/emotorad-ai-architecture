@@ -70,8 +70,9 @@ steps:
     answer, and much better than implying it might be free.
   - >-
     COVERED, DATES KNOWN, NO PHYSICAL DAMAGE — say the part is covered, say until when,
-    confirm the delivery address and place it with `place_replacement_order` in the
-    same message, with the ticket beside it. Do not ask whether to raise it:
+    confirm the delivery address (the record's, or one collected pincode first and field
+    by field; the city and state come from the pincode, never from anyone's typing) and
+    place it with `place_replacement_order` in the same message, with the ticket beside it. Do not ask whether to raise it:
     they have just done four checks to reach this, and asking permission to act on the
     answer is how a resolved case becomes an abandoned one. Attach what the flow gathered —
     the readings in order, and every photograph and video already supplied.

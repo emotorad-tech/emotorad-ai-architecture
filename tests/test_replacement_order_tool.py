@@ -1,9 +1,10 @@
 """place_replacement_order, through the registry.
 
 The one write the fulfilment flow makes. The model may name the part, name the
-frame and pass back the address it confirmed with the customer. Everything
-else is decided here: technician or not, item code, in flight, sure, and the
-approval mode. Spec: docs/superpowers/specs/2026-09-20-replacement-fulfilment-design.md
+frame and pass the address fields the customer gave (or say the record's
+address still stands). Everything else is decided here: technician or not,
+item code, city and state from the pincode, in flight, sure, and the approval
+mode. Spec: docs/superpowers/specs/2026-09-20-replacement-fulfilment-design.md
 """
 
 import unittest
@@ -20,12 +21,13 @@ NOT_COVERED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_na
 UNDETERMINED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": None}]}}
 
 
-def _registry(approval_mode="reasonable", orders=None):
+def _registry(approval_mode="reasonable", orders=None, warranty_source=None):
     return build_registry(
         today=date(2026, 7, 28),
         replacement_orders=orders or ReplacementOrders(),
         item_codes=ItemCodes(),
         approval_mode=approval_mode,
+        warranty_source=warranty_source,
     )
 
 
@@ -40,10 +42,18 @@ def _context(evidence_seen=True, coverage=COVERED, customer_messages=()):
     )
 
 
+RECORD_ADDRESS = "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006"
+GURUGRAM = {"house_or_flat": "A1102", "building_or_street": "Park View City 1",
+            "area": "Sector 49", "pincode": "122018"}
+GURUGRAM_TYPED = ("It's A1102 Park View City 1", "Sector 49", "122018")
+GURUGRAM_LINE = "A1102, Park View City 1, Sector 49, Gurugram, Haryana, 122018"
+
+
 def _place(registry, context, **overrides):
-    args = {"frame_number": "EMXP2025004417", "part": "battery",
-            "confirmed_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006",
-            "idempotency_key": "k-1"}
+    """Ships to the record's address unless an `address` is given."""
+    args = {"frame_number": "EMXP2025004417", "part": "battery", "idempotency_key": "k-1"}
+    if "address" not in overrides:
+        args["use_record_address"] = True
     args.update(overrides)
     return registry.call(PLACE_REPLACEMENT_ORDER, args, context)
 
@@ -76,7 +86,7 @@ class HappyPathTests(unittest.TestCase):
         self.assertRegex(data["order_id"], r"^RO-\d{5}$")
         self.assertEqual(data["status"], "approved")
         self.assertEqual(data["item_code"], "BAT-EMX-48V")
-        self.assertEqual(data["delivery_address"], "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006")
+        self.assertEqual(data["delivery_address"], RECORD_ADDRESS)
         self.assertFalse(data["already_placed"])
 
     def test_the_order_is_recorded(self):
@@ -84,10 +94,10 @@ class HappyPathTests(unittest.TestCase):
         _place(_registry(orders=orders), _context())
         self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
 
-    def test_a_new_address_the_customer_gave_is_used(self):
-        context = _context(customer_messages=["please send it to New place, Mumbai 400001"])
-        result = _place(_registry(), context, confirmed_address="New place, Mumbai 400001")
-        self.assertEqual(result["data"]["delivery_address"], "New place, Mumbai 400001")
+    def test_a_new_address_the_customer_gave_is_assembled_with_city_and_state(self):
+        result = _place(_registry(), _context(customer_messages=GURUGRAM_TYPED), address=GURUGRAM)
+        self.assertNotIn("error", result, result)
+        self.assertEqual(result["data"]["delivery_address"], GURUGRAM_LINE)
 
 
 class ItemCodeMissingTests(unittest.TestCase):
@@ -170,21 +180,31 @@ class RefusalTests(unittest.TestCase):
         result = _place(_registry(), _context(coverage=None))
         self.assertEqual(result["error"]["code"], "missing_fact")
 
-    def test_an_empty_address_is_refused(self):
-        self.assertEqual(_place(_registry(), _context(), confirmed_address="  ")["error"]["code"], "address_required")
+    def test_no_address_at_all_is_refused(self):
+        result = _place(_registry(), _context(), use_record_address=False)
+        self.assertEqual(result["error"]["code"], "address_required")
+
+    def test_the_record_address_cannot_be_used_when_the_record_has_none(self):
+        """Krishna's OMS row has no full_address. The model must collect one,
+        not ship to an empty line."""
+        no_address = lambda phone: [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus",
+                                     "purchase_date": "2025-03-14", "full_address": ""}]
+        result = _place(_registry(warranty_source=no_address), _context())
+        self.assertEqual(result["error"]["code"], "record_address_missing")
 
     def test_a_frame_the_customer_does_not_own_is_refused(self):
         self.assertEqual(_place(_registry(), _context(), frame_number="NOT-MINE")["error"]["code"], "frame_number_not_owned")
 
     def test_an_address_the_customer_never_gave_is_refused(self):
-        result = _place(_registry(), _context(), confirmed_address="1 Made Up Lane 122018")
+        result = _place(_registry(), _context(), address=GURUGRAM)
         self.assertEqual(result["error"]["code"], "address_unconfirmed")
 
     def test_an_address_the_customer_typed_is_accepted(self):
-        context = _context(customer_messages=["please send it to 9 New Road, Mumbai 400001"])
-        result = _place(_registry(), context, confirmed_address="9 New Road, Mumbai 400001")
+        context = _context(customer_messages=["send it to 9 New Road", "Fort", "400001"])
+        address = {"house_or_flat": "9", "building_or_street": "New Road", "area": "Fort", "pincode": "400001"}
+        result = _place(_registry(), context, address=address)
         self.assertNotIn("error", result, result)
-        self.assertEqual(result["data"]["delivery_address"], "9 New Road, Mumbai 400001")
+        self.assertEqual(result["data"]["delivery_address"], "9, New Road, Fort, Mumbai, Maharashtra, 400001")
 
     def test_another_bikes_coverage_never_vouches_for_this_one(self):
         """The most safety-critical check in the tool. A record listing a
@@ -207,57 +227,75 @@ class AddressProvenanceTests(unittest.TestCase):
     "confirm the pincode when they call". A refusal a model can route around
     by degrading its input is worse than no check.
 
-    The rule now: every word of the confirmed address must have been typed by
-    the customer somewhere in this conversation or be on the record, and an
-    Indian delivery address carries a six-digit pincode.
+    The rule now: every word of every field the customer is said to have given
+    must have been typed by the customer somewhere in this conversation or be
+    on the record, and the pincode is a field of its own that code resolves.
+    City and state are never typed, so they are never checked.
     """
 
     STREET = "It's A1102 Park view city 1"
+    AREA = "Sector 49"
     PIN = "122018"
 
-    def test_an_address_given_across_two_messages_is_accepted(self):
-        result = _place(
-            _registry(), _context(customer_messages=(self.STREET, self.PIN)),
-            confirmed_address="A1102 Park view city 1, 122018",
-        )
+    def test_an_address_given_across_messages_is_accepted(self):
+        result = _place(_registry(), _context(customer_messages=(self.STREET, self.AREA, self.PIN)), address=GURUGRAM)
         self.assertNotIn("error", result, result)
-        self.assertEqual(result["data"]["delivery_address"], "A1102 Park view city 1, 122018")
+        self.assertEqual(result["data"]["delivery_address"], GURUGRAM_LINE)
 
-    def test_order_of_the_two_messages_does_not_matter(self):
-        result = _place(
-            _registry(), _context(customer_messages=(self.PIN, self.STREET)),
-            confirmed_address="A1102 Park view city 1, 122018",
-        )
+    def test_order_of_the_messages_does_not_matter(self):
+        result = _place(_registry(), _context(customer_messages=(self.PIN, self.AREA, self.STREET)), address=GURUGRAM)
         self.assertNotIn("error", result, result)
 
     def test_a_read_back_the_customer_agreed_to_is_accepted(self):
-        """The bot restates the address and the customer says yes. That is
-        exactly the confirmation the spec asks for and the old check ignored."""
-        result = _place(
-            _registry(), _context(customer_messages=(self.STREET, self.PIN, "Yes")),
-            confirmed_address="A1102 Park view city 1, 122018",
-        )
+        result = _place(_registry(), _context(customer_messages=(self.STREET, self.AREA, self.PIN, "Yes")), address=GURUGRAM)
         self.assertNotIn("error", result, result)
 
-    def test_a_word_the_customer_never_typed_is_refused(self):
-        result = _place(
-            _registry(), _context(customer_messages=(self.STREET, self.PIN)),
-            confirmed_address="A1102 Park view city 1, Gurgaon, 122018",
-        )
+    def test_a_word_the_customer_never_typed_is_refused_and_named(self):
+        address = dict(GURUGRAM, landmark="near Omaxe Mall")
+        result = _place(_registry(), _context(customer_messages=(self.STREET, self.AREA, self.PIN)), address=address)
         self.assertEqual(result["error"]["code"], "address_unconfirmed")
-        self.assertIn("gurgaon", result["error"]["message"].lower())
+        self.assertIn("landmark", result["error"]["message"])
+        self.assertIn("omaxe", result["error"]["message"].lower())
 
-    def test_an_address_with_no_pincode_is_refused(self):
-        """The refusal the model cannot route around by dropping something."""
-        result = _place(
-            _registry(), _context(customer_messages=(self.STREET,)),
-            confirmed_address="A1102 Park view city 1",
-        )
-        self.assertEqual(result["error"]["code"], "pincode_required")
+    def test_a_blank_field_is_refused_by_name(self):
+        """The refusal the model cannot route around by dropping something:
+        every required field is required."""
+        address = dict(GURUGRAM, area="")
+        result = _place(_registry(), _context(customer_messages=(self.STREET, self.PIN)), address=address)
+        self.assertEqual(result["error"]["code"], "address_incomplete")
+        self.assertIn("area", result["error"]["message"])
+
+    def test_a_pincode_the_directory_does_not_know_is_refused(self):
+        address = dict(GURUGRAM, pincode="999999")
+        result = _place(_registry(), _context(customer_messages=(self.STREET, self.AREA, "999999")), address=address)
+        self.assertEqual(result["error"]["code"], "pincode_unknown")
+
+    def test_a_two_state_pincode_needs_the_customer_to_pick(self):
+        """110025 is served from Delhi and, per India Post, Budaun in UP."""
+        address = dict(GURUGRAM, pincode="110025")
+        typed = (self.STREET, self.AREA, "110025")
+        result = _place(_registry(), _context(customer_messages=typed), address=address)
+        self.assertEqual(result["error"]["code"], "city_required")
+        self.assertIn("Delhi", result["error"]["message"])
+        self.assertIn("Uttar Pradesh", result["error"]["message"])
+
+    def test_the_customers_pick_is_taken_from_the_set(self):
+        address = dict(GURUGRAM, pincode="110025", city="South East")
+        typed = (self.STREET, self.AREA, "110025", "Delhi")
+        result = _place(_registry(), _context(customer_messages=typed), address=address)
+        self.assertNotIn("error", result, result)
+        self.assertTrue(result["data"]["delivery_address"].endswith("South East, Delhi, 110025"))
+
+    def test_a_pick_outside_the_set_is_refused(self):
+        address = dict(GURUGRAM, pincode="110025", city="Mumbai")
+        typed = (self.STREET, self.AREA, "110025", "Mumbai")
+        result = _place(_registry(), _context(customer_messages=typed), address=address)
+        self.assertEqual(result["error"]["code"], "city_required")
 
     def test_the_records_own_address_needs_no_customer_message(self):
         result = _place(_registry(), _context(customer_messages=()))
         self.assertNotIn("error", result, result)
+        self.assertEqual(result["data"]["delivery_address"], RECORD_ADDRESS)
 
 
 class InFlightTests(unittest.TestCase):
@@ -276,7 +314,7 @@ class InFlightTests(unittest.TestCase):
         _place(registry, _context())
         second = _place(registry, _context(), idempotency_key="k-2")["data"]
         self.assertEqual(second["placed_at_utc"], "2026-09-21T03:57:11+00:00")
-        self.assertEqual(second["delivery_address"], "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006")
+        self.assertEqual(second["delivery_address"], RECORD_ADDRESS)
 
     def test_the_same_idempotency_key_returns_the_same_envelope(self):
         registry = _registry()
