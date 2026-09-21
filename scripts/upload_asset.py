@@ -20,27 +20,18 @@ from typing import Any, Dict
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "src"))
 
 from emotorad_ai.storage import keys  # noqa: E402
-from emotorad_ai.storage.derivatives import image_w900_webp, video_poster_jpg  # noqa: E402
+from emotorad_ai.storage.assets import upload_asset as _upload_asset  # noqa: E402
 from emotorad_ai.storage.s3 import BUCKET_ENV, S3Store  # noqa: E402
 
 
 def upload_asset(store: Any, path: str, programme: str, category: str, kind: str, slug: str) -> Dict[str, str]:
+    # The CLI knows a file path; storage.assets.upload_asset knows bytes and a
+    # MIME type. Guessing from the filename and reading the file stays here so
+    # there is exactly one implementation of the actual upload logic.
     mime = mimetypes.guess_type(path)[0] or ""
-    key = keys.asset_key(programme, category, kind, slug, mime)
     with open(path, "rb") as handle:
         data = handle.read()
-    store.put_bytes(key, data, mime)
-    written = {"id": key[len("assets/"):], "original": key}
-    for name, derivative_key in keys.derivative_keys(key).items():
-        if name == "w900":
-            store.put_bytes(derivative_key, image_w900_webp(data), "image/webp")
-            written[name] = derivative_key
-        elif name == "poster":
-            poster = video_poster_jpg(data)
-            if poster:
-                store.put_bytes(derivative_key, poster, "image/jpeg")
-                written[name] = derivative_key
-    return written
+    return _upload_asset(store, data, mime, programme, category, kind, slug)
 
 
 def main(argv=None) -> int:

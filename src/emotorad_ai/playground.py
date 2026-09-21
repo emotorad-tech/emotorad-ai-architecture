@@ -83,6 +83,7 @@ from emotorad_ai.playground_version import CHANGELOG, PLAYGROUND_VERSION
 from emotorad_ai import media
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.storage import keys as storage_keys
+from emotorad_ai.storage.assets import upload_asset, yaml_snippet
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import (
     LOOKUP_ERROR_CODE,
@@ -1168,6 +1169,65 @@ _PAGE_CSS = """
 """
 
 
+def _media_upload_form() -> None:
+    """Admin-only: load a guide photo, clip or PDF straight from the
+    playground, no terminal and no AWS profile. Delegates to
+    storage.assets.upload_asset — the same code scripts/upload_asset.py runs
+    from the command line, so there is one implementation either way."""
+    with st.expander("Media upload (admin)"):
+        store = media.store_for_resolve()
+        if store is None:
+            st.info("Set EMOTORAD_AI_MEDIA_BUCKET to enable uploads.")
+            return
+
+        uploaded = st.file_uploader("Image, clip or PDF", type=["png", "jpg", "jpeg", "webp", "mp4", "pdf"])
+        programme = st.selectbox("Programme", storage_keys.PROGRAMMES)
+        category = st.text_input("Category", "battery")
+        kind = st.selectbox("Kind", storage_keys.ASSET_KINDS)
+        slug = st.text_input("Slug", help="lowercase letters, digits and hyphens, e.g. soc-button")
+        caption = st.text_input("Caption", help="What the customer reads under the picture")
+
+        if st.button("Upload to media bucket"):
+            if uploaded is None:
+                st.error("Choose a file first.")
+            else:
+                mime = uploaded.type or mimetypes.guess_type(uploaded.name)[0] or ""
+                try:
+                    result = upload_asset(store, uploaded.getvalue(), mime, programme, category.strip(), kind, slug.strip())
+                except storage_keys.KeyValidationError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    # Never the traceback or the bytes on screen — just what kind of thing failed.
+                    st.error("Upload failed: %s" % type(exc).__name__)
+                else:
+                    # video for a .mp4 id, else image — the only two `media.resolve` kinds.
+                    ext = result["id"].rsplit(".", 1)[-1].lower()
+                    kind_word = "video" if ext == "mp4" else "image"
+                    # Session state, not a local, so the preview below survives the
+                    # rerun that every later widget interaction on this page triggers.
+                    st.session_state["last_asset_upload"] = {
+                        "result": result,
+                        "kind_word": kind_word,
+                        "ext": ext,
+                        "caption": caption,
+                    }
+
+        last = st.session_state.get("last_asset_upload")
+        if last:
+            result, kind_word, ext, saved_caption = last["result"], last["kind_word"], last["ext"], last["caption"]
+            st.success("Uploaded")
+            st.code("id: %s" % result["id"], language="yaml")
+            st.code(yaml_snippet(result["id"], kind_word, saved_caption), language="yaml")
+            st.caption("Paste into the record's media: list (or the catalogue) and open a PR")
+            resolved = media.resolve({"id": result["id"], "kind": kind_word, "caption": saved_caption})
+            if ext == "pdf":
+                st.markdown("[Open PDF](%s)" % resolved["url"])
+            elif ext == "mp4":
+                st.video(resolved["url"])
+            else:
+                st.image(resolved["url"])
+
+
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")
     st.markdown(_PAGE_CSS, unsafe_allow_html=True)
@@ -1214,6 +1274,8 @@ def main() -> None:
                 "knowledge passage plus screenshots eats the budget before the model writes."
             ),
         )
+
+        _media_upload_form()
 
         module = importlib.import_module(AGENT_MODULES[agent_name])
 
