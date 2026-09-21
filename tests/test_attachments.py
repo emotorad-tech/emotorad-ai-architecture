@@ -3,11 +3,14 @@ in the playground. Text-only turns keep the plain-string shape they had."""
 
 import base64
 import io
+import os
 import unittest
+from unittest import mock
 
 from PIL import Image
 
-from emotorad_ai.attachments import content_blocks, fit_for_model, user_content
+from emotorad_ai import attachments
+from emotorad_ai.attachments import TRANSCRIBE_ENV, content_blocks, fit_for_model, user_content
 from emotorad_ai.contract import VERIFIED, Attachment, Identity, InboundMessage
 
 PNG = base64.b64encode(b"\x89PNG fake").decode()
@@ -88,6 +91,30 @@ class FitForModelTests(unittest.TestCase):
         data, mime = fit_for_model(original, "image/png")
         self.assertEqual(mime, "image/png")
         self.assertEqual(data, original)
+
+
+class TranscriptionGateTests(unittest.TestCase):
+    def _video_content(self):
+        with mock.patch.object(attachments.video, "extract_audio", return_value=b"fake wav"), mock.patch.object(
+            attachments.video, "extract_frames", return_value=["deadbeef"]
+        ), mock.patch.object(
+            attachments.video, "transcribe_audio", return_value={"text": "it wheezes", "language": "hi"}
+        ) as transcribe:
+            content = content_blocks([Attachment("video", "data:video/mp4;base64,AAAA", "video/mp4")])
+        return content, transcribe
+
+    def test_transcription_is_off_by_default_in_the_api_path(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(TRANSCRIBE_ENV, None)
+            content, transcribe = self._video_content()
+        transcribe.assert_not_called()
+        self.assertFalse(any("wheezes" in block.get("text", "") for block in content))
+
+    def test_transcription_runs_when_the_env_var_is_set(self):
+        with mock.patch.dict(os.environ, {TRANSCRIBE_ENV: "1"}):
+            content, transcribe = self._video_content()
+        transcribe.assert_called_once()
+        self.assertTrue(any("wheezes" in block.get("text", "") for block in content))
 
 
 class PlaygroundCompatibilityTests(unittest.TestCase):

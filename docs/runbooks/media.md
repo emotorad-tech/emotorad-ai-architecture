@@ -38,6 +38,10 @@ curl -s https://ai-release-stage.emotorad.com/health
 Expected: `"media":"configured"`. `"media":"not configured"` means the bucket env var is
 unset or empty on the running container.
 
+`EMOTORAD_AI_TRANSCRIBE_VIDEO=1` turns on speech-to-text for a customer's uploaded video
+in this API path; it is off by default because Whisper downloads a model on first use and
+has no deadline.
+
 ## 3. Upload a guide asset
 
 ```bash

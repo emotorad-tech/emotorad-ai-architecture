@@ -13,12 +13,19 @@ and an unreadable clip says so instead of being silently "seen".
 from __future__ import annotations
 
 import base64
+import os
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import video
 from .contract import Attachment, InboundMessage
 
 UNRETRIEVABLE = "[An attachment could not be retrieved; do not describe it.]"
+
+# Off by default in the API path: Whisper downloads a model on first use and
+# has no deadline, so an unbounded transcription here would hang a request
+# with no way for the caller to time it out. The playground calls
+# video.transcribe_audio directly and is unaffected by this flag.
+TRANSCRIBE_ENV = "EMOTORAD_AI_TRANSCRIBE_VIDEO"
 
 MAX_MODEL_EDGE = 1600
 MAX_MODEL_BYTES = 3 * 1024 * 1024
@@ -75,7 +82,7 @@ def _video_blocks(data: bytes, mime: str, name: str) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
     suffix = ".mp4"
     wav = video.extract_audio(data, suffix)
-    transcript = video.transcribe_audio(wav) if wav else None
+    transcript = video.transcribe_audio(wav) if wav and os.environ.get(TRANSCRIBE_ENV, "0") == "1" else None
     if transcript and transcript.get("text"):
         blocks.append(
             {
