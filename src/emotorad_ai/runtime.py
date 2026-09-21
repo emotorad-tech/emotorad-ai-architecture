@@ -324,7 +324,9 @@ class Runtime:
             ),
         )
         if turn.escalate:
-            self.log.escalation(message.conversation_id, "agent_requested_handover", turn.ticket_id)
+            self.log.escalation(
+                message.conversation_id, turn.escalation_reason or "agent_requested_handover", turn.ticket_id
+            )
 
         # The post-check: calling the warranty tool proved the tool ran, not that
         # the reply matches what it returned.

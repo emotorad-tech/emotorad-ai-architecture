@@ -1,17 +1,34 @@
 import unittest
 from datetime import date
+from typing import Any, Dict, List, Sequence
 
 from emotorad_ai.adapters import WebsiteChatAdapter
-from emotorad_ai.agents.base import Agent
+from emotorad_ai.agents.base import MODEL_UNAVAILABLE_TEXT, Agent
 from emotorad_ai.agents.battery_support import AGENT_NAME, DEFINITION
 from emotorad_ai.config import Settings
 from emotorad_ai.identity import IdentityResolver
-from emotorad_ai.llm import ScriptedClaude, call_tool, say
+from emotorad_ai.llm import LLMResponse, ScriptedClaude, call_tool, say
 from emotorad_ai.observability import EventLog, redact_pii
 from emotorad_ai.runtime import Runtime
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, SEARCH_BATTERY_KNOWLEDGE, build_registry
 
 TODAY = date(2026, 7, 28)
+
+
+class _FailingClaude:
+    """Stands in for a model call that fails outright — Bedrock/Anthropic
+    returning a 529 overloaded_error, a timeout, anything that raises rather
+    than returns an `LLMResponse`. Records requests like `ScriptedClaude` so a
+    test can assert the model was actually asked."""
+
+    def __init__(self) -> None:
+        self.requests: List[Dict[str, Any]] = []
+
+    def create(
+        self, system: str, messages: Sequence[Dict[str, Any]], tools: Sequence[Dict[str, Any]]
+    ) -> LLMResponse:
+        self.requests.append({"system": system, "messages": list(messages), "tools": list(tools)})
+        raise RuntimeError("upstream is down")
 
 
 def make_runtime(responses):
@@ -216,6 +233,36 @@ class RuntimeTests(unittest.TestCase):
         send(runtime, adapter, "here")
         peeked = [c for c in llm.requests[-1]["messages"] if c["role"] == "user" and isinstance(c["content"], list)]
         self.assertIn('"seen": true', str(peeked).replace("True", "true"))
+
+
+    def test_a_model_outage_becomes_an_apology_and_an_escalation_not_a_500(self):
+        """Anthropic returned 529 overloaded_error live: `self.llm.create` raised,
+        and with no handling that propagated out of `runtime.handle` as an
+        unhandled exception (a 500 at the FastAPI layer). The customer should
+        get a reply, not a crash — and the reply should say so, not swallow the
+        error."""
+        registry = build_registry(today=TODAY)
+        llm = _FailingClaude()
+        runtime = Runtime(
+            settings=Settings(log_path="", log_to_stdout=False),
+            registry=registry,
+            llm=llm,
+            log=EventLog(path=None),
+            resolver=IdentityResolver(registry),
+        )
+        adapter = WebsiteChatAdapter(runtime.resolver)
+
+        reply = send(runtime, adapter, "my battery won't charge")
+
+        self.assertTrue(reply.escalated)
+        self.assertIn(MODEL_UNAVAILABLE_TEXT, reply.text)
+
+        llm_errors = [e for e in runtime.log.events if e["event"] == "llm_error"]
+        self.assertEqual(len(llm_errors), 1)
+        self.assertEqual(llm_errors[0]["error"], "RuntimeError")
+        # The exception body can carry customer words back verbatim — never log it.
+        dumped = str(llm_errors[0])
+        self.assertNotIn("upstream is down", dumped)
 
 
 class RedactionTests(unittest.TestCase):

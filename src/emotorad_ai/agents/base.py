@@ -25,6 +25,15 @@ HANDOVER_TEXT = (
     "support team who can help properly."
 )
 
+# What the customer sees when the model call itself fails — a 529 overloaded_error,
+# a timeout, a network error. Distinct from HANDOVER_TEXT (which covers the model
+# answering but not resolving anything): this one covers the model not answering
+# at all, so it says "reaching our system" rather than implying we tried and failed.
+MODEL_UNAVAILABLE_TEXT = (
+    "Sorry — I am having trouble reaching our system right now. Let me pass you to a member "
+    "of our support team who can help."
+)
+
 # Tool names whose successful result carries a ticket the customer must be told about.
 TICKET_PRODUCING_TOOLS = ("create_support_ticket",)
 
@@ -42,6 +51,10 @@ class AgentTurn:
     agent: str
     ticket_id: Optional[str] = None
     escalate: bool = False
+    # Why `escalate` is set, when it is more specific than the generic
+    # "agent gave up" reason the runtime otherwise logs. None for every
+    # existing escalation path — only the model-outage path sets this today.
+    escalation_reason: Optional[str] = None
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     iterations: int = 0
     # Media from knowledge records the turn retrieved. Collected here rather than
@@ -142,7 +155,24 @@ class Agent:
 
         for iteration in range(1, self.settings.max_agent_iterations + 1):
             turn.iterations = iteration
-            response = self.llm.create(system=system, messages=history, tools=tools)
+            try:
+                response = self.llm.create(system=system, messages=history, tools=tools)
+            except Exception as exc:
+                # The class name only, never str(exc) or any prompt text: an
+                # exception body can carry the customer's own words back to us
+                # (a proxy error page echoing the request, for instance), and
+                # this log is not the place for that. Return immediately rather
+                # than retrying in this loop — a retry belongs in the client,
+                # and a waiting customer should not sit through several
+                # timeouts before finding out we cannot reach the model.
+                self.log.emit(
+                    "llm_error", message.conversation_id,
+                    agent=self.definition.name, iteration=iteration, error=type(exc).__name__,
+                )
+                turn.escalate = True
+                turn.escalation_reason = "model_unavailable"
+                turn.text = MODEL_UNAVAILABLE_TEXT
+                return turn
             self.log.llm_turn(
                 message.conversation_id,
                 self.definition.name,
