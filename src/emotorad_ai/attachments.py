@@ -13,12 +13,41 @@ and an unreadable clip says so instead of being silently "seen".
 from __future__ import annotations
 
 import base64
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import video
 from .contract import Attachment, InboundMessage
 
 UNRETRIEVABLE = "[An attachment could not be retrieved; do not describe it.]"
+
+MAX_MODEL_EDGE = 1600
+MAX_MODEL_BYTES = 3 * 1024 * 1024
+
+
+def fit_for_model(data: bytes, mime: str) -> Tuple[bytes, str]:
+    """Images go to the model at most 1600px on the long edge and under 3 MB,
+    re-encoded as JPEG when they were larger. Claude sees no more detail above
+    ~1600px, and the request limit is on base64 size, which is 4/3 of this."""
+    import io
+
+    from PIL import Image
+
+    if len(data) <= MAX_MODEL_BYTES:
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if max(image.size) <= MAX_MODEL_EDGE:
+                    return data, mime
+        except Exception:
+            return data, mime
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image = image.convert("RGB")
+            image.thumbnail((MAX_MODEL_EDGE, MAX_MODEL_EDGE))
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=85)
+            return out.getvalue(), "image/jpeg"
+    except Exception:
+        return data, mime
 
 
 def _payload(attachment: Attachment, fetch: Optional[Callable[[str], bytes]]) -> Union[bytes, str, None]:
@@ -110,8 +139,12 @@ def content_blocks(
         if video.is_video(mime, name):
             blocks.extend(_video_blocks(payload, mime, name))
         elif mime.startswith("image/"):
+            fitted, fitted_mime = fit_for_model(payload, mime)
             blocks.append(
-                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(payload).decode()}}
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": fitted_mime, "data": base64.b64encode(fitted).decode()},
+                }
             )
         elif mime == "application/pdf":
             blocks.append(

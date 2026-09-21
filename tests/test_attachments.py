@@ -2,12 +2,21 @@
 in the playground. Text-only turns keep the plain-string shape they had."""
 
 import base64
+import io
 import unittest
 
-from emotorad_ai.attachments import content_blocks, user_content
+from PIL import Image
+
+from emotorad_ai.attachments import content_blocks, fit_for_model, user_content
 from emotorad_ai.contract import VERIFIED, Attachment, Identity, InboundMessage
 
 PNG = base64.b64encode(b"\x89PNG fake").decode()
+
+
+def _png_bytes(width, height):
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), color=(10, 20, 30)).save(out, format="PNG")
+    return out.getvalue()
 
 
 def message(text, attachments=()):
@@ -65,6 +74,20 @@ class UserContentTests(unittest.TestCase):
 
     def test_unknown_types_are_dropped(self):
         self.assertEqual(content_blocks([Attachment("document", "data:text/csv;base64,QQ==", "text/csv")]), [])
+
+
+class FitForModelTests(unittest.TestCase):
+    def test_a_large_image_is_downscaled_to_jpeg_within_the_edge_cap(self):
+        data, mime = fit_for_model(_png_bytes(4000, 3000), "image/png")
+        self.assertEqual(mime, "image/jpeg")
+        with Image.open(io.BytesIO(data)) as image:
+            self.assertLessEqual(max(image.size), 1600)
+
+    def test_a_small_image_passes_through_unchanged(self):
+        original = _png_bytes(200, 200)
+        data, mime = fit_for_model(original, "image/png")
+        self.assertEqual(mime, "image/png")
+        self.assertEqual(data, original)
 
 
 class PlaygroundCompatibilityTests(unittest.TestCase):
