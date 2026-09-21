@@ -100,6 +100,20 @@ class ClaimTests(unittest.TestCase):
             self.reg.claim(self.pending.upload_id)
         self.assertEqual(caught.exception.status, 404)
 
+    def test_peek_returns_the_pending_entry_and_leaves_it_claimable(self):
+        peeked = self.reg.peek(self.pending.upload_id)
+        self.assertEqual(peeked, self.pending)
+        self.store.objects[self.pending.key] = {"size": 1234, "mime": "image/jpeg"}
+        claimed = self.reg.claim(self.pending.upload_id)
+        self.assertEqual(claimed, Claimed(self.pending.upload_id, self.pending.key, "image/jpeg", 1234, "images"))
+
+    def test_peek_on_an_unknown_id_is_none(self):
+        self.assertIsNone(self.reg.peek("upl_nope"))
+
+    def test_peek_on_an_expired_id_is_none(self):
+        self.now[0] = 1_000.0 + 300 + 3600 + 1
+        self.assertIsNone(self.reg.peek(self.pending.upload_id))
+
     def test_concurrent_claims_of_one_id_succeed_exactly_once(self):
         import threading
 

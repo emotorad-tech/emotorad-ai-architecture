@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from . import keys
 from .keys import KeyValidationError
@@ -95,6 +95,18 @@ class UploadRegistry:
         with self._lock:
             self._pending[upload_id] = pending
         return pending, presign
+
+    # -- peek --------------------------------------------------------------------
+
+    def peek(self, upload_id: str) -> Optional[Pending]:
+        """Look up a pending upload without claiming it: no pop, so an
+        ownership check that fails leaves the id claimable by whoever it
+        actually belongs to. Applies the same expiry rule as `claim`."""
+        with self._lock:
+            pending = self._pending.get(upload_id)
+            if pending is not None and self._clock() > pending.expires_at + CLAIM_WINDOW:
+                pending = None
+        return pending
 
     # -- claim -------------------------------------------------------------------
 

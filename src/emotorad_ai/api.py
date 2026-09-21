@@ -224,12 +224,22 @@ def post_message(body: MessageIn) -> MessageOut:
         caller_cluster = _cluster_for_session(body.session_token)
         try:
             for item in body.attachments:
-                claimed = UPLOADS.claim(item.upload_id)
-                if not is_customer_key(claimed.key) or cluster_of(claimed.key) != caller_cluster:
-                    # Not a customer key at all (e.g. an assets/ upload id) or a
-                    # customer key from a different cluster: either way, this
-                    # session did not upload it.
+                # Check ownership on the read-only `peek` before ever calling
+                # `claim`: `claim` pops the pending entry, so if we claimed
+                # first, a 403 for the wrong session (or a stale/foreign
+                # token) would have already destroyed the id and the
+                # rightful owner's retry would 404.
+                pending = UPLOADS.peek(item.upload_id)
+                if pending is None:
+                    raise HTTPException(404, "unknown or expired upload id")
+                if pending.tree != "customers" or cluster_of(pending.key) != caller_cluster:
+                    # Not a customer upload at all (e.g. an assets/ upload id) or
+                    # a customer upload from a different cluster: either way,
+                    # this session did not upload it. No claim happens, so the
+                    # id is still there for whoever actually owns it.
                     raise HTTPException(403, "not your upload")
+                claimed = UPLOADS.claim(item.upload_id)
+                assert is_customer_key(claimed.key) and cluster_of(claimed.key) == caller_cluster
                 attachments.append(
                     {
                         "kind": _ATTACHMENT_KIND[claimed.kind],

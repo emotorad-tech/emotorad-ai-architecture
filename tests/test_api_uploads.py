@@ -107,6 +107,11 @@ class UploadFlowTests(unittest.TestCase):
         r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-rohit", "text": "x", "attachments": [{"upload_id": body["upload_id"]}]})
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.store.fetched, [])
+        # The wrong-session 403 must not have consumed the upload id: the
+        # rightful owner can still attach the same upload afterwards.
+        r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya", "text": "what is this", "pill": "battery_issue", "attachments": [{"upload_id": body["upload_id"]}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.store.fetched, [body["key"]])
 
     def test_presign_refuses_a_conversation_started_by_another_session(self):
         r = self.client.post("/message", json={"conversation_id": "c-a", "session_token": "sess-ananya", "text": "hi"})
