@@ -7,6 +7,10 @@ inherit the environment, so no value is ever written to a file or a command line
 
 The Streamlit server binds to localhost only: api.py reverse-proxies /playground
 to it, so it never needs a port opened in the security group.
+
+`src_dir` finds the `src/` package directory whether this file is running from
+a checkout (`docker/start.py` next to `src/`) or from the image (the Dockerfile
+copies it to `/app/start.py`, beside `/app/src`).
 """
 
 from __future__ import annotations
@@ -14,9 +18,22 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import List
+from typing import List, Optional
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "src"))
+
+def src_dir(here: str) -> Optional[str]:
+    for candidate in (os.path.join(here, "src"), os.path.join(here, os.pardir, "src")):
+        # In the image start.py sits beside src/ (/app/start.py, /app/src); in a
+        # checkout it is one level down (docker/start.py, src/). Try both.
+        if os.path.isdir(candidate):
+            return os.path.normpath(candidate)
+    return None
+
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = src_dir(_HERE)
+if _SRC is not None:
+    sys.path.insert(0, _SRC)
 
 from emotorad_ai.config_store import ConfigStoreError, load_into_environ  # noqa: E402
 
@@ -48,8 +65,13 @@ def main() -> int:
         return 1
     print("startup config: exported %s" % (", ".join(exported) or "nothing (no secret id set)"))
 
-    subprocess.Popen(streamlit_command())
-    os.execvp("uvicorn", uvicorn_command())
+    child = subprocess.Popen(streamlit_command())
+    try:
+        os.execvp("uvicorn", uvicorn_command())
+    except OSError as exc:
+        print("startup: could not exec uvicorn: %s" % type(exc).__name__, file=sys.stderr)
+        child.terminate()
+        return 1
     return 0  # unreachable after a successful exec; kept for the tests' patched path
 
 
