@@ -98,6 +98,11 @@ class SelectTests(unittest.TestCase):
             select_llm("anthropic", Settings(), environ={})
         self.assertIn("ANTHROPIC_API_KEY", str(caught.exception))
 
+    def test_a_whitespace_key_is_treated_as_missing(self):
+        # A secret set to " " must fail here, at startup, not on the first customer request.
+        with self.assertRaises(LLMConfigError):
+            select_llm("anthropic", Settings(), environ={"ANTHROPIC_API_KEY": "   "})
+
     def test_bedrock_uses_the_role_and_takes_no_key(self):
         self.assertIsInstance(select_llm("bedrock", Settings(), environ={}, client=_Client(TOOL)), BedrockClaude)
 

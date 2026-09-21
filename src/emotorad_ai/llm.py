@@ -62,7 +62,14 @@ def response_to_llm(response: Any) -> LLMResponse:
     )
 
 
-def _create(client: Any, model: str, settings: Settings, system: str, messages: Sequence[Dict[str, Any]], tools: Sequence[Dict[str, Any]]) -> LLMResponse:
+def _create(
+    client: Any,
+    model: str,
+    settings: Settings,
+    system: str,
+    messages: Sequence[Dict[str, Any]],
+    tools: Sequence[Dict[str, Any]],
+) -> LLMResponse:
     response = client.messages.create(
         model=model,
         max_tokens=settings.max_tokens,
@@ -144,7 +151,7 @@ def select_llm(mode: str, settings: Settings, environ: Optional[Mapping[str, str
     if mode == "offline":
         return OfflinePlanner()
     if mode == "anthropic":
-        key = env.get("ANTHROPIC_API_KEY", "")
+        key = env.get("ANTHROPIC_API_KEY", "").strip()
         if not key:
             raise LLMConfigError(
                 "EMOTORAD_AI_MODE=anthropic but ANTHROPIC_API_KEY is not set "
