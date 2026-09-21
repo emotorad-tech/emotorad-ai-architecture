@@ -243,6 +243,32 @@ class UserContentTests(unittest.TestCase):
         self.assertEqual(content_blocks([Attachment("document", "data:text/csv;base64,QQ==", "text/csv")]), [])
 
 
+class OneDownscaleForBothPathsTests(unittest.TestCase):
+    """Integrating the two branches left one image-block builder. A photo the
+    inline path carries gets the same 1600px/3MB treatment as one fetched from
+    S3 — before, only the media path downscaled, so a full-resolution photo
+    posted straight at /message went to the model untouched."""
+
+    def test_an_inline_photo_over_the_edge_cap_is_downscaled(self):
+        big = base64.b64encode(_png_bytes(4000, 3000)).decode()
+        block = to_image_blocks(validate([{"kind": "image", "url": "data:image/png;base64," + big}]))[0]
+        self.assertEqual(block["source"]["media_type"], "image/jpeg")
+        with Image.open(io.BytesIO(base64.b64decode(block["source"]["data"]))) as image:
+            self.assertLessEqual(max(image.size), 1600)
+
+    def test_a_photo_within_the_cap_is_untouched_on_both_paths(self):
+        small = _png_bytes(200, 200)
+        inline = to_image_blocks(validate([
+            {"kind": "image", "url": "data:image/png;base64," + base64.b64encode(small).decode()}
+        ]))[0]
+        fetched = content_blocks(
+            [Attachment("image", "s3://customers/c/x/images/u.png", "image/png")],
+            fetch=lambda key: small,
+        )[0]
+        self.assertEqual(inline, fetched)
+        self.assertEqual(inline["source"]["media_type"], "image/png")
+
+
 class FitForModelTests(unittest.TestCase):
     def test_a_large_image_is_downscaled_to_jpeg_within_the_edge_cap(self):
         data, mime = fit_for_model(_png_bytes(4000, 3000), "image/png")

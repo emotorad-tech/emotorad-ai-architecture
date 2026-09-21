@@ -128,6 +128,81 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(self.store.fetched, [])
 
 
+class BothAttachmentShapesTests(unittest.TestCase):
+    """One `attachments` field, two wire shapes.
+
+    The chat page sends an inline `data:` photo; the presigned route sends an
+    upload id. Integrating the two branches put both on the same field, so a
+    message may carry either or both, and the count limit has to be on the
+    total — otherwise adding the second route quietly doubles how many pictures
+    a caller can send.
+    """
+
+    def setUp(self):
+        self.store = _Store()
+        self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+
+    def _presigned(self):
+        body = self.client.post("/uploads", json={
+            "session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers",
+            "mime_type": "image/png", "size_bytes": 9,
+        }).json()
+        self.store.objects[body["key"]] = {"size": 9, "mime": "image/png"}
+        return body
+
+    def test_an_inline_photo_still_reaches_the_model(self):
+        """The path the chat page uses today. It must not need media configured
+        and it must not go anywhere near S3."""
+        inline = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 fake").decode()
+        r = self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "here is the terminal",
+            "pill": "battery_issue",
+            "attachments": [{"kind": "image", "url": inline}],
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.store.fetched, [])
+
+    def test_inline_and_presigned_mix_in_one_message(self):
+        presigned = self._presigned()
+        inline = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 fake").decode()
+        r = self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "both ends",
+            "pill": "battery_issue",
+            "attachments": [{"kind": "image", "url": inline}, {"upload_id": presigned["upload_id"]}],
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.store.fetched, [presigned["key"]])
+
+    def test_the_count_limit_is_on_the_total_not_on_each_path(self):
+        from emotorad_ai.attachments import MAX_ATTACHMENTS
+
+        presigned = self._presigned()
+        inline = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 fake").decode()
+        items = [{"kind": "image", "url": inline}] * MAX_ATTACHMENTS
+        items.append({"upload_id": presigned["upload_id"]})
+        r = self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "x", "attachments": items,
+        })
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("Too many attachments", r.json()["detail"])
+
+    def test_a_refused_message_does_not_consume_the_upload_id(self):
+        """The cap is checked before anything is claimed, so a retry under the
+        limit still finds the id the customer already uploaded."""
+        presigned = self._presigned()
+        inline = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 fake").decode()
+        items = [{"kind": "image", "url": inline}] * 5 + [{"upload_id": presigned["upload_id"]}]
+        self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "x", "attachments": items,
+        })
+        r = self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "x",
+            "attachments": [{"upload_id": presigned["upload_id"]}],
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+
+
 class ReplyAttachmentsOnMessageTests(unittest.TestCase):
     """The reply's attachments (guide photos/clips) must reach /message's JSON,
     caption and poster included, so a web chat can render them."""
