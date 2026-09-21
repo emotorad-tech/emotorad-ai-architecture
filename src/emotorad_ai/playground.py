@@ -729,6 +729,13 @@ def _attachment_blocks(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]
             cached = attachment.get("frame_blob_ids")
             if cached is not None:
                 frames = [_blob_path(b).read_text() for b in cached if _blob_path(b).exists()]
+                if not frames:
+                    # The per-frame blobs were only ever local, so a redeploy
+                    # that wipes the container's disk loses them even though
+                    # `data` above was just refilled from S3. Re-derive frames
+                    # from those bytes rather than reporting an unreadable
+                    # video the customer can see fine.
+                    frames = _extract_frames(data, suffix)
             else:
                 frames = _extract_frames(data, suffix)
             if not frames:

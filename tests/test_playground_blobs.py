@@ -52,6 +52,24 @@ class BlobTests(unittest.TestCase):
             self.assertEqual(playground._get_blob(records[0]), PNG_B64)
             self.assertTrue((self.blob_dir / (records[0]["blob_id"] + ".b64")).exists())
 
+    def test_frames_missing_from_the_cache_are_re_derived_from_the_refilled_video(self):
+        # After a redeploy the video bytes come back from S3 (via _get_blob),
+        # but the per-frame blobs were only ever local, so `frame_blob_ids`
+        # points at files that no longer exist. That must not read as "this
+        # video could not be read" when the bytes are right there.
+        video_blob_id = "video-blob"
+        (self.blob_dir / (video_blob_id + ".b64")).write_text(PNG_B64)
+        attachment = {
+            "name": "a.mp4",
+            "mime_type": "video/mp4",
+            "blob_id": video_blob_id,
+            "frame_blob_ids": ["missing"],
+        }
+        with mock.patch.object(playground, "BLOB_DIR", self.blob_dir), mock.patch.object(playground, "_extract_frames", return_value=["ZmFrZQ=="]):
+            blocks = playground._attachment_blocks([attachment])
+        self.assertTrue(any(b.get("type") == "image" for b in blocks))
+        self.assertFalse(any("could not be read" in b.get("text", "") for b in blocks))
+
 
 if __name__ == "__main__":
     unittest.main()
