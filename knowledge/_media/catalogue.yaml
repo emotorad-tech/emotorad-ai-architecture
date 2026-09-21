@@ -10,27 +10,29 @@
 # the prompt. These ids and captions transfer across unchanged when it does; only
 # the tool goes away.
 #
-# `id` is a Cloudinary public id. Note that a Media Library folder is a *display*
-# folder and is NOT part of the public id — assets uploaded into emotorad/Battery
-# are addressed at the root, as below.
+# `id` is an S3 asset key, not a Cloudinary public id: `<programme>/<category>/
+# <kind>/<slug>.<ext>` (`afs/battery/photos/soc-button-non-doodle.png` below),
+# looked up under `assets/` and signed through the store in
+# `src/emotorad_ai/storage/s3.py`. Upload new assets with
+# `scripts/upload_asset.py`, which writes the key back here.
 
 soc_button:
-  id: SOC_Button_non_doodle
+  id: afs/battery/photos/soc-button-non-doodle.png
   kind: image
   caption: The SOC button and charge indicator, on the side of the pack
 
 battery_onoff_switch:
-  id: Battery_OnOff_switch
+  id: afs/battery/photos/battery-onoff-switch.png
   kind: image
   caption: The battery On/Off switch — set it to ON before charging
 
 battery_revival:
-  id: Battery_Revival_Steps.mp4
+  id: afs/battery/videos/battery-revival-steps.mp4
   kind: video
   caption: Reviving a pack that has gone completely flat
 
 melted_battery_terminal:
-  id: melted_battery_vs_non_melted
+  id: afs/battery/photos/melted-battery-vs-non-melted.png
   kind: image
   caption: >-
     Battery terminal, melted versus normal. A damaged one shows fused metal pins and
@@ -38,7 +40,7 @@ melted_battery_terminal:
     + and - markings still readable.
 
 melted_controller_connector:
-  id: controller_melted_vs_non_melted
+  id: afs/battery/photos/controller-melted-vs-non-melted.png
   kind: image
   caption: >-
     Controller battery connector, normal versus melted. The failed one shows fused pins,

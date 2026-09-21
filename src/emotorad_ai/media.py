@@ -25,6 +25,11 @@ module rather than a hunt through every content file. Same reasoning as
 Absolute URLs still resolve untouched, so records written before this, and any
 asset hosted elsewhere, keep working.
 
+The shipped catalogue (``knowledge/_media/catalogue.yaml`` and the knowledge
+records) has fully migrated off Cloudinary to S3 asset ids; the Cloudinary
+delivery path below stays live for absolute URLs and any Cloudinary id still
+authored against it, neither of which the shipped catalogue uses any more.
+
 Why not Google Drive: a ``drive.google.com/file/d/<id>/view`` link serves an HTML
 viewer page, not image bytes. There is no content type a chat client can render,
 which is why it never worked and could not have been made to.

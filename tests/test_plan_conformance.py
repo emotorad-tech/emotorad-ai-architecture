@@ -19,6 +19,7 @@ from emotorad_ai.runtime import Runtime
 from emotorad_ai import media
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.tools.mocks import SEARCH_KNOWLEDGE, SEND_GUIDE_MEDIA, build_registry
+from tests.test_media import _WithStore
 
 TODAY = date(2026, 8, 6)
 
@@ -94,14 +95,18 @@ class ReplyAttachmentsTests(unittest.TestCase):
     """§3.1 — 'the reply shape needs its own attachments field'."""
 
     def setUp(self):
-        # Catalogue pictures are Cloudinary public ids, so without a cloud name
-        # there is no URL to send and `send_guide_media` refuses rather than
-        # claiming it sent something. That refusal is its own behaviour, tested
-        # in test_media.py; here we want the configured case.
+        # Catalogue pictures are S3 asset ids, so without a media store there is
+        # no URL to send and `send_guide_media` refuses rather than claiming it
+        # sent something. That refusal is its own behaviour, tested in
+        # test_media.py; here we want the configured case, so a fake store
+        # stands in for S3 without touching AWS.
         self._previous = os.environ.get(media.CLOUD_NAME_ENV)
         os.environ[media.CLOUD_NAME_ENV] = "testcloud"
+        self._store_ctx = _WithStore()
+        self._store_ctx.__enter__()
 
     def tearDown(self):
+        self._store_ctx.__exit__(None, None, None)
         if self._previous is None:
             os.environ.pop(media.CLOUD_NAME_ENV, None)
         else:
@@ -121,7 +126,9 @@ class ReplyAttachmentsTests(unittest.TestCase):
         ])
         reply = whatsapp(runtime, "battery not charging")
         self.assertTrue(reply.attachments)
-        self.assertIn("SOC_Button", reply.attachments[0].url)
+        url = reply.attachments[0].url
+        self.assertTrue(url.startswith("https://signed.test/"), url)
+        self.assertIn("assets/afs/battery/", url)
 
     def test_retrieving_a_record_does_not_attach_its_media(self):
         """Retrieval informs the model; it does not send pictures to the customer.

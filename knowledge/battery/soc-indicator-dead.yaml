@@ -12,7 +12,7 @@ applies_to: {}
 excludes: {product_name: doodle}
 source: AFS battery hardware — SOC button / indicator fault
 media:
-  - id: SOC_Button_non_doodle
+  - id: afs/battery/photos/soc-button-non-doodle.png
     kind: image
     caption: The SOC button and charge indicator, on the side of the pack
 steps:

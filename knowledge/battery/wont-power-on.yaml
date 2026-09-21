@@ -11,13 +11,13 @@ applies_to: {}
 excludes: {product_name: doodle}
 source: AFS battery diagnostic — Question Sequence 1
 media:
-  - id: SOC_Button_non_doodle
+  - id: afs/battery/photos/soc-button-non-doodle.png
     kind: image
     caption: The SOC button and charge indicator, on the side of the pack
-  - id: Battery_OnOff_switch
+  - id: afs/battery/photos/battery-onoff-switch.png
     kind: image
     caption: The battery On/Off switch — set it to ON before charging
-  - id: Battery_Revival_Steps.mp4
+  - id: afs/battery/videos/battery-revival-steps.mp4
     kind: video
     caption: Reviving a pack that has gone completely flat
 steps:
