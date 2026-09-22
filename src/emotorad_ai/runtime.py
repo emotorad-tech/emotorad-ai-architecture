@@ -20,6 +20,7 @@ the steps is the design:
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional
 
@@ -32,6 +33,7 @@ from .agents.late_warranty import AGENT_NAME as LATE_WARRANTY
 from .agents.late_warranty import DEFINITION as LATE_WARRANTY_DEFINITION
 from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
 from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
+from .attachments import content_blocks
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import ConversationState, ConversationStore, customer_texts
@@ -97,6 +99,14 @@ SELF_SERVICE_IDENTITY_TOOLS = (
 # customer is. Added to the slice the same way: only when the registry holds
 # them, which it does only when the surface asked for them.
 SELF_SERVICE_SURFACE_TOOLS = (OFFER_LOCATION_SHARE,)
+
+
+def _hazard_sentences(summary: str) -> List[str]:
+    """The lines or sentences of a description that carry a hazard term,
+    for the ticket. Split on newlines and full stops so a bullet-point
+    description and a prose one both come out as short quotes."""
+    pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", summary) if p.strip()]
+    return [p for p in pieces if check_safety_in_description(p).triggered]
 
 
 class Runtime:
@@ -213,14 +223,15 @@ class Runtime:
         #    smoke visible" is describing a safe clip, not a hazard.
         safety = check_safety(message.message_text)
         matched = list(safety.matched)
+        evidence: List[str] = []
         for attachment in message.attachments:
             if attachment.summary:
-                matched += [
-                    m for m in check_safety_in_description(attachment.summary).matched
-                    if m not in matched
-                ]
+                verdict = check_safety_in_description(attachment.summary)
+                matched += [m for m in verdict.matched if m not in matched]
+                if verdict.triggered:
+                    evidence += _hazard_sentences(attachment.summary)
         if matched:
-            return self._handle_safety(message, resolved, state, matched)
+            return self._handle_safety(message, resolved, state, matched, evidence)
 
         # 2. Human handoff, reachable at any point, no friction. Typed text
         #    only: a customer heard on a clip saying "talk to a person" is
@@ -478,20 +489,27 @@ class Runtime:
         resolved: ResolvedIdentity,
         state: ConversationState,
         matched: List[str],
+        evidence: Optional[List[str]] = None,
     ) -> Reply:
         self.log.guardrail(message.conversation_id, "battery_safety", matched)
 
         ticket_id: Optional[str] = None
         if resolved.identity.phone:
             # Deterministic: code decides this ticket exists, not the model.
+            description = (
+                "Automatic safety escalation. Customer reported: %s. Matched safety "
+                "indicators: %s. No troubleshooting was offered."
+                % (message.message_text, ", ".join(matched))
+            )
+            if evidence:
+                # The trigger came from the clip, and the typed text may say
+                # nothing alarming: the safety team needs what the analyser
+                # saw, not just "video attached".
+                description += " Seen in the customer's video: %s" % " ".join(evidence)
             arguments: Dict[str, Any] = {
                 "category": "battery_safety",
                 "severity": "critical",
-                "description": (
-                    "Automatic safety escalation. Customer reported: %s. Matched safety "
-                    "indicators: %s. No troubleshooting was offered."
-                    % (message.message_text, ", ".join(matched))
-                ),
+                "description": description,
                 "idempotency_key": "safety:%s" % message.conversation_id,
             }
             # With several bikes the ticket needs one named, and triage may not
@@ -521,9 +539,19 @@ class Runtime:
             text += "\n\nI have raised this as a priority safety case, reference %s." % ticket_id
 
         self.log.escalation(message.conversation_id, "battery_safety", ticket_id)
+        if evidence:
+            # The whole description goes into the transcript, not just the
+            # matched lines, so a human reading it later sees what the
+            # analyser saw. Same labelled shape the agent path writes.
+            state.history.append({
+                "role": "user",
+                "content": content_blocks([a for a in message.attachments if a.summary])
+                + [{"type": "text", "text": message.message_text}],
+            })
         return self._finish(
             message, state, text, "guardrail:battery_safety",
             escalated=True, ticket_id=ticket_id, metadata={"matched": matched},
+            already_in_history=bool(evidence),
         )
 
     # -- outbound ------------------------------------------------------------

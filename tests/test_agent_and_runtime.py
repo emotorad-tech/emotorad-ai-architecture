@@ -171,6 +171,39 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(reply.escalated)
         self.assertEqual(reply.handled_by, "guardrail:battery_safety")
 
+    def test_a_safety_ticket_from_a_clip_carries_what_the_analyser_saw(self):
+        """The customer typed nothing alarming, so a ticket quoting only
+        their words tells the safety team nothing. The sentences that
+        matched go into the description, and the whole description into the
+        transcript for whoever picks the conversation up."""
+        runtime, adapter, _ = make_runtime([])
+        summary = (
+            "0:00 battery pack on a table, casing intact.\n"
+            "0:03 white smoke rising from the battery pack near the charging port.\n"
+            "0:06 the customer says 'dekho, dhuan nikal raha hai' in Hindi."
+        )
+        message = adapter.to_message({
+            "conversation_id": "conv-e", "session_token": "sess-ananya", "text": "video attached",
+            "attachments": [{
+                "kind": "video", "url": "s3://customers/x/y/videos/z.mp4", "mime_type": "video/mp4",
+                "summary": summary,
+            }],
+        })
+
+        reply = runtime.handle(message)
+
+        ticket = runtime.registry.tickets.tickets[reply.ticket_id]
+        self.assertIn("smoke", ticket["description"])
+        self.assertIn("white smoke rising from the battery pack", ticket["description"])
+        self.assertNotIn("casing intact", ticket["description"])
+        transcript = "\n".join(
+            block["text"] if isinstance(block, dict) else str(block)
+            for turn in runtime.conversations.get("conv-e").history
+            for block in (turn["content"] if isinstance(turn["content"], list) else [turn["content"]])
+        )
+        self.assertIn("casing intact", transcript)
+        self.assertIn("dhuan nikal raha hai", transcript)
+
     def test_a_benign_summary_that_names_absent_hazards_reaches_the_model(self):
         """A description saying what was *not* seen ("no smoke, no swelling")
         is the ordinary case, not a hazard: the negated terms must not trip
