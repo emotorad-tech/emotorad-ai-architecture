@@ -726,8 +726,13 @@ function renderFooter() {
 function paintSendButton() {
   var btn = document.getElementById("sendBtn");
   if (!btn) return;
-  var ready = !state.busy && (state.draft.trim().length > 0 || !!state.pendingPhoto || !!state.pendingVideo);
+  // Not while a clip is still going up: the message would leave without it,
+  // or with an upload id the server cannot claim yet.
+  var uploading = state.videoProgress !== null;
+  var ready = !state.busy && !uploading && (state.draft.trim().length > 0 || !!state.pendingPhoto || !!state.pendingVideo);
   btn.style.background = ready ? "var(--accent)" : "#D9D9D9";
+  btn.title = uploading ? "Video still uploading" : "";
+  btn.setAttribute("aria-disabled", uploading ? "true" : "false");
 }
 
 /* Dim and deaden the composer without touching the document's structure. The
@@ -817,7 +822,7 @@ function ask(text, location) {
 }
 
 function send() {
-  if (state.busy) return;
+  if (state.busy || state.videoProgress !== null) return;
   var text = (state.draft || "").trim();
   if (!text && !state.pendingPhoto && !state.pendingVideo) return;
   if (state.pendingPhoto) state.turns.push({ isUser: true, photo: state.pendingPhoto });
@@ -916,17 +921,23 @@ function onVideoPicked(event) {
   // Clear it now, so picking the same file twice in a row still fires change.
   event.target.value = "";
   if (!file) return;
+  // Before anything else: failed() below clears the pending clip, and a
+  // second pick that failed to presign used to throw away one that had
+  // already uploaded. One clip per message, sent or removed first.
+  if (state.videoProgress !== null || state.pendingVideo) {
+    notice("One clip at a time \u2014 send or remove the current one first.");
+    return;
+  }
   if (file.size > MAX_VIDEO_BYTES) {
     notice("That video is too large. Please send a clip under 100 MB or a shorter recording.");
     return;
   }
-  if (state.videoProgress !== null) return;  // one at a time
   state.videoProgress = 0;
   renderPendingStrip();
 
   function failed(err) {
     state.videoProgress = null;
-    state.pendingVideo = null;
+    clearPendingVideo();
     renderPendingStrip();
     paintSendButton();
     // A 415 is the file, not the network: retrying the same clip cannot help.
@@ -958,6 +969,7 @@ function onVideoPicked(event) {
     putToS3(file, presign, function (ok) {
       if (!ok) { failed(); return; }
       state.videoProgress = null;
+      clearPendingVideo();
       state.pendingVideo = {
         uploadId: presign.upload_id,
         name: file.name || "video.mp4",
@@ -1036,11 +1048,18 @@ function removePendingPhoto() {
   paintSendButton();
 }
 
-function removePendingVideo() {
-  // The object is already in S3 under an id nobody will claim; it expires
-  // with the pending entry. Only the local preview is released here.
+/* Every place pendingVideo is dropped or replaced goes through here, so the
+   blob URL behind the preview is released each time and not just on the
+   remove button. The object itself is already in S3 under an id nobody will
+   claim; it expires with the pending entry. Not called from ask(): the sent
+   turn keeps that preview, so its URL stays alive. */
+function clearPendingVideo() {
   if (state.pendingVideo && state.pendingVideo.previewUrl) URL.revokeObjectURL(state.pendingVideo.previewUrl);
   state.pendingVideo = null;
+}
+
+function removePendingVideo() {
+  clearPendingVideo();
   renderPendingStrip();
   paintSendButton();
 }

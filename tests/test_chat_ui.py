@@ -290,6 +290,35 @@ class VideoUploadTests(ChatPageTests):
         self.assertIn('{ kind: "image", url: sentPhoto }', self.html)
         self.assertIn("shrinkToDataUri", self.html)
 
+    def test_a_second_pick_does_not_clear_the_first_clip(self):
+        """failed() cleared pendingVideo, so a second pick that failed to
+        presign threw away a clip that had already uploaded. One at a time."""
+        self.assertIn("One clip at a time", self.html)
+        body = self.html[self.html.index("function onVideoPicked"):]
+        body = body[:body.index("function failed")]
+        self.assertIn("state.pendingVideo", body)
+
+    def test_the_preview_url_is_released_when_replaced_or_cleared(self):
+        """One helper revokes the blob URL; the failure path, the success
+        path (replacing) and the remove button all go through it."""
+        self.assertIn("URL.revokeObjectURL", self.html)
+        picked = self.html[self.html.index("function onVideoPicked"):self.html.index("function putToS3")]
+        failed = picked[picked.index("function failed"):picked.index('fetch("/uploads"')]
+        self.assertIn("clearPendingVideo()", failed)
+        success = picked[picked.index("putToS3(file, presign"):]
+        self.assertIn("clearPendingVideo()", success)
+        remove = self.html[self.html.index("function removePendingVideo"):]
+        remove = remove[:remove.index("\n}", 1)]
+        self.assertIn("clearPendingVideo()", remove)
+
+    def test_send_is_disabled_while_the_clip_uploads(self):
+        """A message sent mid-upload would go without the clip, or with an
+        id the server cannot claim yet (409)."""
+        self.assertIn("Video still uploading", self.html)
+        body = self.html[self.html.index("function paintSendButton"):]
+        body = body[:body.index("\n}", 1)]
+        self.assertIn("videoProgress", body)
+
     def test_the_page_says_a_video_takes_a_while(self):
         """Gemini can take a minute on a long clip; a spinner alone reads as
         a hang. The notice goes up before the fetch and comes down with the
