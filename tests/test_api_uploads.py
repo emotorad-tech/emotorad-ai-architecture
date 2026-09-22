@@ -457,6 +457,65 @@ class AnonymousVisitorUploadTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400, r.text)
 
 
+class DevVerificationAuthTests(unittest.TestCase):
+    """`/dev/verification` reads out the pending OTP for any conversation, and
+    staging is public with the live OMS key behind it — a readable code there
+    is a login as any phone number. It must sit behind the same playground
+    credential check as the rest of the internal surface."""
+
+    def setUp(self):
+        self.store = _Store()
+        with mock.patch.dict(os.environ, {
+            "EMOTORAD_AI_PLAYGROUND_USER": "dev",
+            "EMOTORAD_AI_PLAYGROUND_PASSWORD": "dev",
+            "EMOTORAD_AI_DEV_CODES": "1",
+        }):
+            self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+
+    def test_no_auth_is_401(self):
+        r = self.client.get("/dev/verification/c1")
+        self.assertEqual(r.status_code, 401)
+
+    def test_wrong_auth_is_401(self):
+        wrong = {"Authorization": "Basic " + base64.b64encode(b"dev:nope").decode()}
+        r = self.client.get("/dev/verification/c1", headers=wrong)
+        self.assertEqual(r.status_code, 401)
+
+    def test_right_auth_returns_the_same_body_as_before(self):
+        r = self.client.get("/dev/verification/c1", headers=AUTH)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {
+            "conversation_id": "c1",
+            "pending_code": None,
+            "verified_phone": None,
+            "attempts_left": 5,
+        })
+
+
+class DevVerificationFlagOffTests(unittest.TestCase):
+    """Auth first, then the flag: an unauthenticated caller gets 401 either
+    way, and only an authenticated one learns whether dev codes are on."""
+
+    def setUp(self):
+        self.store = _Store()
+        with mock.patch.dict(os.environ, {
+            "EMOTORAD_AI_PLAYGROUND_USER": "dev",
+            "EMOTORAD_AI_PLAYGROUND_PASSWORD": "dev",
+        }):
+            os.environ.pop("EMOTORAD_AI_DEV_CODES", None)
+            self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+
+    def test_no_auth_is_401_even_with_the_flag_off(self):
+        r = self.client.get("/dev/verification/c1")
+        self.assertEqual(r.status_code, 401)
+
+    def test_authenticated_but_flag_off_is_404(self):
+        r = self.client.get("/dev/verification/c1", headers=AUTH)
+        self.assertEqual(r.status_code, 404)
+
+
 class NoBucketTests(unittest.TestCase):
     def test_uploads_and_media_are_503_without_a_bucket(self):
         api = fresh_api(None)

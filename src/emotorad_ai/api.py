@@ -572,6 +572,47 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     )
 
 
+# The playground has no auth of its own and takes an Anthropic API key as
+# input, so — since the deployed instance's security group has 443 open to
+# the whole internet, not just the internal team (see the deployment plan) —
+# it must never be reachable without a credential check in front of it.
+#
+# Defined here, ahead of /dev/verification below, because that route's
+# dependency binds to this name at import time, not at request time — moved up
+# from beside the playground proxy it also guards, further down this file.
+PLAYGROUND_USER = os.environ.get("EMOTORAD_AI_PLAYGROUND_USER", "")
+PLAYGROUND_PASSWORD = os.environ.get("EMOTORAD_AI_PLAYGROUND_PASSWORD", "")
+
+
+def _basic_auth_ok(header_value: Optional[str]) -> bool:
+    # Fail closed: unconfigured credentials must never mean "let everyone in."
+    if not PLAYGROUND_USER or not PLAYGROUND_PASSWORD:
+        return False
+    if not header_value or not header_value.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header_value[len("Basic ") :]).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    username, _, password = decoded.partition(":")
+    # constant-time comparisons — a timing difference on a login endpoint is
+    # itself a way to brute-force a credential one character at a time.
+    return secrets.compare_digest(username, PLAYGROUND_USER) and secrets.compare_digest(
+        password, PLAYGROUND_PASSWORD
+    )
+
+
+def require_playground_auth(request: Request) -> None:
+    if not PLAYGROUND_USER or not PLAYGROUND_PASSWORD:
+        raise HTTPException(503, "Playground auth is not configured on this deployment.")
+    if not _basic_auth_ok(request.headers.get("authorization")):
+        raise HTTPException(
+            401,
+            "Authentication required.",
+            headers={"WWW-Authenticate": 'Basic realm="Emotorad AI playground"'},
+        )
+
+
 # Reading the code off the screen replaces the SMS that is not wired yet, the
 # way the playground shows it in its sidebar. It is a verification bypass by
 # definition: it hands the pending code for any conversation to anyone who asks.
@@ -580,10 +621,18 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
 # that forgets to set anything gets 404, and the only way to enable it is to
 # have decided to. Delete the whole route once an SMS provider is wired; nothing
 # else depends on it.
+#
+# The flag alone is not enough, though: staging is public on the internet and
+# runs with the live OMS key behind it, so a code readable by anyone is a login
+# as any phone number on the real customer base, not a toy on a laptop. It sits
+# behind the same playground credential as every other internal route. Auth
+# runs first — an unauthenticated caller gets 401 whether the flag is on or
+# off — and only once that passes does the flag decide between the data and a
+# 404, exactly as before.
 DEV_CODES = os.environ.get("EMOTORAD_AI_DEV_CODES") == "1"
 
 
-@app.get("/dev/verification/{conversation_id}")
+@app.get("/dev/verification/{conversation_id}", dependencies=[Depends(require_playground_auth)])
 def dev_verification(conversation_id: str) -> dict:
     if not DEV_CODES:
         raise HTTPException(status_code=404, detail="not found")
@@ -633,42 +682,6 @@ def index() -> RedirectResponse:
 # is enough; nothing new needs opening for the internal team to reach it.
 PLAYGROUND_UPSTREAM = os.environ.get("EMOTORAD_AI_PLAYGROUND_UPSTREAM", "127.0.0.1:8501")
 _playground_client = httpx.AsyncClient(base_url="http://%s" % PLAYGROUND_UPSTREAM)
-
-# The playground has no auth of its own and takes an Anthropic API key as
-# input, so — since the deployed instance's security group has 443 open to
-# the whole internet, not just the internal team (see the deployment plan) —
-# it must never be reachable without a credential check in front of it.
-PLAYGROUND_USER = os.environ.get("EMOTORAD_AI_PLAYGROUND_USER", "")
-PLAYGROUND_PASSWORD = os.environ.get("EMOTORAD_AI_PLAYGROUND_PASSWORD", "")
-
-
-def _basic_auth_ok(header_value: Optional[str]) -> bool:
-    # Fail closed: unconfigured credentials must never mean "let everyone in."
-    if not PLAYGROUND_USER or not PLAYGROUND_PASSWORD:
-        return False
-    if not header_value or not header_value.startswith("Basic "):
-        return False
-    try:
-        decoded = base64.b64decode(header_value[len("Basic ") :]).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
-        return False
-    username, _, password = decoded.partition(":")
-    # constant-time comparisons — a timing difference on a login endpoint is
-    # itself a way to brute-force a credential one character at a time.
-    return secrets.compare_digest(username, PLAYGROUND_USER) and secrets.compare_digest(
-        password, PLAYGROUND_PASSWORD
-    )
-
-
-def require_playground_auth(request: Request) -> None:
-    if not PLAYGROUND_USER or not PLAYGROUND_PASSWORD:
-        raise HTTPException(503, "Playground auth is not configured on this deployment.")
-    if not _basic_auth_ok(request.headers.get("authorization")):
-        raise HTTPException(
-            401,
-            "Authentication required.",
-            headers={"WWW-Authenticate": 'Basic realm="Emotorad AI playground"'},
-        )
 
 # Response headers that describe the hop from Streamlit to us, not to the
 # browser — passing them through would leave the client trying to decode a
