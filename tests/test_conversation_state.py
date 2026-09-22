@@ -7,6 +7,7 @@ from emotorad_ai.conversation import (
     ROUTED,
     ConversationState,
     ConversationStore,
+    customer_texts,
 )
 
 
@@ -85,6 +86,27 @@ class StoreTests(unittest.TestCase):
         store.get("c1").select_bike("FRAME-A")
         self.assertIsNone(store.get("c2").selected_frame)
         self.assertEqual(len(store), 2)
+
+
+class CustomerTextsTests(unittest.TestCase):
+    def test_machine_written_blocks_are_not_the_customers_words(self):
+        """The video analyser's description sits in a user turn beside the
+        customer's text. It is not something the customer typed: an address
+        read off a sticker in the clip must not satisfy the address
+        provenance backstop on place_replacement_order."""
+        history = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "[Description of the customer's video 'x'... sticker reads 12 MG Road, Pune 411001"},
+                {"type": "text", "text": "[An attachment could not be retrieved; do not describe it.]"},
+                {"type": "text", "text": "my battery died"},
+            ],
+        }]
+        self.assertEqual(customer_texts(history), ["my battery died"])
+
+    def test_a_customer_who_types_a_bracket_is_still_heard(self):
+        history = [{"role": "user", "content": [{"type": "text", "text": "[urgent] 9 New Road, Pune"}]}]
+        self.assertEqual(customer_texts(history), ["[urgent] 9 New Road, Pune"])
 
 
 if __name__ == "__main__":

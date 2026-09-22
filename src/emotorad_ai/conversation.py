@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
+from .attachments import MACHINE_TEXT_PREFIXES
+
 # Phases. A conversation moves forward through these, and can move back — a
 # customer who says "actually, my other bike" returns to bike selection from a
 # routed state, which is why this is a field rather than a one-way sequence.
@@ -158,6 +160,11 @@ def customer_texts(history: List[Dict[str, Any]]) -> List[str]:
     distinction `_is_customer_turn` draws, reused here for the address
     backstop on `place_replacement_order`: it needs the customer's own words,
     not a tool's or the model's.
+
+    Text the platform wrote into the turn about their media — the video
+    analyser's description, a transcript, a "could not be read" note — is
+    skipped by its opening marker (`attachments.MACHINE_TEXT_PREFIXES`). An
+    address read off a sticker in a clip is not an address the customer gave.
     """
     texts: List[str] = []
     for entry in history:
@@ -169,7 +176,10 @@ def customer_texts(history: List[Dict[str, Any]]) -> List[str]:
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    texts.append(block.get("text", ""))
+                    text = block.get("text", "")
+                    if text.startswith("[") and text.startswith(MACHINE_TEXT_PREFIXES):
+                        continue
+                    texts.append(text)
     return texts
 
 
