@@ -7,6 +7,7 @@ a flat JSON object. Field names are the environment variables the code reads:
 | Field | Read by |
 |---|---|
 | `API_KEY_CLAUDE` | exported as `ANTHROPIC_API_KEY` too; the API in `anthropic` mode and the playground |
+| `API_KEY_GEMINI` | exported as `GEMINI_API_KEY` too; `video_summary.py` describes a customer's uploaded video through Gemini once at ingest. Optional: without it the video is sent to Claude as sampled frames instead, and `/health` reports `"video_summary":"frames"` rather than `"gemini"` |
 | `EMOTORAD_OMS_API_KEY` | `tools/oms.py` |
 | `EMOTORAD_AI_PLAYGROUND_USER` | `api.py` basic auth on `/playground` |
 | `EMOTORAD_AI_PLAYGROUND_PASSWORD` | `api.py` basic auth on `/playground` |

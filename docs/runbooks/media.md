@@ -43,9 +43,17 @@ curl -s https://ai-release-stage.emotorad.com/health
 Expected: `"media":"configured"`. `"media":"not configured"` means the bucket env var is
 unset or empty on the running container.
 
-`EMOTORAD_AI_TRANSCRIBE_VIDEO=1` turns on speech-to-text for a customer's uploaded video
-in this API path; it is off by default because Whisper downloads a model on first use and
-has no deadline.
+With `API_KEY_GEMINI` set in the config store, a customer's uploaded video is described
+once at ingest by Gemini (`gemini-3.8-flash`, 90 s deadline) and Claude reads that text
+instead of sampled frames; `/health` shows `"video_summary":"gemini"`. The clip's bytes
+cross to Google's API for that one request, and a clip over 20 MB that goes through
+Google's Files API is deleted there as soon as the description is back, so this is a second
+vendor boundary beside Anthropic (decision recorded in
+`docs/superpowers/specs/2026-09-22-video-evidence-gemini-design.md` §4).
+
+Without the key, or when Gemini fails or times out, the frames path runs.
+`EMOTORAD_AI_TRANSCRIBE_VIDEO=1` turns on speech-to-text for that path; it is off by
+default because Whisper downloads a model on first use and has no deadline.
 
 ## 3. Upload a guide asset
 
