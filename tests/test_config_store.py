@@ -52,7 +52,15 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(env["API_KEY_CLAUDE"], "sk-ant-test")
 
     def test_the_alias_table_is_the_one_place_both_names_meet(self):
-        self.assertEqual(ALIASES, {"API_KEY_CLAUDE": ("ANTHROPIC_API_KEY",)})
+        self.assertEqual(
+            ALIASES,
+            {"API_KEY_CLAUDE": ("ANTHROPIC_API_KEY",), "API_KEY_GEMINI": ("GEMINI_API_KEY",)},
+        )
+
+    def test_the_gemini_key_is_exported_under_the_sdk_name(self):
+        env = {}
+        load_into_environ(SECRET_ID, client=stubbed(json.dumps({"API_KEY_GEMINI": "g-1"})), environ=env)
+        self.assertEqual(env["GEMINI_API_KEY"], "g-1")
 
     def test_no_secret_id_means_no_call_and_nothing_exported(self):
         env = {}

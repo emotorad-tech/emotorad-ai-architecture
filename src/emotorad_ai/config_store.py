@@ -29,10 +29,13 @@ from typing import Any, Dict, List, MutableMapping, Optional, Tuple
 
 SECRET_ID_ENV = "EMOTORAD_AI_SECRET_ID"
 
-# The secret stores the Anthropic key under the name the team uses for it; the
-# SDK and the playground read ANTHROPIC_API_KEY. This table is the only place
-# that knows both names.
-ALIASES: Dict[str, Tuple[str, ...]] = {"API_KEY_CLAUDE": ("ANTHROPIC_API_KEY",)}
+# The secret stores each vendor key under the name the team uses for it; the
+# SDKs read their own names (ANTHROPIC_API_KEY, GEMINI_API_KEY). This table is
+# the only place that knows both.
+ALIASES: Dict[str, Tuple[str, ...]] = {
+    "API_KEY_CLAUDE": ("ANTHROPIC_API_KEY",),
+    "API_KEY_GEMINI": ("GEMINI_API_KEY",),
+}
 
 
 class ConfigStoreError(Exception):

@@ -38,6 +38,10 @@ imageio-ffmpeg>=0.5
 # and the narration is simply absent.
 faster-whisper>=1.0
 
+# Video evidence: src/emotorad_ai/video_summary.py hands a customer's clip to
+# Gemini once at ingest and Claude reads the description. Absent GEMINI_API_KEY the frames path above runs instead.
+google-genai>=1.0
+
 # Startup config: src/emotorad_ai/config_store.py reads one Secrets Manager
 # secret through the instance role and exports its fields as env vars. Local
 # runs without EMOTORAD_AI_SECRET_ID never import boto3's network paths.
