@@ -14,6 +14,7 @@ Cloud free tier first; self-hosting is a one-variable change (§5).
 |---|---|---|
 | Trace `customer-turn` / `dealer-turn` | `inbound` | input = the customer's message, redacted. `session_id` = conversation id. `user_id` = identity cluster, never the phone. Tags = persona, channel |
 | `agent` observation named after the sub-agent | `routed` | `battery_support`, `motor_support`, `late_warranty`, `dealer_orders` |
+| `generation` `video-summary` | `video_summary` / `video_summary_failed` | The Gemini call that described a customer's clip: model, tokens, the fixed prompt and the clip's key, MIME and size as input (never the bytes), the description as output. Attached to the turn the clip arrived on. Logged on every environment by the owner's decision of 2026-09-22 |
 | `generation` | `llm_request` → `llm_turn` | model id, `input`/`output`/`cache_read_input_tokens`/`cache_creation_input_tokens`, stop reason, iteration. This is what gets priced |
 | `tool` / `retriever` | `tool_request` → `tool_call` | arguments and result, redacted; error level on an error envelope. Knowledge searches are retrievers |
 | `guardrail` | `guardrail_triggered` | `battery_safety`, `human_handoff`, coverage and order post-checks |
@@ -22,7 +23,7 @@ Cloud free tier first; self-hosting is a one-variable change (§5).
 
 Not traced: the playground. It bypasses `runtime.handle()` and has its own loop.
 
-What is deliberately **not** sent: the system prompt and the message history the model
+What is deliberately **not** sent: the Claude system prompt and the message history the model
 saw. They carry the customer's warranty facts and every earlier message. The JSONL log has
 the same policy. If a debugging need arises, that is a decision to take with Sachin, not a
 flag to flip.
