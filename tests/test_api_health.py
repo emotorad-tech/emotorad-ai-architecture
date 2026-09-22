@@ -20,7 +20,7 @@ class HealthTests(unittest.TestCase):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
         self.assertEqual(
             api.health(),
-            {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured"},
+            {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured", "video_summary": "frames"},
         )
 
     def test_registry_offers_the_guide_media_tool(self):
