@@ -171,6 +171,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(reply.escalated)
         self.assertEqual(reply.handled_by, "guardrail:battery_safety")
 
+    def test_a_benign_summary_that_names_absent_hazards_reaches_the_model(self):
+        """A description saying what was *not* seen ("no smoke, no swelling")
+        is the ordinary case, not a hazard: the negated terms must not trip
+        the gate, and the turn goes to the model as normal."""
+        runtime, adapter, llm = make_runtime([say("Thanks, I can see the pack.")])
+        message = adapter.to_message({
+            "conversation_id": "conv-b", "session_token": "sess-ananya", "text": "video attached",
+            "pill": "battery_issue",
+            "attachments": [{
+                "kind": "video", "url": "s3://customers/x/y/videos/z.mp4", "mime_type": "video/mp4",
+                "summary": "0:00 battery pack on a table, casing intact. No smoke, swelling, "
+                           "cracks or discolouration visible. Sparks: not visible.",
+            }],
+        })
+
+        reply = runtime.handle(message)
+
+        self.assertEqual(len(llm.requests), 1)
+        self.assertFalse(reply.escalated)
+        self.assertNotEqual(reply.handled_by, "guardrail:battery_safety")
+
     def test_a_video_summary_cannot_ask_for_a_human(self):
         """Handoff stays on the typed text: a clip in which the customer says
         "I want to talk to a person" is evidence, not a request to the bot."""

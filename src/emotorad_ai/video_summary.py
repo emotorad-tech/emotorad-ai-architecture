@@ -52,17 +52,17 @@ POLL_SECONDS = 2.0
 # would hand Claude a conclusion it cannot verify.
 PROMPT = """You are an after-sales evidence analyst for an Indian electric cycle company. A customer has sent this video with a support request. Watch and listen to the whole clip and write a detailed, factual description of what it contains, for a support specialist who cannot see it.
 
-Describe only what is observable. Cover, where present:
+Describe only what is present and observable. Cover, where present:
 - The component and the area of the bike shown (battery pack, charger, charging port, display, motor, controller, brakes, wheels, drivetrain, frame, or other), and how it is mounted or held.
-- Visible damage, deformation, swelling, cracks, discolouration, corrosion, liquid, smoke, sparks or fire. Say exactly where on the part.
+- Any damage or change to the part that you can actually see, described plainly and with its exact position on the part.
 - Indicator lights: which ones, their colours, whether steady or blinking, and the blink pattern with timing where you can count it.
 - Any text, symbol or error code readable on a display or label, quoted exactly as shown.
 - Sounds coming from the bike: describe them plainly (clicking, grinding, whine, beep, silence) and when they occur relative to what is on screen.
 - The customer's spoken words, quoted as closely as you can, and the language or languages they speak in.
 - Notable moments with timestamps, in order.
-- Problems with the recording itself: too dark, out of focus, shaky, too short, the part of interest not in frame.
+- Problems with the recording itself: too dark, out of focus, shaky, too short.
 
-Write plain text in short paragraphs or bullet points. Do not diagnose, do not advise, do not guess at causes, and do not speculate about what is outside the frame. If something is not shown or not audible, say "not visible" or "not audible" rather than inferring it."""
+Never list conditions that were not observed, and do not enumerate faults or hazards by name to say they are absent. If the part of interest is not in frame, say only that. Write plain text in short paragraphs or bullet points. Do not diagnose, do not advise, do not guess at causes, and do not speculate about what is outside the frame."""
 
 
 class VideoSummaryError(Exception):

@@ -152,6 +152,51 @@ def check_safety(text: str) -> GuardrailVerdict:
     return _scan(text, _ALL_SAFETY_PATTERNS)
 
 
+# Words that, within a few tokens before a hazard term, mean the writer is
+# saying it was *absent*. The video analyser is a careful observer and a
+# careful observer writes "no smoke visible"; without this, every benign clip
+# would hard-stop the conversation and open a critical ticket.
+_NEGATIONS = frozenset({"no", "not", "without", "none", "absent", "never", "nor"})
+# How many tokens back a negation still governs the term. Four covers "no
+# signs of visible swelling"; further back it is more likely a different clause.
+_NEGATION_WINDOW = 4
+_PUNCTUATION = str.maketrans("", "", ".,;:!?()[]\"'")
+
+
+def _has_negation(tokens: Sequence[str]) -> bool:
+    return any(token.lower().translate(_PUNCTUATION) in _NEGATIONS for token in tokens)
+
+
+def _negated(text: str, start: int, end: int) -> bool:
+    if _has_negation(text[:start].split()[-_NEGATION_WINDOW:]):
+        return True
+    # The label form, "Sparks: not visible": the negation follows the term.
+    # Only a colon straight after the match opens that window, so "the pack
+    # is swollen, not cracked" still counts the swelling.
+    after = text[end:].lstrip()
+    return after.startswith(":") and _has_negation(after[1:].split()[:_NEGATION_WINDOW])
+
+
+def check_safety_in_description(text: str) -> GuardrailVerdict:
+    """The safety gate for machine-written descriptions of a clip.
+
+    Same patterns as `check_safety`, but a match preceded within the last
+    four words by a negation is dropped, as is the label form "Term: not
+    visible". Typed customer text keeps the plain
+    scan: a customer who writes "not swelling but very hot" is still in
+    trouble, and over-triggering on their words costs one ticket. A
+    description that lists what it did not see is the normal case, and
+    over-triggering on it would make the video path unusable.
+    """
+    matched = []
+    for label, pattern in _ALL_SAFETY_PATTERNS:
+        for found in pattern.finditer(text or ""):
+            if not _negated(text, found.start(), found.end()):
+                matched.append(label)
+                break
+    return GuardrailVerdict(triggered=bool(matched), matched=matched)
+
+
 # Battery-only, kept for the tests and callers written before motor support.
 def check_battery_safety(text: str) -> GuardrailVerdict:
     return _scan(text, _SAFETY_PATTERNS)

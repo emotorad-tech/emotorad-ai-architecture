@@ -48,6 +48,7 @@ from .guardrails import (
     check_human_handoff,
     check_order_claim,
     check_safety,
+    check_safety_in_description,
 )
 from .identity import IdentityResolver, ResolvedIdentity
 from .llm import BedrockClaude
@@ -206,14 +207,20 @@ class Runtime:
             state.evidence_seen = True
 
         #    A video's description (Attachment.summary, written by the video
-        #    analyser at ingest) is scanned with the typed text: smoke seen on
-        #    a clip is the same hard stop as smoke typed in a sentence.
-        scan_text = "\n".join(
-            [message.message_text] + [a.summary for a in message.attachments if a.summary]
-        )
-        safety = check_safety(scan_text)
-        if safety.triggered:
-            return self._handle_safety(message, resolved, state, safety.matched)
+        #    analyser at ingest) is scanned too: smoke seen on a clip is the
+        #    same hard stop as smoke typed in a sentence. The description gets
+        #    the negation-aware scan, because an analyser that writes "no
+        #    smoke visible" is describing a safe clip, not a hazard.
+        safety = check_safety(message.message_text)
+        matched = list(safety.matched)
+        for attachment in message.attachments:
+            if attachment.summary:
+                matched += [
+                    m for m in check_safety_in_description(attachment.summary).matched
+                    if m not in matched
+                ]
+        if matched:
+            return self._handle_safety(message, resolved, state, matched)
 
         # 2. Human handoff, reachable at any point, no friction. Typed text
         #    only: a customer heard on a clip saying "talk to a person" is

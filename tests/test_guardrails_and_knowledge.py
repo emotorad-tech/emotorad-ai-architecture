@@ -1,6 +1,10 @@
 import unittest
 
-from emotorad_ai.guardrails import check_battery_safety, check_human_handoff
+from emotorad_ai.guardrails import (
+    check_battery_safety,
+    check_human_handoff,
+    check_safety_in_description,
+)
 from emotorad_ai.knowledge import BatteryKnowledgeBase
 
 
@@ -34,6 +38,34 @@ class SafetyGateTests(unittest.TestCase):
         verdict = check_battery_safety("battery is swelling and there is a burning smell")
         self.assertIn("swelling", verdict.matched)
         self.assertIn("burning_smell", verdict.matched)
+
+
+class DescriptionSafetyGateTests(unittest.TestCase):
+    """The video analyser writes about what it saw, and a careful analyst
+    also writes what it did not see. "No smoke visible" must not hard-stop
+    the conversation; "white smoke rises" must."""
+
+    def test_negated_terms_do_not_trigger(self):
+        for text in [
+            "No smoke, swelling, cracks or discolouration visible",
+            "Sparks: not visible",
+            "The pack shows no signs of swelling and is without cracks.",
+        ]:
+            with self.subTest(text=text):
+                self.assertFalse(check_safety_in_description(text).triggered, text)
+
+    def test_observed_terms_still_trigger(self):
+        for text in [
+            "white smoke rises from the pack at 0:04",
+            "the pack is visibly swollen on one side",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(check_safety_in_description(text).triggered, text)
+
+    def test_a_negation_more_than_four_words_back_does_not_shield(self):
+        verdict = check_safety_in_description("no charger is connected and the pack is swollen")
+        self.assertTrue(verdict.triggered)
+        self.assertIn("swelling", verdict.matched)
 
 
 class HandoffGateTests(unittest.TestCase):
