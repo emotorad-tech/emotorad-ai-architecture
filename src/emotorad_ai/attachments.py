@@ -15,8 +15,11 @@ The media path carries `Attachment` objects instead, from three sources: a
 fetched server-side through `fetch` (the instance role); an http(s) image is
 passed by URL. No S3 URL of any kind is ever handed to the model, and a fetch
 that fails becomes a sentence the model can read rather than an exception the
-customer sees. Video follows the playground's rule: stills plus the narration,
-and an unreadable clip says so instead of being silently "seen".
+customer sees. A video that Gemini has already described at ingest
+(`Attachment.summary`, see `video_summary.py`) goes to the model as that text
+and nothing else. Without a summary, video follows the playground's rule:
+stills plus the narration, and an unreadable clip says so instead of being
+silently "seen".
 
 Both paths go through `_image_block`, so every image the model sees has been
 through `fit_for_model` — one downscale rule, wherever the picture came from.
@@ -183,9 +186,33 @@ def _payload(attachment: Attachment, fetch: Optional[Callable[[str], bytes]]) ->
     return None
 
 
-def _video_blocks(data: bytes, name: str) -> List[Dict[str, Any]]:
+# What Claude is told about a video it reads as text. Written for the model:
+# it names the author (a machine, not the customer, not Claude) so the model
+# neither quotes it as the customer's words nor treats it as its own
+# observation, and it says what to do when the description is silent — ask,
+# rather than fill the gap.
+SUMMARY_LABEL = (
+    "[Description of the customer's video '%s', written by an automated video analyser — "
+    "not by you and not by a person. Treat it as observation, not diagnosis. If something "
+    "that matters is not described, say you cannot tell from the video and ask for a photo "
+    "or a closer clip.]"
+)
+
+
+def _video_blocks(
+    data: Optional[bytes], name: str, summary: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """The summary when there is one; frames and narration otherwise.
+
+    A described clip never touches ffmpeg: the description is the evidence, and
+    sampling stills on top would double the cost and hand the model two
+    accounts of the same thing to reconcile.
+    """
+    if summary and summary.strip():
+        return [{"type": "text", "text": SUMMARY_LABEL % name + "\n" + summary.strip()}]
     blocks: List[Dict[str, Any]] = []
     suffix = ".mp4"
+    data = data or b""
     wav = video.extract_audio(data, suffix)
     transcript = video.transcribe_audio(wav) if wav and os.environ.get(TRANSCRIBE_ENV, "0") == "1" else None
     if transcript and transcript.get("text"):
@@ -237,6 +264,12 @@ def content_blocks(
             mime = attachment.url[len("data:"):].split(";")[0].lower()
         name = attachment.url.rsplit("/", 1)[-1][:80] if attachment.url.startswith("s3://") else "attachment"
 
+        # A summarised video needs no bytes: skip the fetch so an s3:// clip
+        # is not pulled from the store for nothing.
+        if attachment.summary and attachment.summary.strip() and video.is_video(mime, name):
+            blocks.extend(_video_blocks(None, name, attachment.summary))
+            continue
+
         payload = _payload(attachment, fetch)
         if payload is None:
             continue
@@ -249,7 +282,7 @@ def content_blocks(
             continue
 
         if video.is_video(mime, name):
-            blocks.extend(_video_blocks(payload, name))
+            blocks.extend(_video_blocks(payload, name, attachment.summary))
         elif mime.startswith("image/"):
             blocks.append(_image_block(payload, mime))
         elif mime == "application/pdf":

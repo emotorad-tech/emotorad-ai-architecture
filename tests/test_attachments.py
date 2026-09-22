@@ -307,6 +307,55 @@ class TranscriptionGateTests(unittest.TestCase):
         self.assertTrue(any("wheezes" in block.get("text", "") for block in content))
 
 
+class VideoSummaryBlockTests(unittest.TestCase):
+    """A clip Gemini has already described goes to Claude as that text, and
+    nothing else: no fetch, no ffmpeg, no frames. The bytes are not needed
+    for the turn, so an `s3://` attachment with a summary must not be read
+    from the store at all."""
+
+    SUMMARY = "0:00 battery pack on a table. 0:04 white smoke rising from the left end."
+
+    def test_a_summary_becomes_one_labelled_text_block_and_no_frames(self):
+        fetched = []
+
+        def fetch(key):
+            fetched.append(key)
+            return b"not a video"
+
+        attachment = Attachment("video", "s3://customers/x/y/videos/z.mp4", "video/mp4", summary=self.SUMMARY)
+        with mock.patch.object(attachments.video, "extract_frames") as frames, mock.patch.object(
+            attachments.video, "extract_audio"
+        ) as audio:
+            content = content_blocks([attachment], fetch=fetch)
+        frames.assert_not_called()
+        audio.assert_not_called()
+        self.assertEqual(fetched, [])
+        self.assertEqual(len(content), 1)
+        self.assertEqual(content[0]["type"], "text")
+        text = content[0]["text"]
+        self.assertTrue(text.startswith("[Description of the customer's video 'z.mp4'"), text)
+        self.assertIn("automated video analyser", text)
+        self.assertIn("not by you and not by a person", text)
+        self.assertIn("observation, not diagnosis", text)
+        self.assertTrue(text.endswith("\n" + self.SUMMARY), text)
+
+    def test_an_empty_summary_falls_back_to_frames(self):
+        attachment = Attachment("video", "data:video/mp4;base64,AAAA", "video/mp4", summary="   ")
+        with mock.patch.object(attachments.video, "extract_frames", return_value=["deadbeef"]) as frames, mock.patch.object(
+            attachments.video, "extract_audio", return_value=None
+        ):
+            content = content_blocks([attachment])
+        frames.assert_called_once()
+        self.assertEqual(content[-1]["type"], "image")
+
+    def test_the_summary_goes_before_the_customers_words(self):
+        attachment = Attachment("video", "s3://customers/x/y/videos/z.mp4", "video/mp4", summary=self.SUMMARY)
+        content = user_content(message("it started smoking", [attachment]))
+        self.assertEqual(len(content), 2)
+        self.assertIn(self.SUMMARY, content[0]["text"])
+        self.assertEqual(content[1], {"type": "text", "text": "it started smoking"})
+
+
 class PlaygroundCompatibilityTests(unittest.TestCase):
     def test_the_playground_still_exposes_its_helper_names(self):
         from emotorad_ai import playground, video
