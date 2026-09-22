@@ -290,6 +290,12 @@ class VideoUploadTests(ChatPageTests):
         self.assertIn('{ kind: "image", url: sentPhoto }', self.html)
         self.assertIn("shrinkToDataUri", self.html)
 
+    def test_an_unsupported_format_says_so(self):
+        """A 415 from /uploads is the format, not the network; "did not
+        upload, try again" would send the customer round in circles."""
+        self.assertIn("415", self.html)
+        self.assertIn("That format is not supported, please send an MP4 or a clip recorded on your phone camera", self.html)
+
 
 class LocationSharingTests(ChatPageTests):
     """The Zomato entry point: the bot offers a button, the phone supplies the

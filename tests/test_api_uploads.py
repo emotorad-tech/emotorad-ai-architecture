@@ -72,6 +72,13 @@ class UploadFlowTests(unittest.TestCase):
         r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya", "text": "x", "attachments": [{"upload_id": body["upload_id"]}]})
         self.assertEqual(r.status_code, 409)
 
+    def test_an_iphone_clip_presigns(self):
+        r = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "video/quicktime", "size_bytes": 9})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body["key"].endswith(".mov"), body["key"])
+        self.assertEqual(body["headers"]["Content-Type"], "video/quicktime")
+
     def test_unsupported_type_and_over_cap(self):
         r = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "image/gif", "size_bytes": 9})
         self.assertEqual(r.status_code, 415)

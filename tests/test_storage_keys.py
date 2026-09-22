@@ -76,6 +76,19 @@ class AssetKeyTests(unittest.TestCase):
         )
         self.assertEqual(derivative_keys("assets/afs/battery/docs/manual.pdf"), {})
 
+    def test_phone_camera_clips_are_videos_with_a_poster(self):
+        """An iPhone records .mov (video/quicktime) and older Android phones
+        3gp; both must presign like an mp4, and get the same poster."""
+        self.assertEqual(extension_for("video/quicktime"), "mov")
+        self.assertEqual(extension_for("video/3gpp"), "3gp")
+        self.assertEqual(customer_kind_for("video/quicktime"), "videos")
+        self.assertEqual(
+            derivative_keys("customers/a/b/videos/c.mov"), {"poster": "customers/a/b/videos/c.poster.jpg"}
+        )
+        self.assertEqual(
+            derivative_keys("customers/a/b/videos/c.3gp"), {"poster": "customers/a/b/videos/c.poster.jpg"}
+        )
+
 
 class CustomerKeyTests(unittest.TestCase):
     def test_a_well_formed_customer_key(self):
@@ -118,6 +131,8 @@ class PlaygroundKeyTests(unittest.TestCase):
 class IsValidKeyTests(unittest.TestCase):
     def test_accepts_a_customer_key(self):
         self.assertTrue(is_valid_key("customers/clu_1/conv_1/images/upl_1.jpg"))
+        self.assertTrue(is_valid_key("customers/a/b/videos/c.mov"))
+        self.assertTrue(is_valid_key("customers/a/b/videos/c.3gp"))
 
     def test_accepts_an_asset_key_and_its_derivatives(self):
         self.assertTrue(is_valid_key("assets/afs/battery/photos/soc-button.jpg"))

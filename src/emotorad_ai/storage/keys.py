@@ -28,8 +28,14 @@ MIME_TYPES: Dict[str, str] = {
     "image/png": "png",
     "image/webp": "webp",
     "video/mp4": "mp4",
+    # What phone cameras actually record: iPhone (.mov) and older Android
+    # (.3gp). Gemini accepts both as-is; without them a clip from an iPhone
+    # was refused with a 415 before it ever left the phone.
+    "video/quicktime": "mov",
+    "video/3gpp": "3gp",
     "application/pdf": "pdf",
 }
+VIDEO_EXTENSIONS = ("mp4", "mov", "3gp")
 
 SIZE_CAPS: Dict[str, int] = {
     "images": 10 * 1024 * 1024,
@@ -95,7 +101,7 @@ def derivative_keys(key: str) -> Dict[str, str]:
     stem, _, ext = key.rpartition(".")
     if ext in ("jpg", "png", "webp"):
         return {"w900": "%s.w900.webp" % stem}
-    if ext == "mp4":
+    if ext in VIDEO_EXTENSIONS:
         return {"poster": "%s.poster.jpg" % stem}
     return {}
 
@@ -150,8 +156,8 @@ def cluster_of(key: str) -> str:
     return key.split("/", 2)[1]
 
 
-_CUSTOMER_KEY = re.compile(r"^customers/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/(?:images|videos|docs)/[A-Za-z0-9_-]+\.(?:jpg|png|webp|mp4|pdf)$")
-_ASSET_KEY = re.compile(r"^assets/(?:afs|presales|dealer)/[a-z0-9][a-z0-9-]*/(?:photos|videos|tips|docs)/[a-z0-9][a-z0-9-]*(?:\.w900|\.poster)?\.(?:jpg|png|webp|mp4|pdf)$")
+_CUSTOMER_KEY = re.compile(r"^customers/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/(?:images|videos|docs)/[A-Za-z0-9_-]+\.(?:jpg|png|webp|mp4|mov|3gp|pdf)$")
+_ASSET_KEY = re.compile(r"^assets/(?:afs|presales|dealer)/[a-z0-9][a-z0-9-]*/(?:photos|videos|tips|docs)/[a-z0-9][a-z0-9-]*(?:\.w900|\.poster)?\.(?:jpg|png|webp|mp4|mov|3gp|pdf)$")
 
 
 def is_valid_key(key: str) -> bool:

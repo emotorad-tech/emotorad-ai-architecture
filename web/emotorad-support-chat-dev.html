@@ -906,11 +906,16 @@ function onVideoPicked(event) {
   state.videoProgress = 0;
   renderPendingStrip();
 
-  function failed() {
+  function failed(err) {
     state.videoProgress = null;
     state.pendingVideo = null;
     renderPendingStrip();
     paintSendButton();
+    // A 415 is the file, not the network: retrying the same clip cannot help.
+    if (err && err.status === 415) {
+      notice("That format is not supported, please send an MP4 or a clip recorded on your phone camera.");
+      return;
+    }
     notice("Sorry, the video did not upload. Please try again.");
   }
 
@@ -925,7 +930,11 @@ function onVideoPicked(event) {
       size_bytes: file.size
     })
   }).then(function (r) {
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) {
+      var err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
     return r.json();
   }).then(function (presign) {
     putToS3(file, presign, function (ok) {
