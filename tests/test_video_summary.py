@@ -94,6 +94,21 @@ class InlinePathTests(unittest.TestCase):
         # (`model_dump`), so the fake sees exactly what the SDK would send.
         self.assertEqual(part, {"inline_data": {"data": b"\x00" * 100, "mime_type": "video/mp4"}})
 
+    def test_generation_is_deterministic(self):
+        # The same clip must describe the same way on a retry, or a golden
+        # set of clips cannot exist and a safety false positive cannot be
+        # reproduced.
+        client = _Client()
+        _summariser(client).summarise(b"x", "video/mp4")
+        self.assertEqual(client.configs[-1]["temperature"], 0)
+
+    def test_the_prompt_scopes_the_description_to_the_bike(self):
+        # The two rules the safety gate relies on the analyser to keep: do not
+        # describe objects that are not the bike, and say so when none is shown.
+        self.assertIn("SCOPE.", PROMPT)
+        self.assertIn("No part of the bike or charger is visible in this clip.", PROMPT)
+        self.assertIn("never name a fault or hazard to say it is absent", PROMPT)
+
     def test_the_inline_ceiling_allows_for_base64_growth(self):
         """Gemini's 20 MB inline ceiling is on the encoded request, and base64
         is 4/3 of the bytes: 14 MiB of clip is ~18.7 MB on the wire."""

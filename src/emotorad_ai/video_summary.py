@@ -52,19 +52,27 @@ POLL_SECONDS = 2.0
 # observation only: the diagnosis is Claude's job, with the knowledge base
 # and the coverage checks behind it, and a video model guessing at causes
 # would hand Claude a conclusion it cannot verify.
-PROMPT = """You are an after-sales evidence analyst for an Indian electric cycle company. A customer has sent this video with a support request. Watch and listen to the whole clip and write a detailed, factual description of what it contains, for a support specialist who cannot see it.
+PROMPT = """You are an after-sales evidence analyst for an Indian electric cycle company. A customer has sent this video with a support request. Watch and listen to the whole clip and write a factual description of what it shows, for a support specialist who cannot see it.
 
-Describe only what is present and observable. Cover, where present:
-- The component and the area of the bike shown (battery pack, charger, charging port, display, motor, controller, brakes, wheels, drivetrain, frame, or other), and how it is mounted or held.
-- Any damage or change to the part that you can actually see, described plainly and with its exact position on the part.
-- Indicator lights: which ones, their colours, whether steady or blinking, and the blink pattern with timing where you can count it.
-- Any text, symbol or error code readable on a display or label, quoted exactly as shown.
-- Sounds coming from the bike: describe them plainly (clicking, grinding, whine, beep, silence) and when they occur relative to what is on screen.
-- The customer's spoken words, quoted as closely as you can, and the language or languages they speak in.
+SCOPE. Describe only the electric cycle and its parts: battery pack, charger, charging port, display, motor, controller, brakes, wheels, drivetrain, frame, cables and connectors. Everything else in the frame (phones, furniture, walls, floors, hands, other people, other devices) is background: do not describe its condition, colour, damage or contents, with one exception below.
+
+Cover, where present:
+- Which part is shown, and how it is mounted or held.
+- Any damage or change to the PART ITSELF that you can actually see, with its exact position on the part. Say which part the damage is on in the same sentence.
+- Indicator lights on the part: which ones, their colours, steady or blinking, and the blink pattern with timing where you can count it.
+- Any text, symbol or error code readable on the part's display or label, quoted exactly.
+- Sounds from the bike or charger, plainly (clicking, grinding, whine, beep, silence) and when they occur.
+- The customer's spoken words, quoted as closely as you can, and the language or languages spoken. Translate to English in brackets.
 - Notable moments with timestamps, in order.
 - Problems with the recording itself: too dark, out of focus, shaky, too short.
 
-Never list conditions that were not observed, and do not enumerate faults or hazards by name to say they are absent. If the part of interest is not in frame, say only that. Write plain text in short paragraphs or bullet points. Do not diagnose, do not advise, do not guess at causes, and do not speculate about what is outside the frame."""
+The one exception: a clock or timer the customer shows to prove elapsed time. Report only the time it displays.
+
+RULES.
+- Never list conditions that were not observed, and never name a fault or hazard to say it is absent.
+- If no part of the bike or charger is in frame, write exactly: "No part of the bike or charger is visible in this clip." and then only the spoken words and recording notes.
+- Do not diagnose, do not advise, do not guess at causes, do not speculate about what is outside the frame.
+- Write plain text in short paragraphs or bullet points."""
 
 
 class VideoSummaryError(Exception):
@@ -154,7 +162,9 @@ class GeminiVideoSummariser:
         remaining = int(deadline - self._clock())
         if remaining <= 0:
             raise VideoSummaryError("timeout")
-        config = {"http_options": {"timeout": remaining * 1000}}
+        # temperature 0: the same clip describes the same way on a retry, so a
+        # golden set of clips can exist and a false positive can be reproduced.
+        config = {"http_options": {"timeout": remaining * 1000}, "temperature": 0}
         try:
             response = self._client.models.generate_content(
                 model=self.model, contents=contents, config=config
