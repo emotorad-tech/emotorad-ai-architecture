@@ -76,6 +76,15 @@ class ContractTests(unittest.TestCase):
         payload = attachment.to_dict()
         self.assertEqual(payload["caption"], "c")
         self.assertIsNone(payload["poster"])
+        self.assertIsNone(payload["summary"])
+
+    def test_attachment_carries_a_video_summary_and_defaults_to_none(self):
+        """The summary is what Claude and the safety gate read instead of the
+        clip. It must survive `to_dict` (the event log records it) and be
+        absent by default so every photo path is unchanged."""
+        self.assertIsNone(Attachment("video", "s3://k", "video/mp4").summary)
+        described = Attachment("video", "s3://k", "video/mp4", summary="white smoke from the pack")
+        self.assertEqual(described.to_dict()["summary"], "white smoke from the pack")
 
 
 class WebsiteAdapterTests(unittest.TestCase):

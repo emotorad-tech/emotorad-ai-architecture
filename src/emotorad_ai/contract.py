@@ -92,6 +92,11 @@ class Attachment:
     mime_type: Optional[str] = None
     caption: Optional[str] = None
     poster: Optional[str] = None
+    # A video described as text, once, at ingest (video_summary.py). Present
+    # only on a customer's clip that Gemini has seen; the safety gate scans
+    # it and the agent turn sends it instead of the bytes. None everywhere
+    # else, so photos and outbound media are untouched.
+    summary: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -100,6 +105,7 @@ class Attachment:
             "mime_type": self.mime_type,
             "caption": self.caption,
             "poster": self.poster,
+            "summary": self.summary,
         }
 
 
