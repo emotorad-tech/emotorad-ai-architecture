@@ -370,6 +370,71 @@ class VideoSummaryAtIngestTests(unittest.TestCase):
         self.assertEqual(self.client.get("/health").json()["video_summary"], "frames")
 
 
+class AnonymousVisitorUploadTests(unittest.TestCase):
+    """A visitor who has not verified a phone still has an identity: the
+    website cookie (`em_aid`) resolves to an anonymous identity-graph cluster,
+    exactly as it does on /message. Without this the presign 400s for every
+    customer who tries to send a video before the OTP step."""
+
+    def setUp(self):
+        self.store = _Store()
+        self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+
+    def _presign(self, **overrides):
+        body = {"em_aid": "visitor-abc", "conversation_id": "c-anon", "tree": "customers",
+                "mime_type": "video/mp4", "size_bytes": 5 * 1024 * 1024}
+        body.update(overrides)
+        return self.client.post("/uploads", json=body)
+
+    def test_a_cookie_alone_presigns_under_the_visitors_cluster(self):
+        r = self._presign()
+        self.assertEqual(r.status_code, 200, r.text)
+        key = r.json()["key"]
+        self.assertTrue(key.startswith("customers/"), key)
+        cluster = key.split("/")[1]
+        self.assertNotEqual(cluster, "visitor-abc")
+        self.assertNotIn("+91", key)
+        self.assertFalse(cluster.isdigit(), cluster)
+        self.assertEqual(r.json()["headers"]["Content-Type"], "video/mp4")
+
+    def test_the_same_cookie_can_attach_it_on_message(self):
+        body = self._presign().json()
+        self.store.objects[body["key"]] = {"size": 5 * 1024 * 1024, "mime": "video/mp4"}
+        seen = []
+        scripted = Reply(conversation_id="c-anon", text="ok", handled_by="test")
+        with mock.patch.object(self.api.runtime, "handle", side_effect=lambda m: seen.append(m) or scripted):
+            r = self.client.post("/message", json={
+                "conversation_id": "c-anon", "em_aid": "visitor-abc", "text": "here is the clip",
+                "attachments": [{"upload_id": body["upload_id"]}],
+            })
+        self.assertEqual(r.status_code, 200, r.text)
+        # Claimed under the cookie's cluster and handed on as the stored object.
+        self.assertEqual(seen[-1].attachments[0].kind, "video")
+        self.assertEqual(seen[-1].attachments[0].url, "s3://" + body["key"])
+
+    def test_a_different_cookie_is_refused(self):
+        body = self._presign().json()
+        self.store.objects[body["key"]] = {"size": 5 * 1024 * 1024, "mime": "video/mp4"}
+        r = self.client.post("/message", json={
+            "conversation_id": "c-anon", "em_aid": "visitor-xyz", "text": "mine?",
+            "attachments": [{"upload_id": body["upload_id"]}],
+        })
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.store.fetched, [])
+
+    def test_a_different_cookie_cannot_read_it_back(self):
+        body = self._presign().json()
+        r = self.client.get("/media/" + body["key"], params={"em_aid": "visitor-abc"}, follow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+        r = self.client.get("/media/" + body["key"], params={"em_aid": "visitor-xyz"}, follow_redirects=False)
+        self.assertEqual(r.status_code, 403)
+
+    def test_no_session_and_no_cookie_is_400(self):
+        r = self._presign(em_aid=None)
+        self.assertEqual(r.status_code, 400, r.text)
+
+
 class NoBucketTests(unittest.TestCase):
     def test_uploads_and_media_are_503_without_a_bucket(self):
         api = fresh_api(None)

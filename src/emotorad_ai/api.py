@@ -312,6 +312,10 @@ class AssetPath(BaseModel):
 
 class UploadIn(BaseModel):
     session_token: str = ""
+    # The website cookie, as on MessageIn: a visitor who has not verified a
+    # phone still resolves to their anonymous cluster, so they can send a video
+    # before the OTP step. Either this or a session that resolves is enough.
+    em_aid: Optional[str] = None
     conversation_id: Optional[str] = None
     tree: str
     mime_type: str
@@ -335,9 +339,13 @@ def _require_media() -> None:
         raise HTTPException(503, "Media storage is not configured on this deployment (EMOTORAD_AI_MEDIA_BUCKET).")
 
 
-def _cluster_for_session(session_token: str) -> str:
-    """The identity-graph cluster the session resolves to. Never the phone."""
-    _, identity = resolver.resolve_website(None, session_token or None)
+def _cluster_for_session(session_token: str, em_aid: Optional[str] = None) -> str:
+    """The identity-graph cluster the caller resolves to. Never the phone.
+
+    Resolved exactly as the website adapter does for /message: a session that
+    maps to a verified phone wins, otherwise the cookie's anonymous cluster.
+    """
+    _, identity = resolver.resolve_website(em_aid or None, session_token or None)
     if not identity.cluster_id:
         raise HTTPException(400, "session does not resolve to a customer")
     return identity.cluster_id
@@ -350,7 +358,7 @@ def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
         if body.tree == "customers":
             if not body.conversation_id:
                 raise HTTPException(400, "conversation_id is required for customer uploads")
-            cluster_id = _cluster_for_session(body.session_token)
+            cluster_id = _cluster_for_session(body.session_token, body.em_aid)
             # A conversation id that already exists must have been started under
             # the same cluster; a brand new one is accepted as-is (minted by the
             # client on turn one, before /message has ever seen it).
@@ -373,14 +381,14 @@ def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
 
 
 @app.get("/media/{key:path}")
-def get_media(key: str, session_token: str = "") -> RedirectResponse:
+def get_media(key: str, session_token: str = "", em_aid: Optional[str] = None) -> RedirectResponse:
     _require_media()
     if not is_valid_key(key):
         # A prefix test (is_customer_key/is_asset_key) lets a path like
         # `assets/../customers/...` through; the full grammar does not.
         raise HTTPException(404, "no such media")
     if is_customer_key(key):
-        if cluster_of(key) != _cluster_for_session(session_token):
+        if cluster_of(key) != _cluster_for_session(session_token, em_aid):
             raise HTTPException(403, "not your attachment")
     # A fresh 15-minute link every time, so a transcript rendered later still loads.
     return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)
@@ -419,7 +427,7 @@ def _inbound_attachments(body: MessageIn) -> List[Dict[str, Any]]:
     claims: Dict[str, Dict[str, Any]] = {}
     if uploaded:
         _require_media()
-        caller_cluster = _cluster_for_session(body.session_token)
+        caller_cluster = _cluster_for_session(body.session_token, body.em_aid)
         try:
             for item in uploaded:
                 upload_id = item["upload_id"]
