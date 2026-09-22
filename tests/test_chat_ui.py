@@ -100,7 +100,9 @@ class PhotoPickerTests(ChatPageTests):
         self.assertIn("MAX_EDGE", self.html)
 
     def test_it_is_sent_with_the_message(self):
-        self.assertIn("attachments: sentPhoto", self.html)
+        """Inline, as a data URL on the attachments field: a photo is small
+        once downscaled and the model reads it natively."""
+        self.assertIn('{ kind: "image", url: sentPhoto }', self.html)
 
     def test_the_same_photo_is_not_sent_twice(self):
         """It is captured and cleared before the request goes out, so the next
@@ -242,6 +244,51 @@ class AttachSheetTests(ChatPageTests):
         body = self.html[self.html.index("function paintSendButton"):]
         body = body[:body.index("\n}", 1)]
         self.assertIn("pendingPhoto", body)
+
+
+class VideoUploadTests(ChatPageTests):
+    """Video never goes inline. The page presigns through POST /uploads, PUTs
+    the bytes straight to S3, then sends the upload id with the message; the
+    server describes the clip through Gemini and Claude reads the text. Photos
+    stay inline, by decision (design note of 2026-09-22, section 3)."""
+
+    def test_there_is_a_video_input(self):
+        self.assertIn('id="videoInput"', self.html)
+        self.assertIn('accept="video/mp4,video/*"', self.html)
+
+    def test_the_sheet_offers_video(self):
+        self.assertIn('id="sheetVideo"', self.html)
+
+    def test_it_presigns_through_uploads(self):
+        self.assertIn('"/uploads"', self.html)
+        self.assertIn('tree: "customers"', self.html)
+
+    def test_the_put_reports_progress(self):
+        """fetch has no upload progress, and a 60 MB clip on mobile data with
+        no bar looks like a hang."""
+        self.assertIn("XMLHttpRequest", self.html)
+        self.assertIn("upload.onprogress", self.html)
+        self.assertIn('id="videoProgress"', self.html)
+
+    def test_it_is_sent_as_an_upload_id(self):
+        self.assertIn("upload_id", self.html)
+
+    def test_over_cap_is_refused_on_the_phone(self):
+        self.assertIn("100 * 1024 * 1024", self.html)
+        self.assertIn("under 100 MB", self.html)
+
+    def test_a_picked_video_is_shown_and_removable(self):
+        self.assertIn("pendingVideo", self.html)
+        self.assertIn("removePendingVideo", self.html)
+
+    def test_send_lights_up_for_a_video_alone(self):
+        body = self.html[self.html.index("function paintSendButton"):]
+        body = body[:body.index("\n}", 1)]
+        self.assertIn("pendingVideo", body)
+
+    def test_photos_still_go_inline(self):
+        self.assertIn('{ kind: "image", url: sentPhoto }', self.html)
+        self.assertIn("shrinkToDataUri", self.html)
 
 
 class LocationSharingTests(ChatPageTests):

@@ -175,6 +175,14 @@
     background: #EDEDED; color: var(--ink); font-size: 18px; line-height: 1;
     display: flex; align-items: center; justify-content: center; cursor: pointer; flex: 0 0 auto;
   }
+  /* A picked video, same strip as the photo. `object-fit: cover` so a
+     portrait clip fills the square rather than sitting in letterbox bars. */
+  .pending-video { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; background: #232323; flex: 0 0 auto; }
+  .pending-label .filename { display: block; color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  /* The PUT to S3 in progress. A 60 MB clip on mobile data takes a while,
+     and with nothing moving on the screen that reads as a hang. */
+  .progress-track { flex: 1 1 auto; height: 6px; border-radius: 999px; background: #E3E3E3; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.15s linear; }
 
   /* The choice attach offers: camera or gallery. A sheet in the page rather
      than the OS chooser, because what the OS shows for a file input varies by
@@ -364,6 +372,19 @@
       <button class="pending-remove" id="pendingRemove" aria-label="Remove photo">&times;</button>
     </div>
 
+    <!-- The video's PUT to S3, while it runs. Same fixed-markup rule as the
+         photo strip: render() never touches this region. -->
+    <div class="pending-strip" id="videoProgressStrip" hidden>
+      <div class="pending-label">Uploading video&hellip;</div>
+      <div class="progress-track"><div class="progress-fill" id="videoProgress"></div></div>
+    </div>
+
+    <div class="pending-strip" id="pendingVideoStrip" hidden>
+      <video class="pending-video" id="pendingVideoThumb" muted playsinline preload="metadata"></video>
+      <div class="pending-label"><span class="filename" id="pendingVideoName"></span>1 video ready to send</div>
+      <button class="pending-remove" id="pendingVideoRemove" aria-label="Remove video">&times;</button>
+    </div>
+
     <div id="footer"></div>
 
   </div>
@@ -382,9 +403,14 @@
        request gallery access up front, the picker grants it implicitly. -->
   <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden />
   <input type="file" id="galleryInput" accept="image/*" hidden />
+  <!-- Video goes through S3, never inline: the page presigns, PUTs the clip
+       with a progress bar, then sends the upload id. `capture` opens the
+       camera to record; the same input accepts a clip from the gallery on
+       phones that offer the choice. -->
+  <input type="file" id="videoInput" accept="video/mp4,video/*" capture="environment" hidden />
 
   <div class="sheet-backdrop" id="attachSheet" hidden>
-    <div class="sheet" role="dialog" aria-label="Attach a photo">
+    <div class="sheet" role="dialog" aria-label="Attach a photo or video">
       <div class="sheet-handle"></div>
       <button class="sheet-btn" id="sheetCamera">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
@@ -393,6 +419,10 @@
       <button class="sheet-btn" id="sheetGallery">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
         Choose from gallery
+      </button>
+      <button class="sheet-btn" id="sheetVideo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#171717" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+        Record a video
       </button>
       <button class="sheet-btn sheet-cancel" id="sheetCancel">Cancel</button>
     </div>
@@ -434,7 +464,9 @@ var state = {
   draft: "",
   busy: false,
   pendingPhoto: null,   // a picked photo, downscaled, waiting to be sent
-  turns: []              // {isUser, text} | {isUser:true, attachment:{...}} | {isAi, attachments:[...]}
+  pendingVideo: null,   // {uploadId, name, size, previewUrl}: a clip already in S3, waiting to be sent
+  videoProgress: null,  // 0-100 while the PUT to S3 runs, null otherwise
+  turns: []              // {isUser, text} | {isUser:true, photo} | {isUser:true, video} | {isAi, attachments:[...]}
 };
 
 function esc(s) {
@@ -568,6 +600,14 @@ function renderAiTurnHtml(turn) {
 }
 
 function renderUserTurnHtml(turn) {
+  if (turn.video) {
+    // The local preview, not the S3 key: the bytes are already on the phone
+    // and a presigned read would only be another round trip for the same clip.
+    return '<div class="msg-row user media-row user"><div class="video-card"><video src="' + esc(turn.video.previewUrl) +
+      '" controls muted playsinline preload="metadata" style="width:100%;display:block"></video>' +
+      '<div class="video-meta"><div class="video-filename">' + esc(turn.video.name) +
+      '</div><div class="video-duration">' + esc(formatSize(turn.video.size)) + ' &middot; video</div></div></div></div>';
+  }
   if (turn.photo) {
     return '<div class="msg-row user media-row user"><img class="bubble-media" data-full="' + esc(turn.photo) +
       '" src="' + esc(turn.photo) +
@@ -686,7 +726,7 @@ function renderFooter() {
 function paintSendButton() {
   var btn = document.getElementById("sendBtn");
   if (!btn) return;
-  var ready = !state.busy && (state.draft.trim().length > 0 || !!state.pendingPhoto);
+  var ready = !state.busy && (state.draft.trim().length > 0 || !!state.pendingPhoto || !!state.pendingVideo);
   btn.style.background = ready ? "var(--accent)" : "#D9D9D9";
 }
 
@@ -716,8 +756,14 @@ function ask(text, location) {
   // in the request body and shown in the transcript, and leaving it set would
   // attach the same photo to the next message too.
   var sentPhoto = state.pendingPhoto;
+  var sentVideo = state.pendingVideo;
   state.pendingPhoto = null;
+  state.pendingVideo = null;
   renderPendingStrip();
+  // Both shapes on the one field; the API accepts a mixed list. The photo is
+  // inline as before; the video is the id of an object already PUT to S3.
+  var attachments = sentPhoto ? [{ kind: "image", url: sentPhoto }] : [];
+  if (sentVideo) attachments.push({ upload_id: sentVideo.uploadId });
   fetch("/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -726,7 +772,7 @@ function ask(text, location) {
       em_aid: emAid(),
       agent: "battery_support",
       text: text,
-      attachments: sentPhoto ? [{ kind: "image", url: sentPhoto }] : [],
+      attachments: attachments,
       location: location || null
     })
   }).then(function (r) {
@@ -755,8 +801,9 @@ function ask(text, location) {
 function send() {
   if (state.busy) return;
   var text = (state.draft || "").trim();
-  if (!text && !state.pendingPhoto) return;
+  if (!text && !state.pendingPhoto && !state.pendingVideo) return;
   if (state.pendingPhoto) state.turns.push({ isUser: true, photo: state.pendingPhoto });
+  if (state.pendingVideo) state.turns.push({ isUser: true, video: state.pendingVideo });
   if (text) state.turns.push({ isUser: true, text: text });
   state.draft = "";
   ask(text);
@@ -815,9 +862,111 @@ function onPhotoPicked(event) {
   });
 }
 
-/* What is about to be sent, shown before it goes. The strip is fixed markup
-   between the chat and the composer, so render() never rebuilds it and a
-   photo does not vanish from view when the next message arrives. */
+/* Video never goes inline. A clip is 20-100 MB and the model does not read
+   video anyway: the server describes it once through a video model and hands
+   the text to the agent. So the page asks POST /uploads for a presigned PUT,
+   sends the bytes straight to S3 with a progress bar, and attaches only the
+   upload id to the message. The 100 MB cap mirrors the bucket's; refusing it
+   here saves a presign that would only come back 413.
+
+   INTEGRATION POINT (done): the same identity as /message. The page carries
+   no session token; the cookie (`em_aid`) resolves the visitor's anonymous
+   cluster, and the conversation id is minted here if the customer attaches
+   before their first message has ever been sent. */
+var MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+
+function conversationId() {
+  if (!state.conversationId) {
+    state.conversationId = "c-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+  return state.conversationId;
+}
+
+function notice(text) {
+  state.turns.push({ isUser: false, text: text, attachments: [] });
+  render();
+}
+
+function formatSize(bytes) {
+  if (!bytes) return "";
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+function onVideoPicked(event) {
+  var file = event.target.files && event.target.files[0];
+  // Clear it now, so picking the same file twice in a row still fires change.
+  event.target.value = "";
+  if (!file) return;
+  if (file.size > MAX_VIDEO_BYTES) {
+    notice("That video is too large. Please send a clip under 100 MB or a shorter recording.");
+    return;
+  }
+  if (state.videoProgress !== null) return;  // one at a time
+  state.videoProgress = 0;
+  renderPendingStrip();
+
+  function failed() {
+    state.videoProgress = null;
+    state.pendingVideo = null;
+    renderPendingStrip();
+    paintSendButton();
+    notice("Sorry, the video did not upload. Please try again.");
+  }
+
+  fetch("/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      conversation_id: conversationId(),
+      em_aid: emAid(),
+      tree: "customers",
+      mime_type: file.type || "video/mp4",
+      size_bytes: file.size
+    })
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function (presign) {
+    putToS3(file, presign, function (ok) {
+      if (!ok) { failed(); return; }
+      state.videoProgress = null;
+      state.pendingVideo = {
+        uploadId: presign.upload_id,
+        name: file.name || "video.mp4",
+        size: file.size,
+        previewUrl: URL.createObjectURL(file)
+      };
+      renderPendingStrip();
+      paintSendButton();
+    });
+  }).catch(failed);
+}
+
+/* XMLHttpRequest rather than fetch: fetch has no upload progress event, and
+   the bar is the whole point of not just awaiting the PUT. */
+function putToS3(file, presign, done) {
+  var xhr = new XMLHttpRequest();
+  xhr.open("PUT", presign.url, true);
+  Object.keys(presign.headers || {}).forEach(function (name) {
+    // The browser sets Content-Length itself and refuses it from a script.
+    if (name.toLowerCase() === "content-length") return;
+    xhr.setRequestHeader(name, presign.headers[name]);
+  });
+  xhr.upload.onprogress = function (e) {
+    if (!e.lengthComputable) return;
+    state.videoProgress = Math.round((e.loaded / e.total) * 100);
+    renderPendingStrip();
+  };
+  xhr.onload = function () { done(xhr.status >= 200 && xhr.status < 300); };
+  xhr.onerror = function () { done(false); };
+  xhr.onabort = function () { done(false); };
+  xhr.send(file);
+}
+
+/* What is about to be sent, shown before it goes. The strips are fixed markup
+   between the chat and the composer, so render() never rebuilds them and a
+   photo or clip does not vanish from view when the next message arrives. */
 function renderPendingStrip() {
   var strip = document.getElementById("pendingStrip");
   var thumb = document.getElementById("pendingThumb");
@@ -829,11 +978,42 @@ function renderPendingStrip() {
     thumb.src = "";
     strip.hidden = true;
   }
+
+  var progressStrip = document.getElementById("videoProgressStrip");
+  var progress = document.getElementById("videoProgress");
+  if (progressStrip && progress) {
+    progressStrip.hidden = state.videoProgress === null;
+    progress.style.width = (state.videoProgress || 0) + "%";
+  }
+
+  var videoStrip = document.getElementById("pendingVideoStrip");
+  var videoThumb = document.getElementById("pendingVideoThumb");
+  var videoName = document.getElementById("pendingVideoName");
+  if (videoStrip && videoThumb && videoName) {
+    if (state.pendingVideo) {
+      if (videoThumb.src !== state.pendingVideo.previewUrl) videoThumb.src = state.pendingVideo.previewUrl;
+      videoName.textContent = state.pendingVideo.name;
+      videoStrip.hidden = false;
+    } else {
+      videoThumb.removeAttribute("src");
+      videoName.textContent = "";
+      videoStrip.hidden = true;
+    }
+  }
   pinToBottom();
 }
 
 function removePendingPhoto() {
   state.pendingPhoto = null;
+  renderPendingStrip();
+  paintSendButton();
+}
+
+function removePendingVideo() {
+  // The object is already in S3 under an id nobody will claim; it expires
+  // with the pending entry. Only the local preview is released here.
+  if (state.pendingVideo && state.pendingVideo.previewUrl) URL.revokeObjectURL(state.pendingVideo.previewUrl);
+  state.pendingVideo = null;
   renderPendingStrip();
   paintSendButton();
 }
@@ -927,11 +1107,17 @@ document.getElementById("sheetGallery").addEventListener("click", function () {
   closeAttachSheet();
   document.getElementById("galleryInput").click();
 });
+document.getElementById("videoInput").addEventListener("change", onVideoPicked);
+document.getElementById("sheetVideo").addEventListener("click", function () {
+  closeAttachSheet();
+  document.getElementById("videoInput").click();
+});
 document.getElementById("sheetCancel").addEventListener("click", closeAttachSheet);
 document.getElementById("attachSheet").addEventListener("click", function (e) {
   if (e.target.id === "attachSheet") closeAttachSheet();
 });
 document.getElementById("pendingRemove").addEventListener("click", removePendingPhoto);
+document.getElementById("pendingVideoRemove").addEventListener("click", removePendingVideo);
 document.getElementById("pendingThumb").addEventListener("click", function () {
   openLightbox(state.pendingPhoto);
 });
