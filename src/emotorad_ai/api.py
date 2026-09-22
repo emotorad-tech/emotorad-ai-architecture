@@ -390,14 +390,17 @@ def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
 
 
 @app.get("/media/{key:path}")
-def get_media(key: str, session_token: str = "", em_aid: Optional[str] = None) -> RedirectResponse:
+def get_media(key: str, session_token: str = "") -> RedirectResponse:
     _require_media()
     if not is_valid_key(key):
         # A prefix test (is_customer_key/is_asset_key) lets a path like
         # `assets/../customers/...` through; the full grammar does not.
         raise HTTPException(404, "no such media")
     if is_customer_key(key):
-        if cluster_of(key) != _cluster_for_session(session_token, em_aid):
+        # Session token only, no em_aid: the chat page never reads /media (it
+        # renders its local preview), and a cookie identifies a browser, not
+        # a person, so it must not unlock a verified customer's objects.
+        if cluster_of(key) != _cluster_for_session(session_token):
             raise HTTPException(403, "not your attachment")
     # A fresh 15-minute link every time, so a transcript rendered later still loads.
     return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)

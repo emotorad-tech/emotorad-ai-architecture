@@ -57,6 +57,8 @@ writes down what it saw gives Claude far better evidence at lower cost than eigh
 - `POST /uploads` gains `em_aid`, so a visitor who has not verified a phone yet resolves
   to their anonymous identity-graph cluster the same way `/message` already does.
   `_cluster_for_session(session_token, em_aid)`.
+- `GET /media` takes `session_token` only: the page never reads it back, and a cookie
+  must not unlock a verified customer's objects.
 
 ## 4. Data boundary
 

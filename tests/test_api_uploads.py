@@ -443,12 +443,14 @@ class AnonymousVisitorUploadTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.store.fetched, [])
 
-    def test_a_different_cookie_cannot_read_it_back(self):
+    def test_a_cookie_cannot_read_media_back(self):
+        """The page never reads /media (it renders the local preview), and a
+        cookie is a browser, not a person: accepting em_aid here would let
+        anyone holding a verified customer's cookie read their objects."""
         body = self._presign().json()
-        r = self.client.get("/media/" + body["key"], params={"em_aid": "visitor-abc"}, follow_redirects=False)
-        self.assertEqual(r.status_code, 302)
-        r = self.client.get("/media/" + body["key"], params={"em_aid": "visitor-xyz"}, follow_redirects=False)
-        self.assertEqual(r.status_code, 403)
+        for aid in ("visitor-abc", "visitor-xyz"):
+            r = self.client.get("/media/" + body["key"], params={"em_aid": aid}, follow_redirects=False)
+            self.assertEqual(r.status_code, 400, aid)
 
     def test_no_session_and_no_cookie_is_400(self):
         r = self._presign(em_aid=None)

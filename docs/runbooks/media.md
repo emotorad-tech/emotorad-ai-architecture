@@ -103,8 +103,9 @@ curl -s -o /dev/null -w '%{redirect_url}\n' "http://127.0.0.1:8000/media/<key>?s
 
 Step 1's response carries `upload_id`, `key` and the presign fields for step 2. Step 4
 302s to a fresh 15-minute presigned GET each time, so a transcript rendered later still
-loads. `session_token` (or `em_aid`) on `/media` is the access check — it must resolve to
-the same cluster the upload was made under, or the read 403s.
+loads. `session_token` on `/media` is the access check — it must resolve to the same
+cluster the upload was made under, or the read 403s. `em_aid` is accepted on `/uploads`
+and `/message` only; a cookie does not unlock a read.
 
 ## 5. Migrate off Cloudinary
 
