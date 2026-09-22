@@ -67,6 +67,40 @@ class DescriptionSafetyGateTests(unittest.TestCase):
         self.assertTrue(verdict.triggered)
         self.assertIn("swelling", verdict.matched)
 
+    def test_damage_to_something_that_is_not_the_bike_is_not_a_hazard(self):
+        # Staging, 2026-09-22: the analyser noted the customer's cracked phone
+        # screen in a clip that was otherwise perfect evidence of a battery
+        # not taking charge. "crack" opened a critical safety ticket and Claude
+        # never read the clip. A description inventories the whole room; a
+        # damage word in it is a hazard only when the sentence names a part
+        # of the bike or charger.
+        for text in [
+            "The smartphone has a visible crack on the bottom-right corner of the front glass screen.",
+            "A dented metal bucket stands beside the wall.",
+            # A sentence that mentions a part *and* damage to something else
+            # ("the floor tile under the charger is cracked") still fires: a
+            # word gate cannot tell subject from location. Keeping background
+            # objects out of the description is the prompt's job (SCOPE).
+        ]:
+            with self.subTest(text=text):
+                self.assertFalse(check_safety_in_description(text).triggered, text)
+
+    def test_damage_to_a_bike_part_is_still_a_hazard(self):
+        for text in [
+            "The battery casing has a visible crack along the top seam.",
+            "There is a dent on the lower edge of the pack.",
+            "The charging port on the frame is cracked and loose.",
+            "The controller housing appears deformed near the cable exit.",
+        ]:
+            with self.subTest(text=text):
+                verdict = check_safety_in_description(text)
+                self.assertTrue(verdict.triggered, text)
+                self.assertIn("physical_damage", verdict.matched)
+
+    def test_smoke_and_fire_need_no_named_part(self):
+        # There is no benign object next to a battery that smokes.
+        self.assertTrue(check_safety_in_description("Thin white smoke is visible at 0:12.").triggered)
+
 
 class HandoffGateTests(unittest.TestCase):
     def test_catches_requests_for_a_person(self):

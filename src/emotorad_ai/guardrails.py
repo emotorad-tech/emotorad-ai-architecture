@@ -177,6 +177,31 @@ def _negated(text: str, start: int, end: int) -> bool:
     return after.startswith(":") and _has_negation(after[1:].split()[:_NEGATION_WINDOW])
 
 
+# In a description of a clip, damage words are a hazard only when the sentence
+# names a part of the bike or charger. The analyser inventories the whole
+# frame, and on 2026-09-22 the customer's cracked phone screen opened a
+# critical safety ticket over a clip that showed a battery not taking charge.
+# Smoke, fire, swelling, sparks and leaks need no named part: nothing benign
+# near a battery does those.
+_BIKE_PART = re.compile(
+    r"\b(?:battery|batteries|pack|cell|casing|charger|charging port|port|connector|"
+    r"terminal|cable|wire|display|controller|motor|frame|wheel|brake|drivetrain|"
+    r"chain|pedal|bike|cycle|e-?cycle|bicycle)\b",
+    re.IGNORECASE,
+)
+_PART_SCOPED_LABELS = frozenset({"physical_damage"})
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _sentence_around(text: str, position: int) -> str:
+    start = 0
+    for match in _SENTENCE_END.finditer(text):
+        if match.end() > position:
+            return text[start:match.start()]
+        start = match.end()
+    return text[start:]
+
+
 def check_safety_in_description(text: str) -> GuardrailVerdict:
     """The safety gate for machine-written descriptions of a clip.
 
@@ -191,9 +216,12 @@ def check_safety_in_description(text: str) -> GuardrailVerdict:
     matched = []
     for label, pattern in _ALL_SAFETY_PATTERNS:
         for found in pattern.finditer(text or ""):
-            if not _negated(text, found.start(), found.end()):
-                matched.append(label)
-                break
+            if _negated(text, found.start(), found.end()):
+                continue
+            if label in _PART_SCOPED_LABELS and not _BIKE_PART.search(_sentence_around(text, found.start())):
+                continue
+            matched.append(label)
+            break
     return GuardrailVerdict(triggered=bool(matched), matched=matched)
 
 
