@@ -33,7 +33,7 @@ from .agents.late_warranty import AGENT_NAME as LATE_WARRANTY
 from .agents.late_warranty import DEFINITION as LATE_WARRANTY_DEFINITION
 from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
 from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
-from .attachments import content_blocks
+from .attachments import user_content
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import ConversationState, ConversationStore, customer_texts
@@ -145,7 +145,8 @@ class Runtime:
             }
         # Evidence in S3 is fetched through the instance role and sent as base64;
         # the model never sees a URL.
-        fetch = self.media_store.get_bytes if self.media_store is not None else None
+        self.fetch = self.media_store.get_bytes if self.media_store is not None else None
+        fetch = self.fetch
         self.agents = {
             name: Agent(
                 definition,
@@ -542,12 +543,12 @@ class Runtime:
         if evidence:
             # The whole description goes into the transcript, not just the
             # matched lines, so a human reading it later sees what the
-            # analyser saw. Same labelled shape the agent path writes.
-            state.history.append({
-                "role": "user",
-                "content": content_blocks([a for a in message.attachments if a.summary])
-                + [{"type": "text", "text": message.message_text}],
-            })
+            # analyser saw. Same labelled shape the agent path writes, and the
+            # same rule for the typed text: a clip sent with no caption must
+            # not leave an empty text block behind, because the API rejects it
+            # on every later turn of the conversation (staging, 2026-09-22).
+            described = replace(message, attachments=[a for a in message.attachments if a.summary])
+            state.history.append({"role": "user", "content": user_content(described)})
         return self._finish(
             message, state, text, "guardrail:battery_safety",
             escalated=True, ticket_id=ticket_id, metadata={"matched": matched},
@@ -579,8 +580,11 @@ class Runtime:
         outbound = self._outbound(text, state, message.channel)
         if not already_in_history:
             # Short-circuited turns still belong in the transcript, so a human
-            # picking the conversation up sees what the customer saw.
-            state.history.append({"role": "user", "content": message.message_text})
+            # picking the conversation up sees what the customer saw. Written
+            # the same way the agent path writes a turn: a photo with no caption
+            # must become image blocks, not an empty string the API rejects on
+            # every later call of the conversation.
+            state.history.append({"role": "user", "content": user_content(message, self.fetch)})
         state.history.append({"role": "assistant", "content": [{"type": "text", "text": outbound}]})
         self.log.outcome(message.conversation_id, handled_by, escalated, ticket_id, outbound)
         return Reply(

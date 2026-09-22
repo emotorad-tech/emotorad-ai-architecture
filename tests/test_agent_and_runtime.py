@@ -355,6 +355,41 @@ class RuntimeTests(unittest.TestCase):
         dumped = str(llm_errors[0])
         self.assertNotIn("upstream is down", dumped)
 
+    def test_a_rejected_request_logs_the_field_path_and_nothing_else(self):
+        """Staging 2026-09-22: `llm_error: BadRequestError` was all the log said,
+        and the cause (an empty text block in the transcript) took a local
+        reproduction to find. A 400 is our bug, and the API names the field
+        in the message prefix (`messages.0.content.1.text: ...`). That path is
+        request shape, never customer words, so it is safe to keep; the rest of
+        the message still is not."""
+
+        class _RejectingClaude(_FailingClaude):
+            def create(self, system, messages, tools):
+                self.requests.append({"system": system, "messages": list(messages), "tools": list(tools)})
+                exc = RuntimeError("bad request")
+                exc.status_code = 400
+                exc.body = {"type": "error", "error": {
+                    "type": "invalid_request_error",
+                    "message": "messages.0.content.1.text: text content blocks must be non-empty (customer said battery)",
+                }}
+                raise exc
+
+        registry = build_registry(today=TODAY)
+        runtime = Runtime(
+            settings=Settings(log_path="", log_to_stdout=False),
+            registry=registry,
+            llm=_RejectingClaude(),
+            log=EventLog(path=None),
+            resolver=IdentityResolver(registry),
+        )
+        send(runtime, WebsiteChatAdapter(runtime.resolver), "my battery won't charge")
+
+        [event] = [e for e in runtime.log.events if e["event"] == "llm_error"]
+        self.assertEqual(event["error"], "RuntimeError")
+        self.assertEqual(event["path"], "messages.0.content.1.text")
+        self.assertNotIn("non-empty", str(event))
+        self.assertNotIn("customer said", str(event))
+
 
 class RedactionTests(unittest.TestCase):
     def test_contact_details_are_stripped_from_logged_text(self):

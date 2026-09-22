@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -29,6 +30,28 @@ HANDOVER_TEXT = (
 # a timeout, a network error. Distinct from HANDOVER_TEXT (which covers the model
 # answering but not resolving anything): this one covers the model not answering
 # at all, so it says "reaching our system" rather than implying we tried and failed.
+# The API prefixes a 400 message with the field it rejected:
+# "messages.0.content.1.text: text content blocks must be non-empty".
+_FIELD_PATH = re.compile(r"^([a-z_]+(?:[.\[][a-z0-9_\]]+)*):")
+
+
+def rejected_field_path(exc: BaseException) -> Optional[str]:
+    """The field path from a rejected request, or None.
+
+    A 400 is a bug in the request we built, and the path alone
+    ("messages.0.content.1.text") says where. It is the shape of our request,
+    never the customer's words, which is the line this log keeps: the rest of
+    the message can echo content and stays out.
+    """
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) else None
+    text = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(text, str):
+        return None
+    match = _FIELD_PATH.match(text)
+    return match.group(1) if match else None
+
+
 MODEL_UNAVAILABLE_TEXT = (
     "Sorry — I am having trouble reaching our system right now. Let me pass you to a member "
     "of our support team who can help."
@@ -164,10 +187,13 @@ class Agent:
                 # this log is not the place for that. Return immediately rather
                 # than retrying in this loop — a retry belongs in the client,
                 # and a waiting customer should not sit through several
-                # timeouts before finding out we cannot reach the model.
+                # timeouts before finding out we cannot reach the model. The
+                # one exception is the field path from a 400 (see
+                # rejected_field_path): request shape, not content.
                 self.log.emit(
                     "llm_error", message.conversation_id,
                     agent=self.definition.name, iteration=iteration, error=type(exc).__name__,
+                    path=rejected_field_path(exc),
                 )
                 turn.escalate = True
                 turn.escalation_reason = "model_unavailable"

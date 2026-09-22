@@ -5,6 +5,7 @@ identity runs before the prompt, guardrails before the model, and the post-check
 after it. Every one of these is a conversation a real customer could have.
 """
 
+import base64
 import unittest
 from datetime import date
 
@@ -18,6 +19,7 @@ from emotorad_ai.runtime import Runtime
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import SEARCH_BATTERY_KNOWLEDGE, build_registry
 
+PNG = base64.b64encode(b"\x89PNG fake").decode()
 TODAY = date(2026, 8, 4)
 
 
@@ -100,6 +102,29 @@ class MultiBikeJourneyTests(unittest.TestCase):
         self.assertEqual(llm.requests, [])
         self.assertIn("did not catch", reply.text)
         self.assertIsNone(runtime.conversations.get("c1").selected_frame)
+
+    def test_a_photo_only_turn_during_selection_does_not_poison_the_transcript(self):
+        """A short-circuited turn is written to the transcript by `_finish`. A photo
+        sent with no caption has empty typed text, and storing that as an empty
+        user turn makes every later model call a 400 (staging, 2026-09-22, the
+        same defect on the safety branch)."""
+        runtime, llm = make_runtime([say("Which of the two bikes is it about?")])
+        whatsapp(runtime, "919700000001", "battery issue")
+        photo = {"kind": "image", "url": "data:image/png;base64," + PNG, "mime_type": "image/png"}
+        reply = whatsapp(runtime, "919700000001", "", attachments=[photo])
+        self.assertIn("did not catch", reply.text)
+
+        reply = whatsapp(runtime, "919700000001", "the first one")
+        self.assertEqual(reply.handled_by, "battery_support")
+        for turn in llm.requests[0]["messages"]:
+            content = turn["content"]
+            if isinstance(content, str):
+                self.assertTrue(content.strip(), "blank turn sent to the model: %r" % turn)
+                continue
+            self.assertTrue(content, "empty content list sent to the model: %r" % turn)
+            for block in content:
+                if block.get("type") == "text":
+                    self.assertTrue(block["text"].strip(), "empty text block: %r" % turn)
 
 
 class GuardrailJourneyTests(unittest.TestCase):
