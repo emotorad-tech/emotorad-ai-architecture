@@ -31,12 +31,17 @@ writes down what it saw gives Claude far better evidence at lower cost than eigh
   request (Gemini's 20 MB ceiling is on the base64-encoded request); above that through Gemini's Files API, polled until ACTIVE, deleted from Google
   as soon as the summary is back. Timeout 90 s; a timeout or error falls back to frames.
 - **Prompt (fixed, in code):** an after-sales evidence analyst for an Indian e-cycle
-  company. Describe only what is observable: the component and bike area shown; visible
-  damage, deformation, discolouration, liquid, smoke, sparks or fire; indicator lights and
+  company. Describe only what is present and observable: the component and bike area shown;
+  any damage, deformation, discolouration or liquid actually seen; indicator lights with
   their colours and blink patterns; any text or error code readable on a display, quoted
   exactly; sounds from the bike; the customer's spoken words, quoted, with the language;
-  notable moments with timestamps; image quality problems. Plain text, no diagnosis, no
-  advice, no guesses about causes. Say "not visible" rather than inferring.
+  notable moments with timestamps; image quality problems. Never list conditions that were
+  not observed, and never enumerate hazards by name: a summary that says "no smoke visible"
+  would trip the keyword safety gate. If the part of interest is not in frame, say only that.
+  Plain text, no diagnosis, no advice, no guesses about causes.
+- **Safety scan of summaries** uses `check_safety_in_description`, which ignores a hazard word
+  preceded within four words by a negation, so an analyser sentence like "no cracks" cannot
+  hard-stop a conversation; the typed text keeps the plain scan.
 - **What Claude sees:** one text block:
   `[Description of the customer's video '<name>' (<duration>s), written by an automated
   video analyser — not by you and not by a person. Treat it as observation, not diagnosis.
