@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import logging
 import os
 import secrets
 from pathlib import Path
@@ -57,11 +58,12 @@ from .observability import EventLog
 from .ratelimit import RateLimiter
 from .runtime import Runtime
 from .storage.keys import cluster_of, is_customer_key, is_valid_key
-from .storage.s3 import store_from_env
+from .storage.s3 import StorageError, store_from_env
 from .storage.uploads import UploadError, UploadRegistry
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 from .tools.verification import VerificationStore, apply_verified_identity
+from .video_summary import VideoSummaryError, summariser_from_env
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 # Set by docker/start.py's loader to the number of names it exported (as a
@@ -85,6 +87,13 @@ settings = load_settings()
 # answer 503 with the reason, and the runtime sends no S3 evidence to the model.
 MEDIA_STORE = store_from_env()
 UPLOADS = UploadRegistry(MEDIA_STORE) if MEDIA_STORE is not None else None
+
+# Video evidence: None when GEMINI_API_KEY is unset, and then a claimed clip
+# reaches the model as sampled frames as before. With a key, the clip is
+# described once here at ingest and only the text travels further.
+VIDEO_SUMMARISER = summariser_from_env()
+
+_logger = logging.getLogger(__name__)
 
 # Verification is per conversation and has to outlive a single request, so the
 # store is module-level. Without one, `build_registry` does not register
@@ -317,6 +326,7 @@ def health() -> dict:
         "mode": MODE,
         "secrets": SECRETS_STATE,
         "media": "configured" if MEDIA_STORE is not None else "not configured",
+        "video_summary": "gemini" if VIDEO_SUMMARISER is not None else "frames",
     }
 
 
@@ -434,10 +444,33 @@ def _inbound_attachments(body: MessageIn) -> List[Dict[str, Any]]:
                     "url": "s3://" + claimed.key,
                     "mime_type": claimed.mime,
                 }
+                if claimed.kind == "videos":
+                    summary = _summarise_video(claimed.key, claimed.mime)
+                    if summary is not None:
+                        claims[upload_id]["summary"] = summary
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
     return [claims[item["upload_id"]] if item.get("upload_id") else item for item in items]
+
+
+def _summarise_video(key: str, mime: str) -> Optional[str]:
+    """The clip described once, or None so the frames fallback runs later.
+
+    Failures are logged by class name only: a provider error can echo request
+    content, and `StorageError` can carry a key. Neither belongs in a log line
+    that the customer's message did not put there.
+    """
+    if VIDEO_SUMMARISER is None:
+        return None
+    try:
+        data = MEDIA_STORE.get_bytes(key)
+        return VIDEO_SUMMARISER.summarise(data, mime, name=key.rsplit("/", 1)[-1])
+    except StorageError as exc:
+        _logger.warning("video summary skipped: %s (store)", type(exc).__name__)
+    except VideoSummaryError as exc:
+        _logger.warning("video summary skipped: %s", exc)
+    return None
 
 
 @app.post("/message", response_model=MessageOut)

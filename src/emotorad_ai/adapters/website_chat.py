@@ -43,7 +43,7 @@ class WebsiteChatAdapter(ChannelAdapter):
             entry_metadata["referrer"] = event["referrer"]
 
         attachments = [
-            Attachment(kind=a.get("kind", "image"), url=a["url"], mime_type=a.get("mime_type"))
+            Attachment(kind=a.get("kind", "image"), url=a["url"], mime_type=a.get("mime_type"), summary=a.get("summary"))
             for a in event.get("attachments", [])
             if a.get("url")
         ]

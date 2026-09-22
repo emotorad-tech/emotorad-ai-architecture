@@ -9,6 +9,8 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from emotorad_ai.contract import Reply
+
 
 class _Store:
     bucket = "fake"
@@ -269,6 +271,103 @@ class PlaygroundProxyMethodsTests(unittest.TestCase):
                 self.assertLessEqual(wanted, set(route.methods), route.path)
                 checked += 1
         self.assertEqual(checked, 2)
+
+
+class _Summariser:
+    """Stands in for GeminiVideoSummariser: records what it was asked to
+    describe, answers with a fixed sentence or raises."""
+
+    def __init__(self, text="the pack is on a table", error=None):
+        self.calls = []
+        self.text = text
+        self.error = error
+
+    def summarise(self, data, mime, name="video"):
+        self.calls.append((data, mime, name))
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+
+class VideoSummaryAtIngestTests(unittest.TestCase):
+    """A claimed video is described once, here, before the runtime sees it.
+    The summary rides on the attachment so the safety gate and the agent turn
+    read it; a summariser failure leaves it absent and the frames path runs."""
+
+    def setUp(self):
+        self.store = _Store()
+        self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+        self.summariser = _Summariser()
+        self.api.VIDEO_SUMMARISER = self.summariser
+        self.seen = []
+        scripted = Reply(conversation_id="c1", text="ok", handled_by="test")
+        self._patch = mock.patch.object(self.api.runtime, "handle", side_effect=lambda m: self.seen.append(m) or scripted)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def _upload(self, mime="video/mp4", size=9):
+        body = self.client.post("/uploads", json={
+            "session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers",
+            "mime_type": mime, "size_bytes": size,
+        }).json()
+        self.store.objects[body["key"]] = {"size": size, "mime": mime}
+        return body
+
+    def _send(self, upload_id):
+        return self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "video attached",
+            "attachments": [{"upload_id": upload_id}],
+        })
+
+    def test_a_claimed_mp4_is_summarised_once_and_the_runtime_sees_the_text(self):
+        body = self._upload()
+        r = self._send(body["upload_id"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.summariser.calls, [(b"\x89PNG fake", "video/mp4", body["key"].rsplit("/", 1)[-1])])
+        self.assertEqual(self.store.fetched, [body["key"]])
+        message = self.seen[-1]
+        self.assertEqual(message.attachments[0].kind, "video")
+        self.assertEqual(message.attachments[0].summary, "the pack is on a table")
+
+    def test_a_summariser_failure_leaves_the_summary_absent(self):
+        from emotorad_ai.video_summary import VideoSummaryError
+
+        self.summariser.error = VideoSummaryError("DeadlineExceeded")
+        body = self._upload()
+        with self.assertLogs("emotorad_ai.api", level="WARNING") as logs:
+            r = self._send(body["upload_id"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNone(self.seen[-1].attachments[0].summary)
+        self.assertTrue(any("DeadlineExceeded" in line for line in logs.output), logs.output)
+
+    def test_a_store_failure_leaves_the_summary_absent(self):
+        from emotorad_ai.storage.s3 import StorageError
+
+        def boom(key):
+            raise StorageError("s3 said no")
+
+        self.store.get_bytes = boom
+        body = self._upload()
+        with self.assertLogs("emotorad_ai.api", level="WARNING"):
+            r = self._send(body["upload_id"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.summariser.calls, [])
+        self.assertIsNone(self.seen[-1].attachments[0].summary)
+
+    def test_an_image_upload_is_not_summarised(self):
+        body = self._upload(mime="image/png")
+        r = self._send(body["upload_id"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.summariser.calls, [])
+        self.assertIsNone(self.seen[-1].attachments[0].summary)
+
+    def test_health_reports_which_video_path_is_live(self):
+        self.assertEqual(self.client.get("/health").json()["video_summary"], "gemini")
+        self.api.VIDEO_SUMMARISER = None
+        self.assertEqual(self.client.get("/health").json()["video_summary"], "frames")
 
 
 class NoBucketTests(unittest.TestCase):
