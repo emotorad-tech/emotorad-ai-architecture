@@ -32,6 +32,7 @@ import base64
 import binascii
 import os
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,7 @@ from .ratelimit import RateLimiter
 from .runtime import Runtime
 from .storage.keys import cluster_of, is_customer_key, is_valid_key
 from .storage.s3 import store_from_env
+from . import tracing
 from .storage.uploads import UploadError, UploadRegistry
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
@@ -160,6 +162,13 @@ geocoder = NominatimGeocoder()
 pincode_directory = PincodeDirectory.load()
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
+# Langfuse, when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are in the
+# environment (the config store exports them on staging). Attached as a sink so
+# it only ever sees redacted events; see tracing.py. `tracing.` rather than a
+# bare import so the tests can patch the factory.
+TRACING = tracing.langfuse_sink_from_env()
+if TRACING is not None:
+    log.sinks.append(TRACING)
 runtime = Runtime(
     settings=settings,
     registry=registry,
@@ -190,7 +199,18 @@ adapter = WebsiteChatAdapter(resolver)
 # Claimed-attachment kind, as the adapter expects it — never string tricks.
 _ATTACHMENT_KIND = {"images": "image", "videos": "video", "docs": "document"}
 
-app = FastAPI(title="Emotorad AI — battery support")
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    yield
+    # The SDK batches in a background thread; a container stopped mid-batch
+    # would otherwise lose the last turns of every open conversation.
+    if TRACING is not None:
+        TRACING.flush()
+
+
+app = FastAPI(title="Emotorad AI — battery support", lifespan=_lifespan)
 
 
 class MessageIn(BaseModel):
@@ -317,6 +337,7 @@ def health() -> dict:
         "mode": MODE,
         "secrets": SECRETS_STATE,
         "media": "configured" if MEDIA_STORE is not None else "not configured",
+        "tracing": "on" if TRACING is not None else "off",
     }
 
 

@@ -9,7 +9,7 @@ from contextlib import redirect_stderr
 from emotorad_ai.llm import call_tool, say
 from emotorad_ai.observability import EventLog
 from emotorad_ai.tools.mocks import SEARCH_BATTERY_KNOWLEDGE
-from emotorad_ai.tracing import LangfuseSink
+from emotorad_ai.tracing import LangfuseSink, langfuse_sink_from_env
 
 from tests.test_agent_and_runtime import make_runtime, send
 
@@ -332,6 +332,39 @@ class LangfuseSinkObservationTests(unittest.TestCase):
         self.ev("routed", agent="battery_support", reason="r")
         self.sink(outcome())
         self.assertTrue(self.root.children[-1].ended)
+
+
+class SinkFromEnvTests(unittest.TestCase):
+    def test_no_keys_means_no_sink(self):
+        self.assertIsNone(langfuse_sink_from_env({}))
+        self.assertIsNone(langfuse_sink_from_env({"LANGFUSE_PUBLIC_KEY": "pk"}))
+        self.assertIsNone(langfuse_sink_from_env({"LANGFUSE_SECRET_KEY": "sk"}))
+
+    def test_keys_build_a_client_against_the_eu_cloud_by_default(self):
+        built = {}
+
+        def factory(**kwargs):
+            built.update(kwargs)
+            return FakeLangfuse()
+
+        sink = langfuse_sink_from_env(
+            {"LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk", "EMOTORAD_AI_ENV": "stage"},
+            factory=factory,
+        )
+        self.assertIsInstance(sink, LangfuseSink)
+        self.assertEqual(built["public_key"], "pk")
+        self.assertEqual(built["secret_key"], "sk")
+        self.assertEqual(built["host"], "https://cloud.langfuse.com")
+        self.assertEqual(built["environment"], "stage")
+
+    def test_host_is_one_variable_so_self_hosting_is_a_config_change(self):
+        built = {}
+        langfuse_sink_from_env(
+            {"LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk",
+             "LANGFUSE_HOST": "https://langfuse.internal"},
+            factory=lambda **kw: built.update(kw) or FakeLangfuse(),
+        )
+        self.assertEqual(built["host"], "https://langfuse.internal")
 
 
 if __name__ == "__main__":

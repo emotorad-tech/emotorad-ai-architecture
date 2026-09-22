@@ -18,7 +18,8 @@ Off unless LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Callable, Dict, Mapping, Optional
 
 # Tools that read the knowledge base rather than a system of record. Typed as
 # retrievers so Langfuse's retrieval views and the agent graph tell them apart
@@ -224,3 +225,36 @@ class LangfuseSink:
 
     def _turn(self, event: Dict[str, Any]) -> Optional[_Turn]:
         return self.open_turns.get(event["conversation_id"])
+
+
+# EU cloud: nearest region to India, and the one Spain's data can sit in. A
+# self-hosted instance later is this one variable.
+DEFAULT_HOST = "https://cloud.langfuse.com"
+
+
+def langfuse_sink_from_env(
+    environ: Optional[Mapping[str, str]] = None,
+    factory: Optional[Callable[..., Any]] = None,
+) -> Optional[LangfuseSink]:
+    """The sink for this process, or None when tracing is not configured.
+
+    Both keys are required; one without the other is treated as unset rather
+    than as an error, because a local run without tracing is the normal case.
+    The keys come from the config store on staging (runbook: tracing.md).
+    """
+    env = environ if environ is not None else os.environ
+    public_key = (env.get("LANGFUSE_PUBLIC_KEY") or "").strip()
+    secret_key = (env.get("LANGFUSE_SECRET_KEY") or "").strip()
+    if not (public_key and secret_key):
+        return None
+    if factory is None:
+        from langfuse import Langfuse  # imported lazily: tests and untraced runs never need it
+
+        factory = Langfuse
+    client = factory(
+        public_key=public_key,
+        secret_key=secret_key,
+        host=env.get("LANGFUSE_HOST") or DEFAULT_HOST,
+        environment=env.get("EMOTORAD_AI_ENV") or None,
+    )
+    return LangfuseSink(client)
