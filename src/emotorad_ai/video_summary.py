@@ -100,20 +100,20 @@ class GeminiVideoSummariser:
 
     def summarise(self, data: bytes, mime: str, name: str = "video") -> str:
         """Plain-text description of the clip, or `VideoSummaryError`."""
+        deadline = self._clock() + TIMEOUT_SECONDS
         if len(data) <= INLINE_LIMIT:
             part = {"inline_data": {"data": data, "mime_type": mime}}
-            return self._generate([part, PROMPT])
-        return self._via_files_api(data, mime, name)
+            return self._generate([part, PROMPT], deadline)
+        return self._via_files_api(data, mime, name, deadline)
 
-    def _via_files_api(self, data: bytes, mime: str, name: str) -> str:
-        deadline = self._clock() + TIMEOUT_SECONDS
+    def _via_files_api(self, data: bytes, mime: str, name: str, deadline: float) -> str:
         try:
             uploaded = self._client.files.upload(file=io.BytesIO(data), config={"mime_type": mime})
         except Exception as exc:
             raise VideoSummaryError(type(exc).__name__) from None
         try:
             ready = self._wait_until_active(uploaded, deadline)
-            return self._generate([ready, PROMPT])
+            return self._generate([ready, PROMPT], deadline)
         finally:
             # Whatever happened above, the customer's clip does not stay on
             # Google's side. A failed delete is reported but must not mask
@@ -143,9 +143,22 @@ class GeminiVideoSummariser:
             except Exception as exc:
                 raise VideoSummaryError(type(exc).__name__) from None
 
-    def _generate(self, contents: list) -> str:
+    def _generate(self, contents: list, deadline: float) -> str:
+        # The client-level timeout is per HTTP call, so upload, each poll and
+        # generate could each take the full budget. The deadline is for the
+        # whole summary: generate gets only what is left of it, passed as a
+        # per-request `http_options` on `GenerateContentConfig` (a field on
+        # google-genai 2.24, timeout in milliseconds, checked against the
+        # installed SDK). Whole seconds, so a fake clock's arithmetic and a
+        # log line both read cleanly.
+        remaining = int(deadline - self._clock())
+        if remaining <= 0:
+            raise VideoSummaryError("timeout")
+        config = {"http_options": {"timeout": remaining * 1000}}
         try:
-            response = self._client.models.generate_content(model=self.model, contents=contents)
+            response = self._client.models.generate_content(
+                model=self.model, contents=contents, config=config
+            )
         except Exception as exc:
             raise VideoSummaryError(type(exc).__name__) from None
         text = (getattr(response, "text", None) or "").strip()

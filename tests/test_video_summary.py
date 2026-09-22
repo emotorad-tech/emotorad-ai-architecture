@@ -28,6 +28,7 @@ class _Models:
 
     def generate_content(self, *, model, contents, config=None):
         self._client.calls.append(("generate", model, contents))
+        self._client.configs.append(config)
         if self.error is not None:
             raise self.error
         return SimpleNamespace(text=self.text)
@@ -55,6 +56,7 @@ class _Files:
 class _Client:
     def __init__(self, text="a video", error=None, states=("PROCESSING", "ACTIVE")):
         self.calls = []
+        self.configs = []
         self.models = _Models(self, text=text, error=error)
         self.files = _Files(self, states=states)
 
@@ -144,6 +146,41 @@ class FilesPathTests(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "timeout")
         self.assertEqual(client.calls[-1], ("delete", "files/abc"))
         self.assertNotIn("generate", [c[0] for c in client.calls])
+
+    def test_generate_gets_only_the_budget_left_after_the_upload(self):
+        """The client-level timeout is per HTTP call, so upload, polls and
+        generate could each take the full 90 s. The deadline is for the whole
+        summary: what the poll loop spent comes off what generate may use."""
+        # Each clock read advances 10 s: deadline at t=10 + 90 = 100, then
+        # one poll iteration reads the clock once (t=20) before sleeping, the
+        # next finds ACTIVE and generate is called with the clock at 30.
+        client = _Client(states=["PROCESSING", "ACTIVE"])
+        _summariser(client, clock=_Clock(step=10.0)).summarise(self.big, "video/mp4")
+        config = client.configs[-1]
+        self.assertIsNotNone(config)
+        remaining_ms = config["http_options"]["timeout"]
+        self.assertGreater(remaining_ms, 0)
+        self.assertLess(remaining_ms, 90 * 1000)
+        self.assertEqual(remaining_ms % 1000, 0)
+
+    def test_no_budget_left_before_generate_is_a_timeout_not_a_call(self):
+        """The poll loop sees ACTIVE in time, but by the moment generate would
+        start the budget is spent: it must not begin a 90 s call on top.
+
+        Step 50: deadline 50 + 90 = 140; the one poll reads 100 (inside),
+        the file is ACTIVE on the next get, and the check before generate
+        reads 150, which is past the deadline."""
+        client = _Client(states=["ACTIVE"])
+        with self.assertRaises(VideoSummaryError) as ctx:
+            _summariser(client, clock=_Clock(step=50.0)).summarise(self.big, "video/mp4")
+        self.assertEqual(str(ctx.exception), "timeout")
+        self.assertNotIn("generate", [c[0] for c in client.calls])
+        self.assertEqual(client.calls[-1], ("delete", "files/abc"))
+
+    def test_the_inline_path_gets_the_full_budget(self):
+        client = _Client()
+        _summariser(client).summarise(b"x", "video/mp4")
+        self.assertEqual(client.configs[-1]["http_options"]["timeout"], 90 * 1000)
 
     def test_a_failed_file_state_raises_and_is_deleted(self):
         client = _Client(states=["FAILED"])
