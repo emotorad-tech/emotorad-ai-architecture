@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -155,6 +156,8 @@ class Agent:
 
         for iteration in range(1, self.settings.max_agent_iterations + 1):
             turn.iterations = iteration
+            self.log.llm_request(message.conversation_id, self.definition.name, iteration)
+            started = time.monotonic()
             try:
                 response = self.llm.create(system=system, messages=history, tools=tools)
             except Exception as exc:
@@ -179,6 +182,8 @@ class Agent:
                 iteration,
                 response.stop_reason,
                 response.usage,
+                model=response.model,
+                duration_ms=int(round((time.monotonic() - started) * 1000)),
             )
             history.append({"role": "assistant", "content": response.api_content})
             if (response.text or "").strip():
@@ -231,8 +236,13 @@ class Agent:
                     turn.text = HANDOVER_TEXT
                     return turn
                 seen_calls.add(signature)
+                self.log.tool_request(message.conversation_id, tool_use.name)
+                tool_started = time.monotonic()
                 envelope = self.registry.call(tool_use.name, arguments, context)
-                self.log.tool_call(message.conversation_id, tool_use.name, arguments, envelope)
+                self.log.tool_call(
+                    message.conversation_id, tool_use.name, arguments, envelope,
+                    duration_ms=int(round((time.monotonic() - tool_started) * 1000)),
+                )
                 if on_tool_result is not None:
                     on_tool_result(tool_use.name, arguments, envelope)
                 turn.tool_calls.append({"tool": tool_use.name, "arguments": arguments, "result": envelope})

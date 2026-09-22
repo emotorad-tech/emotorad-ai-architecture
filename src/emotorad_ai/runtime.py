@@ -20,6 +20,7 @@ the steps is the design:
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional
 
@@ -486,6 +487,8 @@ class Runtime:
             elif resolved.single_bike:
                 arguments["frame_number"] = resolved.single_bike["frame_number"]
 
+            self.log.tool_request(message.conversation_id, CREATE_SUPPORT_TICKET)
+            started = time.monotonic()
             envelope = self.registry.call(
                 CREATE_SUPPORT_TICKET,
                 arguments,
@@ -496,7 +499,8 @@ class Runtime:
                 ),
             )
             self.log.tool_call(
-                message.conversation_id, CREATE_SUPPORT_TICKET, {"category": "battery_safety"}, envelope
+                message.conversation_id, CREATE_SUPPORT_TICKET, {"category": "battery_safety"}, envelope,
+                duration_ms=int(round((time.monotonic() - started) * 1000)),
             )
             if not is_error(envelope):
                 ticket_id = envelope["data"]["ticket_id"]

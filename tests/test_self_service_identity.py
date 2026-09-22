@@ -245,9 +245,9 @@ class VerifyThenLookUpInOneTurnTests(unittest.TestCase):
         calls = []
 
         class CapturingLog(EventLog):
-            def tool_call(self, conversation_id, tool, arguments, result):
+            def tool_call(self, conversation_id, tool, arguments, result, **fields):
                 calls.append((tool, result))
-                super().tool_call(conversation_id, tool, arguments, result)
+                super().tool_call(conversation_id, tool, arguments, result, **fields)
 
         store = VerificationStore()
         registry = build_registry(verification=store, today=date(2026, 7, 28))
