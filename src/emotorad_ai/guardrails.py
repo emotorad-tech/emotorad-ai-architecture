@@ -179,7 +179,11 @@ _COVERED_CLAIM = re.compile(
     r"(?:is|are|it'?s|this is|that'?s|you'?re|fully|still)\s+(?:\w+\s+){0,2}"
     r"(?:covered|under (?:the )?warranty|in warranty|within warranty)"
     r"|covered under (?:the )?warranty"
-    r"|(?:no|free of|without)\s+(?:charge|cost)"
+    # The money sense only. A bare "no charge" is the battery's state in this
+    # bot ("the pack having no charge to show" was blocked on staging on
+    # 2026-09-22), so the price reading needs its own preposition.
+    r"|(?:at no|free of|without)\s+charge\b"
+    r"|(?:no|free of|without)\s+cost"
     r"|(?:at )?no cost to you"
     r"|we(?:'| wi)ll (?:repair|replace) (?:it|this) (?:free|at no)",
     re.IGNORECASE,
