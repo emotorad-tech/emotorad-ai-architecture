@@ -67,6 +67,19 @@ jobs:
         # Secrets Manager (EMOTORAD_AI_SECRET_ID) through the instance role —
         # docs/runbooks/config-store.md. Everything passed as -e here is safe to
         # appear in SSM command history.
+        #
+        # Runtime settings are -e flags too, read once at container start, so a
+        # change here is a commit plus a redeploy:
+        #   EMOTORAD_AI_APPROVAL_MODE  bot / reasonable / human. Not bot: the
+        #                              spec's fourth "sure" fact is not built.
+        #   EMOTORAD_AI_DEV_CODES=1    STAGING ONLY. Exposes /dev/verification
+        #                              so a tester can read the one-time code,
+        #                              because no SMS provider exists yet. On a
+        #                              public URL this is a phone-verification
+        #                              bypass for anyone holding a conversation
+        #                              id, so keep EMOTORAD_OMS_API_KEY out of
+        #                              the staging secret while it is on, and
+        #                              never copy it to the prod line.
         run: |
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
@@ -77,7 +90,7 @@ jobs:
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"

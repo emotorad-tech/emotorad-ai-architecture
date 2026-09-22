@@ -77,7 +77,16 @@ Expected: the four field names.
 ## 3. Deploy
 
 Run the "Deploy to staging (EC2)" workflow. It passes `EMOTORAD_AI_SECRET_ID`,
-`EMOTORAD_AI_MODE=anthropic` and `EMOTORAD_AI_MODEL`; nothing sensitive. Then:
+`EMOTORAD_AI_MODE=anthropic`, `EMOTORAD_AI_APPROVAL_MODE=reasonable` and
+`EMOTORAD_AI_DEV_CODES=1`; nothing sensitive. Runtime settings like these are `-e` flags
+on the workflow's `docker run` line, read once at container start, so changing one is a
+commit plus a redeploy.
+
+`EMOTORAD_AI_DEV_CODES=1` is staging only. It opens `/dev/verification/<conversation_id>`
+so a tester can read the one-time code (there is no SMS provider yet). On a public URL
+that is a phone-verification bypass for anyone holding a conversation id, so keep
+`EMOTORAD_OMS_API_KEY` out of the staging secret while it is on (see the note on it at the top of this runbook), and
+never set it on prod. Then:
 
 ```bash
 curl -s https://ai-release-stage.emotorad.com/health
