@@ -91,10 +91,20 @@ class UploadRegistry:
 
     def _remember(self, upload_id: str, key: str, mime: str, size: int, kind: str, tree: str) -> Tuple[Pending, Dict[str, Any]]:
         presign = self._store.presign_put(key, mime, size)
-        pending = Pending(upload_id, key, mime, size, kind, tree, self._clock() + PUT_EXPIRY)
+        now = self._clock()
+        pending = Pending(upload_id, key, mime, size, kind, tree, now + PUT_EXPIRY)
         with self._lock:
+            # Sweep on write, not on a timer: a presign nobody claims is
+            # otherwise a dict entry that lives as long as the process, and
+            # a caller can mint them faster than customers send messages.
+            self._sweep(now)
             self._pending[upload_id] = pending
         return pending, presign
+
+    def _sweep(self, now: float) -> None:
+        """Drop pending entries past the claim window. Caller holds the lock."""
+        for upload_id in [i for i, p in self._pending.items() if now > p.expires_at + CLAIM_WINDOW]:
+            del self._pending[upload_id]
 
     # -- peek --------------------------------------------------------------------
 

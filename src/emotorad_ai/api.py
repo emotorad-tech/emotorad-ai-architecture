@@ -277,6 +277,10 @@ CHAT_AGENTS = ("battery_support", "motor_support", "late_warranty")
 # may use the chat is still undecided; this only bounds what an anonymous caller
 # can cost while that decision is outstanding.
 message_limiter = RateLimiter(limit=20, window_seconds=60.0)
+# Same bound on presigns. Each one costs a signature and a pending entry in
+# memory, and a message can carry at most a few attachments, so a caller
+# minting presigns faster than they can send messages is not a customer.
+upload_limiter = RateLimiter(limit=20, window_seconds=60.0)
 
 
 class AttachmentOut(BaseModel):
@@ -353,6 +357,11 @@ def _cluster_for_session(session_token: str, em_aid: Optional[str] = None) -> st
 
 @app.post("/uploads")
 def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
+    if not upload_limiter.allow(request.client.host if request.client else None):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many uploads. Wait a moment and try again.",
+        )
     _require_media()
     try:
         if body.tree == "customers":

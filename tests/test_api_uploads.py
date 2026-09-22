@@ -72,6 +72,19 @@ class UploadFlowTests(unittest.TestCase):
         r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya", "text": "x", "attachments": [{"upload_id": body["upload_id"]}]})
         self.assertEqual(r.status_code, 409)
 
+    def test_a_presign_flood_is_refused_with_429(self):
+        """/message was rate limited and /uploads was not, so an anonymous
+        caller could mint presigned PUTs (and pending entries) without bound."""
+        from emotorad_ai.ratelimit import RateLimiter
+
+        self.api.upload_limiter = RateLimiter(limit=2, window_seconds=60.0)
+        codes = [
+            self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "image/png", "size_bytes": 9}).status_code
+            for _ in range(4)
+        ]
+        self.assertEqual(codes[:2], [200, 200], codes)
+        self.assertEqual(codes[-1], 429, codes)
+
     def test_an_iphone_clip_presigns(self):
         r = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "video/quicktime", "size_bytes": 9})
         self.assertEqual(r.status_code, 200, r.text)

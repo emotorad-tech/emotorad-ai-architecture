@@ -35,6 +35,21 @@ class BeginTests(unittest.TestCase):
         self.assertEqual(presign["headers"]["Content-Type"], "image/jpeg")
         self.assertEqual(pending.expires_at, 1_300.0)
 
+    def test_an_unclaimed_presign_is_swept_by_the_next_begin(self):
+        """A presign nobody claims must not sit in memory forever: the next
+        begin_* sweeps anything past PUT_EXPIRY + CLAIM_WINDOW."""
+        stale, _ = self.reg.begin_customer("clu_1", "conv_1", "image/jpeg", 1234)
+        self.now[0] = 1_000.0 + 300 + 3600 + 1
+        fresh, _ = self.reg.begin_asset("afs", "battery", "photos", "soc-button", "image/png", 10)
+        self.assertNotIn(stale.upload_id, self.reg._pending)
+        self.assertIn(fresh.upload_id, self.reg._pending)
+
+    def test_a_live_presign_survives_the_sweep(self):
+        live, _ = self.reg.begin_customer("clu_1", "conv_1", "image/jpeg", 1234)
+        self.now[0] = 1_000.0 + 300 + 3600
+        self.reg.begin_customer("clu_1", "conv_1", "image/jpeg", 1234)
+        self.assertIn(live.upload_id, self.reg._pending)
+
     def test_asset_presign_uses_the_assets_tree(self):
         pending, _ = self.reg.begin_asset("afs", "battery", "photos", "soc-button", "image/png", 10)
         self.assertEqual(pending.key, "assets/afs/battery/photos/soc-button.png")
