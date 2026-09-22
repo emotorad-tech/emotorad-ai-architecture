@@ -334,6 +334,61 @@ class LangfuseSinkObservationTests(unittest.TestCase):
         self.assertTrue(self.root.children[-1].ended)
 
 
+class VideoSummaryTraceTests(unittest.TestCase):
+    """The Gemini call happens at ingest, before the turn opens. The sink holds
+    it and attaches it to the next turn of that conversation as a priced
+    generation, input = the fixed prompt plus the clip's metadata (never the
+    bytes), output = the description Claude was given."""
+
+    def setUp(self):
+        self.client = FakeLangfuse()
+        self.sink = LangfuseSink(self.client)
+
+    def summary(self, **over):
+        event = {"event": "video_summary", "conversation_id": "c1", "key": "upl_1.mp4",
+                 "mime": "video/mp4", "size_bytes": 12400000, "model": "gemini-3.8-flash",
+                 "usage": {"input_tokens": 1500, "output_tokens": 320}, "duration_ms": 2100,
+                 "chars": 22, "text": "the pack is on a table"}
+        event.update(over)
+        return event
+
+    def test_a_summary_before_the_turn_lands_on_that_turn_as_a_generation(self):
+        self.sink(self.summary())
+        self.assertEqual(self.client.roots, [], "nothing opens a trace but the message itself")
+        self.sink(inbound(text="here is the video"))
+        root = self.client.roots[0]
+        gen = root.children[0]
+        self.assertEqual((gen.name, gen.as_type), ("video-summary", "generation"))
+        self.assertEqual(gen.kwargs["model"], "gemini-3.8-flash")
+        self.assertEqual(gen.kwargs["usage_details"], {"input": 1500, "output": 320})
+        self.assertEqual(gen.kwargs["output"], "the pack is on a table")
+        self.assertEqual(gen.kwargs["input"]["clip"], {"key": "upl_1.mp4", "mime": "video/mp4", "size_bytes": 12400000})
+        self.assertIn("SCOPE.", gen.kwargs["input"]["prompt"])
+        self.assertEqual(gen.kwargs["metadata"]["duration_ms"], 2100)
+        self.assertTrue(gen.ended)
+
+    def test_a_failed_summary_is_an_error_generation_on_the_turn(self):
+        self.sink({"event": "video_summary_failed", "conversation_id": "c1", "key": "upl_1.mp4", "error": "timeout"})
+        self.sink(inbound())
+        gen = self.client.roots[0].children[0]
+        self.assertEqual((gen.name, gen.as_type), ("video-summary", "generation"))
+        self.assertEqual(gen.kwargs["level"], "ERROR")
+        self.assertEqual(gen.kwargs["status_message"], "timeout")
+        self.assertTrue(gen.ended)
+
+    def test_a_held_summary_is_used_once(self):
+        self.sink(self.summary())
+        self.sink(inbound())
+        self.sink(outcome())
+        self.sink(inbound(text="next"))
+        self.assertEqual(self.client.roots[1].children, [])
+
+    def test_summaries_are_held_per_conversation(self):
+        self.sink(self.summary(conversation_id="c2"))
+        self.sink(inbound(conversation_id="c1"))
+        self.assertEqual(self.client.roots[0].children, [])
+
+
 class SinkFromEnvTests(unittest.TestCase):
     def test_no_keys_means_no_sink(self):
         self.assertIsNone(langfuse_sink_from_env({}))

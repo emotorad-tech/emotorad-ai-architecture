@@ -19,7 +19,9 @@ Off unless LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
+
+from .video_summary import PROMPT as VIDEO_PROMPT
 
 # Tools that read the knowledge base rather than a system of record. Typed as
 # retrievers so Langfuse's retrieval views and the agent graph tell them apart
@@ -78,6 +80,9 @@ class LangfuseSink:
         self.client = client
         # conversation_id -> the turn in progress.
         self.open_turns: Dict[str, _Turn] = {}
+        # conversation_id -> video summaries described at ingest, before the
+        # turn's inbound event exists. Attached to the next turn that opens.
+        self._held_videos: Dict[str, List[Dict[str, Any]]] = {}
 
     def __call__(self, event: Dict[str, Any]) -> None:
         handler = getattr(self, "_on_" + event["event"], None)
@@ -104,6 +109,8 @@ class LangfuseSink:
         tags = [tag for tag in (event.get("persona"), event.get("channel")) if tag]
         root.update_trace(name=name, session_id=conversation_id, input=event.get("text"), tags=tags)
         self.open_turns[conversation_id] = _Turn(root)
+        for held in self._held_videos.pop(conversation_id, []):
+            self._attach_video(root, held)
 
     def _on_identity_resolved(self, event: Dict[str, Any]) -> None:
         turn = self._turn(event)
@@ -128,6 +135,33 @@ class LangfuseSink:
         turn.root.update(output=text, metadata=metadata)
         turn.root.update_trace(output=text, metadata=metadata)
         turn.root.end()
+
+    # The video analyser runs at ingest, before the turn opens.
+
+    def _on_video_summary(self, event: Dict[str, Any]) -> None:
+        self._held_videos.setdefault(event["conversation_id"], []).append(event)
+
+    def _on_video_summary_failed(self, event: Dict[str, Any]) -> None:
+        self._held_videos.setdefault(event["conversation_id"], []).append(event)
+
+    def _attach_video(self, root: Any, event: Dict[str, Any]) -> None:
+        clip = {"key": event.get("key"), "mime": event.get("mime"), "size_bytes": event.get("size_bytes")}
+        if event["event"] == "video_summary_failed":
+            root.start_observation(
+                name="video-summary", as_type="generation", input={"clip": clip},
+                level="ERROR", status_message=event.get("error"),
+            ).end()
+            return
+        root.start_observation(
+            name="video-summary", as_type="generation",
+            model=event.get("model"),
+            usage_details=usage_details(event.get("usage")),
+            # The prompt is fixed in code, so it is the same for every clip; it
+            # is on the observation so the trace reads as what Gemini was asked.
+            input={"prompt": VIDEO_PROMPT, "clip": clip},
+            output=event.get("text"),
+            metadata={"duration_ms": event.get("duration_ms"), "chars": event.get("chars")},
+        ).end()
 
     # Inside the turn
 

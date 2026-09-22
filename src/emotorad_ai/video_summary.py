@@ -29,7 +29,8 @@ import io
 import logging
 import os
 import time
-from typing import Any, Callable, Mapping, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Mapping, Optional
 
 GEMINI_KEY_ENV = "GEMINI_API_KEY"
 # Decided by the person on 2026-09-22; do not change without them.
@@ -52,19 +53,39 @@ POLL_SECONDS = 2.0
 # observation only: the diagnosis is Claude's job, with the knowledge base
 # and the coverage checks behind it, and a video model guessing at causes
 # would hand Claude a conclusion it cannot verify.
-PROMPT = """You are an after-sales evidence analyst for an Indian electric cycle company. A customer has sent this video with a support request. Watch and listen to the whole clip and write a detailed, factual description of what it contains, for a support specialist who cannot see it.
+PROMPT = """You are an after-sales evidence analyst for an Indian electric cycle company. A customer has sent this video with a support request. Watch and listen to the whole clip and write a factual description of what it shows, for a support specialist who cannot see it.
 
-Describe only what is present and observable. Cover, where present:
-- The component and the area of the bike shown (battery pack, charger, charging port, display, motor, controller, brakes, wheels, drivetrain, frame, or other), and how it is mounted or held.
-- Any damage or change to the part that you can actually see, described plainly and with its exact position on the part.
-- Indicator lights: which ones, their colours, whether steady or blinking, and the blink pattern with timing where you can count it.
-- Any text, symbol or error code readable on a display or label, quoted exactly as shown.
-- Sounds coming from the bike: describe them plainly (clicking, grinding, whine, beep, silence) and when they occur relative to what is on screen.
-- The customer's spoken words, quoted as closely as you can, and the language or languages they speak in.
+SCOPE. Describe only the electric cycle and its parts: battery pack, charger, charging port, display, motor, controller, brakes, wheels, drivetrain, frame, cables and connectors. Everything else in the frame (phones, furniture, walls, floors, hands, other people, other devices) is background: do not describe its condition, colour, damage or contents, with one exception below.
+
+Cover, where present:
+- Which part is shown, and how it is mounted or held.
+- Any damage or change to the PART ITSELF that you can actually see, with its exact position on the part. Say which part the damage is on in the same sentence.
+- Indicator lights on the part: which ones, their colours, steady or blinking, and the blink pattern with timing where you can count it.
+- Any text, symbol or error code readable on the part's display or label, quoted exactly.
+- Sounds from the bike or charger, plainly (clicking, grinding, whine, beep, silence) and when they occur.
+- The customer's spoken words, quoted as closely as you can, and the language or languages spoken. Translate to English in brackets.
 - Notable moments with timestamps, in order.
 - Problems with the recording itself: too dark, out of focus, shaky, too short.
 
-Never list conditions that were not observed, and do not enumerate faults or hazards by name to say they are absent. If the part of interest is not in frame, say only that. Write plain text in short paragraphs or bullet points. Do not diagnose, do not advise, do not guess at causes, and do not speculate about what is outside the frame."""
+The one exception: a clock or timer the customer shows to prove elapsed time. Report only the time it displays.
+
+RULES.
+- Never list conditions that were not observed, and never name a fault or hazard to say it is absent.
+- If no part of the bike or charger is in frame, write exactly: "No part of the bike or charger is visible in this clip." and then only the spoken words and recording notes.
+- Do not diagnose, do not advise, do not guess at causes, do not speculate about what is outside the frame.
+- Write plain text in short paragraphs or bullet points."""
+
+
+@dataclass(frozen=True)
+class VideoSummary:
+    """What the analyser wrote, plus what the call cost: the trace prices it
+    beside the Claude turns. `usage` keys mirror Anthropic's so one mapping in
+    tracing.py serves both."""
+
+    text: str
+    model: str
+    usage: Optional[Dict[str, int]]
+    duration_ms: int
 
 
 class VideoSummaryError(Exception):
@@ -84,6 +105,7 @@ class GeminiVideoSummariser:
         self.model = model
         self._clock = clock
         self._sleep = sleep
+        self._last_usage: Optional[Dict[str, int]] = None
         if client is None:
             # Lazy: the SDK pulls in a lot, and a deployment without a key (or
             # a test) never needs it. `HttpOptions.timeout` is in milliseconds
@@ -100,11 +122,24 @@ class GeminiVideoSummariser:
 
     def summarise(self, data: bytes, mime: str, name: str = "video") -> str:
         """Plain-text description of the clip, or `VideoSummaryError`."""
-        deadline = self._clock() + TIMEOUT_SECONDS
+        return self.describe(data, mime, name).text
+
+    def describe(self, data: bytes, mime: str, name: str = "video") -> VideoSummary:
+        """The description with the call's model, token usage and wall time."""
+        started = self._clock()
+        deadline = started + TIMEOUT_SECONDS
+        self._last_usage = None
         if len(data) <= INLINE_LIMIT:
             part = {"inline_data": {"data": data, "mime_type": mime}}
-            return self._generate([part, PROMPT], deadline)
-        return self._via_files_api(data, mime, name, deadline)
+            text = self._generate([part, PROMPT], deadline)
+        else:
+            text = self._via_files_api(data, mime, name, deadline)
+        return VideoSummary(
+            text=text,
+            model=self.model,
+            usage=self._last_usage,
+            duration_ms=int(round((self._clock() - started) * 1000)),
+        )
 
     def _via_files_api(self, data: bytes, mime: str, name: str, deadline: float) -> str:
         try:
@@ -154,7 +189,9 @@ class GeminiVideoSummariser:
         remaining = int(deadline - self._clock())
         if remaining <= 0:
             raise VideoSummaryError("timeout")
-        config = {"http_options": {"timeout": remaining * 1000}}
+        # temperature 0: the same clip describes the same way on a retry, so a
+        # golden set of clips can exist and a false positive can be reproduced.
+        config = {"http_options": {"timeout": remaining * 1000}, "temperature": 0}
         try:
             response = self._client.models.generate_content(
                 model=self.model, contents=contents, config=config
@@ -164,7 +201,20 @@ class GeminiVideoSummariser:
         text = (getattr(response, "text", None) or "").strip()
         if not text:
             raise VideoSummaryError("empty summary")
+        self._last_usage = _usage_of(response)
         return text
+
+
+def _usage_of(response: Any) -> Optional[Dict[str, int]]:
+    meta = getattr(response, "usage_metadata", None)
+    if meta is None:
+        return None
+    usage = {}
+    for source, target in (("prompt_token_count", "input_tokens"), ("candidates_token_count", "output_tokens")):
+        value = getattr(meta, source, None)
+        if isinstance(value, int):
+            usage[target] = value
+    return usage or None
 
 
 def summariser_from_env(

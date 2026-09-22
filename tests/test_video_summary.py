@@ -31,7 +31,11 @@ class _Models:
         self._client.configs.append(config)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(text=self.text)
+        # usage_metadata as google-genai reports it.
+        return SimpleNamespace(
+            text=self.text,
+            usage_metadata=SimpleNamespace(prompt_token_count=1500, candidates_token_count=320),
+        )
 
 
 class _Files:
@@ -93,6 +97,35 @@ class InlinePathTests(unittest.TestCase):
         # The PartDict shape, which is what `types.Part.from_bytes` produces
         # (`model_dump`), so the fake sees exactly what the SDK would send.
         self.assertEqual(part, {"inline_data": {"data": b"\x00" * 100, "mime_type": "video/mp4"}})
+
+    def test_generation_is_deterministic(self):
+        # The same clip must describe the same way on a retry, or a golden
+        # set of clips cannot exist and a safety false positive cannot be
+        # reproduced.
+        client = _Client()
+        _summariser(client).summarise(b"x", "video/mp4")
+        self.assertEqual(client.configs[-1]["temperature"], 0)
+
+    def test_the_prompt_scopes_the_description_to_the_bike(self):
+        # The two rules the safety gate relies on the analyser to keep: do not
+        # describe objects that are not the bike, and say so when none is shown.
+        self.assertIn("SCOPE.", PROMPT)
+        self.assertIn("No part of the bike or charger is visible in this clip.", PROMPT)
+        self.assertIn("never name a fault or hazard to say it is absent", PROMPT)
+
+    def test_describe_returns_the_text_with_usage_model_and_timing(self):
+        client = _Client(text="a clip")
+        result = _summariser(client, clock=_Clock(step=0.5)).describe(b"x", "video/mp4")
+        self.assertEqual(result.text, "a clip")
+        self.assertEqual(result.model, "gemini-3.8-flash")
+        self.assertEqual(result.usage, {"input_tokens": 1500, "output_tokens": 320})
+        self.assertIsInstance(result.duration_ms, int)
+        self.assertGreater(result.duration_ms, 0)
+
+    def test_usage_is_none_when_the_sdk_gives_none(self):
+        client = _Client()
+        client.models.generate_content = lambda **kw: SimpleNamespace(text="t", usage_metadata=None)
+        self.assertIsNone(_summariser(client).describe(b"x", "video/mp4").usage)
 
     def test_the_inline_ceiling_allows_for_base64_growth(self):
         """Gemini's 20 MB inline ceiling is on the encoded request, and base64
