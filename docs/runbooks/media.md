@@ -80,13 +80,18 @@ media:
 ## 4. The customer upload flow
 
 A curl walkthrough of what the web chat widget does: presign, PUT the bytes straight to
-S3, send the message with the upload id, read the delivered media back.
+S3, send the message with the upload id, read the delivered media back. `/chat` sends
+video through exactly this flow (with a progress bar on the PUT); photos stay inline as a
+data URL on the message and never touch this path.
 
 ```bash
 # 1. presign
 curl -s -X POST http://127.0.0.1:8000/uploads -H 'Content-Type: application/json' \
   -d '{"session_token":"sess-ananya","conversation_id":"c1","tree":"customers","mime_type":"image/png","size_bytes":'"$(stat -f%z photo.png)"'}'
 # On Linux use `stat -c%s photo.png`.
+# A visitor with no session yet sends the website cookie instead; it resolves
+# to their anonymous cluster, the same as on /message and /media:
+#   -d '{"em_aid":"<cookie>","conversation_id":"c1","tree":"customers","mime_type":"video/mp4","size_bytes":...}'
 # 2. PUT the bytes to the returned url with the returned headers
 curl -s -X PUT "<url>" -H 'Content-Type: image/png' --data-binary @photo.png
 # 3. send the message with the upload id
@@ -98,8 +103,8 @@ curl -s -o /dev/null -w '%{redirect_url}\n' "http://127.0.0.1:8000/media/<key>?s
 
 Step 1's response carries `upload_id`, `key` and the presign fields for step 2. Step 4
 302s to a fresh 15-minute presigned GET each time, so a transcript rendered later still
-loads. `session_token` on `/media` is the access check — it must resolve to the same
-cluster the upload was made under, or the read 403s.
+loads. `session_token` (or `em_aid`) on `/media` is the access check — it must resolve to
+the same cluster the upload was made under, or the read 403s.
 
 ## 5. Migrate off Cloudinary
 
