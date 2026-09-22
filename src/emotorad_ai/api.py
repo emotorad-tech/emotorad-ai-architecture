@@ -65,7 +65,7 @@ from .storage.uploads import UploadError, UploadRegistry
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 from .tools.verification import VerificationStore, apply_verified_identity
-from .video_summary import VideoSummaryError, summariser_from_env
+from .video_summary import VideoSummary, VideoSummaryError, summariser_from_env
 
 MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 # Set by docker/start.py's loader to the number of names it exported (as a
@@ -486,44 +486,54 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
                     "mime_type": claimed.mime,
                 }
                 if claimed.kind == "videos":
-                    summary = _summarise_video(claimed.key, claimed.mime)
+                    summary = _summarise_video(claimed.key, claimed.mime, conversation_id)
                     if summary is not None:
-                        claims[upload_id]["summary"] = summary
-                        # The description is customer content — a picture of
-                        # their bike, their garage, whoever is standing in it,
-                        # narrated to text — so it belongs in the log only on a
-                        # staging box with dev codes on. Production must never
-                        # write it, not even its length.
-                        if DEV_CODES:
-                            log.emit(
-                                "video_summary",
-                                conversation_id,
-                                key=claimed.key.rsplit("/", 1)[-1],
-                                chars=len(summary),
-                                text=summary,
-                            )
+                        claims[upload_id]["summary"] = summary.text
+                        # The description is customer content narrated to
+                        # text. It is logged on every environment, with what
+                        # the call cost, by the owner's decision of
+                        # 2026-09-22: a false safety stop on a clip (the
+                        # cracked phone screen) was only debuggable with the
+                        # text, and the trace prices the Gemini call beside
+                        # the Claude turns. Redacted like every other event.
+                        log.emit(
+                            "video_summary",
+                            conversation_id,
+                            key=claimed.key.rsplit("/", 1)[-1],
+                            mime=claimed.mime,
+                            size_bytes=claimed.size,
+                            model=summary.model,
+                            usage=summary.usage,
+                            duration_ms=summary.duration_ms,
+                            chars=len(summary.text),
+                            text=summary.text,
+                        )
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
     return [claims[item["upload_id"]] if item.get("upload_id") else item for item in items]
 
 
-def _summarise_video(key: str, mime: str) -> Optional[str]:
+def _summarise_video(key: str, mime: str, conversation_id: str) -> Optional[VideoSummary]:
     """The clip described once, or None so the frames fallback runs later.
 
     Failures are logged by class name only: a provider error can echo request
     content, and `StorageError` can carry a key. Neither belongs in a log line
-    that the customer's message did not put there.
+    that the customer's message did not put there. The failure is also an
+    event, so the trace shows a clip that Claude never got to read.
     """
     if VIDEO_SUMMARISER is None:
         return None
+    name = key.rsplit("/", 1)[-1]
     try:
         data = MEDIA_STORE.get_bytes(key)
-        return VIDEO_SUMMARISER.summarise(data, mime, name=key.rsplit("/", 1)[-1])
+        return VIDEO_SUMMARISER.describe(data, mime, name=name)
     except StorageError as exc:
         _logger.warning("video summary skipped: %s (store)", type(exc).__name__)
+        log.emit("video_summary_failed", conversation_id, key=name, error=type(exc).__name__)
     except VideoSummaryError as exc:
         _logger.warning("video summary skipped: %s", exc)
+        log.emit("video_summary_failed", conversation_id, key=name, error=str(exc))
     return None
 
 

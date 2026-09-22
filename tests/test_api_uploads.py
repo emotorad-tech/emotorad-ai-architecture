@@ -303,10 +303,16 @@ class _Summariser:
         self.error = error
 
     def summarise(self, data, mime, name="video"):
+        return self.describe(data, mime, name).text
+
+    def describe(self, data, mime, name="video"):
+        from emotorad_ai.video_summary import VideoSummary
+
         self.calls.append((data, mime, name))
         if self.error is not None:
             raise self.error
-        return self.text
+        return VideoSummary(text=self.text, model="gemini-3.8-flash",
+                            usage={"input_tokens": 1500, "output_tokens": 320}, duration_ms=2100)
 
 
 class VideoSummaryAtIngestTests(unittest.TestCase):
@@ -391,8 +397,10 @@ class VideoSummaryAtIngestTests(unittest.TestCase):
 
 
 class VideoSummaryLoggingTests(unittest.TestCase):
-    """The video description is customer content: it belongs in the log only
-    on a staging box with dev codes on. Production must never write it."""
+    """The video description is logged on every environment, with what the
+    Gemini call cost, so the trace can show what Claude was given and price
+    it. Decided by the owner on 2026-09-22, reversing the dev-codes-only
+    rule: a false safety stop on a clip is only debuggable with the text."""
 
     def _api_with(self, dev_codes):
         store = _Store()
@@ -420,24 +428,33 @@ class VideoSummaryLoggingTests(unittest.TestCase):
             })
         return r, body
 
-    def test_dev_codes_on_logs_the_summary_text(self):
-        api, store = self._api_with(dev_codes=True)
+    def test_the_summary_is_logged_with_model_usage_and_timing(self):
+        api, store = self._api_with(dev_codes=False)
         summariser = _Summariser(text="the pack is on a table")
         r, body = self._send_video(api, store, summariser)
         self.assertEqual(r.status_code, 200, r.text)
         events = [e for e in api.log.events if e["event"] == "video_summary"]
         self.assertEqual(len(events), 1, api.log.events)
-        self.assertEqual(events[0]["text"], "the pack is on a table")
-        self.assertEqual(events[0]["key"], body["key"].rsplit("/", 1)[-1])
-        self.assertEqual(events[0]["chars"], len("the pack is on a table"))
+        event = events[0]
+        self.assertEqual(event["text"], "the pack is on a table")
+        self.assertEqual(event["key"], body["key"].rsplit("/", 1)[-1])
+        self.assertEqual(event["mime"], "video/mp4")
+        self.assertEqual(event["size_bytes"], 9)
+        self.assertEqual(event["model"], "gemini-3.8-flash")
+        self.assertEqual(event["usage"], {"input_tokens": 1500, "output_tokens": 320})
+        self.assertEqual(event["duration_ms"], 2100)
 
-    def test_dev_codes_off_logs_nothing_not_even_the_length(self):
+    def test_a_failed_summary_is_logged_by_class_name_only(self):
+        from emotorad_ai.video_summary import VideoSummaryError
+
         api, store = self._api_with(dev_codes=False)
-        summariser = _Summariser(text="the pack is on a table")
-        r, _ = self._send_video(api, store, summariser)
+        r, body = self._send_video(api, store, _Summariser(error=VideoSummaryError("timeout")))
         self.assertEqual(r.status_code, 200, r.text)
-        events = [e for e in api.log.events if e["event"] == "video_summary"]
-        self.assertEqual(events, [])
+        events = [e for e in api.log.events if e["event"] == "video_summary_failed"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["error"], "timeout")
+        self.assertEqual(events[0]["key"], body["key"].rsplit("/", 1)[-1])
+        self.assertNotIn("text", events[0])
 
 
 class AnonymousVisitorUploadTests(unittest.TestCase):

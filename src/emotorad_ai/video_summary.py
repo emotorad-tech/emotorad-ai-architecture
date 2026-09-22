@@ -29,7 +29,8 @@ import io
 import logging
 import os
 import time
-from typing import Any, Callable, Mapping, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Mapping, Optional
 
 GEMINI_KEY_ENV = "GEMINI_API_KEY"
 # Decided by the person on 2026-09-22; do not change without them.
@@ -75,6 +76,18 @@ RULES.
 - Write plain text in short paragraphs or bullet points."""
 
 
+@dataclass(frozen=True)
+class VideoSummary:
+    """What the analyser wrote, plus what the call cost: the trace prices it
+    beside the Claude turns. `usage` keys mirror Anthropic's so one mapping in
+    tracing.py serves both."""
+
+    text: str
+    model: str
+    usage: Optional[Dict[str, int]]
+    duration_ms: int
+
+
 class VideoSummaryError(Exception):
     """The clip could not be summarised. The message is a class name or a
     fixed word, never provider text, so it is safe to log."""
@@ -92,6 +105,7 @@ class GeminiVideoSummariser:
         self.model = model
         self._clock = clock
         self._sleep = sleep
+        self._last_usage: Optional[Dict[str, int]] = None
         if client is None:
             # Lazy: the SDK pulls in a lot, and a deployment without a key (or
             # a test) never needs it. `HttpOptions.timeout` is in milliseconds
@@ -108,11 +122,24 @@ class GeminiVideoSummariser:
 
     def summarise(self, data: bytes, mime: str, name: str = "video") -> str:
         """Plain-text description of the clip, or `VideoSummaryError`."""
-        deadline = self._clock() + TIMEOUT_SECONDS
+        return self.describe(data, mime, name).text
+
+    def describe(self, data: bytes, mime: str, name: str = "video") -> VideoSummary:
+        """The description with the call's model, token usage and wall time."""
+        started = self._clock()
+        deadline = started + TIMEOUT_SECONDS
+        self._last_usage = None
         if len(data) <= INLINE_LIMIT:
             part = {"inline_data": {"data": data, "mime_type": mime}}
-            return self._generate([part, PROMPT], deadline)
-        return self._via_files_api(data, mime, name, deadline)
+            text = self._generate([part, PROMPT], deadline)
+        else:
+            text = self._via_files_api(data, mime, name, deadline)
+        return VideoSummary(
+            text=text,
+            model=self.model,
+            usage=self._last_usage,
+            duration_ms=int(round((self._clock() - started) * 1000)),
+        )
 
     def _via_files_api(self, data: bytes, mime: str, name: str, deadline: float) -> str:
         try:
@@ -174,7 +201,20 @@ class GeminiVideoSummariser:
         text = (getattr(response, "text", None) or "").strip()
         if not text:
             raise VideoSummaryError("empty summary")
+        self._last_usage = _usage_of(response)
         return text
+
+
+def _usage_of(response: Any) -> Optional[Dict[str, int]]:
+    meta = getattr(response, "usage_metadata", None)
+    if meta is None:
+        return None
+    usage = {}
+    for source, target in (("prompt_token_count", "input_tokens"), ("candidates_token_count", "output_tokens")):
+        value = getattr(meta, source, None)
+        if isinstance(value, int):
+            usage[target] = value
+    return usage or None
 
 
 def summariser_from_env(
