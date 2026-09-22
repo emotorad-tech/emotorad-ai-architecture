@@ -764,6 +764,22 @@ function ask(text, location) {
   // inline as before; the video is the id of an object already PUT to S3.
   var attachments = sentPhoto ? [{ kind: "image", url: sentPhoto }] : [];
   if (sentVideo) attachments.push({ upload_id: sentVideo.uploadId });
+  // The server describes the clip through a video model before the agent
+  // sees it, which can take a minute on a long recording. A typing dot for
+  // that long reads as a hang, so say what is happening; the notice is
+  // taken down when the reply (or the failure) arrives.
+  var waitingNotice = null;
+  if (sentVideo) {
+    waitingNotice = { isUser: false, text: "Looking at your video. This can take a minute or two.", attachments: [] };
+    state.turns.push(waitingNotice);
+    render();
+  }
+  function dropWaitingNotice() {
+    if (!waitingNotice) return;
+    var at = state.turns.indexOf(waitingNotice);
+    if (at !== -1) state.turns.splice(at, 1);
+    waitingNotice = null;
+  }
   fetch("/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -779,6 +795,7 @@ function ask(text, location) {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return r.json();
   }).then(function (reply) {
+    dropWaitingNotice();
     state.conversationId = reply.conversation_id;
     state.busy = false;
     state.turns.push({ isUser: false, text: reply.text, attachments: reply.attachments || [], actions: reply.actions || [] });
@@ -787,6 +804,7 @@ function ask(text, location) {
   }).catch(function (err) {
     // Say what happened rather than leaving a spinner running. A chat that
     // silently stops is indistinguishable from one that is still thinking.
+    dropWaitingNotice();
     state.busy = false;
     state.turns.push({
       isUser: false,

@@ -290,6 +290,13 @@ class VideoUploadTests(ChatPageTests):
         self.assertIn('{ kind: "image", url: sentPhoto }', self.html)
         self.assertIn("shrinkToDataUri", self.html)
 
+    def test_the_page_says_a_video_takes_a_while(self):
+        """Gemini can take a minute on a long clip; a spinner alone reads as
+        a hang. The notice goes up before the fetch and comes down with the
+        reply."""
+        self.assertIn("Looking at your video. This can take a minute or two.", self.html)
+        self.assertIn("waitingNotice", self.html)
+
     def test_an_unsupported_format_says_so(self):
         """A 415 from /uploads is the format, not the network; "did not
         upload, try again" would send the customer round in circles."""
