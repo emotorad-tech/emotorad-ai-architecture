@@ -406,7 +406,7 @@ def get_media(key: str, session_token: str = "") -> RedirectResponse:
     return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)
 
 
-def _inbound_attachments(body: MessageIn) -> List[Dict[str, Any]]:
+def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str, Any]]:
     """What the customer sent, in the shape the adapter takes, in the order they
     sent it.
 
@@ -468,6 +468,19 @@ def _inbound_attachments(body: MessageIn) -> List[Dict[str, Any]]:
                     summary = _summarise_video(claimed.key, claimed.mime)
                     if summary is not None:
                         claims[upload_id]["summary"] = summary
+                        # The description is customer content — a picture of
+                        # their bike, their garage, whoever is standing in it,
+                        # narrated to text — so it belongs in the log only on a
+                        # staging box with dev codes on. Production must never
+                        # write it, not even its length.
+                        if DEV_CODES:
+                            log.emit(
+                                "video_summary",
+                                conversation_id,
+                                key=claimed.key.rsplit("/", 1)[-1],
+                                chars=len(summary),
+                                text=summary,
+                            )
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
@@ -502,7 +515,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     conversation_id = body.conversation_id or new_conversation_id()
     try:
-        attachments = _inbound_attachments(body)
+        attachments = _inbound_attachments(body, body.conversation_id or "")
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     text = body.text

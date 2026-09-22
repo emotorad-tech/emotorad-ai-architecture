@@ -390,6 +390,56 @@ class VideoSummaryAtIngestTests(unittest.TestCase):
         self.assertEqual(self.client.get("/health").json()["video_summary"], "frames")
 
 
+class VideoSummaryLoggingTests(unittest.TestCase):
+    """The video description is customer content: it belongs in the log only
+    on a staging box with dev codes on. Production must never write it."""
+
+    def _api_with(self, dev_codes):
+        store = _Store()
+        if dev_codes:
+            with mock.patch.dict(os.environ, {"EMOTORAD_AI_DEV_CODES": "1"}):
+                api = fresh_api(store)
+        else:
+            os.environ.pop("EMOTORAD_AI_DEV_CODES", None)
+            api = fresh_api(store)
+        return api, store
+
+    def _send_video(self, api, store, summariser):
+        api.VIDEO_SUMMARISER = summariser
+        client = TestClient(api.app)
+        body = client.post("/uploads", json={
+            "session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers",
+            "mime_type": "video/mp4", "size_bytes": 9,
+        }).json()
+        store.objects[body["key"]] = {"size": 9, "mime": "video/mp4"}
+        scripted = Reply(conversation_id="c1", text="ok", handled_by="test")
+        with mock.patch.object(api.runtime, "handle", return_value=scripted):
+            r = client.post("/message", json={
+                "conversation_id": "c1", "session_token": "sess-ananya", "text": "video attached",
+                "attachments": [{"upload_id": body["upload_id"]}],
+            })
+        return r, body
+
+    def test_dev_codes_on_logs_the_summary_text(self):
+        api, store = self._api_with(dev_codes=True)
+        summariser = _Summariser(text="the pack is on a table")
+        r, body = self._send_video(api, store, summariser)
+        self.assertEqual(r.status_code, 200, r.text)
+        events = [e for e in api.log.events if e["event"] == "video_summary"]
+        self.assertEqual(len(events), 1, api.log.events)
+        self.assertEqual(events[0]["text"], "the pack is on a table")
+        self.assertEqual(events[0]["key"], body["key"].rsplit("/", 1)[-1])
+        self.assertEqual(events[0]["chars"], len("the pack is on a table"))
+
+    def test_dev_codes_off_logs_nothing_not_even_the_length(self):
+        api, store = self._api_with(dev_codes=False)
+        summariser = _Summariser(text="the pack is on a table")
+        r, _ = self._send_video(api, store, summariser)
+        self.assertEqual(r.status_code, 200, r.text)
+        events = [e for e in api.log.events if e["event"] == "video_summary"]
+        self.assertEqual(events, [])
+
+
 class AnonymousVisitorUploadTests(unittest.TestCase):
     """A visitor who has not verified a phone still has an identity: the
     website cookie (`em_aid`) resolves to an anonymous identity-graph cluster,
