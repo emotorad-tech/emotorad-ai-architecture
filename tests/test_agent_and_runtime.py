@@ -152,6 +152,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(ticket["severity"], "critical")
         self.assertEqual(ticket["category"], "battery_safety")
 
+    def test_a_video_summary_trips_the_safety_gate_before_the_model(self):
+        """What Gemini saw in the clip is scanned exactly as typed words are:
+        smoke on video is a hard stop with no Claude call, even when the
+        customer typed nothing alarming."""
+        runtime, adapter, llm = make_runtime([])  # any model call would raise
+        message = adapter.to_message({
+            "conversation_id": "conv-v", "session_token": "sess-ananya", "text": "video attached",
+            "attachments": [{
+                "kind": "video", "url": "s3://customers/x/y/videos/z.mp4", "mime_type": "video/mp4",
+                "summary": "0:03 white smoke rising from the battery pack near the charging port.",
+            }],
+        })
+
+        reply = runtime.handle(message)
+
+        self.assertEqual(llm.requests, [])
+        self.assertTrue(reply.escalated)
+        self.assertEqual(reply.handled_by, "guardrail:battery_safety")
+
+    def test_a_video_summary_cannot_ask_for_a_human(self):
+        """Handoff stays on the typed text: a clip in which the customer says
+        "I want to talk to a person" is evidence, not a request to the bot."""
+        runtime, adapter, llm = make_runtime([say("Let me look at that.")])
+        message = adapter.to_message({
+            "conversation_id": "conv-h", "session_token": "sess-ananya", "text": "here is the clip",
+            "pill": "battery_issue",
+            "attachments": [{
+                "kind": "video", "url": "s3://customers/x/y/videos/z.mp4", "mime_type": "video/mp4",
+                "summary": "The customer says: 'I want to talk to a human agent about this.'",
+            }],
+        })
+
+        reply = runtime.handle(message)
+
+        self.assertNotEqual(reply.handled_by, "guardrail:human_handoff")
+        self.assertEqual(len(llm.requests), 1)
+
     def test_repeated_safety_message_does_not_open_a_second_case(self):
         runtime, adapter, _ = make_runtime([])
         first = send(runtime, adapter, "battery is swelling")

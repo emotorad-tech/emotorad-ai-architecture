@@ -205,11 +205,19 @@ class Runtime:
         if message.attachments:
             state.evidence_seen = True
 
-        safety = check_safety(message.message_text)
+        #    A video's description (Attachment.summary, written by the video
+        #    analyser at ingest) is scanned with the typed text: smoke seen on
+        #    a clip is the same hard stop as smoke typed in a sentence.
+        scan_text = "\n".join(
+            [message.message_text] + [a.summary for a in message.attachments if a.summary]
+        )
+        safety = check_safety(scan_text)
         if safety.triggered:
             return self._handle_safety(message, resolved, state, safety.matched)
 
-        # 2. Human handoff, reachable at any point, no friction.
+        # 2. Human handoff, reachable at any point, no friction. Typed text
+        #    only: a customer heard on a clip saying "talk to a person" is
+        #    evidence of the moment, not a request made to the bot.
         handoff = check_human_handoff(message.message_text)
         if handoff.triggered:
             self.log.guardrail(message.conversation_id, "human_handoff", handoff.matched)
