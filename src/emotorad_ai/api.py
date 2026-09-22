@@ -515,7 +515,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     conversation_id = body.conversation_id or new_conversation_id()
     try:
-        attachments = _inbound_attachments(body, body.conversation_id or "")
+        attachments = _inbound_attachments(body, conversation_id)
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     text = body.text
