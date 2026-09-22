@@ -34,6 +34,33 @@ class ClaimDetectionTests(unittest.TestCase):
         ):
             self.assertTrue(check_coverage_claim(reply, NO_TOOLS).blocked, reply)
 
+    def test_the_electrical_sense_of_charge_is_not_a_coverage_claim(self):
+        # Staging, 2026-09-22: a two-bike customer pressed the SOC button, saw no
+        # light, and the reply "the pack having no charge to show" was blocked as
+        # a promise of free repair. In a battery bot "no charge", "low charge" and
+        # "holding no charge" are the symptom vocabulary, not the price.
+        disagreeing = [{"data": {"bikes": [
+            {"in_warranty": True, "frame_number": "F1"},
+            {"in_warranty": False, "frame_number": "F2"},
+        ]}}]
+        for reply in (
+            "That points to the pack having no charge to show, so let's check the charger next.",
+            "The battery is holding no charge at all after a full night on the charger.",
+            "A pack with no charge left reads exactly like a dead one.",
+            "It will not take a charge without the switch on.",
+        ):
+            self.assertFalse(check_coverage_claim(reply, NO_TOOLS).blocked, reply)
+            self.assertFalse(check_coverage_claim(reply, disagreeing).blocked, reply)
+
+    def test_the_money_sense_of_charge_still_is_a_coverage_claim(self):
+        for reply in (
+            "We will replace the pack at no charge.",
+            "The replacement is free of charge.",
+            "This will be done without charge to you.",
+            "There is no cost to you for this.",
+        ):
+            self.assertTrue(check_coverage_claim(reply, NO_TOOLS).blocked, reply)
+
     def test_negative_claims_are_not_mistaken_for_positive_ones(self):
         # "not covered" contains "covered". Reading it as a positive claim would
         # block every correct refusal and pass every wrong promise.
