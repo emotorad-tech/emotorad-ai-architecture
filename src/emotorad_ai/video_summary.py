@@ -34,9 +34,11 @@ from typing import Any, Callable, Mapping, Optional
 GEMINI_KEY_ENV = "GEMINI_API_KEY"
 # Decided by the person on 2026-09-22; do not change without them.
 DEFAULT_MODEL = "gemini-3.8-flash"
-# Gemini's ceiling for inline request bodies. Above it the Files API is the
-# only route.
-INLINE_LIMIT = 20 * 1024 * 1024
+# Gemini's 20 MB ceiling on an inline request applies to the request as
+# sent, and inline bytes travel base64-encoded at 4/3 their size, so the
+# raw clip must stay under 15 MB. 14 MiB leaves room for the prompt and the
+# JSON around it; above that the Files API is the route.
+INLINE_LIMIT = 14 * 1024 * 1024
 # The whole summarise call, upload and polling included. A clip is summarised
 # inside the customer's request (design §5: no queue), so this is the longest
 # their message can stall before the frames fallback runs instead.

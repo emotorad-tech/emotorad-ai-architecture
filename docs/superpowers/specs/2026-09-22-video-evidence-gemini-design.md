@@ -27,8 +27,8 @@ writes down what it saw gives Claude far better evidence at lower cost than eigh
 - **Model:** `gemini-3.8-flash` via the `google-genai` SDK. Key from the config store field
   `API_KEY_GEMINI`, exported as `GEMINI_API_KEY`. No key means the summariser is absent and
   the old frames path runs, so nothing regresses.
-- **Size:** clips up to the bucket cap (100 MB). Under 20 MB the bytes go inline in the
-  request; above that through Gemini's Files API, polled until ACTIVE, deleted from Google
+- **Size:** clips up to the bucket cap (100 MB). Up to 14 MiB the bytes go inline in the
+  request (Gemini's 20 MB ceiling is on the base64-encoded request); above that through Gemini's Files API, polled until ACTIVE, deleted from Google
   as soon as the summary is back. Timeout 90 s; a timeout or error falls back to frames.
 - **Prompt (fixed, in code):** an after-sales evidence analyst for an Indian e-cycle
   company. Describe only what is observable: the component and bike area shown; visible

@@ -92,6 +92,19 @@ class InlinePathTests(unittest.TestCase):
         # (`model_dump`), so the fake sees exactly what the SDK would send.
         self.assertEqual(part, {"inline_data": {"data": b"\x00" * 100, "mime_type": "video/mp4"}})
 
+    def test_the_inline_ceiling_allows_for_base64_growth(self):
+        """Gemini's 20 MB inline ceiling is on the encoded request, and base64
+        is 4/3 of the bytes: 14 MiB of clip is ~18.7 MB on the wire."""
+        self.assertEqual(INLINE_LIMIT, 14 * 1024 * 1024)
+
+    def test_one_byte_over_the_ceiling_takes_the_files_path(self):
+        client = _Client()
+        _summariser(client).summarise(b"\x00" * (14 * 1024 * 1024 + 1), "video/mp4")
+        self.assertEqual([c[0] for c in client.calls][0], "upload")
+        client = _Client()
+        _summariser(client).summarise(b"\x00" * (14 * 1024 * 1024), "video/mp4")
+        self.assertEqual([c[0] for c in client.calls], ["generate"])
+
     def test_no_files_api_calls_for_a_small_clip(self):
         client = _Client()
         _summariser(client).summarise(b"x", "video/mp4")
