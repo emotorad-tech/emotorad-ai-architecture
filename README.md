@@ -50,6 +50,7 @@ regression set gets built from.
 | `storage/` | media spec §7 | S3 media: key rules, the presigned client, the presign→attach registry |
 | `attachments.py` | media spec §7 | Inbound attachments (data URL, `s3://`, http) as Claude content blocks |
 | `video.py` | media spec §7 | Video evidence as sampled frames plus transcribed narration |
+| `tracing.py` | §3.6 | Langfuse sink behind the event log: one trace per turn, cost per turn and per conversation |
 | `runtime.py` | — | The wiring, in the order the design requires |
 | `llm.py` | §6 | Claude on Bedrock, plus scripted stand-ins for tests |
 
@@ -60,6 +61,14 @@ environment (`infra/media.yaml`), reached through a presign-and-attach flow: the
 presigns, PUTs bytes straight to S3, then references the upload by id on `/message`.
 Setup, the upload flow, the Cloudinary migration and deletion-on-request are all in
 `docs/runbooks/media.md`.
+
+## Tracing
+
+With `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` set, every turn becomes a Langfuse
+trace (session = conversation, user = identity cluster) with the model call priced from
+its token usage, tool and retriever spans, guardrail and escalation marks, and the whole
+handler time. Events reach Langfuse after the same PII redaction the JSONL gets. Setup,
+what to look at, and how to self-host later: `docs/runbooks/tracing.md`.
 
 ## Guardrails that are code, not prompt
 

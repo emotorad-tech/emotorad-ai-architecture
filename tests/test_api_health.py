@@ -2,6 +2,7 @@
 path is live and whether the config store was used, so a container that started
 without its secret is visible in the workflow log rather than in a customer chat."""
 
+import asyncio
 import importlib
 import os
 import unittest
@@ -20,8 +21,37 @@ class HealthTests(unittest.TestCase):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
         self.assertEqual(
             api.health(),
-            {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured", "video_summary": "frames"},
+            {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured", "video_summary": "frames", "tracing": "off"},
         )
+
+    def test_health_says_whether_tracing_is_on(self):
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})
+        self.assertEqual(api.health()["tracing"], "off")
+
+    def test_tracing_keys_attach_the_sink_to_the_log(self):
+        with mock.patch("emotorad_ai.tracing.langfuse_sink_from_env") as from_env:
+            from_env.return_value = object()
+            api = fresh_api({"EMOTORAD_AI_MODE": "offline", "LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk"})
+        self.assertEqual(api.health()["tracing"], "on")
+        self.assertIn(from_env.return_value, api.log.sinks)
+
+    def test_shutdown_flushes_the_tracing_sink(self):
+        class Sink:
+            flushed = 0
+
+            def flush(self):
+                self.flushed += 1
+
+        sink = Sink()
+        with mock.patch("emotorad_ai.tracing.langfuse_sink_from_env", return_value=sink):
+            api = fresh_api({"EMOTORAD_AI_MODE": "offline"})
+
+        async def run_lifespan():
+            async with api._lifespan(api.app):
+                pass
+
+        asyncio.run(run_lifespan())
+        self.assertEqual(sink.flushed, 1)
 
     def test_registry_offers_the_guide_media_tool(self):
         # The playground wires guide_media into build_registry so the model can

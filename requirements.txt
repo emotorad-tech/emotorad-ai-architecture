@@ -52,3 +52,8 @@ boto3>=1.34
 # on request the way Cloudinary did. imageio already pulls Pillow in; pinning it
 # here says the dependency is deliberate.
 Pillow>=10
+
+# Tracing: src/emotorad_ai/tracing.py sends each turn to Langfuse as a trace
+# when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set. Imported lazily, so
+# a run without keys never loads it.
+langfuse>=3.7,<4

@@ -66,7 +66,9 @@ jobs:
         # No secrets in this command. The container reads them at startup from
         # Secrets Manager (EMOTORAD_AI_SECRET_ID) through the instance role —
         # docs/runbooks/config-store.md. Everything passed as -e here is safe to
-        # appear in SSM command history.
+        # appear in SSM command history. LANGFUSE_HOST is the tracing server
+        # (a URL, not a credential; the keys live in the secret) and
+        # EMOTORAD_AI_ENV labels the traces — docs/runbooks/tracing.md.
         #
         # Runtime settings are -e flags too, read once at container start, so a
         # change here is a commit plus a redeploy:
@@ -90,7 +92,7 @@ jobs:
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"

@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # `\b` cannot match before a "+", so the leading sign was left behind and the
 # log read "+[phone]". A lookbehind that rejects a digit or a sign also stops
@@ -107,7 +109,16 @@ class EventLog:
     path: Optional[str] = None
     to_stdout: bool = False
     events: List[Dict[str, Any]] = field(default_factory=list)
+    # Extra destinations for every event, after redaction (tracing.py). The
+    # JSONL line is written first, so a sink can never cost us the record.
+    sinks: List[Callable[[Dict[str, Any]], None]] = field(default_factory=list)
+    # Monotonic seconds; injectable so the turn timing is testable.
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # When each conversation's current turn arrived, keyed by conversation id,
+    # so `outcome` can carry the whole handler time without every short-circuit
+    # path in runtime.py having to thread a start time through.
+    _turn_started: Dict[str, float] = field(default_factory=dict, repr=False)
 
     def emit(self, event_type: str, conversation_id: str, **fields: Any) -> Dict[str, Any]:
         event = {
@@ -116,6 +127,8 @@ class EventLog:
             "conversation_id": conversation_id,
         }
         event.update({k: redact_fields(v, k) for k, v in fields.items()})
+        if event_type == "inbound":
+            self._turn_started[conversation_id] = self.clock()
         with self._lock:
             self.events.append(event)
             line = json.dumps(event, default=str)
@@ -127,6 +140,14 @@ class EventLog:
                     os.makedirs(directory, exist_ok=True)
                 with open(self.path, "a", encoding="utf-8") as handle:
                     handle.write(line + "\n")
+        for sink in self.sinks:
+            try:
+                sink(event)
+            except Exception as exc:
+                # A tracing outage must never become a customer-facing failure,
+                # and must never be silent either: the class name, not str(exc),
+                # since an SDK error can echo the payload it failed to send.
+                print("tracing sink failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
         return event
 
     # Named helpers keep the event vocabulary consistent across agents.
@@ -150,7 +171,26 @@ class EventLog:
     def guardrail(self, conversation_id: str, name: str, triggered_by: Any) -> None:
         self.emit("guardrail_triggered", conversation_id, guardrail=name, triggered_by=triggered_by)
 
-    def llm_turn(self, conversation_id: str, agent: str, iteration: int, stop_reason: str, usage: Any = None) -> None:
+    # The two `*_request` events exist for tracing: a sink opens the
+    # observation when the call starts, so its timeline is real rather than a
+    # zero-width mark stamped after the fact. metrics.py ignores them.
+
+    def llm_request(self, conversation_id: str, agent: str, iteration: int) -> None:
+        self.emit("llm_request", conversation_id, agent=agent, iteration=iteration)
+
+    def tool_request(self, conversation_id: str, tool: str) -> None:
+        self.emit("tool_request", conversation_id, tool=tool)
+
+    def llm_turn(
+        self,
+        conversation_id: str,
+        agent: str,
+        iteration: int,
+        stop_reason: str,
+        usage: Any = None,
+        model: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+    ) -> None:
         self.emit(
             "llm_turn",
             conversation_id,
@@ -158,9 +198,18 @@ class EventLog:
             iteration=iteration,
             stop_reason=stop_reason,
             usage=usage,
+            model=model,
+            duration_ms=duration_ms,
         )
 
-    def tool_call(self, conversation_id: str, tool: str, arguments: Dict[str, Any], result: Dict[str, Any]) -> None:
+    def tool_call(
+        self,
+        conversation_id: str,
+        tool: str,
+        arguments: Dict[str, Any],
+        result: Dict[str, Any],
+        duration_ms: Optional[int] = None,
+    ) -> None:
         self.emit(
             "tool_call",
             conversation_id,
@@ -168,12 +217,15 @@ class EventLog:
             arguments=arguments,
             ok="error" not in result,
             result=result,
+            duration_ms=duration_ms,
         )
 
     def escalation(self, conversation_id: str, reason: str, ticket_id: Optional[str] = None) -> None:
         self.emit("escalation", conversation_id, reason=reason, ticket_id=ticket_id)
 
     def outcome(self, conversation_id: str, handled_by: str, escalated: bool, ticket_id: Optional[str], text: str) -> None:
+        started = self._turn_started.pop(conversation_id, None)
+        duration_ms = None if started is None else int(round((self.clock() - started) * 1000))
         self.emit(
             "outcome",
             conversation_id,
@@ -181,4 +233,5 @@ class EventLog:
             escalated=escalated,
             ticket_id=ticket_id,
             text=redact_pii(text),
+            duration_ms=duration_ms,
         )

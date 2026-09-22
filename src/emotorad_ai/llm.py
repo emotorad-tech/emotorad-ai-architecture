@@ -40,6 +40,9 @@ class LLMResponse:
     # Thinking blocks must be echoed back unchanged, so we never rebuild this.
     api_content: List[Dict[str, Any]] = field(default_factory=list)
     usage: Optional[Dict[str, Any]] = None
+    # The model id the API reports it answered with; None from the scripted and
+    # offline stand-ins, so a trace never prices a fake turn.
+    model: Optional[str] = None
 
     @property
     def wants_tools(self) -> bool:
@@ -66,6 +69,7 @@ def response_to_llm(response: Any) -> LLMResponse:
         tool_uses=tool_uses,
         api_content=api_content,
         usage=response.usage.model_dump() if response.usage else None,
+        model=getattr(response, "model", None),
     )
 
 

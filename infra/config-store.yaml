@@ -27,7 +27,7 @@ Resources:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub /emotorad/${Environment}/ai/app
-      Description: !Sub "EMotorad AI platform startup config for ${Environment}. JSON: API_KEY_CLAUDE, EMOTORAD_OMS_API_KEY, EMOTORAD_AI_PLAYGROUND_USER, EMOTORAD_AI_PLAYGROUND_PASSWORD. Value set by hand; see docs/runbooks/config-store.md."
+      Description: !Sub "EMotorad AI platform startup config for ${Environment}. JSON: API_KEY_CLAUDE, EMOTORAD_OMS_API_KEY, EMOTORAD_AI_PLAYGROUND_USER, EMOTORAD_AI_PLAYGROUND_PASSWORD, and optionally LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY. Value set by hand; see docs/runbooks/config-store.md."
       Tags:
         - Key: service
           Value: emotorad-ai

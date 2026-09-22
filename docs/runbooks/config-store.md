@@ -11,6 +11,8 @@ a flat JSON object. Field names are the environment variables the code reads:
 | `EMOTORAD_OMS_API_KEY` | `tools/oms.py` |
 | `EMOTORAD_AI_PLAYGROUND_USER` | `api.py` basic auth on `/playground` |
 | `EMOTORAD_AI_PLAYGROUND_PASSWORD` | `api.py` basic auth on `/playground` |
+| `LANGFUSE_PUBLIC_KEY` | `tracing.py`; optional, tracing is off without both Langfuse keys |
+| `LANGFUSE_SECRET_KEY` | `tracing.py`; see `docs/runbooks/tracing.md` |
 
 ### Note on EMOTORAD_OMS_API_KEY
 
@@ -60,7 +62,7 @@ into a chat session, a commit, or a workflow.
 
 ```bash
 cat > /tmp/app-config.json <<'EOF'
-{"API_KEY_CLAUDE":"...","EMOTORAD_OMS_API_KEY":"...","EMOTORAD_AI_PLAYGROUND_USER":"...","EMOTORAD_AI_PLAYGROUND_PASSWORD":"..."}
+{"API_KEY_CLAUDE":"...","EMOTORAD_OMS_API_KEY":"...","EMOTORAD_AI_PLAYGROUND_USER":"...","EMOTORAD_AI_PLAYGROUND_PASSWORD":"...","LANGFUSE_PUBLIC_KEY":"pk-lf-...","LANGFUSE_SECRET_KEY":"sk-lf-..."}
 EOF
 aws secretsmanager put-secret-value --secret-id /emotorad/stage/ai/app --secret-string file:///tmp/app-config.json
 rm -P /tmp/app-config.json
@@ -72,7 +74,7 @@ Check the shape without printing values:
 aws secretsmanager get-secret-value --secret-id /emotorad/stage/ai/app --query SecretString --output text | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)))'
 ```
 
-Expected: the four field names.
+Expected: the field names above (the two Langfuse keys only if tracing is wanted).
 
 ## 3. Deploy
 
@@ -92,7 +94,7 @@ never set it on prod. Then:
 curl -s https://ai-release-stage.emotorad.com/health
 ```
 
-Expected: `{"status":"ok","mode":"anthropic","secrets":"loaded"}`. A container that could
+Expected: `{"status":"ok","mode":"anthropic","secrets":"loaded",...,"tracing":"on"}`. A container that could
 not read the secret does not start; its reason is one line in the CloudWatch log group
 `emotorad-ai-stage` beginning `startup config:`.
 
