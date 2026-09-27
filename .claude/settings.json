@@ -1,0 +1,28 @@
+{
+  "enabledPlugins": {
+    "emotorad@emotorad": true
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./logs/**)",
+      "Read(./**/*secret*)",
+      "Read(./**/*credential*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/post-edit.sh\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
