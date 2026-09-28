@@ -365,3 +365,5 @@ If the live shape differs, only `jev.py`'s parser and its fixture change.
 - The retrieval goldens are imported from `tests/test_retrieval_evals.py`, not moved.
 - Post-checks and finishing run inside `Runtime._run` and `Runtime._finish`, shared by every agent node, instead of as separate graph nodes. The order guarantees are the same.
 - Playground wiring is deferred. The playground has its own turn loop. OpenRouter mode reaches the CLI and the API in this change.
+- Jev's state carries the customer's own recent turns only, not our replies, which hold looked-up facts (names, frame numbers, warranty status). Phone numbers are redacted in any separator format before the state leaves.
+- Metrics count `turn_path` (the path that answered) rather than `jev_decision.path` (the path first chosen), and report Jev fallbacks by error code. Average cost per turn per path is deferred: attributing cost to a turn needs per-turn cost grouping the event log does not carry yet.

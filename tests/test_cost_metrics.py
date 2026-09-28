@@ -25,6 +25,7 @@ def events(cid, handled_by, cost, path=None, escalated=False):
     ]
     if path:
         rows.insert(1, {"event": "jev_decision", "conversation_id": cid, "path": path, "cost": 0.00002})
+        rows.insert(2, {"event": "turn_path", "conversation_id": cid, "path": path})
     return rows
 
 

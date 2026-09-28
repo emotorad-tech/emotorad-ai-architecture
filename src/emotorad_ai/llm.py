@@ -204,6 +204,18 @@ _FINISH_REASONS = {"stop": "end_turn", "length": "max_tokens", "content_filter":
 
 
 def from_openai_response(body: Dict[str, Any]) -> LLMResponse:
+    """Any body we cannot read is a typed OpenRouterBadResponse, never a bare
+    TypeError: the runtime falls back or hands over on the typed error, and an
+    untyped one would crash the turn."""
+    try:
+        return _from_openai_response(body)
+    except OpenRouterBadResponse:
+        raise
+    except (TypeError, AttributeError, KeyError, ValueError, IndexError) as exc:
+        raise OpenRouterBadResponse("unreadable OpenRouter response (%s)" % type(exc).__name__) from None
+
+
+def _from_openai_response(body: Dict[str, Any]) -> LLMResponse:
     choices = body.get("choices") if isinstance(body, dict) else None
     if not choices:
         raise OpenRouterBadResponse("OpenRouter returned no choices")
@@ -220,9 +232,12 @@ def from_openai_response(body: Dict[str, Any]) -> LLMResponse:
     tool_uses: List[ToolUse] = []
     for call in message.get("tool_calls") or []:
         function = call.get("function") or {}
+        raw_arguments = function.get("arguments")
         try:
-            arguments = json.loads(function.get("arguments") or "{}")
-        except json.JSONDecodeError:
+            # Some providers send the arguments as an object rather than the
+            # JSON string the OpenAI shape specifies. Both mean the same call.
+            arguments = raw_arguments if isinstance(raw_arguments, dict) else json.loads(raw_arguments or "{}")
+        except (json.JSONDecodeError, TypeError):
             # The registry answers missing_arguments and the loop carries on,
             # which beats failing the whole turn over one malformed call.
             arguments = {}

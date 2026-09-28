@@ -11,6 +11,7 @@ exception message, never shown by repr.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.error
@@ -119,9 +120,14 @@ class OpenRouterTransport:
             with self._opener(request, timeout=timeout or self.timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            error = _for_status(exc.code, _error_message(exc.read() or b""))
-            raise self._scrubbed(error) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            try:
+                body = exc.read() or b""
+            except (http.client.HTTPException, OSError):
+                body = b""
+            raise self._scrubbed(_for_status(exc.code, _error_message(body))) from None
+        except (http.client.HTTPException, OSError) as exc:
+            # OSError covers URLError, timeouts and resets; HTTPException covers a
+            # body cut off mid-read (IncompleteRead). All are ours to retry.
             raise OpenRouterUnavailable("OpenRouter could not be reached (%s)" % type(exc).__name__) from None
 
         try:

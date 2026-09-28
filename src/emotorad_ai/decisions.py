@@ -41,6 +41,14 @@ EMPTY_MESSAGE = "empty_message"
 
 RECENT_TURNS = 3
 
+# An Indian mobile however it is typed: "98765 43210", "+91-98765-43210",
+# "919876543210". observability.redact_pii catches only the unbroken form, and
+# Jev's state leaves AWS, so it gets the wider net.
+_ANY_INDIAN_MOBILE = re.compile(r"(?<!\d)(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}(?!\d)")
+# Word characters including Devanagari, for whole-word matching. `\w` alone
+# misses Devanagari vowel signs (see CLAUDE.md), so the range is explicit.
+_WORD_CHAR = r"[\wऀ-ॿ]"
+
 CATEGORY_INSTRUCTIONS = "Which area of the bike is the customer's message about?"
 CATEGORY_CRITERIA = {
     "battery": (
@@ -207,8 +215,13 @@ def _text_of(entry: Mapping[str, Any]) -> str:
 
 
 def _recent_texts(history: Sequence[Mapping[str, Any]], limit: int) -> List[str]:
+    """The customer's own recent words. Our replies are left out: they carry the
+    facts we looked up (names, frame numbers, warranty status), and the
+    customer's words are what the decision is about."""
     texts: List[str] = []
     for entry in reversed(history):
+        if entry.get("role") != "user":
+            continue
         text = _text_of(entry).strip()
         if text:
             texts.append("%s: %s" % (entry.get("role", "?"), text))
@@ -231,11 +244,16 @@ def build_state(
     the decision. Sending less is also sending less customer data outside AWS.
     """
     terms = sorted({term for term in redact if term and len(term) > 2}, key=len, reverse=True)
+    # Whole words only: a name part like "Ram" must not rewrite "program".
+    patterns = [
+        re.compile(r"(?<!%s)%s(?!%s)" % (_WORD_CHAR, re.escape(term), _WORD_CHAR), re.IGNORECASE)
+        for term in terms
+    ]
 
     def clean(text: str) -> str:
-        text = redact_pii(text or "")
-        for term in terms:
-            text = re.sub(re.escape(term), "[redacted]", text, flags=re.IGNORECASE)
+        text = _ANY_INDIAN_MOBILE.sub("[phone]", redact_pii(text or ""))
+        for pattern in patterns:
+            text = pattern.sub("[redacted]", text)
         return text
 
     return {
@@ -321,6 +339,10 @@ def route(
             )
 
     category = _confident(decision, Q_CATEGORY, thresholds.category)
+    # What Jev confidently named, before none_of_these is mapped to "no category".
+    # Rule 4 needs it: a confident "none of these" mid-flow is a change of
+    # subject, not an unsure follow-up.
+    named_category = category
     if category == NONE_OF_THESE:
         reasons.append("category_none_of_these")
         category = None
@@ -342,8 +364,17 @@ def route(
             reasons.append("narrow_new:%s" % record.id)
 
     # 4. Mid-flow: "yes, it's red now" scores low on everything. Stay on the
-    #    record unless Jev confidently names a different topic.
-    if chosen is None and current is not None and (category is None or category == current.topic):
+    #    record unless Jev confidently named something else: another category
+    #    (none_of_these included) or another record, even one refused above for
+    #    this bike or topic. Answering those from the current record's steps
+    #    would be confidently wrong.
+    named_other_record = sub_id is not None and sub_id != NONE and (current is None or sub_id != current.id)
+    if (
+        chosen is None
+        and current is not None
+        and named_category in (None, current.topic)
+        and not named_other_record
+    ):
         chosen = current
         reasons.append("narrow_continue:%s" % current.id)
 

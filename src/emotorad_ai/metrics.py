@@ -51,8 +51,10 @@ class ConversationSummary:
     # Money, from OpenRouter's reported cost on each model and Jev call. Zero
     # where a provider reports none (Bedrock, offline), never guessed.
     cost: float = 0.0
-    # The path Jev's scores chose on each turn (standard / narrow / full).
+    # The path that answered each turn (standard / narrow / full).
     paths: List[str] = field(default_factory=list)
+    # Jev failures by error code, each one a turn that fell back to the full agent.
+    jev_errors: List[str] = field(default_factory=list)
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
 
@@ -82,6 +84,7 @@ class Report:
     total_tokens: int = 0
     total_cost: float = 0.0
     by_path: Dict[str, int] = field(default_factory=dict)
+    jev_errors: Dict[str, int] = field(default_factory=dict)
 
     @property
     def deflection_rate(self) -> float:
@@ -178,6 +181,12 @@ def summarise(events: Sequence[Dict[str, Any]]) -> List[ConversationSummary]:
             summary.cost += float(usage.get("cost") or 0.0)
         elif kind == "jev_decision":
             summary.cost += float(event.get("cost") or 0.0)
+            # A photo with no text skips Jev on purpose; it is not a Jev failure.
+            if event.get("error") and event["error"] != "empty_message":
+                summary.jev_errors.append(event["error"])
+        elif kind == "turn_path":
+            # The path that answered, not the one Jev first chose: a narrow turn
+            # whose model failed and fell back is a full turn.
             if event.get("path"):
                 summary.paths.append(event["path"])
         elif kind == "outcome":
@@ -234,6 +243,7 @@ def build_report(
     report.total_tokens = sum(s.input_tokens + s.output_tokens for s in summaries)
     report.total_cost = sum(s.cost for s in summaries)
     report.by_path = dict(Counter(path for s in summaries for path in s.paths))
+    report.jev_errors = dict(Counter(code for s in summaries for code in s.jev_errors))
     report.by_channel = dict(Counter(s.channel for s in summaries if s.channel))
     report.guardrail_hits = dict(Counter(g for s in summaries for g in s.guardrails))
     report.edge_cases = dict(edge_case_signals or {})
@@ -274,6 +284,11 @@ def render(report: Report) -> str:
         lines.append("")
         lines.append("turns by path:")
         for name, count in sorted(report.by_path.items(), key=lambda kv: -kv[1]):
+            lines.append("  %-28s %d" % (name, count))
+    if report.jev_errors:
+        lines.append("")
+        lines.append("jev fallbacks by error:")
+        for name, count in sorted(report.jev_errors.items(), key=lambda kv: -kv[1]):
             lines.append("  %-28s %d" % (name, count))
     if report.guardrail_hits:
         lines.append("")

@@ -103,6 +103,18 @@ def _probability(value: Any, question_id: str) -> float:
 
 
 def parse_decision(payload: Mapping[str, Any], questions: Mapping[str, Question]) -> JevDecision:
+    """Every way a body can be wrong ends as `bad_response`, including shapes no
+    check below anticipates (a choice sent as an object, say). An untyped error
+    here would crash the turn instead of falling back to the full agent."""
+    try:
+        return _parse_decision(payload, questions)
+    except JevError:
+        raise
+    except (TypeError, AttributeError, KeyError, ValueError) as exc:
+        raise JevError("bad_response", "unreadable Jev answer (%s)" % type(exc).__name__) from None
+
+
+def _parse_decision(payload: Mapping[str, Any], questions: Mapping[str, Question]) -> JevDecision:
     raw_answers = payload.get("answers") if isinstance(payload, Mapping) else None
     if not isinstance(raw_answers, Mapping):
         raise JevError("bad_response", "the response has no answers object")

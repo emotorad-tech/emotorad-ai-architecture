@@ -98,7 +98,8 @@ class StateTests(unittest.TestCase):
         self.assertEqual(set(state), {"message", "recent_turns", "channel", "bike_model", "current_sub_category"})
         self.assertEqual(state["bike_model"], "EMX Plus")
         self.assertEqual(state["current_sub_category"], "battery-wont-charge")
-        self.assertEqual(len(state["recent_turns"]), 3)
+        # The customer's own turns only: our replies carry looked-up facts.
+        self.assertEqual(state["recent_turns"], ["user: hi, my number is [phone]", "user: it still won't charge"])
         dumped = json.dumps(state)
         for secret in ("9876543210", "a@b.com", "Ananya", "EMXP2025004417"):
             self.assertNotIn(secret, dumped)

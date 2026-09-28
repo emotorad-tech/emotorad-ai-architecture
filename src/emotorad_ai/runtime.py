@@ -69,7 +69,7 @@ from .llm import BedrockClaude
 from .observability import EventLog
 from .openrouter import OpenRouterError
 from .standard_responses import StandardResponse, load_standard_responses
-from .tools.mocks import CREATE_SUPPORT_TICKET, LOOKUP_ERROR_CODE, build_registry
+from .tools.mocks import CREATE_SUPPORT_TICKET, LOOKUP_ERROR_CODE, SEND_GUIDE_MEDIA, build_registry
 from .tools.registry import ToolContext, ToolRegistry, is_error
 from .triage import TriageAgent
 
@@ -221,7 +221,7 @@ class Runtime:
             # up holding someone else's warranty data.
             state.route_to(DEALER_ORDERS)
             self.log.routed(message.conversation_id, DEALER_ORDERS, "persona:dealer")
-            return {"reply": self._run_agent(DEALER_ORDERS, message, resolved, state)}
+            return {"reply": self._run_agent_or_handover(DEALER_ORDERS, message, resolved, state)}
 
         if resolved.persona != "customer":
             return {"reply": self._finish(
@@ -233,7 +233,7 @@ class Runtime:
         #    triage has nothing to disambiguate and no issue it can act on.
         if resolved.method in ("no_warranty_record",) and LATE_WARRANTY in self.agents:
             state.route_to(LATE_WARRANTY)
-            return {"reply": self._run_agent(LATE_WARRANTY, message, resolved, state)}
+            return {"reply": self._run_agent_or_handover(LATE_WARRANTY, message, resolved, state)}
 
         # 4. Triage: which bike, what issue, which agent.
         if state.agent is None:
@@ -287,6 +287,7 @@ class Runtime:
         if check_coverage_claim(text, []).blocked or check_evidence(text, state.evidence_seen).blocked:
             self.log.guardrail(message.conversation_id, "standard_response_blocked", {"id": response.id})
             return {"route": replace(chosen, path="full", reasons=chosen.reasons + ("standard_blocked",))}
+        self._log_turn_path(message.conversation_id, "standard")
         return {"reply": self._finish(
             message, state, text, "standard:%s" % response.id, metadata={"route": "standard"},
         )}
@@ -312,6 +313,7 @@ class Runtime:
 
         agent = Agent(build_narrow_definition(record, prefetched), self.registry, self.narrow_llm, self.log, self.settings)
         mark = len(state.history)
+        log_mark = len(self.log.events)
         try:
             reply = self._run(agent, message, resolved, state, prefetched=prefetched, route_path="narrow")
         except OpenRouterError as exc:
@@ -319,7 +321,21 @@ class Runtime:
             # or the full agent would be shown the message twice.
             del state.history[mark:]
             self.log.emit("llm_error", message.conversation_id, agent=NARROW_SUPPORT, code=exc.code)
+            written = self._side_effects_since(log_mark, message.conversation_id)
+            if written:
+                # Something already happened for the customer: a ticket, a
+                # booking, a picture sent. Rerunning the turn on the full agent
+                # would repeat it or hide it, so hand over and say what was done.
+                ticket_id = next((w["ticket_id"] for w in written if w.get("ticket_id")), None)
+                self.log.escalation(message.conversation_id, "llm_error_after_write", ticket_id)
+                self._log_turn_path(message.conversation_id, "narrow")
+                text = HANDOVER_TEXT + ("\n\nYour reference is %s." % ticket_id if ticket_id else "")
+                return {"reply": self._finish(
+                    message, state, text, "llm_error", escalated=True, ticket_id=ticket_id,
+                    metadata={"code": exc.code, "side_effects": [w["tool"] for w in written]},
+                )}
             return {"route": replace(chosen, path="full", reasons=chosen.reasons + ("narrow_llm_error:%s" % exc.code,))}
+        self._log_turn_path(message.conversation_id, "narrow")
         return {"reply": reply}
 
     def _node_full(self, turn: Dict[str, Any]) -> Dict[str, Any]:
@@ -337,20 +353,52 @@ class Runtime:
             if current is None or current.topic != chosen.category:
                 state.sub_category = None
 
-        name = state.agent or BATTERY_SUPPORT
-        mark = len(state.history)
-        try:
-            return {"reply": self._run_agent(name, message, resolved, state)}
-        except OpenRouterError as exc:
-            # Only the OpenRouter models raise this; Bedrock behaviour is unchanged.
-            del state.history[mark:]
-            self.log.emit("llm_error", message.conversation_id, agent=name, code=exc.code)
-            self.log.escalation(message.conversation_id, "llm_error", None)
-            return {"reply": self._finish(
-                message, state, HANDOVER_TEXT, "llm_error", escalated=True, metadata={"code": exc.code},
-            )}
+        self._log_turn_path(message.conversation_id, "full")
+        return {"reply": self._run_agent_or_handover(state.agent or BATTERY_SUPPORT, message, resolved, state)}
 
     # -- helpers -------------------------------------------------------------
+
+    def _run_agent_or_handover(
+        self,
+        agent_name: str,
+        message: InboundMessage,
+        resolved: ResolvedIdentity,
+        state: ConversationState,
+    ) -> Reply:
+        """Every agent node, so an OpenRouter outage in any of them (dealer, late
+        warranty, a full topic agent) is a handover, never a crashed turn. Only
+        the OpenRouter models raise this; Bedrock behaviour is unchanged."""
+        mark = len(state.history)
+        try:
+            return self._run_agent(agent_name, message, resolved, state)
+        except OpenRouterError as exc:
+            del state.history[mark:]
+            self.log.emit("llm_error", message.conversation_id, agent=agent_name, code=exc.code)
+            self.log.escalation(message.conversation_id, "llm_error", None)
+            return self._finish(
+                message, state, HANDOVER_TEXT, "llm_error", escalated=True, metadata={"code": exc.code},
+            )
+
+    def _side_effects_since(self, log_mark: int, conversation_id: str) -> List[Dict[str, Any]]:
+        """Tool calls since `log_mark` that changed something for the customer:
+        any write tool, plus sending guide media, which the registry records as
+        sent and will refuse to send twice."""
+        done: List[Dict[str, Any]] = []
+        for event in self.log.events[log_mark:]:
+            if event.get("event") != "tool_call" or event.get("conversation_id") != conversation_id or not event.get("ok"):
+                continue
+            spec = self.registry.specs.get(event.get("tool"))
+            if spec is None or not (spec.write or spec.name == SEND_GUIDE_MEDIA):
+                continue
+            data = (event.get("result") or {}).get("data") or {}
+            done.append({"tool": spec.name, "ticket_id": data.get("ticket_id") if isinstance(data, dict) else None})
+        return done
+
+    def _log_turn_path(self, conversation_id: str, path: str) -> None:
+        """The path that actually answered, logged only when Jev routes. The
+        jev_decision event records the intended path, which a fallback changes."""
+        if self.jev is not None:
+            self.log.emit("turn_path", conversation_id, path=path)
 
     @staticmethod
     def _selected_bike(resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
