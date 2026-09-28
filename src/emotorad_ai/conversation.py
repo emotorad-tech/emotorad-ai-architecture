@@ -16,7 +16,11 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from .contract import InboundMessage, Reply
+from .observability import redact_pii
 
 # Phases. A conversation moves forward through these, and can move back — a
 # customer who says "actually, my other bike" returns to bike selection from a
@@ -121,26 +125,125 @@ class ConversationState:
         self.move_to(AWAITING_ISSUE, "handback:" + reason)
 
 
-class ConversationStore:
-    """In-memory conversation state.
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    Replace with the session store before anything multi-instance ships — two
-    web dynos with separate dicts would put a customer in two different phases
-    depending on which one answered. The interface is `get` and nothing else.
+
+class ConversationConflict(Exception):
+    """Another server saved this conversation after we loaded it."""
+
+
+class StoreUnavailable(Exception):
+    """The store could not be read or written. Never treated as an empty state."""
+
+
+@dataclass(frozen=True)
+class TranscriptTurn:
+    """What was said, and nothing the model saw besides: no tool results."""
+
+    n: int
+    role: str  # "customer" | "bot"
+    text: str
+    at: str
+    attachments: Tuple[Dict[str, str], ...] = ()
+    handled_by: str = ""
+    path: str = ""
+
+
+@dataclass(frozen=True)
+class ConversationSummaryItem:
+    """One line of a person's history, built by code for the bot's memory."""
+
+    conversation_id: str
+    user_key: str
+    started_at: str
+    last_at: str
+    channel: str = ""
+    title: str = ""
+    frame_number: Optional[str] = None
+    product_name: Optional[str] = None
+    agent: Optional[str] = None
+    sub_category: Optional[str] = None
+    outcome: str = "open"  # "open" | "escalated"
+    ticket_id: Optional[str] = None
+    turns: int = 0
+
+
+def transcript_turns(
+    state: ConversationState, inbound: InboundMessage, reply: Reply, at: str
+) -> Tuple[TranscriptTurn, TranscriptTurn]:
+    """The customer's message and the bot's reply for this turn, redacted.
+
+    Numbered from the turn counter, so recording the same turn twice (a retry)
+    overwrites rather than duplicates.
+    """
+    n = state.turns * 2 - 1
+    customer = TranscriptTurn(
+        n=n, role="customer", text=redact_pii(inbound.message_text or ""), at=at,
+        attachments=tuple({"kind": a.kind, "url": a.url} for a in inbound.attachments),
+    )
+    bot = TranscriptTurn(
+        n=n + 1, role="bot", text=redact_pii(reply.text or ""), at=at,
+        attachments=tuple({"kind": a.kind, "url": a.url} for a in reply.attachments),
+        handled_by=reply.handled_by or "", path=str(reply.metadata.get("route") or ""),
+    )
+    return customer, bot
+
+
+class InMemoryConversationStore:
+    """One process, lost on restart. The default, and what every test uses.
+
+    `get` hands back the same object each time, so there is nothing to conflict
+    with; `save` only advances the version to match the durable store.
+    DynamoConversationStore (stores/dynamo.py) is the same contract across
+    restarts and servers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], str] = utc_now_iso) -> None:
+        self._clock = clock
         self._states: Dict[str, ConversationState] = {}
+        self._turns: Dict[str, Dict[int, TranscriptTurn]] = {}
+        self._summaries: Dict[str, Dict[str, ConversationSummaryItem]] = {}
 
     def get(self, conversation_id: str) -> ConversationState:
         state = self._states.get(conversation_id)
         if state is None:
-            state = ConversationState(conversation_id=conversation_id)
+            state = ConversationState(conversation_id=conversation_id, started_at=self._clock())
             self._states[conversation_id] = state
         return state
+
+    def save(self, state: ConversationState) -> None:
+        state.version += 1
+        self._states[state.conversation_id] = state
+
+    def record_turn(
+        self,
+        state: ConversationState,
+        inbound: InboundMessage,
+        reply: Reply,
+        summary: Optional[ConversationSummaryItem] = None,
+    ) -> None:
+        turns = self._turns.setdefault(state.conversation_id, {})
+        for turn in transcript_turns(state, inbound, reply, self._clock()):
+            turns[turn.n] = turn
+        if summary is not None and state.user_key:
+            self._summaries.setdefault(state.user_key, {})[state.conversation_id] = summary
+
+    def transcript(self, conversation_id: str) -> List[TranscriptTurn]:
+        return [turn for _, turn in sorted(self._turns.get(conversation_id, {}).items())]
+
+    def recent_summaries(
+        self, user_key: str, limit: int = 3, exclude: Optional[str] = None
+    ) -> List[ConversationSummaryItem]:
+        items = [s for s in self._summaries.get(user_key, {}).values() if s.conversation_id != exclude]
+        return sorted(items, key=lambda s: s.started_at, reverse=True)[:limit]
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history
 
     def __len__(self) -> int:
         return len(self._states)
+
+
+# The name every caller already imports.
+ConversationStore = InMemoryConversationStore
