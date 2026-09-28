@@ -51,6 +51,10 @@ class ConversationState:
     # conversation, not per turn: a customer who sent the picture three turns ago
     # must not be asked for it again because the model concluded later.
     evidence_seen: bool = False
+    # The knowledge record the narrow agent is working through. Held across
+    # turns so a follow-up like "yes, the light is red now", which scores low
+    # on everything, stays on the same record (decisions.route rule 4).
+    sub_category: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.
@@ -75,6 +79,7 @@ class ConversationState:
         """
         if self.selected_frame and self.selected_frame != frame_number:
             self.agent = None
+            self.sub_category = None
             self.transitions.append("bike_changed:%s->%s" % (self.selected_frame, frame_number))
         self.selected_frame = frame_number
 
@@ -90,6 +95,7 @@ class ConversationState:
         which bike again would be maddening.
         """
         self.agent = None
+        self.sub_category = None
         self.move_to(AWAITING_ISSUE, "handback:" + reason)
 
 

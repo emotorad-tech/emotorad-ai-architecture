@@ -69,6 +69,7 @@ class Agent:
         resolved: ResolvedIdentity,
         history: List[Dict[str, Any]],
         context: str = "",
+        prefetched: Sequence[Dict[str, Any]] = (),
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
         tools = self.registry.schemas_for(
@@ -82,7 +83,10 @@ class Agent:
 
         history.append({"role": "user", "content": message.message_text})
 
-        turn = AgentTurn(text="", agent=self.definition.name)
+        # Calls the runtime made before the loop (decisions.route prefetch)
+        # count as this turn's tool calls, so the coverage post-check sees the
+        # warranty result the reply was written from.
+        turn = AgentTurn(text="", agent=self.definition.name, tool_calls=list(prefetched))
         # Same tool, same arguments, twice: the model is stuck, and the remaining
         # iterations will burn tokens and latency to arrive at the same place.
         # Breaking early and handing over is cheaper and more honest than looping
