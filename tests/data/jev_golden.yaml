@@ -1,0 +1,15 @@
+# Labels for Jev calibration beyond the retrieval goldens, which are imported from
+# tests/test_retrieval_evals.py rather than copied. Standard-response examples and
+# counter-examples are read from knowledge/_standard/. Omitted fields default to:
+# sub_category none, standard_response none, needs_warranty_lookup false.
+cases:
+  - {text: "do you sell helmets", language: english, category: none_of_these}
+  - {text: "what is the price of the new X2", language: english, category: none_of_these}
+  - {text: "where is my order", language: english, category: none_of_these}
+  - {text: "mera order kab aayega", language: hinglish, category: none_of_these}
+  - {text: "can I get a refund", language: english, category: none_of_these}
+  - {text: "is my battery still under warranty", language: english, category: battery, needs_warranty_lookup: true}
+  - {text: "battery replace free mein hoga kya", language: hinglish, category: battery, needs_warranty_lookup: true}
+  - {text: "क्या बैटरी वारंटी में है", language: hindi, category: battery, needs_warranty_lookup: true}
+  - {text: "will I have to pay to fix the motor noise", language: english, category: motor, sub_category: motor-noise, needs_warranty_lookup: true}
+  - {text: "my display shows E-07", language: english, category: battery, error_code: E07}

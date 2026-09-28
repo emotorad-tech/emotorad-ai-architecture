@@ -29,6 +29,14 @@ account and region in `config.py`):
 PYTHONPATH=src python3 -m emotorad_ai.cli --session sess-ananya
 ```
 
+Through OpenRouter, with Jev choosing each turn's path (standard reply, narrow DeepSeek
+agent, or the full Haiku agent). This needs `OPENROUTER_API_KEY`, and sends customer text
+outside AWS, so it is for testing until signed off:
+
+```bash
+PYTHONPATH=src python3 -m emotorad_ai.cli --mode openrouter --channel amiigo --session sess-amiigo-test
+```
+
 Every turn appends to `logs/conversations.jsonl` — that file is what the golden
 regression set gets built from.
 

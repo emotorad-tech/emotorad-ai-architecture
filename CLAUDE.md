@@ -78,6 +78,8 @@ Full detail lives in `docs/`:
 - Tests: `python3 -m unittest discover -s tests -t .` (this is also the deploy gate in `.github/workflows/deploy-staging.yml`; it runs only on manual deploy, not on push).
 - CLI offline: `PYTHONPATH=src python3 -m emotorad_ai.cli --offline "my battery won't charge"`. Against Bedrock: drop `--offline`, set `--session`.
 - Playground: `docker/start.sh` (Streamlit on 8501 behind `/playground`, API on 8000). `EMOTORAD_AI_MODE=offline` is the default and what staging runs; nothing reaches Bedrock unless the mode is flipped.
+- Model modes: `EMOTORAD_AI_MODE=offline|bedrock|openrouter`. `openrouter` turns on Jev routing (`src/emotorad_ai/decisions.py`, `graph.py`) with DeepSeek Flash for the narrow path and Haiku 4.5 for the full agent, all through `OPENROUTER_API_KEY`. It sends customer text outside AWS: **Sachin signs off before real customer traffic**. CLI: `--mode openrouter`.
+- Jev: `python scripts/jev_probe.py` saves the live Decisions API shape once; `python scripts/calibrate_jev.py [--write]` proposes thresholds from the labelled set (`tests/jev_golden.py`). Both need the key and are run by a person, never CI. Thresholds live in `knowledge/_routing/thresholds.yaml`, standard responses in `knowledge/_standard/` (drafts until an SME approves them in a PR).
 - There is no linter or formatter configured. `python3 -m py_compile` runs on every edit through the hook in `.claude/settings.json`; adopting ruff is a small separate PR.
 
 ## Git

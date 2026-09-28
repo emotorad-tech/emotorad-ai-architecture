@@ -357,3 +357,11 @@ If the live shape differs, only `jev.py`'s parser and its fixture change.
 | Scores are overconfident in Hindi or Hinglish | Per-language calibration. The standard path also needs a confident `language` answer |
 | Customer data leaves AWS and the EU | Off by default, ZDR routing, redacted state for Jev, Sachin sign-off before customer traffic |
 | DeepSeek Flash follows rules less well than Claude | The narrow prompt is short and has one record. The post-checks are code. Every turn logs its path, so quality per path can be compared in shadow mode before rollout |
+
+## 15. Implementation notes (2026-09-28 plan)
+
+- Shared prompt blocks stay in `battery_support.py` and are imported, as `motor_support.py` already does, rather than moving to a new `agents/blocks.py`.
+- `needs_service_slots` is dropped. The warranty result carries no PIN code, so the slot lookup cannot be prefetched. The narrow agent keeps `find_service_slots` as a model-requested tool.
+- The retrieval goldens are imported from `tests/test_retrieval_evals.py`, not moved.
+- Post-checks and finishing run inside `Runtime._run` and `Runtime._finish`, shared by every agent node, instead of as separate graph nodes. The order guarantees are the same.
+- Playground wiring is deferred. The playground has its own turn loop. OpenRouter mode reaches the CLI and the API in this change.
