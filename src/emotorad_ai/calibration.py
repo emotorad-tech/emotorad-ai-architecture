@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+from .decisions import RoutingCatalogue, Thresholds, route
 from .jev import ChoiceAnswer, JevDecision, NoulAnswer
 
 CANDIDATES = [round(0.50 + 0.05 * step, 2) for step in range(10)]  # 0.50 .. 0.95
@@ -68,6 +69,33 @@ def evaluate_noul(
             by_language[case.language][key] += 1
         rows[threshold] = dict(by_language)
     return rows
+
+
+def evaluate_followups(
+    pairs: Sequence[Pair], thresholds: Thresholds, catalogue: RoutingCatalogue
+) -> Dict[str, Dict[str, int]]:
+    """Mid-conversation replies, judged by what route() would actually do.
+
+    Per-question accuracy cannot see this. Rule 4 keeps a conversation on its
+    record when Jev is unsure, so a follow-up is handled well only if Jev is
+    unsure on "yes, it's red now" and sure on "now the motor is noisy". This
+    replays the real routing with these thresholds and counts, per language:
+    stay_ok / leave_ok (right), stay_wrong (kept on the record when the customer
+    had moved on) and leave_wrong (dropped the record mid-flow).
+    """
+    rows: Dict[str, Dict[str, int]] = defaultdict(lambda: {"stay_ok": 0, "leave_ok": 0, "stay_wrong": 0, "leave_wrong": 0})
+    for case, decision in pairs:
+        current = getattr(case, "current_sub_category", None)
+        if not current or case.sub_category is None:
+            continue
+        should_stay = case.sub_category == current
+        chosen = route(decision, None, thresholds, catalogue, current, getattr(case, "bike", None) or {})
+        stayed = chosen.path == "narrow" and chosen.sub_category == current
+        if should_stay:
+            rows[case.language]["stay_ok" if stayed else "leave_wrong"] += 1
+        else:
+            rows[case.language]["stay_wrong" if stayed else "leave_ok"] += 1
+    return dict(rows)
 
 
 def suggest_noul(rows: Mapping[float, Mapping[str, Mapping[str, int]]], target_recall: float) -> Optional[float]:

@@ -3,14 +3,86 @@ from collections import Counter
 
 import yaml
 
-from emotorad_ai.calibration import evaluate_choice, evaluate_noul, suggest_choice, suggest_noul
-from emotorad_ai.decisions import NONE, NONE_OF_THESE, Q_CATEGORY
+from emotorad_ai.calibration import evaluate_choice, evaluate_followups, evaluate_noul, suggest_choice, suggest_noul
+from emotorad_ai.decisions import NONE, NONE_OF_THESE, Q_CATEGORY, Q_SUB_CATEGORY, Thresholds, build_catalogue
 from emotorad_ai.errorcodes import ANY_CODE, load_table
 from emotorad_ai.jev import JevDecision, choose, yes
 from emotorad_ai.knowledge import KnowledgeBase
 from emotorad_ai.standard_responses import LANGUAGES, load_standard_responses
-from tests.jev_golden import EXTRAS, GoldenCase, load_golden
+from tests.jev_golden import EXTRAS, GoldenCase, load_golden, state_for
 from tests.test_retrieval_evals import GOLDEN
+
+
+class FollowUpSetTests(unittest.TestCase):
+    """Mid-conversation replies, scored with the conversation they belong to."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kb = KnowledgeBase()
+        cls.followups = [c for c in load_golden() if c.current_sub_category]
+
+    def test_there_are_enough_follow_ups_that_stay_and_that_leave_in_every_language(self):
+        stay = [c for c in self.followups if c.sub_category == c.current_sub_category]
+        leave = [c for c in self.followups if c.sub_category not in (None, c.current_sub_category)]
+        self.assertGreaterEqual(len(stay), 30)
+        self.assertGreaterEqual(len(leave), 12)
+        languages = Counter(c.language for c in self.followups)
+        for language in ("english", "hinglish", "hindi"):
+            self.assertGreaterEqual(languages[language], 8, languages)
+
+    def test_every_follow_up_has_a_real_current_record_that_applies_and_a_history(self):
+        records = {r.id: r for r in self.kb.records}
+        for case in self.followups:
+            with self.subTest(case.text):
+                self.assertIn(case.current_sub_category, records)
+                self.assertTrue(case.history)
+                if case.bike.get("product_name"):
+                    self.assertTrue(self.kb.applicable(records[case.current_sub_category], case.bike))
+
+    def test_the_state_jev_sees_carries_the_conversation(self):
+        case = next(c for c in self.followups if c.text == "yes the light is red now")
+        state = state_for(case)
+        self.assertEqual(state["current_sub_category"], "battery-wont-charge")
+        self.assertEqual(state["recent_turns"], ["user: my battery won't charge"])
+        self.assertEqual(state["message"], "yes the light is red now")
+
+    def test_a_first_message_carries_no_conversation(self):
+        case = next(c for c in load_golden() if c.text == "do you sell helmets")
+        state = state_for(case)
+        self.assertEqual((state["recent_turns"], state["current_sub_category"]), ([], None))
+
+
+class FollowUpRoutingMathTests(unittest.TestCase):
+    """evaluate_followups replays route() on each follow-up: did it stay when it should?"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.catalogue = build_catalogue(KnowledgeBase())
+
+    def case(self, language, expected_record):
+        return GoldenCase(text="x", language=language, sub_category=expected_record,
+                          current_sub_category="battery-wont-charge", history=("my battery won't charge",))
+
+    def test_counts_each_outcome_per_language(self):
+        unsure = JevDecision(answers={Q_CATEGORY: choose("battery", 0.4), Q_SUB_CATEGORY: choose(NONE, 0.5)})
+        to_motor = JevDecision(answers={Q_CATEGORY: choose("motor", 0.95), Q_SUB_CATEGORY: choose("motor-noise", 0.9)})
+        off_topic = JevDecision(answers={Q_CATEGORY: choose(NONE_OF_THESE, 0.97), Q_SUB_CATEGORY: choose(NONE, 0.95)})
+        pairs = [
+            (self.case("english", "battery-wont-charge"), unsure),      # stayed, should stay
+            (self.case("english", "motor-noise"), to_motor),            # left, should leave
+            (self.case("hinglish", "battery-wont-charge"), off_topic),  # left, should have stayed
+            (self.case("hinglish", "battery-range-dropped"), unsure),   # stayed, should have left
+        ]
+        rows = evaluate_followups(pairs, Thresholds(), self.catalogue)
+        self.assertEqual(rows["english"], {"stay_ok": 1, "leave_ok": 1, "stay_wrong": 0, "leave_wrong": 0})
+        self.assertEqual(rows["hinglish"], {"stay_ok": 0, "leave_ok": 0, "stay_wrong": 1, "leave_wrong": 1})
+
+    def test_unscored_follow_ups_and_first_messages_are_skipped(self):
+        first = GoldenCase(text="x", language="english", sub_category="battery-wont-charge")
+        unscored = GoldenCase(text="x", language="english", sub_category=None,
+                              current_sub_category="battery-wont-charge", history=("hi",))
+        decision = JevDecision(answers={})
+        self.assertEqual(evaluate_followups([(first, decision), (unscored, decision)], Thresholds(), self.catalogue), {})
 
 
 class GoldenSetTests(unittest.TestCase):

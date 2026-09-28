@@ -17,18 +17,22 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
 
 import yaml  # noqa: E402
 
-from emotorad_ai.calibration import CANDIDATES, evaluate_choice, evaluate_noul, suggest_choice, suggest_noul  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from emotorad_ai.calibration import (  # noqa: E402
+    CANDIDATES, evaluate_choice, evaluate_followups, evaluate_noul, suggest_choice, suggest_noul,
+)
 from emotorad_ai.config import load_settings  # noqa: E402
 from emotorad_ai.decisions import (  # noqa: E402
     Q_CATEGORY, Q_ERROR_CODE, Q_LANGUAGE, Q_STANDARD, Q_SUB_CATEGORY, Q_WARRANTY, THRESHOLDS_PATH,
-    build_catalogue, build_questions, build_state,
+    build_catalogue, build_questions, load_thresholds,
 )
 from emotorad_ai.errorcodes import load_table  # noqa: E402
 from emotorad_ai.jev import JevClient, JevError  # noqa: E402
 from emotorad_ai.knowledge import KnowledgeBase  # noqa: E402
 from emotorad_ai.openrouter import OpenRouterTransport  # noqa: E402
 from emotorad_ai.standard_responses import load_standard_responses  # noqa: E402
-from tests.jev_golden import load_golden  # noqa: E402
+from tests.jev_golden import load_golden, state_for  # noqa: E402
 
 TARGETS = {Q_STANDARD: 0.98, Q_CATEGORY: 0.95, Q_SUB_CATEGORY: 0.90, Q_LANGUAGE: 0.95, Q_ERROR_CODE: 0.95}
 EXPECTED = {
@@ -52,7 +56,8 @@ def main() -> int:
     cost = 0.0
     for case in load_golden():
         try:
-            decision = client.decide(build_state(case.text, [], "whatsapp", bike=case.bike or None), questions)
+            # Follow-ups carry their conversation, as the runtime would send it.
+            decision = client.decide(state_for(case), questions)
         except JevError as exc:
             failures += 1
             print("jev failed on %r: %s" % (case.text, exc.code))
@@ -80,6 +85,19 @@ def main() -> int:
     print("%s suggested: %s" % (Q_WARRANTY, warranty))
     if warranty is not None:
         proposal["tools"] = {"lookup_warranty_record": warranty}
+
+    # Follow-ups are judged on the routing they get, not on one question: a
+    # threshold that is right for first messages can still drop a conversation
+    # mid-flow (leave_wrong) or keep it on the old record (stay_wrong).
+    committed = load_thresholds()
+    proposed = replace(committed, **{k: v for k, v in proposal.items() if k != "tools"},
+                       tools=dict(committed.tools, **proposal.get("tools", {})))
+    for label, thresholds in (("committed", committed), ("proposed", proposed)):
+        rows = evaluate_followups(pairs, thresholds, catalogue)
+        print("\nfollow-ups under the %s thresholds:" % label)
+        for language, row in sorted(rows.items()):
+            print("  %-9s stay_ok %d  leave_ok %d  stay_wrong %d  leave_wrong %d"
+                  % (language, row["stay_ok"], row["leave_ok"], row["stay_wrong"], row["leave_wrong"]))
 
     if args.write:
         current = yaml.safe_load(THRESHOLDS_PATH.read_text(encoding="utf-8")) or {}

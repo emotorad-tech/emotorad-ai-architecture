@@ -192,3 +192,84 @@ cases:
   - {text: "warranty kab tak hai meri cycle ki", language: hinglish, category: null, sub_category: null, needs_warranty_lookup: true}
   - {text: "मेरी वारंटी कब तक है", language: hindi, category: null, sub_category: null, needs_warranty_lookup: true}
   - {text: "motor ki awaz theek karwane ka paisa lagega kya", language: hinglish, category: motor, sub_category: motor-noise, needs_warranty_lookup: true}
+
+  # -- follow-ups: replies mid-conversation --------------------------------------
+  # `current_sub_category` is the record the conversation is on; `history` is the
+  # customer's earlier messages, oldest first. Calibration sends both, as the
+  # runtime does, and also replays route() on each (calibration.evaluate_followups).
+  #
+  # STAY: sub_category equals current_sub_category. The reply continues the same
+  # issue; Jev should not confidently name another category or record.
+  # LEAVE: sub_category is another record, or none with a different category. The
+  # customer has moved on; Jev should say so confidently.
+
+  # stay: will not charge
+  - {text: "yes the light is red now", language: english, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "tried another socket, still nothing", language: english, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "no change", language: english, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["my battery won't charge", "the charger light doesn't come on"]}
+  - {text: "done", language: english, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "ok it's charging now", language: english, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "haan light red ho gayi", language: hinglish, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["battery charge nahi ho rahi"]}
+  - {text: "dusre socket mein bhi nahi hua", language: hinglish, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["battery charge nahi ho rahi"]}
+  - {text: "charger ki light hari hai", language: hinglish, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["charger laga diya par kuch nahi hua"]}
+  - {text: "हाँ, अब लाइट लाल है", language: hindi, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["बैटरी चार्ज नहीं हो रही"]}
+  - {text: "दूसरे सॉकेट में भी नहीं हुआ", language: hindi, category: battery, sub_category: battery-wont-charge, current_sub_category: battery-wont-charge, history: ["बैटरी चार्ज नहीं हो रही"]}
+
+  # stay: range dropped
+  - {text: "about 18 km now", language: english, category: battery, sub_category: battery-range-dropped, current_sub_category: battery-range-dropped, history: ["range has dropped a lot"]}
+  - {text: "I ride mostly uphill with two people", language: english, category: battery, sub_category: battery-range-dropped, current_sub_category: battery-range-dropped, history: ["range has dropped a lot"]}
+  - {text: "haan tyre pressure theek hai", language: hinglish, category: battery, sub_category: battery-range-dropped, current_sub_category: battery-range-dropped, history: ["backup bahut kam ho gaya hai"]}
+  - {text: "हाँ, टायर में हवा ठीक है", language: hindi, category: battery, sub_category: battery-range-dropped, current_sub_category: battery-range-dropped, history: ["एक बार चार्ज करने पर बहुत कम चलती है"]}
+
+  # stay: will not power on (standard bike)
+  - {text: "pressed the SOC button, no lights", language: english, category: battery, sub_category: battery-wont-power-on, current_sub_category: battery-wont-power-on, history: ["bike won't turn on"], bike: {product_name: EMX Plus}}
+  - {text: "switch is on, still nothing", language: english, category: battery, sub_category: battery-wont-power-on, current_sub_category: battery-wont-power-on, history: ["bike won't turn on"], bike: {product_name: EMX Plus}}
+  - {text: "button dabaya, kuch nahi jala", language: hinglish, category: battery, sub_category: battery-wont-power-on, current_sub_category: battery-wont-power-on, history: ["cycle on nahi ho rahi"], bike: {product_name: EMX Plus}}
+  - {text: "बटन दबाया, कुछ नहीं जला", language: hindi, category: battery, sub_category: battery-wont-power-on, current_sub_category: battery-wont-power-on, history: ["साइकिल चालू नहीं हो रही"], bike: {product_name: EMX Plus}}
+
+  # stay: Doodle will not power on
+  - {text: "the charger LED is green", language: english, category: battery, sub_category: battery-doodle-wont-power-on, current_sub_category: battery-doodle-wont-power-on, history: ["my doodle won't turn on"], bike: {product_name: Doodle V3}}
+  - {text: "charger ki light blink kar rahi hai", language: hinglish, category: battery, sub_category: battery-doodle-wont-power-on, current_sub_category: battery-doodle-wont-power-on, history: ["doodle chalu nahi ho rahi"], bike: {product_name: Doodle V3}}
+  - {text: "चार्जर की लाइट हरी है", language: hindi, category: battery, sub_category: battery-doodle-wont-power-on, current_sub_category: battery-doodle-wont-power-on, history: ["डूडल चालू नहीं हो रही"], bike: {product_name: Doodle V3}}
+
+  # stay: melted terminal, charging port
+  - {text: "sent the photo of the battery side", language: english, category: battery, sub_category: battery-melted-terminal, current_sub_category: battery-melted-terminal, history: ["the connector looks melted"]}
+  - {text: "controller wali side bhi kaali hai", language: hinglish, category: battery, sub_category: battery-melted-terminal, current_sub_category: battery-melted-terminal, history: ["connector pighal gaya hai"]}
+  - {text: "the pin inside looks bent", language: english, category: battery, sub_category: battery-charging-port-damaged, current_sub_category: battery-charging-port-damaged, history: ["charger doesn't fit in the port"]}
+
+  # stay: motor
+  - {text: "only when I pedal hard", language: english, category: motor, sub_category: motor-noise, current_sub_category: motor-noise, history: ["motor is making noise"]}
+  - {text: "it's more of a click than a grind", language: english, category: motor, sub_category: motor-noise, current_sub_category: motor-noise, history: ["motor is making noise"]}
+  - {text: "sirf chadhai pe awaz aati hai", language: hinglish, category: motor, sub_category: motor-noise, current_sub_category: motor-noise, history: ["motor se awaz aa rahi hai"]}
+  - {text: "सिर्फ चढ़ाई पर आवाज आती है", language: hindi, category: motor, sub_category: motor-noise, current_sub_category: motor-noise, history: ["मोटर से आवाज आ रही है"]}
+  - {text: "mostly on bumpy roads", language: english, category: motor, sub_category: motor-cuts-out, current_sub_category: motor-cuts-out, history: ["power cuts out while riding"]}
+  - {text: "gaddhe mein jaate hi band ho jati hai", language: hinglish, category: motor, sub_category: motor-cuts-out, current_sub_category: motor-cuts-out, history: ["chalate chalate power band ho jati hai"]}
+  - {text: "गड्ढे में जाते ही बंद हो जाती है", language: hindi, category: motor, sub_category: motor-cuts-out, current_sub_category: motor-cuts-out, history: ["चलाते समय मोटर बार बार बंद हो जाती है"]}
+  - {text: "PAS level is set to 3", language: english, category: motor, sub_category: motor-no-assist, current_sub_category: motor-no-assist, history: ["pedal assist is not working"]}
+  - {text: "display pe level dikh raha hai par help nahi", language: hinglish, category: motor, sub_category: motor-no-assist, current_sub_category: motor-no-assist, history: ["pedal marne par motor help nahi karti"]}
+  - {text: "the throttle cable looks fine", language: english, category: motor, sub_category: motor-throttle, current_sub_category: motor-throttle, history: ["throttle is not responding"]}
+  - {text: "थ्रॉटल की तार ठीक लग रही है", language: hindi, category: motor, sub_category: motor-throttle, current_sub_category: motor-throttle, history: ["थ्रॉटल काम नहीं कर रहा"]}
+
+  # leave: a different record on the same topic
+  - {text: "it charges now but only gives 15 km", language: english, category: battery, sub_category: battery-range-dropped, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "ab charge ho rahi hai par range bahut kam hai", language: hinglish, category: battery, sub_category: battery-range-dropped, current_sub_category: battery-wont-charge, history: ["battery charge nahi ho rahi"]}
+  - {text: "also my charging port is bent", language: english, category: battery, sub_category: battery-charging-port-damaged, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "now the throttle doesn't work at all", language: english, category: motor, sub_category: motor-throttle, current_sub_category: motor-cuts-out, history: ["power cuts out while riding"]}
+  - {text: "अब थ्रॉटल भी काम नहीं कर रहा", language: hindi, category: motor, sub_category: motor-throttle, current_sub_category: motor-cuts-out, history: ["चलाते समय मोटर बार बार बंद हो जाती है"]}
+
+  # leave: the other topic
+  - {text: "also the motor makes a grinding noise", language: english, category: motor, sub_category: motor-noise, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "अब चार्ज हो रही है पर मोटर से आवाज आती है", language: hindi, category: motor, sub_category: motor-noise, current_sub_category: battery-wont-charge, history: ["बैटरी चार्ज नहीं हो रही"]}
+  - {text: "and now the battery won't charge either", language: english, category: battery, sub_category: battery-wont-charge, current_sub_category: motor-noise, history: ["motor is making noise"]}
+  - {text: "ab battery bhi charge nahi ho rahi", language: hinglish, category: battery, sub_category: battery-wont-charge, current_sub_category: motor-noise, history: ["motor se awaz aa rahi hai"]}
+
+  # leave: off topic
+  - {text: "forget that, where is my order", language: english, category: none_of_these, sub_category: none, current_sub_category: battery-wont-charge, history: ["my battery won't charge"]}
+  - {text: "EMI options kya hain", language: hinglish, category: none_of_these, sub_category: none, current_sub_category: motor-noise, history: ["motor se awaz aa rahi hai"]}
+  - {text: "can I book a test ride for the new model", language: english, category: none_of_these, sub_category: none, current_sub_category: battery-range-dropped, history: ["range has dropped a lot"]}
+  - {text: "मेरा दूसरा ऑर्डर कब आएगा", language: hindi, category: none_of_these, sub_category: none, current_sub_category: battery-wont-charge, history: ["बैटरी चार्ज नहीं हो रही"]}
+  - {text: "refund ka kya hua", language: hinglish, category: none_of_these, sub_category: none, current_sub_category: motor-cuts-out, history: ["chalate chalate power band ho jati hai"]}
+
+  # warranty question mid-flow: the lookup is needed, the record question is not scored
+  - {text: "is this covered under warranty", language: english, category: battery, sub_category: null, needs_warranty_lookup: true, current_sub_category: battery-wont-power-on, history: ["bike won't turn on"], bike: {product_name: EMX Plus}}
+  - {text: "ye warranty mein aayega kya", language: hinglish, category: motor, sub_category: null, needs_warranty_lookup: true, current_sub_category: motor-noise, history: ["motor se awaz aa rahi hai"]}
