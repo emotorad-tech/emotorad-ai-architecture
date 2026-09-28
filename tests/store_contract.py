@@ -1,7 +1,7 @@
 """One set of behaviours every conversation store must have.
 
-Mixed into a TestCase per implementation, so the in-memory store and the
-DynamoDB store are held to the same contract, not two similar ones.
+Mixed into a TestCase per implementation, so the in-memory store and any
+durable store (MongoDB next) are held to the same contract, not two similar ones.
 """
 
 from emotorad_ai.contract import Attachment, Identity, InboundMessage, Reply

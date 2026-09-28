@@ -350,8 +350,8 @@ def build_registry(
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
-    # Where write results are remembered. In memory by default; the DynamoDB
-    # store shares one record across every server (stores/dynamo.py).
+    # Where write results are remembered. In memory by default; a durable store
+    # with the same claim/get/put/release methods shares it across servers.
     idempotency: Optional[Any] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.

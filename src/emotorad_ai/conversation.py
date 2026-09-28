@@ -65,7 +65,7 @@ class ConversationState:
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.
     transitions: List[str] = field(default_factory=list)
-    # Persistence (EMOTORAD_STORE=dynamodb). `version` guards concurrent saves;
+    # Persistence, for a durable store. `version` guards concurrent saves;
     # `user_key` ties the conversation to a person for memory; the last two
     # feed the per-user summary.
     version: int = 0
@@ -194,9 +194,9 @@ class InMemoryConversationStore:
     """One process, lost on restart. The default, and what every test uses.
 
     `get` hands back the same object each time, so there is nothing to conflict
-    with; `save` only advances the version to match the durable store.
-    DynamoConversationStore (stores/dynamo.py) is the same contract across
-    restarts and servers.
+    with; `save` only advances the version, as a durable store must. A durable
+    store implements the same methods (tests/store_contract.py holds it to
+    them) and must raise ConversationConflict on a stale save.
     """
 
     def __init__(self, clock: Callable[[], str] = utc_now_iso) -> None:

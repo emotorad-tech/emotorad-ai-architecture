@@ -1,7 +1,6 @@
 import json
 import unittest
 
-from emotorad_ai.config import STORES, Settings
 from emotorad_ai.conversation import ConversationState
 
 HISTORY = [
@@ -12,19 +11,6 @@ HISTORY = [
     ]},
     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"data\": {}}", "is_error": False}]},
 ]
-
-
-class StoreSettingsTests(unittest.TestCase):
-    def test_store_settings_default_to_memory_and_the_spec_windows(self):
-        settings = Settings()
-        self.assertEqual(STORES, ("memory", "dynamodb"))
-        self.assertEqual(settings.store, "memory")
-        self.assertEqual(settings.dynamo_table, "emotorad-ai-conversations")
-        self.assertEqual((settings.state_ttl_hours, settings.transcript_ttl_days, settings.idempotency_ttl_days), (48, 90, 7))
-
-    def test_an_unknown_store_is_refused(self):
-        with self.assertRaises(ValueError):
-            Settings(store="redis")
 
 
 class StateJsonTests(unittest.TestCase):

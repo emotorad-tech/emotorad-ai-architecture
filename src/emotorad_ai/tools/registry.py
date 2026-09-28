@@ -106,8 +106,9 @@ class IdempotencyStore:
     Claim-before-execute: `claim` marks a key as in progress and only the
     caller that won the claim runs the tool, so a retry arriving while the
     first attempt is still running cannot execute it a second time.
-    In-memory, one process; stores.dynamo.DynamoIdempotencyStore is the same
-    contract across restarts and servers.
+    In-memory, one process. Back it with a durable store implementing the same
+    four methods before a real write integration (Zoho) runs on more than one
+    server, or a retry across servers can execute twice.
     """
 
     def __init__(self) -> None:

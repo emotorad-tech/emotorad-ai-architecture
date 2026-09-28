@@ -15,9 +15,6 @@ anthropic>=0.40
 # design requires; runtime.py holds what each step does.
 langgraph>=1.2,<2
 
-# Conversation store (src/emotorad_ai/stores/dynamo.py), when EMOTORAD_STORE=dynamodb.
-boto3>=1.34
-
 # Prompt-tuning playground (src/emotorad_ai/playground.py). Ships in the
 # deployed container too — api.py reverse-proxies /playground to it so the
 # internal team can reach it through the one port that's exposed, rather

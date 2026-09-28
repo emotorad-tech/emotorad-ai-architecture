@@ -1,9 +1,7 @@
 import unittest
 
-from emotorad_ai.stores.dynamo import DynamoIdempotencyStore
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, MockTicketSystem, build_registry
 from emotorad_ai.tools.registry import IdempotencyStore, ToolContext, ToolRegistry, is_error, ok
-from tests.dynamo_fixture import MotoTable
 
 TICKET = {"category": "battery_charging", "severity": "normal", "description": "LED off.", "idempotency_key": "k1"}
 CTX = ToolContext(conversation_id="c1", phone="+919876543210")
@@ -33,23 +31,17 @@ class InMemoryClaimTests(ClaimContract, unittest.TestCase):
         return IdempotencyStore()
 
 
-class DynamoClaimTests(MotoTable, ClaimContract, unittest.TestCase):
-    def make(self):
-        return DynamoIdempotencyStore(self.table, client=self.client, now=lambda: 1_790_000_000)
-
-    def test_two_registries_on_one_table_raise_exactly_one_ticket(self):
-        tickets = MockTicketSystem()
-        first = build_registry(ticket_system=tickets, idempotency=self.make())
-        second = build_registry(ticket_system=tickets, idempotency=self.make())
+class SharedStoreTests(unittest.TestCase):
+    def test_two_registries_sharing_one_store_raise_exactly_one_ticket(self):
+        # Two servers in miniature: a durable store only has to pass this with
+        # its own instance in place of the shared in-memory one.
+        shared, tickets = IdempotencyStore(), MockTicketSystem()
+        first = build_registry(ticket_system=tickets, idempotency=shared)
+        second = build_registry(ticket_system=tickets, idempotency=shared)
         a = first.call(CREATE_SUPPORT_TICKET, dict(TICKET), CTX)
         b = second.call(CREATE_SUPPORT_TICKET, dict(TICKET), CTX)
         self.assertEqual(a, b)
         self.assertEqual(len(tickets.tickets), 1)
-
-    def test_the_claim_expires_after_seven_days(self):
-        self.make().claim("c1:x:k")
-        item = self.client.get_item(TableName=self.table, Key={"PK": {"S": "IDEM#c1:x:k"}, "SK": {"S": "IDEM"}})["Item"]
-        self.assertEqual(int(item["expires_at"]["N"]), 1_790_000_000 + 7 * 86400)
 
 
 class RegistryReleasesOnFailureTests(unittest.TestCase):
