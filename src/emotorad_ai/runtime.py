@@ -21,9 +21,10 @@ methods below are what each step does:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence
 
-from .agents.base import Agent, AgentDefinition
+from .agents.base import HANDOVER_TEXT, Agent, AgentDefinition
 from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
 from .agents.battery_support import DEFINITION as BATTERY_SUPPORT_DEFINITION
 from .agents.dealer_orders import AGENT_NAME as DEALER_ORDERS
@@ -32,10 +33,21 @@ from .agents.late_warranty import AGENT_NAME as LATE_WARRANTY
 from .agents.late_warranty import DEFINITION as LATE_WARRANTY_DEFINITION
 from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
 from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
+from .agents.narrow_support import AGENT_NAME as NARROW_SUPPORT
+from .agents.narrow_support import build_narrow_definition
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import ConversationState, ConversationStore
-from .decisions import Route
+from .decisions import (
+    EMPTY_MESSAGE,
+    Route,
+    Thresholds,
+    build_catalogue,
+    build_questions,
+    build_state,
+    load_thresholds,
+    route,
+)
 from .disclosure import apply_disclosure
 from .enrichment import ContextEnricher
 from .graph import TurnNodes, build_turn_graph
@@ -49,10 +61,15 @@ from .guardrails import (
     check_evidence,
     check_human_handoff,
 )
+from .errorcodes import load_table
 from .identity import IdentityResolver, ResolvedIdentity
+from .jev import JevError
+from .knowledge import KnowledgeBase
 from .llm import BedrockClaude
 from .observability import EventLog
-from .tools.mocks import CREATE_SUPPORT_TICKET, build_registry
+from .openrouter import OpenRouterError
+from .standard_responses import StandardResponse, load_standard_responses
+from .tools.mocks import CREATE_SUPPORT_TICKET, LOOKUP_ERROR_CODE, build_registry
 from .tools.registry import ToolContext, ToolRegistry, is_error
 from .triage import TriageAgent
 
@@ -77,6 +94,10 @@ class Runtime:
         log: Optional[EventLog] = None,
         resolver: Optional[IdentityResolver] = None,
         diagnostics_available: bool = False,
+        jev: Any = None,
+        narrow_llm: Any = None,
+        thresholds: Optional[Thresholds] = None,
+        standard_responses: Optional[Sequence[StandardResponse]] = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
@@ -97,6 +118,22 @@ class Runtime:
             name: Agent(definition, self.registry, self.llm, self.log, self.settings)
             for name, definition in definitions.items()
         }
+
+        # Jev routing. Absent in offline and bedrock modes, where the graph's
+        # classify node always answers `full` and the turn is exactly today's.
+        self.jev = jev
+        self.narrow_llm = narrow_llm if narrow_llm is not None else self.llm
+        self.catalogue = None
+        self.jev_questions: Dict[str, Any] = {}
+        self.thresholds = thresholds or Thresholds()
+        if jev is not None:
+            self.thresholds = thresholds or load_thresholds()
+            self.catalogue = build_catalogue(
+                KnowledgeBase(),
+                standard=standard_responses if standard_responses is not None else load_standard_responses(),
+                error_table=load_table() if LOOKUP_ERROR_CODE in self.registry.specs else None,
+            )
+            self.jev_questions = build_questions(self.catalogue)
 
         self.graph = build_turn_graph(
             TurnNodes(
@@ -218,17 +255,120 @@ class Runtime:
         return {}
 
     def _node_classify(self, turn: Dict[str, Any]) -> Dict[str, Any]:
-        return {"route": Route(path="full", reasons=("jev_disabled",))}
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        if self.jev is None:
+            return {"route": Route(path="full", reasons=("jev_disabled",))}
+
+        bike = self._selected_bike(resolved, state)
+        decision, error = None, None
+        if not message.message_text.strip():
+            # A photo on its own: nothing to score. Stay on the record if there is one.
+            error = EMPTY_MESSAGE
+        else:
+            jev_state = build_state(
+                message.message_text, state.history, message.channel, bike=bike,
+                current_sub_category=state.sub_category, redact=self._redaction_terms(resolved),
+            )
+            try:
+                decision = self.jev.decide(jev_state, self.jev_questions)
+            except JevError as exc:
+                error = exc.code
+
+        chosen = route(decision, error, self.thresholds, self.catalogue, state.sub_category, bike)
+        self.log.jev_decision(message.conversation_id, chosen, decision, error)
+        return {"route": chosen}
 
     def _node_standard(self, turn: Dict[str, Any]) -> Dict[str, Any]:
-        return {}
+        message, state, chosen = turn["message"], turn["conversation"], turn["route"]
+        response = self.catalogue.standard[chosen.standard_response_id]
+        text = response.reply_for(chosen.language)
+        # Checked at load already; checked again here because a check that only
+        # runs at load is a check an edit to the loader can remove.
+        if check_coverage_claim(text, []).blocked or check_evidence(text, state.evidence_seen).blocked:
+            self.log.guardrail(message.conversation_id, "standard_response_blocked", {"id": response.id})
+            return {"route": replace(chosen, path="full", reasons=chosen.reasons + ("standard_blocked",))}
+        return {"reply": self._finish(
+            message, state, text, "standard:%s" % response.id, metadata={"route": "standard"},
+        )}
 
     def _node_narrow(self, turn: Dict[str, Any]) -> Dict[str, Any]:
-        return {}
+        message, state, resolved, chosen = turn["message"], turn["conversation"], turn["resolved"], turn["route"]
+        record = self.catalogue.records[chosen.sub_category]
+        state.sub_category = record.id
+
+        context = ToolContext(
+            conversation_id=message.conversation_id,
+            phone=resolved.identity.phone,
+            cluster_id=resolved.cluster_id,
+        )
+        prefetched: List[Dict[str, Any]] = []
+        for call in chosen.prefetch:
+            if call.tool not in self.registry.specs:
+                continue
+            arguments = dict(call.arguments)
+            envelope = self.registry.call(call.tool, arguments, context)
+            self.log.tool_call(message.conversation_id, call.tool, arguments, envelope)
+            prefetched.append({"tool": call.tool, "arguments": arguments, "result": envelope, "prefetched": True})
+
+        agent = Agent(build_narrow_definition(record, prefetched), self.registry, self.narrow_llm, self.log, self.settings)
+        mark = len(state.history)
+        try:
+            reply = self._run(agent, message, resolved, state, prefetched=prefetched, route_path="narrow")
+        except OpenRouterError as exc:
+            # The loop appended the customer's message before failing. Undo it,
+            # or the full agent would be shown the message twice.
+            del state.history[mark:]
+            self.log.emit("llm_error", message.conversation_id, agent=NARROW_SUPPORT, code=exc.code)
+            return {"route": replace(chosen, path="full", reasons=chosen.reasons + ("narrow_llm_error:%s" % exc.code,))}
+        return {"reply": reply}
 
     def _node_full(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
-        return {"reply": self._run_agent(state.agent or BATTERY_SUPPORT, message, resolved, state)}
+        chosen = turn.get("route")
+
+        # Jev may confidently place the message in a different topic from the
+        # one triage picked; that is the category decision the spec gives it.
+        topic_agent = TOPIC_AGENTS.get(chosen.category) if chosen and chosen.category else None
+        if topic_agent and topic_agent != state.agent:
+            state.route_to(topic_agent)
+            self.log.routed(message.conversation_id, topic_agent, "jev:%s" % chosen.category)
+        if chosen and chosen.category and state.sub_category:
+            current = self.catalogue.records.get(state.sub_category) if self.catalogue else None
+            if current is None or current.topic != chosen.category:
+                state.sub_category = None
+
+        name = state.agent or BATTERY_SUPPORT
+        mark = len(state.history)
+        try:
+            return {"reply": self._run_agent(name, message, resolved, state)}
+        except OpenRouterError as exc:
+            # Only the OpenRouter models raise this; Bedrock behaviour is unchanged.
+            del state.history[mark:]
+            self.log.emit("llm_error", message.conversation_id, agent=name, code=exc.code)
+            self.log.escalation(message.conversation_id, "llm_error", None)
+            return {"reply": self._finish(
+                message, state, HANDOVER_TEXT, "llm_error", escalated=True, metadata={"code": exc.code},
+            )}
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _selected_bike(resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
+        for bike in resolved.bikes:
+            if bike.get("frame_number") == state.selected_frame:
+                return bike
+        return resolved.single_bike
+
+    @staticmethod
+    def _redaction_terms(resolved: ResolvedIdentity) -> List[str]:
+        """Names and frame numbers that must not reach Jev, even inside recent turns."""
+        terms: List[str] = []
+        name = (resolved.profile or {}).get("name") or ""
+        if name:
+            terms.append(name)
+            terms.extend(part for part in name.split() if len(part) > 2)
+        terms.extend(bike.get("frame_number") or "" for bike in resolved.bikes)
+        return [term for term in terms if term]
 
     # -- steps ---------------------------------------------------------------
 
