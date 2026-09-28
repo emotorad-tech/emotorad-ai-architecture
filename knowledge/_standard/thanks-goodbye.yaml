@@ -1,0 +1,14 @@
+# DRAFT. Needs an SME's approval (status: approved, approved_by: <name>) in a PR
+# before Jev may send it. The wording states no business fact on purpose.
+id: std-thanks-goodbye
+status: draft
+approved_by: ""
+criteria: >
+  The customer is only thanking us or saying goodbye, with no new question, problem or
+  information. Not this if the message also asks something, or says a problem continues.
+replies:
+  english: "You're welcome. If anything else comes up with your bike, just message here and we'll help."
+  hinglish: "Aapka swagat hai. Bike ke saath kuch aur ho toh yahin message kar dijiye, hum madad karenge."
+  hindi: "आपका स्वागत है। बाइक से जुड़ी कोई और बात हो तो यहीं मैसेज कर दीजिए, हम मदद करेंगे।"
+examples: ["thanks", "thank you so much", "ok bye", "dhanyavaad", "shukriya", "धन्यवाद"]
+counter_examples: ["thanks but it still won't charge", "ok thanks, and is it under warranty?"]
