@@ -8,6 +8,11 @@ Flip to real Claude once that's ready:
 
     EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app
 
+Or Jev routing with the OpenRouter models (needs OPENROUTER_API_KEY; sends
+customer text outside AWS, so not for real customers until signed off):
+
+    EMOTORAD_AI_MODE=openrouter uvicorn emotorad_ai.api:app
+
 Run locally:
 
     pip install -r requirements-dev.txt
@@ -44,21 +49,22 @@ from .adapters import WebsiteChatAdapter
 from .config import load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
-from .llm import OfflinePlanner
 from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
-
-MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
+from .wiring import build_models
 
 settings = load_settings()
 registry = build_registry()
 resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
+models = build_models(settings)
 runtime = Runtime(
     settings=settings,
     registry=registry,
-    llm=OfflinePlanner() if MODE == "offline" else None,
+    llm=models.llm,
+    narrow_llm=models.narrow_llm,
+    jev=models.jev,
     log=log,
     resolver=resolver,
 )
@@ -84,7 +90,7 @@ class MessageOut(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "mode": MODE}
+    return {"status": "ok", "mode": settings.mode}
 
 
 @app.post("/message", response_model=MessageOut)
