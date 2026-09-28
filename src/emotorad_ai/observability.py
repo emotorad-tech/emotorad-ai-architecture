@@ -105,15 +105,15 @@ class EventLog:
     def guardrail(self, conversation_id: str, name: str, triggered_by: Any) -> None:
         self.emit("guardrail_triggered", conversation_id, guardrail=name, triggered_by=triggered_by)
 
-    def llm_turn(self, conversation_id: str, agent: str, iteration: int, stop_reason: str, usage: Any = None) -> None:
-        self.emit(
-            "llm_turn",
-            conversation_id,
-            agent=agent,
-            iteration=iteration,
-            stop_reason=stop_reason,
-            usage=usage,
-        )
+    def llm_turn(
+        self, conversation_id: str, agent: str, iteration: int, stop_reason: str,
+        usage: Any = None, model: Optional[str] = None,
+    ) -> None:
+        fields: Dict[str, Any] = {"agent": agent, "iteration": iteration, "stop_reason": stop_reason, "usage": usage}
+        if model:
+            # Which model answered is what makes a cost per path comparable.
+            fields["model"] = model
+        self.emit("llm_turn", conversation_id, **fields)
 
     def tool_call(self, conversation_id: str, tool: str, arguments: Dict[str, Any], result: Dict[str, Any]) -> None:
         self.emit(

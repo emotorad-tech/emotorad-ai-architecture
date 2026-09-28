@@ -102,6 +102,7 @@ class Agent:
                 iteration,
                 response.stop_reason,
                 response.usage,
+                model=getattr(self.llm, "model", None),
             )
             history.append({"role": "assistant", "content": response.api_content})
 
