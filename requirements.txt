@@ -11,6 +11,10 @@ websockets>=12.0
 # Claude on Bedrock, once EMOTORAD_AI_MODE=bedrock is set (see api.py).
 anthropic>=0.40
 
+# Turn orchestration (src/emotorad_ai/graph.py). The graph encodes the order the
+# design requires; runtime.py holds what each step does.
+langgraph>=1.2,<2
+
 # Prompt-tuning playground (src/emotorad_ai/playground.py). Ships in the
 # deployed container too — api.py reverse-proxies /playground to it so the
 # internal team can reach it through the one port that's exposed, rather

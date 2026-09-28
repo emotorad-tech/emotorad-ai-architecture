@@ -1,10 +1,11 @@
 """The skeleton, wired end to end.
 
     channel adapter -> message contract -> identity resolution -> enrichment
-    -> guardrails -> triage -> sub-agent -> tools -> post-checks
+    -> guardrails -> triage -> Jev path -> sub-agent -> tools -> post-checks
 
 `handle` is the single entry point a channel adapter calls, and the *order* of
-the steps is the design:
+the steps is the design. graph.py fixes that order as a LangGraph graph; the
+methods below are what each step does:
 
 * identity and enrichment run before the prompt is built, so the agent never has
   to ask a customer what they own;
@@ -20,7 +21,7 @@ the steps is the design:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from .agents.base import Agent, AgentDefinition
 from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
@@ -34,8 +35,10 @@ from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import ConversationState, ConversationStore
+from .decisions import Route
 from .disclosure import apply_disclosure
 from .enrichment import ContextEnricher
+from .graph import TurnNodes, build_turn_graph
 from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
     EVIDENCE_BLOCKED_MESSAGE,
@@ -95,13 +98,31 @@ class Runtime:
             for name, definition in definitions.items()
         }
 
+        self.graph = build_turn_graph(
+            TurnNodes(
+                prepare=self._node_prepare,
+                safety_gate=self._node_safety,
+                handoff_gate=self._node_handoff,
+                persona_route=self._node_persona,
+                jev_classify=self._node_classify,
+                standard_reply=self._node_standard,
+                narrow_agent=self._node_narrow,
+                full_agent=self._node_full,
+            )
+        )
+
     # -- entry point ---------------------------------------------------------
 
     def handle(self, message: InboundMessage) -> Reply:
+        return self.graph.invoke({"message": message})["reply"]
+
+    # -- graph nodes (graph.py says what follows what) -----------------------
+
+    def _node_prepare(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        message = turn["message"]
         self.log.inbound(message)
         state = self.conversations.get(message.conversation_id)
         state.turns += 1
-        history = state.history
 
         resolved = self.resolver.hydrate(message)
         self.log.identity_resolved(
@@ -128,25 +149,34 @@ class Runtime:
                 kept=list(context.sections), dropped=context.dropped, tokens=context.tokens,
             )
 
-        # 1. Safety. A keyword gate ahead of the agent turn, not something the
-        #    model has to notice. Allowed to over-trigger.
         if message.attachments:
             state.evidence_seen = True
+        return {"conversation": state, "resolved": resolved}
 
+    def _node_safety(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 1. Safety. A keyword gate ahead of the agent turn, not something the
+        #    model has to notice. Allowed to over-trigger.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         safety = check_safety(message.message_text)
         if safety.triggered:
-            return self._handle_safety(message, resolved, state, safety.matched)
+            return {"reply": self._handle_safety(message, resolved, state, safety.matched)}
+        return {}
 
+    def _node_handoff(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 2. Human handoff, reachable at any point, no friction.
+        message, state = turn["message"], turn["conversation"]
         handoff = check_human_handoff(message.message_text)
         if handoff.triggered:
             self.log.guardrail(message.conversation_id, "human_handoff", handoff.matched)
             self.log.escalation(message.conversation_id, "customer_requested_human", None)
-            return self._finish(
+            return {"reply": self._finish(
                 message, state, HANDOFF_MESSAGE, "guardrail:human_handoff",
                 escalated=True, metadata={"matched": handoff.matched},
-            )
+            )}
+        return {}
 
+    def _node_persona(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         if resolved.persona == "dealer":
             # Dealers bypass customer triage entirely. There is no bike to
             # disambiguate and no customer record to enrich from — and routing
@@ -154,19 +184,19 @@ class Runtime:
             # up holding someone else's warranty data.
             state.route_to(DEALER_ORDERS)
             self.log.routed(message.conversation_id, DEALER_ORDERS, "persona:dealer")
-            return self._run_agent(DEALER_ORDERS, message, resolved, state)
+            return {"reply": self._run_agent(DEALER_ORDERS, message, resolved, state)}
 
         if resolved.persona != "customer":
-            return self._finish(
+            return {"reply": self._finish(
                 message, state, UNSUPPORTED_MESSAGE, "router",
                 escalated=True, metadata={"persona": resolved.persona},
-            )
+            )}
 
         # 3. A customer with no bike on record goes straight to registration —
         #    triage has nothing to disambiguate and no issue it can act on.
         if resolved.method in ("no_warranty_record",) and LATE_WARRANTY in self.agents:
             state.route_to(LATE_WARRANTY)
-            return self._run_agent(LATE_WARRANTY, message, resolved, state)
+            return {"reply": self._run_agent(LATE_WARRANTY, message, resolved, state)}
 
         # 4. Triage: which bike, what issue, which agent.
         if state.agent is None:
@@ -181,12 +211,24 @@ class Runtime:
                 topic=state.pending_topic, agent=outcome.agent, reason=outcome.reason,
             )
             if not outcome.is_handoff:
-                return self._finish(
+                return {"reply": self._finish(
                     message, state, outcome.reply or UNSUPPORTED_MESSAGE, "triage",
                     metadata=dict(outcome.metadata, reason=outcome.reason),
-                )
+                )}
+        return {}
 
-        return self._run_agent(state.agent or BATTERY_SUPPORT, message, resolved, state)
+    def _node_classify(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        return {"route": Route(path="full", reasons=("jev_disabled",))}
+
+    def _node_standard(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        return {}
+
+    def _node_narrow(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        return {}
+
+    def _node_full(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        return {"reply": self._run_agent(state.agent or BATTERY_SUPPORT, message, resolved, state)}
 
     # -- steps ---------------------------------------------------------------
 
@@ -197,8 +239,23 @@ class Runtime:
         resolved: ResolvedIdentity,
         state: ConversationState,
     ) -> Reply:
-        turn = self.agents[agent_name].run(
-            message, resolved, state.history, state.context_block or ""
+        return self._run(self.agents[agent_name], message, resolved, state)
+
+    def _run(
+        self,
+        agent: Agent,
+        message: InboundMessage,
+        resolved: ResolvedIdentity,
+        state: ConversationState,
+        prefetched: Sequence[Dict[str, Any]] = (),
+        route_path: Optional[str] = None,
+    ) -> Reply:
+        """One agent turn and every post-check, for whichever agent ran it.
+
+        One place, so the narrow agent cannot skip a check the full agents get.
+        """
+        turn = agent.run(
+            message, resolved, state.history, state.context_block or "", prefetched=prefetched
         )
         if turn.escalate:
             self.log.escalation(message.conversation_id, "agent_requested_handover", turn.ticket_id)
@@ -258,7 +315,10 @@ class Runtime:
                 for item in turn.attachments
                 if item.get("url")
             ],
-            metadata={"tool_calls": [c["tool"] for c in turn.tool_calls], "iterations": turn.iterations},
+            metadata=dict(
+                {"tool_calls": [c["tool"] for c in turn.tool_calls], "iterations": turn.iterations},
+                **({"route": route_path} if route_path else {}),
+            ),
         )
 
     def _handle_safety(
