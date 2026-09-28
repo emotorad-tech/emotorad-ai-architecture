@@ -7,6 +7,9 @@
     # against Claude on Bedrock (needs AWS credentials for the account/region)
     python -m emotorad_ai.cli --session sess-ananya
 
+    # as the signed-in Amiigo test rider (two bikes, see tools/fixtures.py)
+    python -m emotorad_ai.cli --offline --channel amiigo --session sess-amiigo-test
+
 Offline mode is what you use to demo the safety hard-stop and the escalation
 path, because neither of those calls the model at all.
 """
@@ -17,7 +20,7 @@ import argparse
 import sys
 from typing import Sequence
 
-from .adapters import WebsiteChatAdapter
+from .adapters import AmiigoAdapter, WebsiteChatAdapter
 from .config import load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
@@ -26,10 +29,14 @@ from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
 
+# Both carry a session token, which is all the CLI supplies.
+ADAPTERS = {"website": WebsiteChatAdapter, "amiigo": AmiigoAdapter}
+
 
 def main(argv: Sequence[str] = ()) -> int:
     parser = argparse.ArgumentParser(description="Run an Emotorad battery-support conversation.")
-    parser.add_argument("--session", default="sess-ananya", help="website session token (see tools/fixtures.py)")
+    parser.add_argument("--session", default="sess-ananya", help="website or Amiigo session token (see tools/fixtures.py)")
+    parser.add_argument("--channel", choices=sorted(ADAPTERS), default="website", help="which channel adapter the message arrives through")
     parser.add_argument("--pill", default=None, help="entry pill the visitor tapped, e.g. battery_issue")
     parser.add_argument("--offline", action="store_true", help="use the offline planner instead of Bedrock")
     parser.add_argument("--diagnostics", action="store_true", help="pretend battery telematics exist")
@@ -46,7 +53,7 @@ def main(argv: Sequence[str] = ()) -> int:
         log=log,
         resolver=IdentityResolver(registry),
     )
-    adapter = WebsiteChatAdapter(runtime.resolver)
+    adapter = ADAPTERS[args.channel](runtime.resolver)
     conversation_id = new_conversation_id()
 
     def send(text: str) -> None:

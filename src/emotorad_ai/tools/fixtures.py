@@ -148,7 +148,42 @@ WARRANTY_RECORDS: Dict[str, List[Dict[str, Any]]] = {
             "created_at": None,
         }
     ],
+    # The Amiigo test rider, reached through `sess-amiigo-test`. Unlike the
+    # fixtures above, every field is filled in: this record exists to show the
+    # bot a complete profile, not to reproduce an upstream gap. Two bikes, one
+    # either side of the warranty line, so both coverage answers and the
+    # which-bike question can be tried from one login.
+    "+919700000010": [
+        {
+            "customer_name": "Kabir Sharma",
+            "mobile": "+919700000010",
+            "frame_number": "EMXP2026001234",
+            "product_name": "EMX Plus",
+            "product_color": "Grey",
+            "purchase_date": "2026-02-10",
+            "franchise_name": "EMotorad D2C",
+            "pin_code": "411045",
+            "battery_variant": "48V 14.4Ah removable",
+            "created_at": "2026-02-12",
+        },
+        {
+            "customer_name": "Kabir Sharma",
+            "mobile": "+919700000010",
+            "frame_number": "DDL32023045678",
+            "product_name": "Doodle V3",
+            "product_color": "Matte Black",
+            "purchase_date": "2023-05-20",
+            "franchise_name": "Pune Cycle Company",
+            "pin_code": "411045",
+            "battery_variant": "36V 12.75Ah removable",
+            "created_at": "2023-05-22",
+        },
+    ],
 }
+
+# The Amiigo test rider's number. Invented, and kept in the +91970000xxxx block
+# the other fixtures use, never one of the Amigo backend's QA login numbers.
+PHONE_AMIIGO_TEST_RIDER = "+919700000010"
 
 # Registered bike, no purchase date — coverage answered provisionally from the
 # registration date.
@@ -214,6 +249,7 @@ PRICE_LIST: Dict[str, Dict[str, Any]] = {
 SESSIONS: Dict[str, str] = {
     "sess-ananya": "+919876543210",
     "sess-rohit": "+919812345678",
+    "sess-amiigo-test": PHONE_AMIIGO_TEST_RIDER,
 }
 
 SERVICE_CENTRES: List[Dict[str, Any]] = [
