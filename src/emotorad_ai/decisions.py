@@ -15,13 +15,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .errorcodes import ANY_CODE, ErrorCodeTable
-from .jev import Question, choice, noul
+from .jev import ChoiceAnswer, JevDecision, NoulAnswer, Question, choice, noul
 from .knowledge import KNOWLEDGE_DIR, KnowledgeBase, KnowledgeRecord
 from .observability import redact_pii
 from .standard_responses import LANGUAGES, StandardResponse
+from .tools.mocks import LOOKUP_ERROR_CODE, LOOKUP_WARRANTY_RECORD
 
 THRESHOLDS_PATH = KNOWLEDGE_DIR / "_routing" / "thresholds.yaml"
 
@@ -244,3 +245,122 @@ def build_state(
         "bike_model": (bike or {}).get("product_name") or None,
         "current_sub_category": current_sub_category,
     }
+
+
+@dataclass(frozen=True)
+class PrefetchCall:
+    tool: str
+    arguments: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Route:
+    path: str  # "standard" | "narrow" | "full"
+    reasons: Tuple[str, ...] = ()
+    scores: Mapping[str, Any] = field(default_factory=dict)
+    standard_response_id: Optional[str] = None
+    category: Optional[str] = None
+    sub_category: Optional[str] = None
+    error_code: Optional[str] = None
+    language: Optional[str] = None
+    prefetch: Tuple[PrefetchCall, ...] = ()
+
+
+def _confident(decision: JevDecision, question_id: str, threshold: float) -> Optional[str]:
+    answer = decision.answers.get(question_id)
+    if isinstance(answer, ChoiceAnswer) and answer.p >= threshold:
+        return answer.choice
+    return None
+
+
+def _noul(decision: JevDecision, question_id: str) -> float:
+    answer = decision.answers.get(question_id)
+    return answer.p if isinstance(answer, NoulAnswer) else 0.0
+
+
+def route(
+    decision: Optional[JevDecision],
+    error: Optional[str],
+    thresholds: Thresholds,
+    catalogue: RoutingCatalogue,
+    current_sub_category: Optional[str] = None,
+    bike: Optional[Mapping[str, Any]] = None,
+) -> Route:
+    """Pick the path. Rules in order, first match wins (spec §3.3).
+
+    The safe direction is always `full`: today's agent at today's cost. Every
+    other path has to be earned by a score above its own threshold.
+    """
+    bike = bike or {}
+    current = catalogue.records.get(current_sub_category) if current_sub_category else None
+
+    # 1. No decision.
+    if decision is None:
+        if error == EMPTY_MESSAGE and current is not None:
+            return Route(path="narrow", reasons=("empty_message_continue",), category=current.topic, sub_category=current.id)
+        return Route(path="full", reasons=("jev_error:%s" % error if error else "jev_disabled",))
+
+    scores = decision.scores()
+    reasons: List[str] = []
+    language = _confident(decision, Q_LANGUAGE, thresholds.language)
+
+    # 2. Standard response.
+    standard_id = _confident(decision, Q_STANDARD, thresholds.standard_response)
+    if standard_id and standard_id != NONE:
+        response = catalogue.standard.get(standard_id)
+        if response is None:
+            reasons.append("standard_unknown:%s" % standard_id)
+        elif language is None:
+            reasons.append("standard_language_unsure")
+        elif response.reply_for(language) is None:
+            reasons.append("standard_no_reply_for:%s" % language)
+        else:
+            return Route(
+                path="standard", reasons=tuple(reasons + ["standard:%s" % standard_id]), scores=scores,
+                standard_response_id=standard_id, language=language,
+            )
+
+    category = _confident(decision, Q_CATEGORY, thresholds.category)
+    if category == NONE_OF_THESE:
+        reasons.append("category_none_of_these")
+        category = None
+    sub_id = _confident(decision, Q_SUB_CATEGORY, thresholds.sub_category)
+    record = catalogue.records.get(sub_id) if sub_id and sub_id != NONE else None
+    error_code = _confident(decision, Q_ERROR_CODE, thresholds.error_code)
+    if error_code == NONE:
+        error_code = None
+
+    # 3. A new record, earned by both scores and allowed for this bike.
+    chosen: Optional[KnowledgeRecord] = None
+    if category and record is not None:
+        if record.topic != category:
+            reasons.append("topic_mismatch:%s/%s" % (category, record.id))
+        elif not catalogue.applicable(record, bike):
+            reasons.append("not_applicable:%s" % record.id)
+        else:
+            chosen = record
+            reasons.append("narrow_new:%s" % record.id)
+
+    # 4. Mid-flow: "yes, it's red now" scores low on everything. Stay on the
+    #    record unless Jev confidently names a different topic.
+    if chosen is None and current is not None and (category is None or category == current.topic):
+        chosen = current
+        reasons.append("narrow_continue:%s" % current.id)
+
+    # 5. Otherwise the full agent.
+    if chosen is None:
+        if category is None:
+            reasons.append("category_unsure")
+        elif record is None:
+            reasons.append("sub_category_unsure")
+        return Route(path="full", reasons=tuple(reasons), scores=scores, category=category, error_code=error_code, language=language)
+
+    prefetch: List[PrefetchCall] = []
+    if _noul(decision, Q_WARRANTY) >= thresholds.tools.get(LOOKUP_WARRANTY_RECORD, 1.01):
+        prefetch.append(PrefetchCall(LOOKUP_WARRANTY_RECORD, {}))
+    if error_code:
+        prefetch.append(PrefetchCall(LOOKUP_ERROR_CODE, {"code": error_code}))
+    return Route(
+        path="narrow", reasons=tuple(reasons), scores=scores, category=chosen.topic, sub_category=chosen.id,
+        error_code=error_code, language=language, prefetch=tuple(prefetch),
+    )
