@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 # Which models answer. `offline` is a fixed planner, no network; `bedrock` is
 # Claude in EMotorad's own AWS account; `openrouter` is Jev routing plus the
 # OpenRouter reply models, and sends customer text outside AWS, so it needs
 # sign-off before real customer traffic (spec §1.8).
 MODES = ("offline", "bedrock", "openrouter")
+# Where conversations live (spec 2026-09-28-dynamodb-conversation-store).
+STORES = ("memory", "dynamodb")
 
 
 @dataclass(frozen=True)
@@ -48,9 +51,21 @@ class Settings:
     # Zero-data-retention providers only, unless someone deliberately turns it off.
     openrouter_zdr: bool = os.environ.get("EMOTORAD_OPENROUTER_ZDR", "1") == "1"
 
+    # Where conversations live. `memory` is one process, lost on restart;
+    # `dynamodb` survives restarts and scales out.
+    store: str = os.environ.get("EMOTORAD_STORE", "memory")
+    dynamo_table: str = os.environ.get("EMOTORAD_DYNAMO_TABLE", "emotorad-ai-conversations")
+    dynamo_endpoint: Optional[str] = os.environ.get("EMOTORAD_DYNAMO_ENDPOINT") or None
+    # How long each kind of item lives before DynamoDB deletes it (TTL).
+    state_ttl_hours: int = int(os.environ.get("EMOTORAD_STATE_TTL_HOURS", "48"))
+    transcript_ttl_days: int = int(os.environ.get("EMOTORAD_TRANSCRIPT_TTL_DAYS", "90"))
+    idempotency_ttl_days: int = int(os.environ.get("EMOTORAD_IDEMPOTENCY_TTL_DAYS", "7"))
+
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise ValueError("EMOTORAD_AI_MODE must be one of %s, not %r" % (", ".join(MODES), self.mode))
+        if self.store not in STORES:
+            raise ValueError("EMOTORAD_STORE must be one of %s, not %r" % (", ".join(STORES), self.store))
 
 
 def load_settings() -> Settings:

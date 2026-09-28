@@ -6,3 +6,6 @@
 # AppTest cannot drive a file-accepting chat_input. pyflakes catches the whole
 # class without running anything.
 pyflakes>=3.0
+
+# An in-process fake of DynamoDB, so the store's tests never reach AWS.
+moto[dynamodb]>=5.0

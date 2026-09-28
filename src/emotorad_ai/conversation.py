@@ -13,6 +13,8 @@ currently owns the conversation. Everything else is transcript.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -59,10 +61,30 @@ class ConversationState:
     # Every phase change, for debugging a conversation that went sideways. The
     # transcript says what was said; this says what the platform decided.
     transitions: List[str] = field(default_factory=list)
+    # Persistence (EMOTORAD_STORE=dynamodb). `version` guards concurrent saves;
+    # `user_key` ties the conversation to a person for memory; the last two
+    # feed the per-user summary.
+    version: int = 0
+    user_key: Optional[str] = None
+    started_at: Optional[str] = None
+    channel: Optional[str] = None
+    escalated: bool = False
+    ticket_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.phase not in PHASES:
             raise ValueError("unknown conversation phase: %r" % (self.phase,))
+
+    def to_json(self) -> str:
+        return json.dumps(dataclasses.asdict(self), ensure_ascii=False, default=str)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "ConversationState":
+        """Tolerant of fields a newer version wrote, so a rolling deploy with two
+        versions running cannot make old code fail to load a conversation."""
+        data = json.loads(raw)
+        known = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
 
     def move_to(self, phase: str, reason: str = "") -> None:
         if phase not in PHASES:
