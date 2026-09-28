@@ -195,3 +195,62 @@ class DynamoConversationStore:
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history
+
+
+class DynamoIdempotencyStore:
+    """The registry's idempotency contract, shared by every server via the table.
+
+    Claim-before-execute, like the in-memory store: a conditional put marks the
+    key as pending, and only the caller whose put succeeded runs the tool.
+    """
+
+    def __init__(
+        self,
+        table_name: str,
+        client: Any = None,
+        region: str = "ap-south-1",
+        endpoint_url: Optional[str] = None,
+        now: Callable[[], float] = time.time,
+        ttl_days: int = 7,
+    ) -> None:
+        # Reuses the conversation store's client and error mapping.
+        self._table = DynamoConversationStore(table_name, client=client, region=region, endpoint_url=endpoint_url, now=now)
+        self._now = now
+        self._ttl = ttl_days * DAY
+
+    def _key(self, key: str) -> Dict[str, Dict[str, str]]:
+        return {"PK": _s("IDEM#" + key), "SK": _s("IDEM")}
+
+    def claim(self, key: str) -> Optional[Dict[str, Any]]:
+        from ..tools.registry import err
+
+        item = dict(self._key(key), status=_s("pending"), expires_at=_n(self._now() + self._ttl))
+        try:
+            self._table._call("put_item", Item=item, ConditionExpression="attribute_not_exists(PK)")
+            return None
+        except ConversationConflict:
+            existing = self.get(key)
+            if existing is not None:
+                return existing
+            return err("write_in_progress", "This action is already being carried out; try again shortly.", retryable=True)
+
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        item = self._table._call("get_item", Key=self._key(key), ConsistentRead=True).get("Item")
+        if not item or item.get("status", {}).get("S") != "done":
+            return None
+        return json.loads(item["envelope"]["S"])
+
+    def put(self, key: str, envelope: Dict[str, Any]) -> None:
+        self._table._call("put_item", Item=dict(
+            self._key(key), status=_s("done"), envelope=_s(json.dumps(envelope, default=str)),
+            expires_at=_n(self._now() + self._ttl),
+        ))
+
+    def release(self, key: str) -> None:
+        # Only a pending claim is released. A conditional failure here means the
+        # key was already done, which release is never called for: that is a bug
+        # to surface, so the ConversationConflict propagates.
+        self._table._call(
+            "delete_item", Key=self._key(key), ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":pending": _s("pending")},
+        )

@@ -97,24 +97,46 @@ class ToolSpec:
         }
 
 
+_PENDING = object()
+
+
 class IdempotencyStore:
     """Maps an idempotency key to the envelope its first execution produced.
 
-    In-memory for the mocked build. Back it with DynamoDB or Postgres before any
-    real write integration, so a retry across process restarts still dedupes.
+    Claim-before-execute: `claim` marks a key as in progress and only the
+    caller that won the claim runs the tool, so a retry arriving while the
+    first attempt is still running cannot execute it a second time.
+    In-memory, one process; stores.dynamo.DynamoIdempotencyStore is the same
+    contract across restarts and servers.
     """
 
     def __init__(self) -> None:
-        self._seen: Dict[str, Envelope] = {}
+        self._seen: Dict[str, Any] = {}
         self._lock = threading.Lock()
+
+    def claim(self, key: str) -> Optional[Envelope]:
+        with self._lock:
+            existing = self._seen.get(key)
+            if existing is None:
+                self._seen[key] = _PENDING
+                return None
+            if existing is _PENDING:
+                return err("write_in_progress", "This action is already being carried out; try again shortly.", retryable=True)
+            return existing
 
     def get(self, key: str) -> Optional[Envelope]:
         with self._lock:
-            return self._seen.get(key)
+            existing = self._seen.get(key)
+            return None if existing is _PENDING else existing
 
     def put(self, key: str, envelope: Envelope) -> None:
         with self._lock:
             self._seen[key] = envelope
+
+    def release(self, key: str) -> None:
+        with self._lock:
+            if self._seen.get(key) is _PENDING:
+                del self._seen[key]
 
 
 @dataclass
@@ -168,21 +190,24 @@ class ToolRegistry:
                 )
             arguments[field_name] = value
 
-        # The idempotency guardrail is checked before generic argument
-        # validation so a missing key is reported as itself rather than as one
-        # more absent field.
+        # The idempotency key is checked before the other arguments so a
+        # missing key is reported as itself rather than as one more absent field.
+        scoped_key = None
         if spec.write:
             key = arguments.get("idempotency_key")
             if not key:
                 return err("missing_idempotency_key", "%s requires an idempotency_key." % name)
             scoped_key = "%s:%s:%s" % (context.conversation_id, name, key)
-            previous = self.idempotency.get(scoped_key)
-            if previous is not None:
-                return previous
 
+        # Validated before the claim, so a rejected call never holds one.
         missing = [key for key in spec.required if key not in arguments]
         if missing:
             return err("missing_arguments", "Missing required argument(s): %s" % ", ".join(missing))
+
+        if scoped_key is not None:
+            previous = self.idempotency.claim(scoped_key)
+            if previous is not None:
+                return previous
 
         try:
             result = spec.fn(**arguments)
@@ -193,6 +218,10 @@ class ToolRegistry:
         else:
             envelope = result if isinstance(result, dict) and ("data" in result or "error" in result) else ok(result)
 
-        if spec.write and not is_error(envelope):
-            self.idempotency.put(scoped_key, envelope)
+        if scoped_key is not None:
+            if is_error(envelope):
+                # A failed write did nothing; let the retry run it.
+                self.idempotency.release(scoped_key)
+            else:
+                self.idempotency.put(scoped_key, envelope)
         return envelope

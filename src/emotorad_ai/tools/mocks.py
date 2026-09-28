@@ -350,6 +350,9 @@ def build_registry(
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
+    # Where write results are remembered. In memory by default; the DynamoDB
+    # store shares one record across every server (stores/dynamo.py).
+    idempotency: Optional[Any] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -363,7 +366,7 @@ def build_registry(
     tickets = ticket_system or MockTicketSystem()
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
-    registry = ToolRegistry()
+    registry = ToolRegistry(idempotency=idempotency) if idempotency is not None else ToolRegistry()
     registry.tickets = tickets  # type: ignore[attr-defined]  # test/inspection handle
     registry.bookings = bookings  # type: ignore[attr-defined]
     registry.orders = orders  # type: ignore[attr-defined]
