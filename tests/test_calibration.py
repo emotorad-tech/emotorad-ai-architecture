@@ -1,28 +1,84 @@
 import unittest
+from collections import Counter
+
+import yaml
 
 from emotorad_ai.calibration import evaluate_choice, evaluate_noul, suggest_choice, suggest_noul
 from emotorad_ai.decisions import NONE, NONE_OF_THESE, Q_CATEGORY
+from emotorad_ai.errorcodes import ANY_CODE, load_table
 from emotorad_ai.jev import JevDecision, choose, yes
 from emotorad_ai.knowledge import KnowledgeBase
-from emotorad_ai.standard_responses import load_standard_responses
-from tests.jev_golden import GoldenCase, load_golden
+from emotorad_ai.standard_responses import LANGUAGES, load_standard_responses
+from tests.jev_golden import EXTRAS, GoldenCase, load_golden
+from tests.test_retrieval_evals import GOLDEN
 
 
 class GoldenSetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.kb = KnowledgeBase()
+        cls.cases = load_golden()
+
     def test_every_label_points_at_something_that_exists(self):
-        records = {r.id for r in KnowledgeBase().records}
+        records = {r.id for r in self.kb.records}
         standard = {s.id for s in load_standard_responses()}
-        cases = load_golden()
-        self.assertGreaterEqual(len(cases), 61 + 10)
-        for case in cases:
+        codes = {e.code for e in load_table().entries if e.code != ANY_CODE}
+        for case in self.cases:
             with self.subTest(case.text):
                 self.assertIn(case.category, (None, "battery", "motor", NONE_OF_THESE))
                 self.assertIn(case.sub_category, records | {NONE, None})
                 self.assertIn(case.standard_response, standard | {NONE, None})
+                self.assertIn(case.error_code, codes | {NONE, None})
+                self.assertIn(case.language, set(LANGUAGES) | {"other"})
 
-    def test_english_hinglish_and_hindi_are_all_represented(self):
-        languages = {case.language for case in load_golden()}
-        self.assertTrue({"english", "hinglish", "hindi"} <= languages)
+    def test_a_record_label_agrees_with_its_category_and_applies_to_its_bike(self):
+        records = {r.id: r for r in self.kb.records}
+        for case in self.cases:
+            record = records.get(case.sub_category)
+            if record is None:
+                continue
+            with self.subTest(case.text):
+                if case.category is not None:
+                    self.assertEqual(record.topic, case.category)
+                if case.bike.get("product_name"):
+                    self.assertTrue(self.kb.applicable(record, case.bike))
+
+    def test_the_set_is_big_enough_and_balanced_enough_to_calibrate_on(self):
+        self.assertGreaterEqual(len(self.cases), 200)
+        languages = Counter(case.language for case in self.cases)
+        for language in ("english", "hinglish", "hindi"):
+            self.assertGreaterEqual(languages[language], 30, languages)
+        records = Counter(case.sub_category for case in self.cases)
+        for record in self.kb.records:
+            self.assertGreaterEqual(records[record.id], 4, record.id)
+        self.assertGreaterEqual(sum(1 for c in self.cases if c.needs_warranty_lookup), 12)
+        self.assertGreaterEqual(len({c.error_code for c in self.cases} - {NONE, None}), 12)
+
+    def test_imported_label_overrides_name_real_retrieval_phrases_and_apply(self):
+        raw = yaml.safe_load(EXTRAS.read_text(encoding="utf-8"))
+        golden_texts = {query for query, _, _, _ in GOLDEN}
+        self.assertTrue(set(raw["imported"]) <= golden_texts, set(raw["imported"]) - golden_texts)
+        by_text = {case.text: case for case in self.cases}
+        self.assertEqual(by_text["charger laga diya but nothing happens"].language, "hinglish")
+        self.assertTrue(by_text["battery replacement under warranty"].needs_warranty_lookup)
+        self.assertTrue(by_text["warranty mein replacement milega"].needs_warranty_lookup)
+
+    def test_hindi_in_latin_letters_is_labelled_hinglish_without_a_marker_from_the_metrics_list(self):
+        by_text = {case.text: case for case in self.cases}
+        for text in ("dhanyavaad", "ruko check karta hoon", "aap insaan ho ya bot", "haan ek minute"):
+            with self.subTest(text):
+                self.assertEqual(by_text[text].language, "hinglish")
+        for text in ("thanks", "are you human?", "one sec"):
+            with self.subTest(text):
+                self.assertEqual(by_text[text].language, "english")
+
+    def test_an_error_code_message_is_not_scored_on_category(self):
+        # Codes span components (E-07 is the motor, E-06 the charging port), so
+        # the message alone does not settle the category.
+        for case in self.cases:
+            if case.error_code not in (None, NONE):
+                with self.subTest(case.text):
+                    self.assertIsNone(case.category)
 
 
 def case(language, category):

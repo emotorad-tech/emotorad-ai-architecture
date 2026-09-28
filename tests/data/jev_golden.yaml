@@ -1,15 +1,194 @@
-# Labels for Jev calibration beyond the retrieval goldens, which are imported from
-# tests/test_retrieval_evals.py rather than copied. Standard-response examples and
-# counter-examples are read from knowledge/_standard/. Omitted fields default to:
-# sub_category none, standard_response none, needs_warranty_lookup false.
+# Labels for Jev calibration (scripts/calibrate_jev.py), beyond the retrieval
+# goldens, which are imported from tests/test_retrieval_evals.py rather than copied.
+# Standard-response examples and counter-examples are read from knowledge/_standard/.
+#
+# Fields: text, language (english | hindi | hinglish | marathi | tamil | other),
+# category (battery | motor | none_of_these), sub_category (a knowledge record id,
+# or none), error_code (e.g. E07, or none), needs_warranty_lookup (true/false),
+# bike ({product_name: ...}, only where the record depends on the model).
+#
+# Omitted fields default to: sub_category none, error_code none,
+# needs_warranty_lookup false. An explicit null means "not scored on this
+# question" because the message genuinely does not settle it. Prefer null to a
+# guess: a wrong label pulls a threshold the wrong way.
+#
+# DRAFT LABELS (2026-09-28): written to fill coverage gaps, not taken from real
+# chats. An SME should review them before a calibration run is trusted. Never
+# paste real customer messages here unedited: this repo is public.
+
+# Corrections to the imported retrieval phrases, keyed by their exact text.
+imported:
+  "charger laga diya but nothing happens": {language: hinglish}
+  "warranty mein replacement milega": {language: hinglish, needs_warranty_lookup: true}
+  "battery replacement under warranty": {needs_warranty_lookup: true}
+
 cases:
+  # -- off topic: none_of_these ------------------------------------------------
   - {text: "do you sell helmets", language: english, category: none_of_these}
   - {text: "what is the price of the new X2", language: english, category: none_of_these}
   - {text: "where is my order", language: english, category: none_of_these}
   - {text: "mera order kab aayega", language: hinglish, category: none_of_these}
   - {text: "can I get a refund", language: english, category: none_of_these}
-  - {text: "is my battery still under warranty", language: english, category: battery, needs_warranty_lookup: true}
-  - {text: "battery replace free mein hoga kya", language: hinglish, category: battery, needs_warranty_lookup: true}
-  - {text: "क्या बैटरी वारंटी में है", language: hindi, category: battery, needs_warranty_lookup: true}
+  - {text: "when will my order be delivered", language: english, category: none_of_these}
+  - {text: "order ka status kya hai", language: hinglish, category: none_of_these}
+  - {text: "मेरा ऑर्डर कहाँ है", language: hindi, category: none_of_these}
+  - {text: "do you have EMI options", language: english, category: none_of_these}
+  - {text: "EMI pe milegi kya", language: hinglish, category: none_of_these}
+  - {text: "which bike is best for a 30 km daily commute", language: english, category: none_of_these}
+  - {text: "X1 aur X2 mein kya fark hai", language: hinglish, category: none_of_these}
+  - {text: "can I book a test ride in Pune", language: english, category: none_of_these}
+  - {text: "nearest dealer in Kolkata?", language: english, category: none_of_these}
+  - {text: "मुझे नई साइकिल खरीदनी है", language: hindi, category: none_of_these}
+  - {text: "refund kab tak aayega", language: hinglish, category: none_of_these}
+  - {text: "do you sell spare tyres", language: english, category: none_of_these}
+  - {text: "what time do you open on Sundays", language: english, category: none_of_these}
+  - {text: "invoice chahiye mujhe", language: hinglish, category: none_of_these}
+  - {text: "can I change the colour on my order", language: english, category: none_of_these}
+  - {text: "इसकी कीमत कितनी है", language: hindi, category: none_of_these}
+  - {text: "hello", language: english, category: none_of_these}
+  - {text: "नमस्ते", language: hindi, category: none_of_these}
+
+  # -- battery: will not charge -------------------------------------------------
+  - {text: "plugged it in overnight and it's still at zero", language: english, category: battery, sub_category: battery-wont-charge}
+  - {text: "batery not chargng", language: english, category: battery, sub_category: battery-wont-charge}
+  - {text: "charger ki light hi nahi jal rahi", language: hinglish, category: battery, sub_category: battery-wont-charge}
+  - {text: "charger lagaya par battery charge nahi hui", language: hinglish, category: battery, sub_category: battery-wont-charge}
+  - {text: "चार्जर लगाने पर कुछ नहीं होता", language: hindi, category: battery, sub_category: battery-wont-charge}
+  - {text: "बैटरी चार्ज ही नहीं हो रही, चार्जर की लाइट भी नहीं जलती", language: hindi, category: battery, sub_category: battery-wont-charge}
+
+  # -- battery: charging slowly -------------------------------------------------
+  - {text: "takes like 10 hours to charge fully now", language: english, category: battery, sub_category: battery-charging-slowly}
+  - {text: "charging used to take 4 hrs, now it's 8", language: english, category: battery, sub_category: battery-charging-slowly}
+  - {text: "charge hone mein bahut time lag raha hai", language: hinglish, category: battery, sub_category: battery-charging-slowly}
+  - {text: "चार्ज होने में बहुत समय लगता है", language: hindi, category: battery, sub_category: battery-charging-slowly}
+
+  # -- battery: range dropped ---------------------------------------------------
+  - {text: "only getting 15 km on a full charge", language: english, category: battery, sub_category: battery-range-dropped}
+  - {text: "battery dies way faster than it used to", language: english, category: battery, sub_category: battery-range-dropped}
+  - {text: "pehle 40 km chalti thi ab 20 bhi nahi", language: hinglish, category: battery, sub_category: battery-range-dropped}
+  - {text: "backup bahut kam de rahi hai aajkal", language: hinglish, category: battery, sub_category: battery-range-dropped}
+  - {text: "एक बार चार्ज करने पर बहुत कम चलती है", language: hindi, category: battery, sub_category: battery-range-dropped}
+
+  # -- battery: will not power on (standard bikes, not the Doodle) ---------------
+  - {text: "nothing on the display when I press the power button", language: english, category: battery, sub_category: battery-wont-power-on, bike: {product_name: EMX Plus}}
+  - {text: "completely dead, no lights at all", language: english, category: battery, sub_category: battery-wont-power-on, bike: {product_name: EMX Plus}}
+  - {text: "cycle on hi nahi ho rahi", language: hinglish, category: battery, sub_category: battery-wont-power-on, bike: {product_name: EMX Plus}}
+  - {text: "साइकिल चालू नहीं हो रही, डिस्प्ले भी नहीं आ रहा", language: hindi, category: battery, sub_category: battery-wont-power-on, bike: {product_name: T-Rex Air}}
+
+  # -- battery: Doodle will not power on ----------------------------------------
+  - {text: "my doodle won't switch on", language: english, category: battery, sub_category: battery-doodle-wont-power-on, bike: {product_name: Doodle V3}}
+  - {text: "doodle chalu nahi ho rahi", language: hinglish, category: battery, sub_category: battery-doodle-wont-power-on, bike: {product_name: Doodle V3}}
+  - {text: "डूडल चालू नहीं हो रही", language: hindi, category: battery, sub_category: battery-doodle-wont-power-on, bike: {product_name: Doodle V3}}
+
+  # -- battery: SOC indicator dead ----------------------------------------------
+  - {text: "the charge level lights on the battery don't show anything", language: english, category: battery, sub_category: battery-soc-indicator-dead, bike: {product_name: EMX Plus}}
+  - {text: "battery pe jo lights hain wo nahi jal rahi", language: hinglish, category: battery, sub_category: battery-soc-indicator-dead, bike: {product_name: EMX Plus}}
+  - {text: "बैटरी पर चार्ज दिखाने वाली लाइट नहीं जलती", language: hindi, category: battery, sub_category: battery-soc-indicator-dead, bike: {product_name: EMX Plus}}
+
+  # -- battery: on/off switch dead ----------------------------------------------
+  - {text: "the switch on the battery does nothing, bike won't come on", language: english, category: battery, sub_category: battery-onoff-switch-dead, bike: {product_name: EMX Plus}}
+  - {text: "battery ka on off button kaam nahi karta", language: hinglish, category: battery, sub_category: battery-onoff-switch-dead, bike: {product_name: EMX Plus}}
+  - {text: "बैटरी का स्विच काम नहीं कर रहा", language: hindi, category: battery, sub_category: battery-onoff-switch-dead, bike: {product_name: EMX Plus}}
+
+  # -- battery: switch does not cut output --------------------------------------
+  - {text: "turned the battery off but the display is still on", language: english, category: battery, sub_category: battery-switch-not-cutting-output, bike: {product_name: EMX Plus}}
+  - {text: "switch off karne ke baad bhi display on rehta hai", language: hinglish, category: battery, sub_category: battery-switch-not-cutting-output, bike: {product_name: EMX Plus}}
+  - {text: "बैटरी बंद करने पर भी बाइक चलती रहती है", language: hindi, category: battery, sub_category: battery-switch-not-cutting-output, bike: {product_name: EMX Plus}}
+
+  # -- battery: melted terminal or connector ------------------------------------
+  - {text: "the pins where the battery connects look melted", language: english, category: battery, sub_category: battery-melted-terminal}
+  - {text: "connector pighal gaya hai", language: hinglish, category: battery, sub_category: battery-melted-terminal}
+  - {text: "बैटरी का कनेक्टर पिघल गया है", language: hindi, category: battery, sub_category: battery-melted-terminal}
+
+  # -- battery: charging port damaged -------------------------------------------
+  - {text: "charger pin keeps slipping out of the socket", language: english, category: battery, sub_category: battery-charging-port-damaged}
+  - {text: "charging socket dheela ho gaya hai", language: hinglish, category: battery, sub_category: battery-charging-port-damaged}
+  - {text: "चार्जिंग पोर्ट टूट गया है", language: hindi, category: battery, sub_category: battery-charging-port-damaged}
+
+  # -- battery: impact damage ---------------------------------------------------
+  - {text: "someone knocked my bike over in the parking", language: english, category: battery, sub_category: battery-impact-damage}
+  - {text: "bike slip ho gayi thi, ab battery ajeeb behave kar rahi hai", language: hinglish, category: battery, sub_category: battery-impact-damage}
+  - {text: "बाइक गिर गई थी, उसके बाद से दिक्कत है", language: hindi, category: battery, sub_category: battery-impact-damage}
+
+  # -- battery: damaged on arrival ----------------------------------------------
+  - {text: "new battery arrived with scuff marks all over", language: english, category: battery, sub_category: battery-arrival-damage}
+  - {text: "delivery mein hi battery pe scratch the", language: hinglish, category: battery, sub_category: battery-arrival-damage}
+  - {text: "डिलीवरी के समय बैटरी पर खरोंच थी", language: hindi, category: battery, sub_category: battery-arrival-damage}
+
+  # -- battery: storage ---------------------------------------------------------
+  - {text: "going abroad for 4 months, how should I leave the bike", language: english, category: battery, sub_category: battery-storage}
+  - {text: "do mahine bike use nahi karunga, battery ka kya karu", language: hinglish, category: battery, sub_category: battery-storage}
+  - {text: "कुछ महीने साइकिल नहीं चलाऊंगा, बैटरी कैसे रखूं", language: hindi, category: battery, sub_category: battery-storage}
+
+  # -- battery: warranty replacement (a faulty part, and cover for it) ----------
+  - {text: "the service guy said my battery is faulty, will it be replaced free?", language: english, category: battery, sub_category: battery-warranty-replacement, needs_warranty_lookup: true}
+  - {text: "how do I claim warranty for my charger", language: english, category: battery, sub_category: battery-warranty-replacement, needs_warranty_lookup: true}
+  - {text: "battery kharab hai, warranty mein badal denge kya", language: hinglish, category: battery, sub_category: battery-warranty-replacement, needs_warranty_lookup: true}
+  - {text: "बैटरी खराब हो गई है, क्या वारंटी में बदल जाएगी", language: hindi, category: battery, sub_category: battery-warranty-replacement, needs_warranty_lookup: true}
+
+  # -- motor: noise -------------------------------------------------------------
+  - {text: "clicking sound from the back wheel hub when I pedal", language: english, category: motor, sub_category: motor-noise}
+  - {text: "loud humming from the motor at high speed", language: english, category: motor, sub_category: motor-noise}
+  - {text: "motor mein se khar khar ki awaz", language: hinglish, category: motor, sub_category: motor-noise}
+  - {text: "पीछे के पहिये से खड़खड़ की आवाज आती है", language: hindi, category: motor, sub_category: motor-noise}
+
+  # -- motor: no pedal assist ---------------------------------------------------
+  - {text: "PAS on level 3 but no push at all", language: english, category: motor, sub_category: motor-no-assist}
+  - {text: "assist stopped working, feels like a normal cycle", language: english, category: motor, sub_category: motor-no-assist}
+  - {text: "pedal marne par motor help nahi karti", language: hinglish, category: motor, sub_category: motor-no-assist}
+  - {text: "पैडल मारने पर मोटर मदद नहीं करती", language: hindi, category: motor, sub_category: motor-no-assist}
+
+  # -- motor: cuts out while riding ---------------------------------------------
+  - {text: "motor switches off every time I hit a pothole", language: english, category: motor, sub_category: motor-cuts-out}
+  - {text: "keeps cutting in and out on the highway", language: english, category: motor, sub_category: motor-cuts-out}
+  - {text: "chalate chalate power band ho jati hai", language: hinglish, category: motor, sub_category: motor-cuts-out}
+  - {text: "चलाते समय मोटर बार बार बंद हो जाती है", language: hindi, category: motor, sub_category: motor-cuts-out}
+
+  # -- motor: throttle ----------------------------------------------------------
+  - {text: "twisting the throttle does nothing", language: english, category: motor, sub_category: motor-throttle}
+  - {text: "throttle ghumane par kuch nahi hota", language: hinglish, category: motor, sub_category: motor-throttle}
+  - {text: "थ्रॉटल काम नहीं कर रहा", language: hindi, category: motor, sub_category: motor-throttle}
+
+  # -- boundaries between topics: the cases thresholds are really for ------------
+  - {text: "power cuts out while riding but the battery shows full", language: english, category: motor, sub_category: motor-cuts-out}
+  - {text: "display shows battery full but the motor doesn't help when I pedal", language: english, category: motor, sub_category: motor-no-assist}
+  - {text: "range is fine, it's the motor that's noisy", language: english, category: motor, sub_category: motor-noise}
+  - {text: "battery toh full hai par motor chal nahi rahi", language: hinglish, category: motor, sub_category: motor-no-assist}
+  - {text: "bike won't start after I charged it", language: english, category: battery, sub_category: null}
+  - {text: "battery drains fast and the motor is noisy", language: english, category: null, sub_category: null}
+
+  # -- error codes: the code is scored, the category is not ---------------------
+  - {text: "display pe E-01 aa raha hai", language: hinglish, category: null, sub_category: null, error_code: E01}
+  - {text: "getting error E2 on the screen", language: english, category: null, sub_category: null, error_code: E02}
+  - {text: "E-03 showing on my display", language: english, category: null, sub_category: null, error_code: E03}
+  - {text: "screen shows E04", language: english, category: null, sub_category: null, error_code: E04}
+  - {text: "E 05 error", language: english, category: null, sub_category: null, error_code: E05}
+  - {text: "my display says E-06", language: english, category: null, sub_category: null, error_code: E06}
+  - {text: "my display shows E-07", language: english, category: null, sub_category: null, error_code: E07}
+  - {text: "error code E7 after riding in the rain", language: english, category: null, sub_category: null, error_code: E07}
+  - {text: "E08 dikh raha hai", language: hinglish, category: null, sub_category: null, error_code: E08}
+  - {text: "डिस्प्ले पर E-09 आ रहा है", language: hindi, category: null, sub_category: null, error_code: E09}
+  - {text: "E10 error on display", language: english, category: null, sub_category: null, error_code: E10}
+  - {text: "e-11 showing", language: english, category: null, sub_category: null, error_code: E11}
+  - {text: "display showing E12 since morning", language: english, category: null, sub_category: null, error_code: E12}
+  - {text: "E13 on the screen", language: english, category: null, sub_category: null, error_code: E13}
+  - {text: "E24 aa raha hai", language: hinglish, category: null, sub_category: null, error_code: E24}
+  - {text: "E-25 error aa gaya", language: hinglish, category: null, sub_category: null, error_code: E25}
+  - {text: "E30 code on the display", language: english, category: null, sub_category: null, error_code: E30}
+  - {text: "स्क्रीन पर E30 लिखा आ रहा है", language: hindi, category: null, sub_category: null, error_code: E30}
+  # Numbers on the display that are not codes.
+  - {text: "the display shows 25 km range left", language: english, category: null, sub_category: null, error_code: none}
+  - {text: "speed shows 0 on the display", language: english, category: null, sub_category: null, error_code: none}
+
+  # -- warranty questions: the lookup is needed, the record may not be ----------
+  - {text: "is my battery still under warranty", language: english, category: battery, sub_category: null, needs_warranty_lookup: true}
+  - {text: "battery replace free mein hoga kya", language: hinglish, category: battery, sub_category: null, needs_warranty_lookup: true}
+  - {text: "क्या बैटरी वारंटी में है", language: hindi, category: battery, sub_category: null, needs_warranty_lookup: true}
   - {text: "will I have to pay to fix the motor noise", language: english, category: motor, sub_category: motor-noise, needs_warranty_lookup: true}
-  - {text: "my display shows E-07", language: english, category: battery, error_code: E07}
+  - {text: "charger not working, is it covered?", language: english, category: battery, sub_category: null, needs_warranty_lookup: true}
+  - {text: "how much will a new battery cost me", language: english, category: battery, sub_category: null, needs_warranty_lookup: true}
+  - {text: "kitna kharcha aayega motor theek karane mein", language: hinglish, category: motor, sub_category: null, needs_warranty_lookup: true}
+  - {text: "is my bike still in warranty", language: english, category: null, sub_category: null, needs_warranty_lookup: true}
+  - {text: "warranty kab tak hai meri cycle ki", language: hinglish, category: null, sub_category: null, needs_warranty_lookup: true}
+  - {text: "मेरी वारंटी कब तक है", language: hindi, category: null, sub_category: null, needs_warranty_lookup: true}
+  - {text: "motor ki awaz theek karwane ka paisa lagega kya", language: hinglish, category: motor, sub_category: motor-noise, needs_warranty_lookup: true}

@@ -10,5 +10,9 @@ replies:
   english: "You're welcome. If anything else comes up with your bike, just message here and we'll help."
   hinglish: "Aapka swagat hai. Bike ke saath kuch aur ho toh yahin message kar dijiye, hum madad karenge."
   hindi: "आपका स्वागत है। बाइक से जुड़ी कोई और बात हो तो यहीं मैसेज कर दीजिए, हम मदद करेंगे।"
-examples: ["thanks", "thank you so much", "ok bye", "dhanyavaad", "shukriya", "धन्यवाद"]
-counter_examples: ["thanks but it still won't charge", "ok thanks, and is it under warranty?"]
+examples: ["thanks", "thank you so much", "ok bye", "dhanyavaad", "shukriya", "धन्यवाद",
+           "great, thanks!", "thank u", "ok thank you bye", "bahut bahut dhanyavaad", "thik hai, thanks",
+           "शुक्रिया", "बहुत धन्यवाद, नमस्ते"]
+counter_examples: ["thanks but it still won't charge", "ok thanks, and is it under warranty?",
+                   "thanks, but where is my order?", "shukriya, par abhi bhi charge nahi ho rahi",
+                   "धन्यवाद, लेकिन मोटर से अब भी आवाज आ रही है"]
