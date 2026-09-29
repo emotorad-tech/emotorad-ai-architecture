@@ -410,6 +410,9 @@ def build_registry(
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
     registry = ToolRegistry(idempotency=idempotency) if idempotency is not None else ToolRegistry()
+    # The guide pictures this registry can send (api.py passes only those
+    # media.sendable kept), for the narrow prompt and the search results.
+    registry.guide_media = dict(guide_media or {})  # type: ignore[attr-defined]
 
     # Every write validates a frame against the same source the lookup used.
     # Before this, _owned_bike read the fixtures directly, and with a live
@@ -755,7 +758,18 @@ def build_registry(
                 },
                 freshness_seconds=86400,
             )
-        return ok({"passages": [p.to_dict() for p in passages]}, freshness_seconds=86400)
+        return ok({"passages": [_with_sendable_media(p.to_dict()) for p in passages]}, freshness_seconds=86400)
+
+    def _with_sendable_media(passage: Dict[str, Any]) -> Dict[str, Any]:
+        """A passage names only the pictures this server can send, by the key
+        send_guide_media takes; one it cannot send is not mentioned at all, so
+        the model never offers it (2026-09-29)."""
+        key_for = {item.get("id"): key for key, item in registry.guide_media.items() if item.get("id")}
+        media_items = [{"key": key_for[item["id"]], "kind": item.get("kind", "image"), "caption": item.get("caption", "")}
+                       for item in passage.pop("media", None) or [] if item.get("id") in key_for]
+        if media_items:
+            passage["media"] = media_items
+        return passage
 
     @registry.register(
         CREATE_SUPPORT_TICKET,

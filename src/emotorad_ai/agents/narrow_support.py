@@ -12,7 +12,7 @@ round trips.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
@@ -44,17 +44,22 @@ stop charging the bike now.
 - Reply in the language the customer writes in."""
 
 
-def _record_block(record: KnowledgeRecord) -> str:
+def _record_block(record: KnowledgeRecord, sendable: Optional[Mapping[str, Mapping[str, Any]]] = None) -> str:
     lines = ["\n\nThe documented steps for this issue (%s):" % record.title]
     for number, step in enumerate(record.steps, start=1):
         lines.append("%d. %s" % (number, step))
     if record.escalate_when:
         lines.append("Escalate when: %s" % record.escalate_when)
-    media = [item for item in record.media if item.get("id")]
+    # Only a picture this server can send, and by the catalogue key the tool
+    # takes. The record names its media by file path, which the tool rejects,
+    # and listing a picture that cannot be sent is how the bot came to offer
+    # one it did not have (2026-09-29).
+    key_for = {item.get("id"): key for key, item in (sendable or {}).items() if item.get("id")}
+    media = [(key_for[item["id"]], item) for item in record.media if item.get("id") in key_for]
     if media:
         lines.append("Guide media you can send with send_guide_media, by key:")
-        for item in media:
-            lines.append("- %s: %s" % (item["id"], item.get("caption", "")))
+        for key, item in media:
+            lines.append("- %s: %s" % (key, item.get("caption", "")))
     return "\n".join(lines)
 
 
@@ -67,7 +72,11 @@ def _prefetched_block(prefetched: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def build_narrow_definition(record: KnowledgeRecord, prefetched: Sequence[Dict[str, Any]]) -> AgentDefinition:
+def build_narrow_definition(
+    record: KnowledgeRecord,
+    prefetched: Sequence[Dict[str, Any]],
+    sendable: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> AgentDefinition:
     frozen: List[Dict[str, Any]] = list(prefetched)
 
     def build_system_prompt(message: InboundMessage, resolved: ResolvedIdentity, context: str = "") -> str:
@@ -76,7 +85,7 @@ def build_narrow_definition(record: KnowledgeRecord, prefetched: Sequence[Dict[s
             + _facts_block(resolved)
             + _context_block(context)
             + _entry_block(message)
-            + _record_block(record)
+            + _record_block(record, sendable)
             + _prefetched_block(frozen)
         )
 

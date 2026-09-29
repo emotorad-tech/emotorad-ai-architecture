@@ -59,6 +59,7 @@ from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
+from .media import sendable as media_sendable
 from .identity import IdentityResolver
 from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
@@ -136,6 +137,15 @@ verification_store = VerificationStore()
 # filtered straight back out of the slice. The prompt told the model to point at
 # the button it was describing, and it had nothing to point with.
 GUIDE_MEDIA = load_catalogue()
+# Only the pictures this server can actually send reach the model; with none,
+# the tool is not registered at all, so a picture it does not have is never
+# offered (the person's rule, 2026-09-29). /health says how many.
+SENDABLE_MEDIA, UNSENDABLE_MEDIA = media_sendable(GUIDE_MEDIA, MEDIA_STORE)
+if UNSENDABLE_MEDIA:
+    _logger.warning(
+        "guide pictures this server cannot send, left out: %d of %d (%s)",
+        len(UNSENDABLE_MEDIA), len(GUIDE_MEDIA), "; ".join(sorted(UNSENDABLE_MEDIA.values()))[:500],
+    )
 
 # conversation_id -> the keys already shown in it. Module-level because "already
 # sent" only means anything across turns, and a request-scoped dict would let
@@ -162,7 +172,7 @@ def _build_registry():
     if not os.environ.get("EMOTORAD_OMS_API_KEY"):
         return build_registry(
             verification=verification_store,
-            guide_media=GUIDE_MEDIA,
+            guide_media=SENDABLE_MEDIA,
             sent_media=sent_media,
             replacement_orders=replacement_orders,
             item_codes=ItemCodes(),
@@ -175,7 +185,7 @@ def _build_registry():
         verification=verification_store,
         warranty_source=live_warranty_source(client),
         account_finder=live_account_finder(client),
-        guide_media=GUIDE_MEDIA,
+        guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
         replacement_orders=replacement_orders,
         item_codes=ItemCodes(),
@@ -389,6 +399,7 @@ def health() -> dict:
         "store": settings.store,
         "secrets": SECRETS_STATE,
         "media": "configured" if MEDIA_STORE is not None else "not configured",
+        "guide_media": "%d of %d sendable" % (len(SENDABLE_MEDIA), len(GUIDE_MEDIA)),
         # A summariser without a provider label predates the OpenRouter one: Gemini.
         "video_summary": getattr(VIDEO_SUMMARISER, "provider", "gemini") if VIDEO_SUMMARISER is not None else "frames",
         "tracing": "on" if TRACING is not None else "off",

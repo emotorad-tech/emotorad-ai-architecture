@@ -78,6 +78,15 @@ the step in words, using only what the documented steps and the picture's captio
 say: do not describe what a part looks like or where it is beyond that. Never offer \
 to show something unless you are about to send it."""
 
+# The rest: a customer agent on a server that can send no picture at all (no
+# bucket, or none of the catalogue's links can be signed; api.py drops those
+# at startup). The person's rule, 2026-09-29: a picture it does not have is
+# never offered.
+NO_PICTURES_RULE = """
+
+Pictures: no pictures or videos can be sent in this chat. Never offer to show the \
+customer one; describe every step in words, using only what the documented steps say."""
+
 
 @dataclass(frozen=True)
 class AgentDefinition:
@@ -165,12 +174,15 @@ class Agent:
         on_user_turn: Optional[Callable[[Any], None]] = None,
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
+        if GUIDE_MEDIA_TOOL in self.definition.tool_names and GUIDE_MEDIA_TOOL in self.registry.specs:
+            system += GUIDE_MEDIA_RULE
+        elif self.definition.one_step:
+            # A customer agent with nothing to show: say so, or it offers anyway.
+            system += NO_PICTURES_RULE
         if self.definition.one_step:
             # Here, not in each agent's prompt text: last, and outside the
             # base prompt a promotion replaces.
             system += ONE_STEP_RULE
-        if GUIDE_MEDIA_TOOL in self.definition.tool_names and GUIDE_MEDIA_TOOL in self.registry.specs:
-            system += GUIDE_MEDIA_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]
         )

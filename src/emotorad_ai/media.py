@@ -38,7 +38,7 @@ which is why it never worked and could not have been made to.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .storage import keys as storage_keys
 
@@ -116,6 +116,28 @@ def _delivery(kind: str, transform: str, public_id: str) -> Optional[str]:
     # An empty transform must not leave a doubled slash in the path.
     segments = [BASE, cloud, resource, "upload", transform, public_id.lstrip("/")]
     return "/".join(part for part in segments if part)
+
+
+def sendable(
+    catalogue: Mapping[str, Mapping[str, Any]], store: Any = None
+) -> Tuple[Dict[str, Mapping[str, Any]], Dict[str, str]]:
+    """The catalogue items this server can actually send, and why the rest cannot.
+
+    Run once at startup (api.py): only these reach the model, so it never
+    offers a picture it does not have (the person's rule, 2026-09-29). An
+    item is sendable when `resolve` can turn it into a link. Whether the S3
+    object exists is not checked here: that would put a network call per
+    picture in front of every start.
+    """
+    kept: Dict[str, Mapping[str, Any]] = {}
+    dropped: Dict[str, str] = {}
+    for key, item in catalogue.items():
+        found = resolve(item, store)
+        if found.get("unresolved"):
+            dropped[key] = found.get("reason") or "unresolved"
+        else:
+            kept[key] = item
+    return kept, dropped
 
 
 def resolve(item: Mapping[str, Any], store: Any = None) -> Dict[str, Any]:

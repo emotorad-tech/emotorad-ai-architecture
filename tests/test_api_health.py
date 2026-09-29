@@ -24,8 +24,19 @@ class HealthTests(unittest.TestCase):
                          "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": ""})
         self.assertEqual(
             api.health(),
-            {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured", "video_summary": "frames", "tracing": "off"},
+            {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
+             "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off"},
         )
+
+    def test_with_no_bucket_no_guide_picture_is_offered(self):
+        # The person's rule (2026-09-29): a picture the server cannot send is
+        # never offered. With no bucket none can be, so the tool is not there.
+        from emotorad_ai.tools.mocks import SEND_GUIDE_MEDIA
+
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_MEDIA_BUCKET": ""})
+        self.assertGreater(len(api.GUIDE_MEDIA), 0)
+        self.assertEqual(api.SENDABLE_MEDIA, {})
+        self.assertNotIn(SEND_GUIDE_MEDIA, api.registry.specs)
 
     def test_health_names_the_video_summariser(self):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "OPENROUTER_API_KEY": "sk-or-test", "GEMINI_API_KEY": ""})
@@ -64,8 +75,29 @@ class HealthTests(unittest.TestCase):
         # The playground wires guide_media into build_registry so the model can
         # send pictures. Production has to do the same, or a deployed agent
         # can be asked for a picture and simply has no tool to send one with.
-        api = fresh_api({"EMOTORAD_AI_MODE": "offline"})
+        # With a bucket that can sign links: without one no picture can be sent,
+        # and the tool is rightly left out (test_with_no_bucket_...).
+        class Signs:
+            bucket = "fake"
+
+            def presign_get(self, key):
+                return "https://bucket.example/" + key
+
+            def presign_put(self, key, mime, size):
+                return {"url": "https://bucket.example/" + key, "headers": {}, "expires_in": 300}
+
+            def get_bytes(self, key):
+                return b""
+
+            def head(self, key):
+                return None
+
+        with mock.patch("emotorad_ai.storage.s3.store_from_env", return_value=Signs()), \
+                mock.patch("emotorad_ai.media.store_for_resolve", return_value=Signs()):
+            api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_MEDIA_BUCKET": "fake"})
         self.assertIn("send_guide_media", api.registry.specs)
+        self.assertEqual(api.health()["guide_media"], "%d of %d sendable" % (len(api.GUIDE_MEDIA), len(api.GUIDE_MEDIA)))
+        fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_MEDIA_BUCKET": ""})
 
     def test_a_secret_id_reports_loaded(self):
         api = fresh_api(

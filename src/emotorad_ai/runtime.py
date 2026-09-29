@@ -674,7 +674,9 @@ class Runtime:
             self.log.tool_call(message.conversation_id, call.tool, arguments, envelope)
             prefetched.append({"tool": call.tool, "arguments": arguments, "result": envelope, "prefetched": True})
 
-        definition = build_narrow_definition(record, prefetched)
+        # Only the pictures this server can send are listed (media.sendable).
+        sendable = getattr(self.registry, "guide_media", {}) if SEND_GUIDE_MEDIA in self.registry.specs else {}
+        definition = build_narrow_definition(record, prefetched, sendable=sendable)
         if self.self_service_identity:
             # The same identity tools every other agent gets on the web chat:
             # an anonymous visitor routed narrow must still be able to verify.
