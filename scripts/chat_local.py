@@ -53,7 +53,7 @@ NEEDS = {
 WITHHELD = ("EMOTORAD_OMS_API_KEY",)
 # Reported but not required: each switches one feature on.
 OPTIONAL = (
-    ("EMOTORAD_AI_MEDIA_BUCKET", "video upload"),
+    ("EMOTORAD_AI_MEDIA_BUCKET", "photo and video storage in S3"),
     ("LANGFUSE_PUBLIC_KEY", "Langfuse tracing"),
 )
 

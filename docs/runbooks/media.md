@@ -169,3 +169,110 @@ place, nothing is recreated and nothing already stored is touched.
 
 The old `playground-uploads/` object in the deploy bucket (`S3_BUCKET`, pre-dating this
 media bucket, referenced by no code on `master`) can be deleted.
+
+## 8. Staging test: a photo from the chat page to S3 and MongoDB
+
+A person's own end to end check that a real photo sent from the chat page lands in the
+staging bucket and gets a permanent record in MongoDB, never a presigned URL. Run this
+after any change to how photos are stored. Do not run any of the commands below against
+anything real from inside a Claude session; this section is for a person, in their own
+shell.
+
+1. Deploy the template change, if it has not already gone out. This is the same command
+   as section 1 above, nothing new to invent:
+
+   ```powershell
+   aws cloudformation deploy --profile emotorad-staging --region ap-south-1 `
+     --stack-name emotorad-ai-stage-media --template-file infra/media.yaml `
+     --parameter-overrides Environment=stage InstanceRoleName=emotorad-ai-stage-ec2-role `
+       "AllowedOrigins=https://ai-release-stage.emotorad.com,http://localhost:8000" `
+     --capabilities CAPABILITY_NAMED_IAM
+   ```
+
+   You should see CloudFormation report `UPDATE_COMPLETE`, or say there is nothing to
+   update if it is already current.
+
+2. Make sure the `media` collection and its index exist. This is safe to rerun even if
+   they already do.
+
+   ```powershell
+   python scripts/mongo_setup.py
+   ```
+
+   You should see `media` listed among the collections and indexes it prints.
+
+3. Set this shell's environment. PowerShell does not use the cmd.exe `set VAR=...`
+   form; use `$env:VAR = "..."` instead. Use your own named AWS profile, with
+   permission to put and get objects in the staging media bucket, and never paste a
+   real key or connection string into a chat message.
+
+   ```powershell
+   $env:EMOTORAD_AI_MEDIA_BUCKET = "emotorad-ai-stage-media"
+   $env:AWS_REGION = "ap-south-1"
+   $env:AWS_PROFILE = "<your named profile>"
+   $env:OPENROUTER_API_KEY = "<your key, same as for the combined test>"
+   $env:EMOTORAD_MONGO_URI = "<the staging connection string, same as for the combined test>"
+   ```
+
+   Nothing prints back; these are only set in this shell, for this session.
+
+4. Start the chat page.
+
+   ```powershell
+   python scripts/chat_local.py
+   ```
+
+   You should see the status lines include
+   `EMOTORAD_AI_MEDIA_BUCKET: set (photo and video storage in S3)`, then a sign-in
+   link and a chat link. Open the sign-in link and sign in, then open the chat link,
+   attach a photo and send it with a short message.
+
+5. Find the object in the bucket. First get its key with a read-only query in
+   `mongosh`, against the newest `media` document:
+
+   ```
+   db.media.find().sort({stored_at: -1}).limit(1)
+   ```
+
+   Copy the `key` field from the one document it returns, then check the object is
+   really in the bucket:
+
+   ```powershell
+   aws s3api head-object --bucket emotorad-ai-stage-media --key "<key from the query above>"
+   ```
+
+   You should see a JSON response with a `ContentLength` and `ContentType` matching
+   the photo you sent.
+
+6. Look at the same document's `uri` field. It should read
+   `s3://emotorad-ai-stage-media/<key>`, with no `X-Amz-` anywhere in it and no `?`.
+   Either one showing up means a presigned URL leaked into the permanent record,
+   which the design forbids.
+
+7. If step 5's query returns nothing, the photo was not stored. Read the failure
+   event, from the server's own console output or `logs/conversations.jsonl`:
+   - `media_not_stored` with `reason: no_cluster`: nothing identified who sent it, no
+     session and no cookie, so there was nowhere to key the object under. Sign in
+     first, then send the photo again.
+   - `media_not_stored` with `reason: store_failed`: the write to S3 itself failed.
+     Check the bucket name and the AWS credentials in this shell.
+   - `media_record_failed`: the object reached S3 but the MongoDB write failed.
+     Check `EMOTORAD_MONGO_URI` and that Atlas is reachable.
+
+8. Clean up the test conversation and its media. First a dry run, which deletes
+   nothing:
+
+   ```powershell
+   python scripts/delete_person.py --phone 9876543210
+   ```
+
+   You should see a count of what would be deleted, including the S3 key from step 5.
+   Then delete it for real, which needs credentials allowed to delete object
+   versions, not just put and get:
+
+   ```powershell
+   python scripts/delete_person.py --phone 9876543210 --yes --reason "staging media test"
+   ```
+
+   You should see the same counts printed again, this time as done, and the object
+   gone if you rerun step 5's `head-object` command.
