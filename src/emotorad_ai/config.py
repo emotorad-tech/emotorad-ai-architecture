@@ -41,7 +41,9 @@ class Settings:
     # environment itself.
     openrouter_base_url: str = os.environ.get("EMOTORAD_OPENROUTER_BASE_URL", "https://openrouter.ai/api")
     jev_model: str = os.environ.get("EMOTORAD_JEV_MODEL", "typesafe/jev-1.13")
-    narrow_model: str = os.environ.get("EMOTORAD_NARROW_MODEL", "deepseek/deepseek-v4-flash-0731")
+    # Haiku on the narrow path too, for now (2026-09-29): Jev plus one reply
+    # model. EMOTORAD_NARROW_MODEL=deepseek/deepseek-v4-flash-0731 brings DeepSeek back.
+    narrow_model: str = os.environ.get("EMOTORAD_NARROW_MODEL", "anthropic/claude-haiku-4.5")
     fallback_model: str = os.environ.get("EMOTORAD_FALLBACK_MODEL", "anthropic/claude-haiku-4.5")
     # Jev sits in front of every turn, so it gets a tight budget: a slow answer
     # falls back to the full agent rather than holding the customer up.

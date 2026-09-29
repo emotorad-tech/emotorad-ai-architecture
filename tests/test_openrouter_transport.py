@@ -31,7 +31,7 @@ class SettingsModeTests(unittest.TestCase):
     def test_model_defaults_match_the_spec(self):
         settings = Settings()
         self.assertEqual(settings.jev_model, "typesafe/jev-1.13")
-        self.assertEqual(settings.narrow_model, "deepseek/deepseek-v4-flash-0731")
+        self.assertEqual(settings.narrow_model, "anthropic/claude-haiku-4.5")
         self.assertEqual(settings.fallback_model, "anthropic/claude-haiku-4.5")
         self.assertEqual(settings.openrouter_base_url, "https://openrouter.ai/api")
 
