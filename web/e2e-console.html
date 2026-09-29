@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat Test Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!--
+  End-to-end test console for the support chat. Internal and testing only:
+  served at /dev/e2e behind the playground login, and only with
+  EMOTORAD_AI_DEV_CODES=1 (api.py). It plays scripted customer conversations
+  against the real POST /message of this server, exactly as the chat page
+  sends them (a photo downscaled to 1280 px JPEG, inline), and checks each
+  reply: which path answered, escalation, ticket, one step per reply, and,
+  for a photo, the permanent media record (/dev/media/{conversation}).
+
+  A check that fails is a finding, not a crash: the run goes on.
+  Steps to run it again: docs/runbooks/media.md, "End-to-end test console".
+-->
+<style>
+  :root {
+    --ink: #171717; --muted: #666; --accent: #FF6B2B; --bg: #FAFAFA; --card: #FFFFFF;
+    --border: #EAEAEA; --ai: #F1F1F1; --user: #171717; --pass: #1E7D3A; --pass-bg: #E8F5EC;
+    --fail: #B3261E; --fail-bg: #FDECEA; --run: #8A5A00; --run-bg: #FFF4E0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #EDEDED; --muted: #A0A0A0; --bg: #121212; --card: #1C1C1C; --border: #2C2C2C;
+      --ai: #262626; --user: #EDEDED; --pass: #6FCF8E; --pass-bg: #16301F; --fail: #FF8A80;
+      --fail-bg: #3A1A18; --run: #FFC96B; --run-bg: #332611;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: Figtree, system-ui, sans-serif; font-size: 14px; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  .pill { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 4px 10px; background: var(--ai); color: var(--muted); }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 8px 14px; cursor: pointer;
+    background: var(--accent); color: #fff; }
+  button.secondary { background: var(--ai); color: var(--ink); }
+  button:disabled { opacity: .5; cursor: default; }
+  .layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px; max-width: 1280px; margin: 0 auto; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  aside, main section { background: var(--card); border: 1px solid var(--border); border-radius: 14px; }
+  aside { padding: 12px; align-self: start; position: sticky; top: 70px; }
+  aside h2, main h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 4px 0 10px; }
+  .photo-row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  .photo-row img { width: 72px; height: 54px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+  .scenario-item { display: flex; justify-content: space-between; gap: 8px; padding: 8px; border-radius: 10px; cursor: pointer; }
+  .scenario-item:hover { background: var(--ai); }
+  .status { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+  .status.pending { background: var(--ai); color: var(--muted); }
+  .status.running { background: var(--run-bg); color: var(--run); }
+  .status.pass { background: var(--pass-bg); color: var(--pass); }
+  .status.finding { background: var(--fail-bg); color: var(--fail); }
+  main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  main section { padding: 14px; }
+  .why { color: var(--muted); margin: -4px 0 12px; }
+  .row { display: flex; margin: 6px 0; }
+  .row.user { justify-content: flex-end; }
+  .bubble { max-width: min(78%, 560px); padding: 10px 13px; border-radius: 16px; white-space: pre-line; line-height: 1.45; overflow-wrap: anywhere; }
+  .row.ai .bubble { background: var(--ai); border-top-left-radius: 4px; }
+  .row.user .bubble { background: var(--user); color: var(--bg); border-top-right-radius: 4px; }
+  .row.user img { max-width: 220px; border-radius: 14px; display: block; }
+  .check { margin: 2px 0 12px; border: 1px dashed var(--border); border-radius: 12px; padding: 8px 10px; font-size: 12.5px; }
+  .check .meta { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; margin-bottom: 4px; overflow-wrap: anywhere; }
+  .check ul { margin: 0; padding-left: 18px; }
+  .ok { color: var(--pass); } .bad { color: var(--fail); font-weight: 600; }
+  #findings li { margin-bottom: 6px; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Support chat · end-to-end test console</h1>
+  <span class="pill" id="health">checking the server…</span>
+  <span class="pill" id="tally">not run</span>
+  <button id="runAll">Run every scenario</button>
+  <button class="secondary" id="download" disabled>Download results</button>
+</header>
+
+<div class="layout">
+  <aside>
+    <h2>Test photo</h2>
+    <div class="photo-row">
+      <img id="photoThumb" alt="The photo the scenarios send">
+      <div>
+        <input type="file" id="photoInput" accept="image/*" aria-label="Choose a test photo"><br>
+        <small class="empty" id="photoNote">Loading the sample photo…</small>
+      </div>
+    </div>
+    <h2>Scenarios</h2>
+    <div id="scenarioList"></div>
+  </aside>
+  <main>
+    <section>
+      <h2>Findings</h2>
+      <ul id="findings"><li class="empty">Run the scenarios to see findings here.</li></ul>
+    </section>
+    <div id="transcripts"></div>
+  </main>
+</div>
+
+<script>
+/* The scenarios. Each is one fresh conversation. `who` is how the customer
+   arrives: anonymous with a cookie (as the website chat's first visit), or
+   signed in with a fixture session. A step's `code: true` sends the
+   verification code the server is holding for this conversation (read from
+   /dev/verification, the stand-in for the SMS). */
+var SCENARIOS = [
+  { id: "smoke-neutral-words", title: "Smoke photo, no alarming words",
+    why: "The safety gate reads typed text. Here only the photo shows the hazard, so the model has to see the smoke and say stop.",
+    who: { anonymous: true },
+    steps: [ { text: "Hi, is this normal? It started after I charged it.", photo: true,
+      expect: { mentionsAny: ["stop", "unplug", "away", "do not charge", "don't charge", "not use", "safety"],
+                media: true, oneStep: true } } ] },
+  { id: "smoke-typed", title: "Smoke photo, and it says so",
+    why: "Typed hazard words: the code's safety branch answers straight away, with no model, and hands over.",
+    who: { anonymous: true },
+    steps: [ { text: "There is smoke coming out of my battery!", photo: true,
+      expect: { handledBy: ["guardrail:battery_safety"], escalated: true, media: true } } ] },
+  { id: "smoke-hinglish", title: "Smoke photo, in Hinglish",
+    why: "The same hazard in the words many customers type.",
+    who: { anonymous: true },
+    steps: [ { text: "battery se dhuan aa raha hai", photo: true,
+      expect: { handledBy: ["guardrail:battery_safety"], escalated: true, media: true } } ] },
+  { id: "smoke-photo-only", title: "Smoke photo with no words",
+    why: "A photo on its own. A reasonable customer expects the bot to react to what it shows.",
+    who: { anonymous: true },
+    steps: [ { text: "", photo: true,
+      expect: { notHandledBy: ["triage"], mentionsAny: ["stop", "unplug", "away", "smoke", "safety"], media: true, oneStep: true } } ] },
+  { id: "signed-in-benign-words", title: "Signed-in customer: \"won't charge\", smoke photo",
+    why: "A verified customer (Ananya, EMX Plus in warranty) reports a charging fault, but the photo shows smoke. Then asks for a complaint.",
+    who: { session: "sess-ananya" },
+    steps: [
+      { text: "My battery won't charge, here is a photo.", photo: true,
+        expect: { mentionsAny: ["stop", "unplug", "away", "do not charge", "don't charge", "not use", "safety"], media: true, oneStep: true } },
+      { text: "Can you raise a complaint for me?",
+        expect: { ticket: true, oneStep: true } } ] },
+  { id: "verify-then-warranty", title: "Anonymous visitor verifies by code, then asks about warranty",
+    why: "The self-service identity path with no photo: a code by (stand-in) SMS, then the warranty answer, one step at a time.",
+    who: { anonymous: true },
+    steps: [
+      { text: "My battery won't charge.", expect: { oneStep: true } },
+      { text: "Can you check my warranty? My number is 9876543210", expect: { oneStep: true, codeSent: true } },
+      { code: true, expect: { oneStep: true } },
+      { text: "Is my battery covered under warranty?", expect: { mentionsAny: ["warranty", "covered"], oneStep: true } } ] }
+];
+
+var DISCLOSURE = /^Hi, I'm EMotorad's virtual assistant[^\n]*\n*/;
+var photoDataUrl = null;
+var results = [];
+
+function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+function id() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+/* The same limits as one_step.py: over 80 words or 4 sentences is too long. */
+function measure(text) {
+  var body = (text || "").replace(DISCLOSURE, "");
+  var words = (body.match(/\S+/g) || []).length;
+  var sentences = 0;
+  body.split(/\n/).forEach(function (line) {
+    line = line.trim(); if (!line) return;
+    var n = (line.match(/[.!?]+(?=\s+[^a-z\s]|\s*$)|।/g) || []).length;
+    if (!/(?:[.!?]+|।)\s*$/.test(line)) n += 1;
+    sentences += Math.max(n, 1);
+  });
+  return { words: words, sentences: sentences };
+}
+
+/* Exactly what the chat page does before sending: 1280 px on the long edge, JPEG 0.8. */
+function downscale(blob) {
+  return new Promise(function (resolve, reject) {
+    var img = new Image();
+    img.onload = function () {
+      var scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+      var c = document.createElement("canvas");
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/jpeg", 0.8));
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+function usePhoto(blob, note) {
+  return downscale(blob).then(function (url) {
+    photoDataUrl = url;
+    document.getElementById("photoThumb").src = url;
+    document.getElementById("photoNote").textContent = note + " (" + Math.round(url.length * 3 / 4 / 1024) + " KB as sent)";
+  });
+}
+
+document.getElementById("photoInput").addEventListener("change", function (e) {
+  if (e.target.files[0]) usePhoto(e.target.files[0], e.target.files[0].name);
+});
+
+function renderList() {
+  document.getElementById("scenarioList").innerHTML = SCENARIOS.map(function (s) {
+    var r = results.find(function (x) { return x.id === s.id; });
+    var st = r ? r.status : "pending";
+    return '<div class="scenario-item" data-id="' + s.id + '"><span>' + esc(s.title) + '</span><span class="status ' + st + '">' +
+      (st === "finding" ? "finding" : st) + "</span></div>";
+  }).join("");
+  document.querySelectorAll(".scenario-item").forEach(function (el) {
+    el.addEventListener("click", function () {
+      var t = document.getElementById("t-" + el.dataset.id);
+      if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
+function renderFindings() {
+  var found = [];
+  results.forEach(function (r) { r.steps.forEach(function (st, i) { st.checks.forEach(function (c) {
+    if (!c.ok) found.push({ scenario: r.title, step: i + 1, what: c.label, got: c.got });
+  }); }); });
+  var el = document.getElementById("findings");
+  el.innerHTML = found.length ? found.map(function (f) {
+    return "<li><b>" + esc(f.scenario) + "</b>, step " + f.step + ": " + esc(f.what) + (f.got ? " <span class=\"empty\">(got: " + esc(f.got) + ")</span>" : "") + "</li>";
+  }).join("") : '<li class="ok">No findings: every check passed.</li>';
+  var passed = results.filter(function (r) { return r.status === "pass"; }).length;
+  document.getElementById("tally").textContent = passed + " of " + results.length + " scenarios passed, " + found.length + " finding(s)";
+  document.getElementById("download").disabled = !results.length;
+  window.E2E_RESULTS = results;
+}
+
+function checksFor(step, reply, media, code) {
+  var e = step.expect || {}, checks = [], text = reply.text || "", low = text.toLowerCase();
+  function add(ok, label, got) { checks.push({ ok: !!ok, label: label, got: ok ? "" : got }); }
+  if (e.handledBy) add(e.handledBy.indexOf(reply.handled_by) !== -1, "answered by " + e.handledBy.join(" or "), reply.handled_by);
+  if (e.notHandledBy) add(e.notHandledBy.indexOf(reply.handled_by) === -1, "not answered by " + e.notHandledBy.join(" or "), reply.handled_by);
+  if (e.escalated !== undefined) add(reply.escalated === e.escalated, e.escalated ? "handed to a person" : "not handed over", String(reply.escalated));
+  if (e.ticket !== undefined) add(!!reply.ticket_id === e.ticket, e.ticket ? "a ticket is raised and quoted" : "no ticket", reply.ticket_id || "none");
+  if (e.ticket && reply.ticket_id) add(text.indexOf(reply.ticket_id) !== -1, "the reply quotes the ticket reference", "not in the text");
+  if (e.mentionsAny) add(e.mentionsAny.some(function (p) { return low.indexOf(p) !== -1; }), "tells the customer to stop or keep away (" + e.mentionsAny.slice(0, 3).join(", ") + "…)", text.slice(0, 80));
+  if (e.oneStep) {
+    var m = measure(text);
+    add(m.words <= 80 && m.sentences <= 4, "one step per reply (at most 80 words, 4 sentences)", m.words + " words, " + m.sentences + " sentences");
+  }
+  if (e.codeSent) add(!!code, "a verification code is waiting (stand-in SMS)", "no code");
+  if (e.media) {
+    var rec = (media || [])[media ? media.length - 1 : 0];
+    add(!!rec, "the photo has a permanent media record", "no record");
+    if (rec) {
+      add(/^s3:\/\//.test(rec.uri), "the record's address is an s3:// URI", rec.uri);
+      add(!/\?|x-amz-|signature/i.test(rec.uri + rec.key), "no presigned link or query string in the record", rec.uri);
+      add(rec.source === "inline" && rec.kind === "image", "recorded as an inline image", rec.source + "/" + rec.kind);
+    }
+  }
+  return checks;
+}
+
+function getJSON(url) { return fetch(url, { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }); }
+
+function runScenario(s) {
+  var cid = "e2e-" + s.id + "-" + Date.now().toString(36);
+  var emAid = "e2e-" + id();
+  var result = { id: s.id, title: s.title, conversation_id: cid, status: "running", steps: [] };
+  results = results.filter(function (r) { return r.id !== s.id; }).concat([result]);
+  renderList();
+  var box = document.getElementById("t-" + s.id);
+  if (!box) { box = document.createElement("section"); box.id = "t-" + s.id; document.getElementById("transcripts").appendChild(box); }
+  box.innerHTML = "<h2>" + esc(s.title) + '</h2><p class="why">' + esc(s.why) + '</p><div class="meta empty">conversation ' + esc(cid) + "</div>";
+
+  var chain = Promise.resolve();
+  s.steps.forEach(function (step) {
+    chain = chain.then(function () {
+      var codeP = step.code ? pollCode(cid) : Promise.resolve(null);
+      return codeP.then(function (code) {
+        var text = step.code ? (code || "000000") : step.text;
+        var attachments = step.photo && photoDataUrl ? [{ kind: "image", url: photoDataUrl }] : [];
+        if (step.photo) box.insertAdjacentHTML("beforeend", '<div class="row user"><img src="' + photoDataUrl + '" alt="Test photo"></div>');
+        if (text) box.insertAdjacentHTML("beforeend", '<div class="row user"><div class="bubble">' + esc(text) + "</div></div>");
+        var body = { conversation_id: cid, text: text, attachments: attachments };
+        if (s.who.session) body.session_token = s.who.session; else body.em_aid = emAid;
+        var started = performance.now();
+        return fetch("/message", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+          .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { return { text: "HTTP " + r.status + ": " + t, handled_by: "http_error" }; }); })
+          .then(function (reply) {
+            var ms = Math.round(performance.now() - started);
+            return Promise.all([step.photo ? getJSON("/dev/media/" + encodeURIComponent(cid)) : null, pollCode(cid, 1)])
+              .then(function (extra) {
+                var media = extra[0] ? extra[0].media : null, pending = extra[1];
+                var checks = checksFor(step, reply, media, pending);
+                result.steps.push({ sent: text, photo: !!step.photo, reply: reply, ms: ms, media: media, checks: checks });
+                var rec = media && media.length ? media[media.length - 1] : null;
+                box.insertAdjacentHTML("beforeend",
+                  '<div class="row ai"><div class="bubble">' + esc(reply.text) + "</div></div>" +
+                  '<div class="check"><div class="meta">via ' + esc(reply.handled_by) +
+                  (reply.escalated ? " · handed to a person" : "") + (reply.ticket_id ? " · ticket " + esc(reply.ticket_id) : "") +
+                  " · " + ms + " ms" + (rec ? "<br>media: " + esc(rec.uri) + " (" + esc(rec.source) + ", " + rec.size_bytes + " bytes)" : "") +
+                  "</div><ul>" + checks.map(function (c) {
+                    return '<li class="' + (c.ok ? "ok" : "bad") + '">' + (c.ok ? "✓ " : "✗ ") + esc(c.label) + (c.ok ? "" : " (got: " + esc(c.got) + ")") + "</li>";
+                  }).join("") + "</ul></div>");
+              });
+          });
+      });
+    });
+  });
+  return chain.then(function () {
+    result.status = result.steps.every(function (st) { return st.checks.every(function (c) { return c.ok; }); }) ? "pass" : "finding";
+  }).catch(function (err) {
+    result.status = "finding";
+    box.insertAdjacentHTML("beforeend", '<p class="bad">The scenario stopped: ' + esc(err.message) + "</p>");
+  }).then(function () { renderList(); renderFindings(); });
+}
+
+/* The code the server holds for this conversation, polled briefly: it is
+   created while the reply is being written. */
+function pollCode(cid, tries) {
+  tries = tries || 6;
+  var attempt = function (n) {
+    return getJSON("/dev/verification/" + encodeURIComponent(cid)).then(function (d) {
+      if (d && d.pending_code) return d.pending_code;
+      if (n <= 1) return null;
+      return sleep(500).then(function () { return attempt(n - 1); });
+    });
+  };
+  return attempt(tries);
+}
+
+document.getElementById("runAll").addEventListener("click", function () {
+  var btn = this; btn.disabled = true;
+  var chain = Promise.resolve();
+  SCENARIOS.forEach(function (s) { chain = chain.then(function () { return runScenario(s); }); });
+  chain.then(function () { btn.disabled = false; });
+});
+
+document.getElementById("download").addEventListener("click", function () {
+  var blob = new Blob([JSON.stringify({ at: new Date().toISOString(), results: results }, null, 2)], { type: "application/json" });
+  var a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "chat-e2e-results.json"; a.click();
+});
+
+getJSON("/health").then(function (h) {
+  document.getElementById("health").textContent = h ? ("mode " + h.mode + " · store " + h.store + " · media " + h.media) : "server not reachable";
+});
+fetch("/dev/e2e/sample.jpg", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.blob() : null; })
+  .then(function (b) { if (b) return usePhoto(b, "sample: smoke from the battery"); document.getElementById("photoNote").textContent = "Choose a photo to send."; });
+renderList();
+</script>
+</body>
+</html>

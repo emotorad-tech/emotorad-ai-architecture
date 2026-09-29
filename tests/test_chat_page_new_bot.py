@@ -237,6 +237,19 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("0.0.0.0", command)
         self.assertNotIn("localhost", command)
 
+    def test_a_local_bucket_runs_the_folder_server_on_this_machine_only(self):
+        # For a machine with no AWS access: photos go to a folder, the rest
+        # of the path is the server's own (scripts/local_media_server.py).
+        command = self.launcher.server_command(8000, local_bucket="C:/e2e-bucket")
+        self.assertTrue(command[1].endswith("local_media_server.py"))
+        self.assertEqual(command[command.index("--dir") + 1], "C:/e2e-bucket")
+        self.assertEqual(command[command.index("--port") + 1], "8000")
+        self.assertEqual(self.launcher.parse_args(["--local-bucket", "C:/b"]).local_bucket, "C:/b")
+        self.assertIsNone(self.launcher.parse_args([]).local_bucket)
+
+    def test_it_says_where_the_test_console_is(self):
+        self.assertEqual(self.launcher.e2e_url(8000), "http://localhost:8000/dev/e2e")
+
     def test_an_unknown_mode_or_store_is_refused(self):
         with self.assertRaises(SystemExit):
             self.launcher.parse_args(["--mode", "gpt"])

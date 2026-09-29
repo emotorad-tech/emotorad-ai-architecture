@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 import websockets
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -820,6 +820,37 @@ def dev_verification(conversation_id: str) -> dict:
 
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 CHAT_FILE = WEB_DIR / "emotorad-support-chat-dev.html"
+
+# The end-to-end test console and what it reads, behind the same two locks as
+# /dev/verification: the playground login, and off unless DEV_CODES is on.
+E2E_CONSOLE_FILE = WEB_DIR / "e2e-console.html"
+E2E_SAMPLE_PHOTO = WEB_DIR.parent / "tests" / "data" / "live_media" / "smoke-battery.jpg"
+
+
+@app.get("/dev/e2e", response_class=HTMLResponse, dependencies=[Depends(require_playground_auth)])
+def dev_e2e_console() -> HTMLResponse:
+    if not DEV_CODES:
+        raise HTTPException(status_code=404, detail="not found")
+    return HTMLResponse(E2E_CONSOLE_FILE.read_text(encoding="utf-8"))
+
+
+@app.get("/dev/e2e/sample.jpg", dependencies=[Depends(require_playground_auth)])
+def dev_e2e_sample_photo() -> Response:
+    if not DEV_CODES or not E2E_SAMPLE_PHOTO.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return Response(E2E_SAMPLE_PHOTO.read_bytes(), media_type="image/jpeg")
+
+
+@app.get("/dev/media/{conversation_id}", dependencies=[Depends(require_playground_auth)])
+def dev_media(conversation_id: str) -> dict:
+    """The permanent media records of one conversation: where its photos and
+    videos are stored, as the `media` collection holds them. Read-only."""
+    if not DEV_CODES:
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        return {"conversation_id": conversation_id, "media": stores.conversations.media_of(conversation_id)}
+    except StoreUnavailable:
+        raise HTTPException(status_code=503, detail="The conversation store is unavailable.") from None
 
 
 @app.get("/chat", response_class=HTMLResponse)

@@ -116,7 +116,17 @@ def sign_in_url(port: int) -> str:
     return "http://%s:%d/dev/verification/sign-in" % (PAGE_HOST, port)
 
 
-def server_command(port: int) -> List[str]:
+def e2e_url(port: int) -> str:
+    """The end-to-end test console (web/e2e-console.html), behind the same login."""
+    return "http://%s:%d/dev/e2e" % (PAGE_HOST, port)
+
+
+def server_command(port: int, local_bucket: Optional[str] = None) -> List[str]:
+    if local_bucket:
+        # A folder in place of the media bucket, for a machine with no AWS
+        # access: the same server, started by scripts/local_media_server.py.
+        return [sys.executable, str(ROOT / "scripts" / "local_media_server.py"),
+                "--dir", local_bucket, "--port", str(port)]
     return [sys.executable, "-m", "uvicorn", "emotorad_ai.api:app", "--host", HOST, "--port", str(port)]
 
 
@@ -125,6 +135,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=MODES, default="openrouter")
     parser.add_argument("--store", choices=STORES, default="mongodb")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--local-bucket", metavar="DIR", default=None,
+                        help="keep photos in this folder instead of the S3 bucket (no AWS needed; photos only)")
     return parser.parse_args(argv)
 
 
@@ -142,11 +154,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("\n1. Open %s and sign in with %s." % (sign_in_url(args.port), who))
     print("   That lets the page show the verification code. You will see a line of JSON.")
     print("2. Then open %s" % chat_url(args.mode, args.port))
+    print("3. The end-to-end test console: %s" % e2e_url(args.port))
+    if args.local_bucket:
+        print("Photos are kept in the folder %s, not in S3." % args.local_bucket)
     # Flushed, so the address is on screen before the server's own output
     # when this runs with its output piped (an IDE, a log file).
     print("Stop with Ctrl+C.\n", flush=True)
     try:
-        return subprocess.call(server_command(args.port), env=env, cwd=str(ROOT))
+        return subprocess.call(server_command(args.port, args.local_bucket), env=env, cwd=str(ROOT))
     except KeyboardInterrupt:
         return 0
 
