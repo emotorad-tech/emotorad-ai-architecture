@@ -416,6 +416,24 @@ class Runtime:
         self.log.emit("conversation_merged", ours.conversation_id, ticket_id=reply.ticket_id)
         return fresh
 
+    @staticmethod
+    def _already_done(turn: Any) -> str:
+        """What this turn created (tickets, bookings, orders), for a reply a
+        post-check replaced: the write happened either way, and the customer
+        must not be left without its reference."""
+        done: List[str] = []
+        for call in turn.tool_calls:
+            if call.get("prefetched") or is_error(call.get("result") or {}):
+                continue
+            data = (call.get("result") or {}).get("data") or {}
+            if not isinstance(data, dict):
+                continue
+            for key, label in (("ticket_id", "ticket"), ("booking_id", "booking"), ("order_id", "order")):
+                value = data.get(key)
+                if value and "%s %s" % (label, value) not in done:
+                    done.append("%s %s" % (label, value))
+        return ("\n\nAlready done for you: %s." % ", ".join(done)) if done else ""
+
     def _ticket_since(self, log_mark: int, conversation_id: str) -> Optional[str]:
         return next((w["ticket_id"] for w in self._side_effects_since(log_mark, conversation_id) if w.get("ticket_id")), None)
 
@@ -882,7 +900,7 @@ class Runtime:
             )
             self.log.escalation(message.conversation_id, "coverage_claim_blocked", turn.ticket_id)
             return self._finish(
-                message, state, COVERAGE_BLOCKED_MESSAGE, "guardrail:coverage_post_check",
+                message, state, COVERAGE_BLOCKED_MESSAGE + self._already_done(turn), "guardrail:coverage_post_check",
                 escalated=True, ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": coverage.reason, "suppressed_text": turn.text},
                 already_in_history=True,
@@ -905,7 +923,7 @@ class Runtime:
             )
             self.log.escalation(message.conversation_id, "order_claim_blocked", turn.ticket_id)
             return self._finish(
-                message, state, ORDER_BLOCKED_MESSAGE, "guardrail:order_post_check",
+                message, state, ORDER_BLOCKED_MESSAGE + self._already_done(turn), "guardrail:order_post_check",
                 escalated=True, ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": order.reason, "suppressed_text": turn.text},
                 already_in_history=True,
@@ -926,8 +944,20 @@ class Runtime:
             )
             # The reply is replaced, but a ticket the turn already raised still
             # exists: keep its id so it is tracked and gets the transcript.
+            if state.evidence_asked:
+                # Asked for a photo once already, and the reply still concludes
+                # with nothing seen: a person takes it from here, rather than the
+                # customer being asked the same thing again.
+                self.log.escalation(message.conversation_id, "evidence_not_forthcoming", turn.ticket_id)
+                return self._finish(
+                    message, state, HANDOVER_TEXT + self._already_done(turn), "guardrail:evidence_post_check",
+                    escalated=True, ticket_id=turn.ticket_id,
+                    metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text, "handover": True},
+                    already_in_history=True,
+                )
+            state.evidence_asked = True
             return self._finish(
-                message, state, EVIDENCE_BLOCKED_MESSAGE, "guardrail:evidence_post_check",
+                message, state, EVIDENCE_BLOCKED_MESSAGE + self._already_done(turn), "guardrail:evidence_post_check",
                 ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text},
                 already_in_history=True,

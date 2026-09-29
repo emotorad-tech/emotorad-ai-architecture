@@ -136,6 +136,8 @@ class ReuseAfterExpiryTests(unittest.TestCase):
 class ConflictAfterWriteTests(unittest.TestCase):
     def test_a_turn_that_raised_a_ticket_is_not_rerun_after_a_conflict(self):
         store = ConflictingStore(conflicts=1)
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        InMemoryConversationStore.get(store, "conv-1").evidence_seen = True
         runtime = runtime_on(store, list(TICKET_TURN))
         answer = send(runtime, "my battery won't charge")
         self.assertEqual(len(runtime.registry.tickets.tickets), 1)
@@ -151,7 +153,10 @@ class ConflictAfterWriteTests(unittest.TestCase):
         class SaveDown(InMemoryConversationStore):
             def save(self, state):
                 raise StoreUnavailable("MongoDB update_one failed")
-        runtime = runtime_on(SaveDown(), list(TICKET_TURN))
+        store = SaveDown()
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        store.get("conv-1").evidence_seen = True
+        runtime = runtime_on(store, list(TICKET_TURN))
         answer = send(runtime, "my battery won't charge")
         self.assertEqual(answer.handled_by, "store_unavailable")
         self.assertIn("EM-00001", answer.text)

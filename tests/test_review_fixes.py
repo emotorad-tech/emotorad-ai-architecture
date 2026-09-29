@@ -117,6 +117,8 @@ class NarrowWriteThenFailTests(unittest.TestCase):
         }, "toolu_1")])
         fallback = ScriptedClaude([say("I have raised a ticket.")])
         runtime = build([JevDecision(answers=NARROW)], fallback_llm=fallback, narrow_llm=narrow, tickets=tickets)
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        runtime.conversations.get("conv-1").evidence_seen = True
         reply = web(runtime, "my battery won't charge")
         self.assertEqual(list(tickets.tickets), ["EM-00001"])
         self.assertEqual(fallback.requests, [])

@@ -103,6 +103,8 @@ class TicketThenOutageTests(unittest.TestCase):
 
     def test_the_ticket_is_kept_and_quoted_on_the_handover(self):
         store = InMemoryConversationStore()
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        store.get("c1").evidence_seen = True
         rt = runtime(store, Sequence(TICKET_CALL, OpenRouterUnavailable("down")))
         answer = send(rt, "my battery won't charge")
         self.assertEqual((answer.handled_by, answer.escalated, answer.ticket_id), ("llm_error", True, "EM-00001"))

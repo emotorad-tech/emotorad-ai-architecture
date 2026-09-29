@@ -104,6 +104,10 @@ class ToolSpec:
     required: Tuple[str, ...]
     fn: Callable[..., Any]
     injects: Tuple[str, ...] = ()  # ToolContext fields passed in behind the model's back
+    # Facts passed in the same way when the conversation knows them, and left
+    # out when it does not (a direct caller with no conversation facts). Never
+    # taken from the model: anything it supplies under these names is dropped.
+    optional_injects: Tuple[str, ...] = ()
     write: bool = False  # writes require an idempotency key and are deduplicated
 
     def schema(self) -> Dict[str, Any]:
@@ -192,6 +196,7 @@ class ToolRegistry:
         required: Iterable[str] = (),
         injects: Iterable[str] = (),
         write: bool = False,
+        optional_injects: Iterable[str] = (),
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             if name in self.specs:
@@ -204,6 +209,7 @@ class ToolRegistry:
                 fn=fn,
                 injects=tuple(injects),
                 write=write,
+                optional_injects=tuple(optional_injects),
             )
             return fn
 
@@ -245,6 +251,11 @@ class ToolRegistry:
                     % (field_name, name),
                 )
             arguments[field_name] = value
+        for field_name in spec.optional_injects:
+            arguments.pop(field_name, None)
+            value = context.value_for(field_name)
+            if value is not None:
+                arguments[field_name] = value
 
         # The idempotency key is checked before the other arguments so a
         # missing key is reported as itself rather than as one more absent field.

@@ -58,6 +58,8 @@ PLACE_ORDER = "place_order"
 PLACE_REPLACEMENT_ORDER = "place_replacement_order"
 
 TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety", "other")
+# A hazard is raised on the customer's word, never held behind a photograph.
+EVIDENCE_EXEMPT_CATEGORIES = ("battery_safety",)
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
 
 # An Indian pincode. Six digits, first digit 1 to 9.
@@ -779,6 +781,9 @@ def build_registry(
         },
         required=("category", "description", "severity", "idempotency_key"),
         injects=("phone",),
+        # Whether any photo or video has arrived in the conversation, from the
+        # runtime's facts; absent for a caller that has none (the safety branch).
+        optional_injects=("evidence_seen",),
         write=True,
     )
     def create_support_ticket(
@@ -788,11 +793,23 @@ def build_registry(
         severity: str,
         idempotency_key: str,
         frame_number: Optional[str] = None,
+        evidence_seen: Optional[bool] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
         if severity not in TICKET_SEVERITIES:
             raise ToolError("invalid_severity", "Unknown severity %r." % severity)
+        if evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES:
+            # The rule the evidence post-check enforces on the reply, enforced
+            # here on the write too: before, the ticket was created and only the
+            # reply saying so was blocked, so the customer never heard of it.
+            raise ToolError(
+                "evidence_required",
+                "No photo or video has arrived in this conversation, and a fault ticket needs one. "
+                "Ask the customer for a photo or a short video of the fault. If they cannot send one "
+                "(a voice call, or they say they cannot), hand the conversation to a person instead.",
+                remedy="collect_evidence",
+            )
         bike = _owned_bike(phone, frame_number, bikes_on)
         ticket = tickets.create(
             phone=phone,

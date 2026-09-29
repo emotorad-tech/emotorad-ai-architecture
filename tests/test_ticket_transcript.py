@@ -1,6 +1,7 @@
 import unittest
 
 from emotorad_ai.conversation import InMemoryConversationStore, TranscriptTurn, render_transcript
+from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE
 from emotorad_ai.llm import call_tool, say
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET
 from tests.test_runtime_persistence import runtime_on, send
@@ -17,7 +18,10 @@ class RenderTests(unittest.TestCase):
 
 class TicketTranscriptTests(unittest.TestCase):
     def test_an_agent_ticket_carries_the_thread_including_this_turn(self):
-        runtime = runtime_on(InMemoryConversationStore(), [
+        store = InMemoryConversationStore()
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        store.get("conv-1").evidence_seen = True
+        runtime = runtime_on(store, [
             say("Is the charger light on?"),
             call_tool(CREATE_SUPPORT_TICKET, {"category": "battery_charging", "severity": "normal",
                                               "description": "LED stays off.", "idempotency_key": "k1"}, "toolu_1"),
@@ -30,8 +34,12 @@ class TicketTranscriptTests(unittest.TestCase):
         self.assertIn("Customer: no, the light is off", transcript)
         self.assertIn("Bot: Your reference is EM-00001", transcript)
 
-    def test_a_ticket_raised_in_a_turn_the_evidence_check_blocked_is_still_tracked(self):
-        # The tool ran, so the ticket exists; blocking the reply must not lose it.
+    def test_without_a_photo_no_ticket_is_raised_and_the_reply_asks_for_one(self):
+        # This used to pin a ticket raised with no evidence and then hidden by
+        # the evidence check. The rule is now enforced at the tool as well
+        # (the person's decision, 2026-09-29), so no such ticket exists; a
+        # blocked reply that follows a real write still names it
+        # (test_evidence_before_ticket.NeverHideAWriteTests).
         runtime = runtime_on(InMemoryConversationStore(), [
             say("Is the charger light on?"),
             call_tool(CREATE_SUPPORT_TICKET, {"category": "battery_charging", "severity": "normal",
@@ -41,8 +49,9 @@ class TicketTranscriptTests(unittest.TestCase):
         send(runtime, "my battery won't charge")
         reply = send(runtime, "no, the light is off")
         self.assertEqual(reply.handled_by, "guardrail:evidence_post_check")
-        self.assertEqual(reply.ticket_id, "EM-00001")
-        self.assertIn("Customer: no, the light is off", runtime.registry.tickets.tickets["EM-00001"]["transcript"])
+        self.assertIsNone(reply.ticket_id)
+        self.assertEqual(runtime.registry.tickets.tickets, {})
+        self.assertIn(EVIDENCE_BLOCKED_MESSAGE, reply.text)
 
     def test_a_safety_ticket_carries_it_too(self):
         runtime = runtime_on(InMemoryConversationStore(), [])
