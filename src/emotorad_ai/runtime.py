@@ -1019,7 +1019,12 @@ class Runtime:
                 "category": "battery_safety",
                 "severity": "critical",
                 "description": description,
-                "idempotency_key": "safety:%s" % message.conversation_id,
+                # One ticket per run of the conversation: repeats inside a run
+                # share it, and a thread that returns after its working state
+                # expired (48 h; receipts live 7 days) raises a new one rather
+                # than being quoted the old reference (the person's decision,
+                # 2026-09-29). A run is the id and its start, as for summaries.
+                "idempotency_key": "safety:%s:%s" % (message.conversation_id, state.started_at or ""),
             }
             # With several bikes the ticket needs one named, and triage may not
             # have run yet — the safety branch fires before it.
