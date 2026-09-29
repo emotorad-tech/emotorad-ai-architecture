@@ -95,6 +95,9 @@ class SetupScriptTests(unittest.TestCase):
         self.assertIn("emotorad.example.mongodb.net", text)
         self.assertNotIn("SECRET", text)
         self.assertRegex(text, r"transcript_turns\s+permanent")
+        # Customer media is kept permanently (decision 2026-09-29), so its
+        # record is part of the permanent record and must never get a TTL.
+        self.assertRegex(text, r"\bmedia\s+permanent")
 
 
 class DeletePersonScriptTests(unittest.TestCase):

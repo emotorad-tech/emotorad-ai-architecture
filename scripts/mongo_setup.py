@@ -8,7 +8,8 @@ database only. A Claude session never runs this: org rules forbid writing to a
 shared database from one.
 
 Prints every collection and index so the output can be checked, and fails if
-the permanent record (transcripts, summaries) has picked up an expiry index.
+the permanent record (transcripts, summaries, media) has picked up an expiry
+index.
 """
 
 import os
