@@ -161,23 +161,34 @@ def resolve(item: Mapping[str, Any], store: Any = None) -> Dict[str, Any]:
             return resolved
         key = "assets/" + public_id.lstrip("/")
         derivatives = storage_keys.derivative_keys(key)
-        original = s3.presign_get(key)
-        if kind == "video":
+        try:
+            original = s3.presign_get(key)
+            if kind == "video":
+                resolved.update(
+                    {
+                        "url": original,
+                        "fallback": original,
+                        "poster": s3.presign_get(derivatives["poster"]) if "poster" in derivatives else None,
+                        "unresolved": False,
+                    }
+                )
+            else:
+                resolved.update(
+                    {
+                        "url": s3.presign_get(derivatives["w900"]) if "w900" in derivatives else original,
+                        "fallback": original,
+                        "unresolved": False,
+                    }
+                )
+        except Exception as exc:
+            # A link the store could not sign (no credentials, a store with no
+            # signing, as the local-folder test bucket). Reported, not raised,
+            # as the docstring promises: raised, it reached the model as a bare
+            # tool_exception, and the model told the customer about a picture
+            # that was never sent (2026-09-29).
             resolved.update(
-                {
-                    "url": original,
-                    "fallback": original,
-                    "poster": s3.presign_get(derivatives["poster"]) if "poster" in derivatives else None,
-                    "unresolved": False,
-                }
-            )
-        else:
-            resolved.update(
-                {
-                    "url": s3.presign_get(derivatives["w900"]) if "w900" in derivatives else original,
-                    "fallback": original,
-                    "unresolved": False,
-                }
+                {"url": None, "unresolved": True,
+                 "reason": "the link for %r could not be signed (%s)" % (public_id, type(exc).__name__)}
             )
         return resolved
 

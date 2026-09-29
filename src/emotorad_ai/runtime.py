@@ -158,6 +158,14 @@ SELF_SERVICE_SURFACE_TOOLS = (OFFER_LOCATION_SHARE,)
 # (a second code, or a spent code replayed and refused).
 SIDE_EFFECT_TOOLS = (SEND_GUIDE_MEDIA, REQUEST_IDENTITY_VERIFICATION, VERIFY_IDENTITY)
 
+# Said when a guide picture failed and the reply does not already say so
+# (Runtime._admit_unsent_media).
+MEDIA_NOT_SENT_TEXT = "I couldn't show you the picture just now, sorry."
+_ADMITS_NO_PICTURE = re.compile(
+    r"\b(?:can(?:no|')t|could(?: not|n't)|unable to|not able to)\b[^.\n]{0,30}\b(?:show|send|share|display)\b",
+    re.IGNORECASE,
+)
+
 
 def _hazard_sentences(summary: str) -> List[str]:
     """The lines or sentences of a description that carry a hazard term,
@@ -892,6 +900,8 @@ class Runtime:
         # have, with the original as the suppressed text.
         if not any(check.blocked for check in self._post_checks(turn.text, turn, state)):
             turn = self._one_step(agent, message, state, turn)
+        # After the cut, so the admission is never the part a cut removes.
+        turn = self._admit_unsent_media(message, state, turn)
         if turn.escalate:
             self.log.escalation(
                 message.conversation_id, turn.escalation_reason or "agent_requested_handover", turn.ticket_id
@@ -1107,6 +1117,21 @@ class Runtime:
             escalated=True, ticket_id=ticket_id, metadata={"matched": matched},
             already_in_history=bool(evidence),
         )
+
+    def _admit_unsent_media(self, message: InboundMessage, state: ConversationState, turn: Any) -> Any:
+        """The backstop for GUIDE_MEDIA_RULE: a guide picture the model asked
+        for failed and nothing went out, and the reply does not say so. One
+        plain sentence is added, so the customer is never left looking for a
+        picture that was described but never sent (2026-09-29)."""
+        failed = [call["arguments"].get("key") for call in turn.tool_calls
+                  if call.get("tool") == SEND_GUIDE_MEDIA and is_error(call.get("result") or {})]
+        if (not failed or turn.attachments or turn.escalation_reason == "model_unavailable"
+                or _ADMITS_NO_PICTURE.search(turn.text or "")):
+            return turn
+        text = (turn.text or "").rstrip() + "\n\n" + MEDIA_NOT_SENT_TEXT
+        replace_turn_text(state.history, text)
+        self.log.emit("guide_media_not_sent", message.conversation_id, keys=failed)
+        return replace(turn, text=text)
 
     def _one_step(self, agent: Agent, message: InboundMessage, state: ConversationState, turn: Any) -> Any:
         """The backstop for the one-step rule (one_step.py): a reply that runs

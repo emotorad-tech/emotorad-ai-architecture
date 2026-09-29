@@ -63,6 +63,19 @@ MODEL_UNAVAILABLE_TEXT = (
 # Tool names whose successful result carries a ticket the customer must be told about.
 TICKET_PRODUCING_TOOLS = ("create_support_ticket",)
 
+# Every agent that can send a guide picture is given this, last in its prompt
+# (Agent.run). On 2026-09-29 the bot offered "I can show you where it is", the
+# send failed, and it answered "That's the battery On/Off switch" with nothing
+# on the screen. Runtime._admit_unsent_media is the backstop in code.
+GUIDE_MEDIA_TOOL = "send_guide_media"
+GUIDE_MEDIA_RULE = """
+
+Pictures: you can show the customer a guide photo or clip only through \
+send_guide_media, and only the ones it lists. Talk about a picture only after \
+send_guide_media has returned sent: true in this turn. If it returns an error, the \
+customer received nothing: say you cannot show the picture right now, and describe \
+the step in words. Never offer to show something unless you are about to send it."""
+
 
 @dataclass(frozen=True)
 class AgentDefinition:
@@ -154,6 +167,8 @@ class Agent:
             # Here, not in each agent's prompt text: last, and outside the
             # base prompt a promotion replaces.
             system += ONE_STEP_RULE
+        if GUIDE_MEDIA_TOOL in self.definition.tool_names and GUIDE_MEDIA_TOOL in self.registry.specs:
+            system += GUIDE_MEDIA_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]
         )

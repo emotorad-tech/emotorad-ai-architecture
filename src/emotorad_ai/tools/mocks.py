@@ -490,7 +490,9 @@ def build_registry(
             SEND_GUIDE_MEDIA,
             "Show the customer a guide photo or short clip — where a button is, what a light "
             "looks like, how a step is performed. Use it whenever a step is easier to point at "
-            "than to describe, and say in your reply what you are showing them. Choose a key "
+            "than to describe. Only once it returns sent: true, say in your reply what you are "
+            "showing them; if it returns an error, nothing was sent, so say you cannot show it "
+            "right now and describe the step in words. Choose a key "
             "from the list below; you cannot send anything else, and there is no way to supply "
             "a file or a link. Available:\n%s"
             % "\n".join(
