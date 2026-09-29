@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .agents.base import HANDOVER_TEXT, Agent, AgentDefinition
 from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
@@ -72,6 +72,9 @@ from .guardrails import (
     HANDOFF_MESSAGE,
     ORDER_BLOCKED_MESSAGE,
     SAFETY_MESSAGE,
+    CoverageCheck,
+    EvidenceCheck,
+    OrderCheck,
     carries_caution,
     check_coverage_claim,
     check_evidence,
@@ -874,8 +877,21 @@ class Runtime:
             prefetched=prefetched,
             on_user_turn=lambda content: self._note_customer_turn(message, state, content),
         )
-        # Before the post-checks, so they judge the text the customer is sent.
-        turn = self._one_step(agent, message, state, turn)
+        # Remember this turn's lookup before checking (prefetched ones included),
+        # so a claim made in the same turn as the lookup and a claim made three
+        # turns later are judged against the same fact. Latest wins.
+        for call in turn.tool_calls:
+            if call["tool"] == LOOKUP_WARRANTY_RECORD and not is_error(call["result"]):
+                state.coverage_result = call["result"]
+
+        # The one-step cut runs before the post-checks, so they judge the text
+        # the customer is sent. But the post-checks judge the model's own reply
+        # first: a cut that dropped an unsupported "that's covered" would
+        # otherwise leave no trace of it. When the original would be blocked it
+        # is not cut, and the checks below block it exactly as they would
+        # have, with the original as the suppressed text.
+        if not any(check.blocked for check in self._post_checks(turn.text, turn, state)):
+            turn = self._one_step(agent, message, state, turn)
         if turn.escalate:
             self.log.escalation(
                 message.conversation_id, turn.escalation_reason or "agent_requested_handover", turn.ticket_id
@@ -883,17 +899,7 @@ class Runtime:
 
         # The post-check: calling the warranty tool proved the tool ran, not that
         # the reply matches what it returned.
-        #
-        # Remember this turn's lookup before checking (prefetched ones included),
-        # so a claim made in the same turn as the lookup and a claim made three
-        # turns later are judged against the same fact. Latest wins.
-        for call in turn.tool_calls:
-            if call["tool"] == LOOKUP_WARRANTY_RECORD and not is_error(call["result"]):
-                state.coverage_result = call["result"]
-        results = [call["result"] for call in turn.tool_calls]
-        if state.coverage_result is not None:
-            results = results + [state.coverage_result]
-        coverage = check_coverage_claim(turn.text, results)
+        coverage, order, evidence = self._post_checks(turn.text, turn, state)
         if coverage.blocked:
             self.log.guardrail(
                 message.conversation_id, "coverage_post_check",
@@ -916,15 +922,7 @@ class Runtime:
             )
 
         # The third post-check, same reason as the first: the order tool ran
-        # is not the reply named the order it returned. A placed order is
-        # remembered for the conversation, the way coverage_result is, so a
-        # claim about an order placed three turns ago is not blocked as
-        # unsupported; an id from another conversation still is.
-        order = check_order_claim(
-            turn.text,
-            [call["result"] for call in turn.tool_calls]
-            + [{"data": {"order_id": order_id}} for order_id in state.placed_order_ids],
-        )
+        # is not the reply named the order it returned (see _post_checks).
         if order.blocked:
             self.log.guardrail(
                 message.conversation_id, "order_post_check",
@@ -945,7 +943,6 @@ class Runtime:
         # here has already passed check_safety. What check_evidence still watches
         # for is a reply that hands over for safety reasons the regex did not
         # catch — a hazard is never held behind a request for a photograph of it.
-        evidence = check_evidence(turn.text, state.evidence_seen)
         if evidence.blocked:
             self.log.guardrail(
                 message.conversation_id, "evidence_post_check",
@@ -998,6 +995,34 @@ class Runtime:
                 **({"route": route_path} if route_path else {}),
             ),
         )
+
+    @staticmethod
+    def _post_checks(
+        text: str, turn: Any, state: ConversationState
+    ) -> Tuple[CoverageCheck, OrderCheck, EvidenceCheck]:
+        """The coverage, order and evidence verdicts on `text`, from this
+        turn's tool results and what the conversation remembers.
+
+        One place, because `_run` asks twice: of the model's own reply, to
+        decide whether it may be cut at all, and of the text the customer
+        would be sent. Pure: nothing is logged or changed here.
+
+        The order check takes the conversation's placed orders as well as
+        this turn's, the way coverage takes `state.coverage_result`, so a
+        claim about an order placed three turns ago is not blocked as
+        unsupported; an id from another conversation still is.
+        """
+        results = [call["result"] for call in turn.tool_calls]
+        if state.coverage_result is not None:
+            results = results + [state.coverage_result]
+        coverage = check_coverage_claim(text, results)
+        order = check_order_claim(
+            text,
+            [call["result"] for call in turn.tool_calls]
+            + [{"data": {"order_id": order_id}} for order_id in state.placed_order_ids],
+        )
+        evidence = check_evidence(text, state.evidence_seen)
+        return coverage, order, evidence
 
     def _handle_safety(
         self,

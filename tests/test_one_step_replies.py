@@ -19,7 +19,7 @@ from emotorad_ai.adapters import DealerWhatsAppAdapter, WebsiteChatAdapter
 from emotorad_ai.config import Settings
 from emotorad_ai.conversation import InMemoryConversationStore
 from emotorad_ai.decisions import Q_CATEGORY, Q_SUB_CATEGORY
-from emotorad_ai.guardrails import COVERAGE_BLOCKED_MESSAGE
+from emotorad_ai.guardrails import COVERAGE_BLOCKED_MESSAGE, EVIDENCE_BLOCKED_MESSAGE
 from emotorad_ai.identity import IdentityResolver
 from emotorad_ai.jev import JevDecision, ScriptedJev, choose
 from emotorad_ai.llm import ScriptedClaude, call_tool, say
@@ -261,6 +261,58 @@ class CautionIsNeverCutTests(unittest.TestCase):
 
     def test_hindi(self):
         self.assert_sent_whole("कृपया अभी बैटरी चार्ज न करें।" + HINDI_STEPS, "बैटरी गरम लग रही है")
+
+
+class PostChecksJudgeTheOriginalFirstTests(unittest.TestCase):
+    """The coverage, order and evidence checks run on the reply the model
+    wrote before any cut. A cut that happens to drop an unsupported claim
+    would otherwise leave no trace of it: the customer gets the cut, and the
+    log never shows what the model nearly said."""
+
+    def guardrail(self, rt, name):
+        return [e for e in events(rt, "guardrail_triggered") if e["guardrail"] == name]
+
+    def test_an_unsupported_coverage_claim_blocks_the_original_and_nothing_is_cut(self):
+        wrong = "Good news: this is covered under warranty, so the replacement is free. " + LONG
+        rt = routed(runtime([say(wrong), say(SHORT)]))
+        answer = send(rt, "my battery won't charge")
+        self.assertEqual(len(rt.llm.requests), 1)  # the cut was never asked for
+        self.assertEqual(answer.handled_by, "guardrail:coverage_post_check")
+        self.assertIn(COVERAGE_BLOCKED_MESSAGE, answer.text)
+        [event] = self.guardrail(rt, "coverage_post_check")
+        self.assertEqual(event["triggered_by"]["suppressed_text"], wrong)
+        self.assertEqual(answer.metadata["suppressed_text"], wrong)
+        self.assertEqual(events(rt, "reply_shortened"), [])
+
+    def test_a_fault_concluded_without_evidence_blocks_the_original_and_nothing_is_cut(self):
+        concluded = "From what you describe, the battery is dead. " + LONG
+        rt = routed(runtime([say(concluded), say(SHORT)]))
+        answer = send(rt, "my battery won't charge")
+        self.assertEqual(len(rt.llm.requests), 1)
+        self.assertEqual(answer.handled_by, "guardrail:evidence_post_check")
+        self.assertIn(EVIDENCE_BLOCKED_MESSAGE, answer.text)
+        [event] = self.guardrail(rt, "evidence_post_check")
+        self.assertEqual(event["triggered_by"]["matched"], "battery is dead")
+        self.assertEqual(answer.metadata["suppressed_text"], concluded)
+
+    def test_an_order_no_tool_placed_blocks_the_original_and_nothing_is_cut(self):
+        invented = "Your replacement battery is on its way, order RO-00042. " + LONG
+        rt = routed(runtime([say(invented), say(SHORT)]))
+        answer = send(rt, "my battery won't charge")
+        self.assertEqual(len(rt.llm.requests), 1)
+        self.assertEqual(answer.handled_by, "guardrail:order_post_check")
+        [event] = self.guardrail(rt, "order_post_check")
+        self.assertEqual(event["triggered_by"]["suppressed_text"], invented)
+
+    def test_an_original_that_passes_is_still_cut_and_the_cut_still_checked(self):
+        # The pair to the tests above, and the case the old order was for.
+        claim = "Good news: this is covered under warranty, so the replacement is free."
+        rt = routed(runtime([say(LONG), say(claim)]))
+        answer = send(rt, "my battery won't charge")
+        self.assertEqual(len(rt.llm.requests), 2)
+        self.assertEqual(answer.handled_by, "guardrail:coverage_post_check")
+        [event] = self.guardrail(rt, "coverage_post_check")
+        self.assertEqual(event["triggered_by"]["suppressed_text"], claim)
 
 
 class CarriesCautionTests(unittest.TestCase):

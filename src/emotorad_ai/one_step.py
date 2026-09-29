@@ -12,7 +12,9 @@ reply against the limits below and, when one runs over, asks the same model
 once to cut it to its first step or question (Runtime._one_step). The cut is
 used only when it is within the limits and keeps every reference; otherwise
 the original is sent and the reason logged. A reply that carries a caution or
-a hazard word (guardrails.carries_caution) is never cut at all.
+a hazard word (guardrails.carries_caution) is never cut at all, and nor is one
+the coverage, order or evidence post-check would block: those checks judge the
+model's own reply first, so a cut cannot hide what it nearly said.
 
 The dealer agent is exempt (AgentDefinition.one_step): an order summary has to
 list every line for the dealer to confirm it.
