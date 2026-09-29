@@ -72,13 +72,13 @@ from .guardrails import (
     HANDOFF_MESSAGE,
     ORDER_BLOCKED_MESSAGE,
     SAFETY_MESSAGE,
+    carries_caution,
     check_coverage_claim,
     check_evidence,
     check_human_handoff,
     check_order_claim,
     check_safety,
     check_safety_in_description,
-    warns_of_hazard,
 )
 from .errorcodes import load_table
 from .identity import IdentityResolver, ResolvedIdentity
@@ -1088,16 +1088,17 @@ class Runtime:
         over the limits is cut, once, by the model that wrote it.
 
         Left alone: an agent that opts out (dealer), text written by code (the
-        model-outage handover), and a reply that warns of a hazard, which goes
-        out whole. Whatever happens is logged by counts, never the text; the
-        transcript has the text.
+        model-outage handover), and a reply that carries a caution or a hazard
+        word (guardrails.carries_caution), which goes out whole. Whatever
+        happens is logged by counts, never the text; the transcript has the
+        text.
         """
         cid = message.conversation_id
         if (
             not agent.definition.one_step
             or turn.escalation_reason == "model_unavailable"
             or not is_too_long(turn.text)
-            or warns_of_hazard(turn.text)
+            or carries_caution(turn.text)
         ):
             return turn
         before = {"agent": turn.agent, "words_before": one_step_words(turn.text),

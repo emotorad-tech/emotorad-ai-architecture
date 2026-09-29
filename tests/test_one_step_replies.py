@@ -209,6 +209,122 @@ class BackstopTests(unittest.TestCase):
         self.assertEqual(rt.llm.requests, [])
 
 
+# Long filler in each language, so a reply built from a caution and one of
+# these runs past the limits and the backstop would cut it.
+HINGLISH_STEPS = (
+    " Pehle wall socket check kijiye. Phir charger ki light dekhiye. Phir battery ki chaabi on kijiye."
+    " Phir do ghante rukiye. Phir mujhe bataiye ki kya dikha."
+)
+HINDI_STEPS = (
+    " पहले दीवार का सॉकेट जाँचिए। फिर चार्जर की लाइट देखिए। फिर बैटरी की चाबी देखिए।"
+    " फिर दो घंटे रुकिए। फिर मुझे बताइए कि क्या दिखा।"
+)
+# The final review's probe (2026-09-29): this was cut to the last question
+# alone, and the customer lost the caution.
+PROBE = (
+    "Please don't charge the battery again until our team has looked at it, and keep it away from anything "
+    "that can burn. A warm pack after a long ride can be normal, but one that smells hot is not. "
+    "Could you tell me when this started? Also, how old is the charger you are using? "
+    "And does the charger light turn green at any point? Finally, please send a photo of the battery label."
+)
+
+
+class CautionIsNeverCutTests(unittest.TestCase):
+    """A reply that warns the customer off something goes out whole, in every
+    language the bot answers in. A cut that keeps the question and drops the
+    caution is worse than a long reply."""
+
+    def assert_sent_whole(self, reply, customer="the battery feels a bit warm after charging"):
+        self.assertTrue(is_too_long(reply), "the test reply must be long enough to be cut")
+        rt = routed(runtime([say(reply), say(SHORT)]))
+        answer = send(rt, customer)
+        self.assertEqual(len(rt.llm.requests), 1)  # no second call: nothing asked to cut it
+        self.assertIn(reply, answer.text)
+        self.assertNotIn(SHORT, answer.text)
+        self.assertEqual(events(rt, "reply_shortened") + events(rt, "reply_too_long"), [])
+
+    def test_the_final_reviews_probe(self):
+        self.assert_sent_whole(PROBE)
+
+    def test_english(self):
+        self.assert_sent_whole("Please don't charge it tonight. " + LONG)
+
+    def test_english_hazard_words_the_safety_gate_uses(self):
+        self.assert_sent_whole("If you see any smoke, move away from the bike. " + LONG)
+
+    def test_hinglish(self):
+        self.assert_sent_whole("Abhi charging band kar dijiye." + HINGLISH_STEPS, "battery garam lag rahi hai")
+
+    def test_hinglish_hazard_words_the_safety_gate_uses(self):
+        self.assert_sent_whole("Agar battery se dhuan nikle to usse door rahiye." + HINGLISH_STEPS,
+                               "battery garam lag rahi hai")
+
+    def test_hindi(self):
+        self.assert_sent_whole("कृपया अभी बैटरी चार्ज न करें।" + HINDI_STEPS, "बैटरी गरम लग रही है")
+
+
+class CarriesCautionTests(unittest.TestCase):
+    """The rule the backstop asks before it cuts (guardrails.carries_caution)."""
+
+    CAUTIONS = (
+        # English: don't / do not / never / stop, with what not to do.
+        "Please don't charge it tonight.",
+        "Please don’t charge it tonight.",  # the curly apostrophe models write
+        "Stop riding the bike until it has been checked.",
+        "Do not force the charger into the port.",
+        "Never open the battery case yourself.",
+        "Please stop using it for now.",
+        "Don't touch the terminals.",
+        "Switch it off at the key.",
+        "Turn the bike off and wait.",
+        # Hinglish.
+        "Battery charge mat karo.",
+        "Abhi charging band kar dijiye.",
+        "Bike abhi mat chalaiye.",
+        "Charger ko use na karein.",
+        # Hindi.
+        "चार्ज न करें।",
+        "कृपया बैटरी चार्ज मत करें।",
+        "बाइक मत चलाइए।",
+        "चार्जिंग बंद कर दीजिए।",
+        # The safety gate's own words, English and romanised Hindi.
+        "If it is swollen, keep it outside.",
+        "If you see smoke, move away.",
+        "Agar dhuan dikhe to door rahiye.",
+        "If the brakes are not working, do not ride.",
+        # What the evidence check already treated as a safety handover.
+        "Our safety team will call you.",
+    )
+    ORDINARY = (
+        LONG,
+        SHORT,
+        "Don't worry, this is common after a long ride.",
+        "Kya battery charge nahi ho rahi? Charger ki light dekhiye.",
+        "Kya charger ki light jalti hai?",
+        "क्या चार्जर की लाइट जलती है?",
+    )
+
+    def test_a_caution_is_recognised(self):
+        from emotorad_ai.guardrails import carries_caution
+
+        for text in self.CAUTIONS:
+            with self.subTest(text=text):
+                self.assertTrue(carries_caution(text))
+
+    def test_an_ordinary_step_is_not(self):
+        from emotorad_ai.guardrails import carries_caution
+
+        for text in self.ORDINARY:
+            with self.subTest(text=text):
+                self.assertFalse(carries_caution(text))
+
+    def test_the_cut_is_told_to_keep_every_caution_and_every_cost_word_for_word(self):
+        from emotorad_ai.one_step import SHORTEN_SYSTEM
+
+        self.assertIn("Keep every warning or caution, and every statement of cost or charges, word for word.",
+                      SHORTEN_SYSTEM)
+
+
 class LiveEvalCheckTests(unittest.TestCase):
     """A paid run shows every reply the backstop could not cut."""
 

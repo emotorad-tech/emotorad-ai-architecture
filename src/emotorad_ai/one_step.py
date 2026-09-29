@@ -11,7 +11,8 @@ guardrails.py, evidence post-check), so the runtime also checks every agent
 reply against the limits below and, when one runs over, asks the same model
 once to cut it to its first step or question (Runtime._one_step). The cut is
 used only when it is within the limits and keeps every reference; otherwise
-the original is sent and the reason logged.
+the original is sent and the reason logged. A reply that carries a caution or
+a hazard word (guardrails.carries_caution) is never cut at all.
 
 The dealer agent is exempt (AgentDefinition.one_step): an order summary has to
 list every line for the dealer to confirm it.
@@ -53,7 +54,8 @@ You edit replies from EMotorad's customer support assistant before the customer 
 them. Rewrite the reply you are given so that it does one thing: its first step, or \
 its single most important question, in at most three short sentences. Keep its \
 language and tone. Keep every reference number (such as EM-00001, BK-00001 or \
-RO-00001) exactly as written. Add nothing that is not in the reply. Answer with the \
+RO-00001) exactly as written. Keep every warning or caution, and every statement of \
+cost or charges, word for word. Add nothing that is not in the reply. Answer with the \
 rewritten reply only."""
 
 

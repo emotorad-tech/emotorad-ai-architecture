@@ -405,10 +405,71 @@ _SAFETY_HANDOVER = re.compile(
 )
 
 
-def warns_of_hazard(reply: str) -> bool:
-    """Whether a reply tells the customer to stop using or charging the bike.
-    Such a reply goes out whole: the one-step cut (one_step.py) never shortens it."""
-    return bool(_SAFETY_HANDOVER.search(reply or ""))
+# --- what the one-step cut never shortens ---------------------------------------
+# The one-step backstop (one_step.py) asks the model to cut a long reply to its
+# first step or question. On 2026-09-29 a probe had "Please don't charge the
+# battery again until our team has looked at it" cut to "Could you send a photo
+# of the battery label?": the question kept, the caution gone. So a reply that
+# warns the customer off something is sent whole. False positives are the
+# acceptable direction here too: one long reply costs some reading, a lost
+# caution can cost a battery.
+
+# English: don't / do not / never / stop, then up to two words, then what not to
+# do. Punctuation ends the reach, so "Don't worry, use..." is not a caution.
+_CAUTION_EN = re.compile(
+    r"\b(?:don['’]?t|do not|never|stop)\s+(?:\w+\s+){0,2}?"
+    r"(?:charg(?:e|ing)|rid(?:e|ing)|us(?:e|ing)|forc(?:e|ing)|open(?:ing)?|touch(?:ing)?)\b"
+    r"|\b(?:switch|turn)\s+(?:\w+\s+){0,2}?off\b",
+    re.IGNORECASE,
+)
+
+# Hinglish, the way the bot writes it back: "charge mat karo", "use na karein",
+# "mat chalaiye", "na chalayein", "charging band kar dijiye". "nahi" is left
+# out on purpose: "charge nahi ho rahi" is the complaint, not a caution, and
+# matching it would stop every Hinglish troubleshooting reply being cut.
+_HINGLISH_VERB = r"(?:charg\w*|chala\w*|khol\w*|chh?u\w*|use|istemal)"
+_CAUTION_HINGLISH = re.compile(
+    r"\b" + _HINGLISH_VERB + r"\s+(?:\w+\s+)?(?:mat\b|na\s+kar\w*)"
+    r"|\bmat\s+(?:\w+\s+)?" + _HINGLISH_VERB + r"\b"
+    r"|\bna\s+(?:chala\w*|khol\w*|chh?u\w*)"
+    r"|\b(?:charg\w*|chala\w*|bike|battery|switch|power)\s+(?:\w+\s+)?band\s+kar\w*",
+    re.IGNORECASE,
+)
+
+# Devanagari. No \b or \w here: Python splits a Devanagari word at every vowel
+# sign, so the forms are spelled out and separated by whitespace instead.
+# "चार्ज न करें", "चार्ज मत कीजिए", "मत चलाइए", "न खोलें", "चार्जिंग बंद कर दीजिए".
+_CAUTION_HINDI = re.compile(
+    r"(?:चार्ज\S*|इस्तेमाल|उपयोग|प्रयोग)\s+(?:\S+\s+)?(?:न|मत)\s+(?:कर|की)"
+    r"|(?<!\S)(?:मत|न)\s+(?:चला|खोल|छू|छु|लगा)"
+    r"|(?:चार्ज\S*|चलाना|बाइक|बैटरी|स्विच)\s+(?:\S+\s+)?बंद\s+(?:कर|की)"
+)
+
+
+def carries_caution(reply: str) -> bool:
+    """Whether a reply warns the customer off something, and so goes out whole.
+
+    The one-step cut (one_step.py, via Runtime._one_step) never shortens a
+    reply for which this is true. True when the reply:
+
+    * uses any hazard word the safety gate listens for (`_SAFETY_TERMS` and
+      `_MOTOR_SAFETY_TERMS`, English and romanised Hindi, the same plain scan
+      as `check_safety`);
+    * hands over for safety the way the evidence check recognises
+      (`_SAFETY_HANDOVER`: "stop using", "safety team", "unplug it now");
+    * tells the customer not to do something: don't / do not / never / stop
+      with charge, ride, use, force, open or touch; "switch off" or "turn
+      off"; or the Hinglish and Hindi forms ("charge mat karo", "charging
+      band kar dijiye", "mat chalaiye", "चार्ज न करें", "चार्ज मत करें").
+    """
+    text = reply or ""
+    return bool(
+        _SAFETY_HANDOVER.search(text)
+        or _CAUTION_EN.search(text)
+        or _CAUTION_HINGLISH.search(text)
+        or _CAUTION_HINDI.search(text)
+        or check_safety(text)
+    )
 
 
 @dataclass(frozen=True)
