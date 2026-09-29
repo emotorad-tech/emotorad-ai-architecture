@@ -37,7 +37,14 @@ from .agents.narrow_support import AGENT_NAME as NARROW_SUPPORT
 from .agents.narrow_support import build_narrow_definition
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
-from .conversation import ConversationState, ConversationStore
+from .conversation import (
+    ConversationConflict,
+    ConversationState,
+    ConversationSummaryItem,
+    InMemoryConversationStore,
+    StoreUnavailable,
+    utc_now_iso,
+)
 from .decisions import (
     EMPTY_MESSAGE,
     Route,
@@ -78,6 +85,17 @@ UNSUPPORTED_MESSAGE = (
     "team who can."
 )
 
+BUSY_MESSAGE = "Sorry, I'm still working on your last message. Please send that again in a moment."
+
+# The summary title when no knowledge record was chosen. Fixed labels, never
+# chat text, so nothing a customer typed is replayed into a future prompt.
+AGENT_TITLES = {
+    BATTERY_SUPPORT: "Battery issue",
+    MOTOR_SUPPORT: "Motor issue",
+    LATE_WARRANTY: "Warranty registration",
+    DEALER_ORDERS: "Dealer order",
+}
+
 # Topic -> sub-agent, **scoped per persona**. Never one router over everything:
 # a dealer and a customer asking the same words mean different things, and a
 # shared agent set is how a dealer reaches a customer-only tool.
@@ -98,13 +116,16 @@ class Runtime:
         narrow_llm: Any = None,
         thresholds: Optional[Thresholds] = None,
         standard_responses: Optional[Sequence[StandardResponse]] = None,
+        conversations: Any = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
         self.log = log or EventLog(path=self.settings.log_path, to_stdout=self.settings.log_to_stdout)
         self.llm = llm if llm is not None else BedrockClaude(self.settings)
         self.resolver = resolver or IdentityResolver(self.registry)
-        self.conversations = ConversationStore()
+        # In memory by default; the MongoDB store (EMOTORAD_STORE=mongodb) keeps
+        # conversations across restarts and servers.
+        self.conversations = conversations if conversations is not None else InMemoryConversationStore()
         self.enricher = ContextEnricher()
         self.triage = TriageAgent(TOPIC_AGENTS)
 
@@ -151,17 +172,66 @@ class Runtime:
     # -- entry point ---------------------------------------------------------
 
     def handle(self, message: InboundMessage) -> Reply:
-        return self.graph.invoke({"message": message})["reply"]
+        """One turn: load, run the graph, save, record.
+
+        The save is version-checked. If another server saved this conversation
+        in the meantime, the turn is run once more from freshly loaded state,
+        never on top of the losing attempt's; a second clash asks the customer
+        to resend rather than overwrite anyone's work.
+        """
+        cid = message.conversation_id
+        for attempt in (1, 2):
+            try:
+                state = self.conversations.get(cid)
+            except StoreUnavailable as exc:
+                return self._store_down(message, exc)
+            final = self.graph.invoke({"message": message, "conversation": state})
+            reply, resolved = final["reply"], final.get("resolved")
+            state.escalated = state.escalated or reply.escalated
+            state.ticket_id = reply.ticket_id or state.ticket_id
+            try:
+                self.conversations.save(state)
+                break
+            except ConversationConflict:
+                self.log.emit("conversation_conflict", cid, attempt=attempt)
+                if attempt == 2:
+                    self.log.emit("conversation_busy", cid)
+                    return Reply(
+                        conversation_id=cid, text=self._outbound(BUSY_MESSAGE, state, message.channel),
+                        handled_by="conversation_busy",
+                    )
+            except StoreUnavailable as exc:
+                return self._store_down(message, exc)
+        try:
+            self.conversations.record_turn(state, message, reply, self._summary_for(state, resolved))
+        except StoreUnavailable as exc:
+            # The turn happened and the state is saved; only the record of it
+            # failed. Said in the log, and the customer still gets the answer.
+            self.log.emit("transcript_write_failed", cid, error=str(exc))
+        return reply
+
+    def _store_down(self, message: InboundMessage, exc: Exception) -> Reply:
+        """The store cannot be reached: hand over, never start from blank."""
+        self.log.emit("store_unavailable", message.conversation_id, error=str(exc))
+        self.log.escalation(message.conversation_id, "store_unavailable", None)
+        # A throwaway state, so the AI disclosure is always added: we cannot
+        # know whether this person has already seen it.
+        text = apply_disclosure(HANDOVER_TEXT, ConversationState(conversation_id=message.conversation_id), message.channel)
+        return Reply(conversation_id=message.conversation_id, text=text, handled_by="store_unavailable", escalated=True)
 
     # -- graph nodes (graph.py says what follows what) -----------------------
 
     def _node_prepare(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         message = turn["message"]
         self.log.inbound(message)
-        state = self.conversations.get(message.conversation_id)
+        state = turn["conversation"]  # loaded by handle(), saved after the graph
         state.turns += 1
 
         resolved = self.resolver.hydrate(message)
+        if state.channel is None:
+            state.channel = message.channel
+        if state.user_key is None:
+            state.user_key = self._user_key(resolved)
         self.log.identity_resolved(
             message.conversation_id,
             resolved.persona,
@@ -399,6 +469,42 @@ class Runtime:
         jev_decision event records the intended path, which a fallback changes."""
         if self.jev is not None:
             self.log.emit("turn_path", conversation_id, path=path)
+
+    @staticmethod
+    def _user_key(resolved: ResolvedIdentity) -> Optional[str]:
+        """Who a conversation belongs to, for memory. Only a proven identity:
+        a cookie or caller ID never gets a history (the disclosure rule)."""
+        identity = resolved.identity
+        if resolved.persona == "dealer" and identity.dealer_id:
+            return "DEALER#" + identity.dealer_id
+        if resolved.persona == "customer" and identity.may_disclose and identity.phone:
+            return "PHONE#" + identity.phone
+        return None
+
+    def _summary_for(
+        self, state: ConversationState, resolved: Optional[ResolvedIdentity]
+    ) -> Optional[ConversationSummaryItem]:
+        """This conversation's line in the person's history, from code only."""
+        if not state.user_key:
+            return None
+        record = self.catalogue.records.get(state.sub_category) if (self.catalogue and state.sub_category) else None
+        title = record.title if record else AGENT_TITLES.get(state.agent or "", "General question")
+        bike = (self._selected_bike(resolved, state) if resolved else None) or {}
+        return ConversationSummaryItem(
+            conversation_id=state.conversation_id,
+            user_key=state.user_key,
+            started_at=state.started_at or "",
+            last_at=utc_now_iso(),
+            channel=state.channel or "",
+            title=title,
+            frame_number=bike.get("frame_number"),
+            product_name=bike.get("product_name"),
+            agent=state.agent,
+            sub_category=state.sub_category,
+            outcome="escalated" if state.escalated else "open",
+            ticket_id=state.ticket_id,
+            turns=state.turns,
+        )
 
     @staticmethod
     def _selected_bike(resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
