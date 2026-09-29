@@ -74,7 +74,9 @@ Pictures: you can show the customer a guide photo or clip only through \
 send_guide_media, and only the ones it lists. Talk about a picture only after \
 send_guide_media has returned sent: true in this turn. If it returns an error, the \
 customer received nothing: say you cannot show the picture right now, and describe \
-the step in words. Never offer to show something unless you are about to send it."""
+the step in words, using only what the documented steps and the picture's caption \
+say: do not describe what a part looks like or where it is beyond that. Never offer \
+to show something unless you are about to send it."""
 
 
 @dataclass(frozen=True)

@@ -567,8 +567,9 @@ def build_registry(
                 # the customer never received.
                 raise ToolError(
                     "guide_media_unavailable",
-                    "%r could not be prepared (%s). Describe the step in words instead, and do "
-                    "not tell the customer you have sent a picture."
+                    "%r could not be prepared (%s). Describe the step in words instead, using "
+                    "only the documented steps and the caption, and do not tell the customer "
+                    "you have sent a picture."
                     % (key, found.get("reason", "unknown")),
                 )
             already.add(key)
