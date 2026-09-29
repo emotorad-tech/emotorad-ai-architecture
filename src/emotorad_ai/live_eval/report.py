@@ -44,6 +44,7 @@ def _attempt(attempt: Attempt) -> Dict[str, Any]:
                 "sub_category": t.sub_category, "tools": t.tools, "ticket_id": t.ticket_id,
                 "escalated": t.escalated, "media": t.media, "cost": t.cost.to_dict(), "seconds": t.seconds,
                 "failures": t.failures, "provider_codes": t.provider_codes,
+                "blocked_reason": t.blocked_reason, "suppressed": t.suppressed,
             }
             for t in attempt.turns
         ],
@@ -138,6 +139,9 @@ def render_html(data: Mapping[str, Any]) -> str:
                         e(t["ticket_id"] or "none"), t["cost"]["total"], t["seconds"]))
                     if t["failures"]:
                         parts.append("<ul class='bad'>%s</ul>" % "".join("<li>%s</li>" % e(f) for f in t["failures"]))
+                    if t["suppressed"]:
+                        parts.append("<p class='warn'>Blocked by %s (%s). The model wrote:</p><pre>%s</pre>" % (
+                            e(t["handled_by"]), e(t["blocked_reason"] or "no reason given"), e(t["suppressed"])))
                     if t["provider_codes"]:
                         parts.append("<p class='warn'>provider: %s</p>" % e(", ".join(t["provider_codes"])))
                     parts.append("<p class='notes'>Wording notes: ______________________________</p></div>")

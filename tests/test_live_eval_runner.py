@@ -32,6 +32,13 @@ class RunScenarioTests(unittest.TestCase):
         self.assertAlmostEqual(attempt.cost.total, 0.0021)
         self.assertEqual({m: round(a, 6) for m, a in attempt.cost.by_model.items()}, {BASE.narrow_model: 0.002, JEV: 0.0001})
 
+    def test_a_reply_a_post_check_blocked_is_kept_for_the_reader(self):
+        claim = "Good news: your battery is covered under warranty, so the replacement is free."
+        attempt = run_scenario(scenario(expect=Expect()), BASE, Factory(replies=[priced(claim)]), today=TODAY)
+        [turn] = attempt.turns
+        self.assertEqual(turn.handled_by, "guardrail:coverage_post_check")
+        self.assertEqual((turn.blocked_reason, turn.suppressed), ("coverage_claim_without_tool_result", claim))
+
     def test_every_scenario_runs_on_openrouter_in_memory_with_zero_retention(self):
         factory = Factory()
         base = replace(BASE, mode="offline", store="mongodb", openrouter_zdr=False)

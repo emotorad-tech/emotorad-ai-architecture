@@ -39,6 +39,14 @@ class ReportTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertNotIn("<script>alert(1)</script>", page)
 
+    def test_a_blocked_reply_is_shown_with_why(self):
+        claim = "Good news: your battery is covered under warranty, so the replacement is free."
+        page, data = write(run_with(claim))
+        [turn] = data["scenarios"][0]["outcomes"][0][0]["turns"]
+        self.assertEqual((turn["blocked_reason"], turn["suppressed"]), ("coverage_claim_without_tool_result", claim))
+        self.assertIn("Blocked by guardrail:coverage_post_check (coverage_claim_without_tool_result). The model wrote:", page)
+        self.assertIn(claim, page)
+
     def test_the_key_never_reaches_the_report(self):
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-LIVEEVALTESTKEY"}):
             page, data = write(run_with("Try another socket."))

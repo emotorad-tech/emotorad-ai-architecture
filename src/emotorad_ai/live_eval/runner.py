@@ -113,6 +113,10 @@ class TurnResult:
     seconds: float
     failures: List[str]
     provider_codes: List[str]
+    # What the model wrote when a post-check replaced it, so the reader can
+    # judge whether the check or the model was wrong.
+    blocked_reason: Optional[str] = None
+    suppressed: Optional[str] = None
 
 
 @dataclass
@@ -267,6 +271,7 @@ def run_scenario(
             ticket_id=reply.ticket_id, escalated=reply.escalated, media=len(reply.attachments),
             cost=cost, seconds=round(seconds, 2), failures=check_turn(record, turn.expect, scenario.who),
             provider_codes=[c for c in codes if c in PROVIDER_CODES],
+            blocked_reason=reply.metadata.get("blocked_reason"), suppressed=reply.metadata.get("suppressed_text"),
         ))
 
     if error:
