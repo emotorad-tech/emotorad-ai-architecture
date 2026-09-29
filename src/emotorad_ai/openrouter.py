@@ -94,9 +94,18 @@ class OpenRouterTransport:
         timeout: float = 30.0,
         opener: Callable[..., Any] = urllib.request.urlopen,
     ) -> None:
-        key = api_key if api_key is not None else os.environ.get(API_KEY_ENV, "")
+        # Stripped, as select_llm strips the Anthropic key: a value stored with
+        # a trailing newline made http.client raise a ValueError that quoted
+        # the whole Authorization header, key and all, and crashed the turn.
+        key = (api_key if api_key is not None else os.environ.get(API_KEY_ENV, "")).strip()
         if not key:
             raise OpenRouterConfigError("%s is not set" % API_KEY_ENV)
+        if any(ch.isspace() or not ch.isprintable() for ch in key):
+            # Damaged, not merely padded. Refused here, where it fails the
+            # deploy's health check, and without the value in the message.
+            raise OpenRouterConfigError(
+                "%s contains a space or control character inside it; set it again" % API_KEY_ENV
+            )
         self._api_key = key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout

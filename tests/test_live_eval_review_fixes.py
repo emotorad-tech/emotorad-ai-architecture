@@ -67,18 +67,19 @@ class KeyNeverWrittenTests(unittest.TestCase):
 
     def test_a_key_with_a_trailing_line_ending_never_reaches_either_file(self):
         # The real wiring: build_models reads the key from the environment and
-        # urllib sends it. http.client refuses a header ending in CR or LF
-        # before any connection is made, with a ValueError that quotes the
-        # header, key and all; the runner used to store that text verbatim.
+        # urllib sends it. http.client refused a header ending in CR or LF with
+        # a ValueError that quoted the header, key and all, and the runner
+        # stored that text verbatim. The transport now strips the key
+        # (test_openrouter_key_hygiene), so the header is clean and the turn
+        # gets as far as the network, which this test refuses.
         for ending in ("\r", "\n", "\r\n"):
             with self.subTest(ending=repr(ending)):
                 with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": FAKE_KEY + ending}), no_network():
                     run = run_suite([scenario()], BASE, budget=1.0, models_factory=build_models, **quiet())
                 page, results = written(run)
                 error = json.loads(results)["scenarios"][0]["outcomes"][0][0]["error"]
-                # The path that used to leak really ran: the turn crashed on the header.
-                self.assertIn("ValueError", error)
-                self.assertIn("[key]", error)
+                self.assertNotIn("ValueError", error)
+                self.assertIn("a test tried to open a connection", error)
                 self.assertNotIn(FAKE_KEY, page)
                 self.assertNotIn(FAKE_KEY, results)
 
