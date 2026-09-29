@@ -102,7 +102,7 @@ class IndexTests(unittest.TestCase):
     def test_every_collection_gets_exactly_its_indexes_and_only_two_expire(self):
         db = fresh_db()
         report = ensure_indexes(db)
-        self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys"})
+        self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media"})
         ttl = {}
         for collection in report:
             for index, info in db[collection].index_information().items():

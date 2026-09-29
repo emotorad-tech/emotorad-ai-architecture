@@ -2,10 +2,11 @@
 
 Spec: docs/superpowers/specs/2026-09-29-mongodb-conversation-store-design.md.
 
-Four collections. `transcript_turns` and `conversation_summaries` are the
-conversation record and are kept permanently: no TTL index, and deletion on
-request through `delete_person` or `delete_conversation`. `conversations`
-(working state) and `idempotency_keys` expire through TTL indexes.
+Five collections. `transcript_turns`, `conversation_summaries` and `media`
+are the conversation record and are kept permanently: no TTL index, and
+deletion on request through `delete_person` or `delete_conversation`.
+`conversations` (working state) and `idempotency_keys` expire through TTL
+indexes.
 
 Every driver failure becomes a typed error the runtime handles:
 ConversationConflict when another server saved first, StoreUnavailable for
@@ -47,6 +48,7 @@ CONVERSATIONS = "conversations"
 TRANSCRIPT_TURNS = "transcript_turns"
 CONVERSATION_SUMMARIES = "conversation_summaries"
 IDEMPOTENCY_KEYS = "idempotency_keys"
+MEDIA = "media"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
 INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
@@ -63,6 +65,11 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     ],
     IDEMPOTENCY_KEYS: [
         ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
+    ],
+    # Every photo and video kept for a conversation. Permanent, like the
+    # transcript: no TTL index, and removed only through delete_conversation.
+    MEDIA: [
+        ([("conversation_id", 1)], {"name": "conversation"}),
     ],
 }
 
@@ -263,6 +270,18 @@ class MongoConversationStore:
             for d in docs
         ]
 
+    def record_media(self, record: Dict[str, Any]) -> None:
+        """Upsert by `_id` (the S3 key): recording the same object twice
+        (a retried claim) replaces its record rather than duplicating it."""
+        media = self._collection(MEDIA)
+        self._guard("replace_one", lambda: media.replace_one({"_id": record["_id"]}, record, upsert=True))
+
+    def media_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        return self._guard(
+            "find",
+            lambda: list(self._collection(MEDIA).find({"conversation_id": conversation_id}).sort("stored_at", 1)),
+        )
+
     def recent_summaries(
         self, user_key: str, limit: int = 3, exclude: Optional[str] = None
     ) -> List[ConversationSummaryItem]:
@@ -293,7 +312,7 @@ class MongoConversationStore:
         that does, then removed by id. Their idempotency receipts go too.
         With `dry_run`, counts what would go and deletes nothing.
         """
-        counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS)}
+        counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -307,6 +326,7 @@ class MongoConversationStore:
             TRANSCRIPT_TURNS: self._remove(TRANSCRIPT_TURNS, {"conversation_id": conversation_id}, dry_run),
             CONVERSATION_SUMMARIES: self._remove(CONVERSATION_SUMMARIES, {"conversation_id": conversation_id}, dry_run),
             IDEMPOTENCY_KEYS: self._remove(IDEMPOTENCY_KEYS, _receipts_of(conversation_id), dry_run),
+            MEDIA: self._remove(MEDIA, {"conversation_id": conversation_id}, dry_run),
         }
 
     def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:

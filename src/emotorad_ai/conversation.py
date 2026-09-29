@@ -371,6 +371,8 @@ class InMemoryConversationStore:
         self._states: "OrderedDict[str, ConversationState]" = OrderedDict()
         self._turns: Dict[str, Dict[int, TranscriptTurn]] = {}
         self._summaries: Dict[str, Dict[str, ConversationSummaryItem]] = {}
+        # Media records, permanent like the transcript: conversation id -> S3 key -> record.
+        self._media: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def get(self, conversation_id: str) -> ConversationState:
         state = self._states.get(conversation_id)
@@ -411,6 +413,15 @@ class InMemoryConversationStore:
     def transcript(self, conversation_id: str) -> List[TranscriptTurn]:
         return [turn for _, turn in sorted(self._turns.get(conversation_id, {}).items())]
 
+    def record_media(self, record: Dict[str, Any]) -> None:
+        """Upsert by `_id` (the S3 key): recording the same object twice
+        (a retried claim) replaces its record rather than duplicating it."""
+        self._media.setdefault(record["conversation_id"], {})[record["_id"]] = record
+
+    def media_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        records = self._media.get(conversation_id, {}).values()
+        return sorted(records, key=lambda r: r["stored_at"])
+
     def recent_summaries(
         self, user_key: str, limit: int = 3, exclude: Optional[str] = None
     ) -> List[ConversationSummaryItem]:
@@ -427,7 +438,8 @@ class InMemoryConversationStore:
         """
         mine = {cid for cid, state in self._states.items() if state.user_key == user_key}
         mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
-        counts = {"conversations": 0, "transcript_turns": 0, "conversation_summaries": len(self._summaries.pop(user_key, {}))}
+        counts = {"conversations": 0, "transcript_turns": 0, "media": 0,
+                  "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
             for name, count in self.delete_conversation(cid).items():
                 counts[name] += count
@@ -445,6 +457,7 @@ class InMemoryConversationStore:
             "conversations": 1 if self._states.pop(conversation_id, None) is not None else 0,
             "transcript_turns": len(self._turns.pop(conversation_id, {})),
             "conversation_summaries": summaries,
+            "media": len(self._media.pop(conversation_id, {})),
         }
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:

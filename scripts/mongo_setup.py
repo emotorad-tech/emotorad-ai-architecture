@@ -20,10 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src")]
 
 from emotorad_ai.stores.mongo import (  # noqa: E402
-    CONVERSATION_SUMMARIES, MONGO_URI_ENV, TRANSCRIPT_TURNS, connect, ensure_indexes,
+    CONVERSATION_SUMMARIES, MEDIA, MONGO_URI_ENV, TRANSCRIPT_TURNS, connect, ensure_indexes,
 )
 
-PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES)
+PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA)
 
 
 def main() -> int:
