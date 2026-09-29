@@ -233,8 +233,12 @@ shell.
 
    You should see the status lines include
    `EMOTORAD_AI_MEDIA_BUCKET: set (photo and video storage in S3)`, then a sign-in
-   link and a chat link. Open the sign-in link and sign in, then open the chat link,
-   attach a photo and send it with a short message.
+   link, `http://localhost:8000/dev/verification/sign-in`, and a chat link,
+   `http://localhost:8000/chat?debug=1`. Open the sign-in link and sign in, then open
+   the chat link, attach a photo and send it with a short message. Use the addresses
+   exactly as printed, with `localhost`: that is the origin the bucket's CORS allows
+   (section 1), and a page opened on `127.0.0.1` has its video upload refused. The
+   server itself still listens on `127.0.0.1` only.
 
 5. Find the object in the bucket. First get its key with a read-only query in
    `mongosh`, against the newest `media` document:

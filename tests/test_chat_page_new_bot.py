@@ -200,11 +200,21 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("EMOTORAD_MONGO_URI: set", text)
 
     def test_the_url_routes_through_jev_on_openrouter_and_pins_without_it(self):
-        self.assertEqual(self.launcher.chat_url("openrouter", 8000), "http://127.0.0.1:8000/chat?debug=1")
+        self.assertEqual(self.launcher.chat_url("openrouter", 8000), "http://localhost:8000/chat?debug=1")
         # No Jev in the single-model modes: pin the agent the prompts were tuned
         # on, as the page always did, rather than the keyword triage.
         self.assertEqual(self.launcher.chat_url("offline", 8001),
-                         "http://127.0.0.1:8001/chat?agent=battery_support&debug=1")
+                         "http://localhost:8001/chat?agent=battery_support&debug=1")
+
+    def test_the_page_is_opened_on_the_origin_the_bucket_allows(self):
+        # The media bucket's CORS allows http://localhost:8000 for local
+        # testing (docs/runbooks/media.md section 1). A page opened on
+        # 127.0.0.1 is another origin, and its video PUT to S3 is refused.
+        # Both addresses, since a browser signed in on one origin is not
+        # signed in on the other.
+        for url in (self.launcher.chat_url("openrouter", 8000), self.launcher.sign_in_url(8000)):
+            with self.subTest(url=url):
+                self.assertTrue(url.startswith("http://localhost:8000/"), url)
 
     def test_the_business_tools_are_always_the_fixtures(self):
         # With the OMS key the server reads the live purchase table, and in
@@ -217,13 +227,15 @@ class LauncherTests(unittest.TestCase):
     def test_it_says_where_to_sign_in_for_the_code_panel(self):
         # The page's code fetch cannot ask for the login itself; signing in
         # once under /dev/verification/ lets the browser send it from then on.
-        self.assertEqual(self.launcher.sign_in_url(8000), "http://127.0.0.1:8000/dev/verification/sign-in")
+        self.assertEqual(self.launcher.sign_in_url(8000), "http://localhost:8000/dev/verification/sign-in")
 
     def test_it_only_ever_listens_on_this_machine(self):
         # Dev codes on means the code panel hands out a login for any phone.
+        # The address printed is localhost; the address bound stays 127.0.0.1.
         command = self.launcher.server_command(8000)
-        self.assertIn("127.0.0.1", command)
+        self.assertEqual(command[command.index("--host") + 1], "127.0.0.1")
         self.assertNotIn("0.0.0.0", command)
+        self.assertNotIn("localhost", command)
 
     def test_an_unknown_mode_or_store_is_refused(self):
         with self.assertRaises(SystemExit):

@@ -32,7 +32,14 @@ from pathlib import Path
 from typing import List, Mapping, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+# What the server binds to: this machine only.
 HOST = "127.0.0.1"
+# What the printed addresses use. The media bucket's CORS allows
+# http://localhost:8000 for local testing (docs/runbooks/media.md section 1),
+# and 127.0.0.1 is a different origin to a browser, so a page opened there
+# has its video upload to S3 refused. Both addresses use it: a browser
+# signed in on one origin is not signed in on the other.
+PAGE_HOST = "localhost"
 MODES = ("openrouter", "offline", "anthropic", "bedrock")
 STORES = ("mongodb", "memory")
 # The login in front of the code panel when none is set. Local only: the
@@ -99,14 +106,14 @@ def chat_url(mode: str, port: int) -> str:
     # Jev routes only in openrouter mode. Without it, pin the agent the prompts
     # were tuned on, as the page always did, rather than the keyword triage.
     query = "debug=1" if mode == "openrouter" else "agent=battery_support&debug=1"
-    return "http://%s:%d/chat?%s" % (HOST, port, query)
+    return "http://%s:%d/chat?%s" % (PAGE_HOST, port, query)
 
 
 def sign_in_url(port: int) -> str:
     """Where to sign in once so the page can show the code. The page's fetch
     cannot ask for a login, but a browser signed in anywhere under
     /dev/verification/ sends it for every later request there."""
-    return "http://%s:%d/dev/verification/sign-in" % (HOST, port)
+    return "http://%s:%d/dev/verification/sign-in" % (PAGE_HOST, port)
 
 
 def server_command(port: int) -> List[str]:
