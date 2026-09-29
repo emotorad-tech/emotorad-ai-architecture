@@ -82,13 +82,22 @@ class PathTests(unittest.TestCase):
 
 class StatedTests(unittest.TestCase):
     def test_path_handled_by_and_record(self):
-        events = [{"event": "turn_path", "path": "full"}, {"event": "jev_decision", "sub_category": "battery-range-dropped"}]
+        # The shape the runtime logs for a full route: the route carries no
+        # record, and Jev's own pick is in its scores.
+        events = [{"event": "jev_decision", "path": "full", "sub_category": None,
+                   "scores": {"sub_category": {"choice": "battery-range-dropped", "p": 0.6}}},
+                  {"event": "turn_path", "path": "full"}]
         rec = record("Ok.", events=events)
         self.assertEqual(failures(rec, path=("narrow", "full"), handled_by=("narrow_support", "battery_support"),
                                   sub_category="battery-range-dropped"), [])
         self.assertEqual(failures(rec, path=("narrow",), handled_by=("motor_support",), sub_category="battery-wont-charge"),
                          ["path was full, expected narrow", "handled by battery_support, expected motor_support",
-                          "record was battery-range-dropped, expected battery-wont-charge"])
+                          "Jev's pick was battery-range-dropped, expected battery-wont-charge"])
+        narrow = [{"event": "jev_decision", "path": "narrow", "sub_category": "battery-range-dropped",
+                   "scores": {"sub_category": {"choice": "battery-range-dropped", "p": 0.9}}},
+                  {"event": "turn_path", "path": "narrow"}]
+        self.assertEqual(failures(record("Ok.", events=narrow), sub_category="battery-wont-charge"),
+                         ["record was battery-range-dropped, expected battery-wont-charge"])
 
     def test_tools_called_and_not_called(self):
         rec = record("Ok.", events=[{"event": "tool_call", "tool": "lookup_warranty_record"}])

@@ -8,6 +8,8 @@ from unittest import mock
 from emotorad_ai.live_eval.report import write_report
 from emotorad_ai.live_eval.runner import run_suite
 from emotorad_ai.live_eval.scenarios import Expect
+from emotorad_ai.openrouter import OpenRouterTransport
+from emotorad_ai.wiring import build_models
 from tests.live_eval_helpers import BASE, TODAY, Factory, priced, scenario
 
 MIXES = {"typical": {"s": 10}, "worst": {"s": 10}}
@@ -48,8 +50,21 @@ class ReportTests(unittest.TestCase):
         self.assertIn(claim, page)
 
     def test_the_key_never_reaches_the_report(self):
+        # The real wiring, so the key is read from the environment and put on
+        # the request. Scripted models never touch the key, so a test on them
+        # could not fail. The leak is an error that echoes the request's
+        # headers, as a proxy's refusal can; nothing leaves this machine.
+        def echoing_opener(request, timeout=None):
+            raise RuntimeError("proxy refused the request: %s" % dict(request.header_items()))
+
+        def models(settings):
+            return build_models(settings, transport=OpenRouterTransport(opener=echoing_opener))
+
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-LIVEEVALTESTKEY"}):
-            page, data = write(run_with("Try another socket."))
+            run = run_suite([scenario(expect=Expect(path=("narrow",)))], BASE, budget=1.0,
+                            models_factory=models, sleep=lambda s: None, today=TODAY)
+            page, data = write(run)
+        self.assertIn("RuntimeError: proxy refused the request", data["scenarios"][0]["outcomes"][0][0]["error"])
         self.assertNotIn("LIVEEVALTESTKEY", page)
         self.assertNotIn("LIVEEVALTESTKEY", json.dumps(data))
 

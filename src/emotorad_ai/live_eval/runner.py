@@ -9,6 +9,7 @@ written to MongoDB and only fixture people leave this machine.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
@@ -21,21 +22,30 @@ from ..adapters.website_chat import WebsiteChatAdapter
 from ..adapters.whatsapp import WhatsAppAdapter
 from ..config import Settings
 from ..conversation import InMemoryConversationStore
+from ..decisions import EMPTY_MESSAGE
 from ..errorcodes import load_table
 from ..identity import IdentityResolver
 from ..media import load_catalogue
 from ..observability import EventLog
+from ..openrouter import API_KEY_ENV
 from ..runtime import Runtime
 from ..tools.mocks import build_registry
 from ..tools.registry import IdempotencyStore, ToolRegistry
 from ..wiring import Models, build_models
-from .checks import TurnRecord, check_turn, path_of, sub_category_of, tools_called
+from .checks import TurnRecord, always_failures, path_of, stated_failures, sub_category_of, tools_called
 from .scenarios import Scenario, Turn, Who
 
 # The provider, not the bot: worth one retry after a pause.
 PROVIDER_CODES = frozenset({"rate_limited", "unavailable", "bad_response"})
 # Every further call would fail the same way: stop the run.
 FATAL_CODES = {"auth": "OpenRouter rejected the key", "payment_required": "the OpenRouter account is out of credit"}
+# A model call that failed after the provider may have done the work, and so
+# may have billed it: a timeout or dropped connection, or an answer we could
+# not read. A refused call (rate limit, bad key, no credit) is not billed.
+BILLED_ERRORS = frozenset({"unavailable", "bad_response"})
+# What the budget gate charges a call of unknown cost when no call in the run
+# has been priced yet. Well above any single call the eval makes today.
+UNKNOWN_CALL_CEILING = 0.05
 ADAPTERS = {
     "website": WebsiteChatAdapter,
     "amiigo": AmiigoAdapter,
@@ -55,7 +65,8 @@ class Cost:
     total: float = 0.0
     by_model: Dict[str, float] = field(default_factory=dict)
     calls: int = 0
-    unknown: int = 0  # calls that came back without a billed cost
+    unknown: int = 0  # calls with no billed cost: none came back, or the call failed
+    dearest: Optional[float] = None  # the most any one priced call cost
 
     def charge(self, model: str, amount: Optional[float]) -> None:
         self.calls += 1
@@ -64,6 +75,7 @@ class Cost:
             return
         self.total += amount
         self.by_model[model] = self.by_model.get(model, 0.0) + amount
+        self.dearest = amount if self.dearest is None else max(self.dearest, amount)
 
     def add(self, other: "Cost") -> None:
         self.total += other.total
@@ -71,6 +83,15 @@ class Cost:
         self.unknown += other.unknown
         for model, amount in other.by_model.items():
             self.by_model[model] = self.by_model.get(model, 0.0) + amount
+        if other.dearest is not None:
+            self.dearest = other.dearest if self.dearest is None else max(self.dearest, other.dearest)
+
+    def charged(self) -> float:
+        """What the budget gate counts: the billed total, plus every call of
+        unknown cost at the dearest call seen, or at the ceiling when no call
+        has been priced yet."""
+        per_call = self.dearest if self.dearest is not None else UNKNOWN_CALL_CEILING
+        return self.total + self.unknown * per_call
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -86,15 +107,34 @@ def _number(value: Any) -> Optional[float]:
 
 
 def cost_of(events: Sequence[Mapping[str, Any]], jev_model: str) -> Cost:
-    """What one turn's model calls were billed, from the event log."""
+    """What one turn's model calls were billed, from the event log. A call
+    that failed is a call of unknown cost, not a free one."""
     cost = Cost()
     for event in events:
-        if event.get("event") == "llm_turn":
+        kind = event.get("event")
+        if kind == "llm_turn":
             usage = event.get("usage")
             cost.charge(str(event.get("model") or "unknown model"), _number(usage.get("cost")) if isinstance(usage, dict) else None)
-        elif event.get("event") == "jev_decision" and not event.get("error"):
+        elif kind == "jev_decision" and not event.get("error"):
             cost.charge(str(event.get("model") or jev_model), _number(event.get("cost")))
+        elif kind == "jev_decision" and event.get("error") != EMPTY_MESSAGE:
+            # Jev was asked and failed. A photo sent on its own is never
+            # scored (empty_message): no call was made.
+            cost.charge(str(event.get("model") or jev_model), None)
+        elif kind == "llm_error" and str(event.get("error")) in BILLED_ERRORS:
+            cost.charge("unknown model", None)
     return cost
+
+
+def scrub(text: str) -> str:
+    """Error text with the OpenRouter key taken out, as it is set and as it is
+    stripped. A key ending in CR or LF fails inside http.client, whose
+    ValueError quotes the whole Authorization header."""
+    raw = os.environ.get(API_KEY_ENV, "")
+    for secret in sorted({raw, raw.strip()}, key=len, reverse=True):
+        if secret:
+            text = text.replace(secret, "[key]")
+    return text
 
 
 @dataclass
@@ -117,6 +157,8 @@ class TurnResult:
     # judge whether the check or the model was wrong.
     blocked_reason: Optional[str] = None
     suppressed: Optional[str] = None
+    # The failures among `failures` that break a rule every reply keeps.
+    always_failed: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -246,7 +288,7 @@ def run_scenario(
         try:
             reply = runtime.handle(adapter.to_message(_event(scenario.who, conversation_id, turn)))
         except Exception as exc:  # a crash is a finding; the run goes on
-            error = "turn %d crashed: %s: %s" % (index + 1, type(exc).__name__, exc)
+            error = scrub("turn %d crashed: %s: %s" % (index + 1, type(exc).__name__, exc))
             break
         seconds = time.monotonic() - started
         events = log.events[mark:]
@@ -267,16 +309,22 @@ def run_scenario(
         )
         cost = cost_of(events, settings.jev_model)
         total.add(cost)
+        always = always_failures(record, turn.expect, scenario.who)
         turns.append(TurnResult(
             index=index, text=turn.message, reply=reply.text, handled_by=reply.handled_by,
             path=path_of(reply, events), sub_category=sub_category_of(events), tools=tools_called(events),
             ticket_id=reply.ticket_id, escalated=reply.escalated, media=len(reply.attachments),
-            cost=cost, seconds=round(seconds, 2), failures=check_turn(record, turn.expect, scenario.who),
+            cost=cost, seconds=round(seconds, 2), failures=always + stated_failures(record, turn.expect),
             provider_codes=[c for c in codes if c in PROVIDER_CODES],
             blocked_reason=reply.metadata.get("blocked_reason"), suppressed=reply.metadata.get("suppressed_text"),
+            always_failed=always,
         ))
 
     if error:
+        status = "fail"
+    elif any(t.always_failed for t in turns):
+        # Another person's data, an invented amount, an empty or blocked
+        # reply: wrong whatever the provider did, and not worth a retry.
         status = "fail"
     elif scenario.family != "failures" and any(t.provider_codes for t in turns):
         status = "provider"
@@ -305,7 +353,8 @@ def run_suite(
     )
     for scenario in scenarios:
         for _ in range(repeat):
-            if run.spend.total >= budget:
+            # Pessimistic: a call whose cost is unknown still cost something.
+            if run.spend.charged() >= budget:
                 if scenario.id not in run.skipped:
                     run.skipped.append(scenario.id)
                 continue

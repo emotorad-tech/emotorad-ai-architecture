@@ -106,7 +106,8 @@ def render_html(data: Mapping[str, Any]) -> str:
     spend = data["spend"]
     parts.append("<h2>Spend</h2><p>$%.4f over %d model call(s).</p>" % (spend["total"], spend["calls"]))
     if spend["unknown"]:
-        parts.append("<p class='warn'>%d call(s) came back without a billed cost; the total is a lower bound.</p>" % spend["unknown"])
+        parts.append("<p class='warn'>%d call(s) have no billed cost (none came back, or the call failed); "
+                     "the total is a lower bound.</p>" % spend["unknown"])
     parts.append("<table>%s</table>" % "".join(
         "<tr><th>%s</th><td>$%.4f</td></tr>" % (e(model), amount) for model, amount in spend["by_model"].items()))
 

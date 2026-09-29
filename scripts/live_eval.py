@@ -56,8 +56,11 @@ def main(argv=None, models_factory=build_models, sleep=time.sleep) -> int:
         return 0
 
     def progress(outcome):
-        print("%-8s %-12s %-42s $%.4f" % (outcome.final.status.upper(), outcome.scenario.family,
-                                          outcome.scenario.id, outcome.spend.total), flush=True)
+        # The unknown count says how far the dollar figure undercounts.
+        spend = outcome.spend
+        print("%-8s %-12s %-42s $%.4f, %d call(s) of unknown cost" % (
+            outcome.final.status.upper(), outcome.scenario.family, outcome.scenario.id, spend.total, spend.unknown),
+            flush=True)
 
     try:
         run = run_suite(scenarios, Settings(), budget=args.budget, repeat=args.repeat,
