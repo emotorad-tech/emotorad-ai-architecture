@@ -106,6 +106,8 @@
   .header-sub span.label { font-size: 12px; color: var(--muted); }
   .header-menu { margin-left: auto; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; }
 
+  /* ?debug=1 only: which path answered. Testing aid, never customer copy. */
+  .route-note { font-size: 11px; color: var(--muted); margin: -2px 0 4px 32px; font-family: ui-monospace, Menlo, Consolas, monospace; }
   .context-pill-row { flex: 0 0 auto; display: flex; justify-content: center; padding: 10px 0 2px 0; }
   .context-pill {
     font-size: 11.5px; font-weight: 600; color: var(--muted);
@@ -450,14 +452,21 @@
    only "what happens next" moved from reading a hardcoded
    SCRIPT to asking the agent.
 
-   Still stubbed, deliberately: the attach button. Uploading
-   needs somewhere to put the file and a decision about size and
-   type limits, and MessageIn has no attachment field yet. Until
-   then it sends a text note so the conversation can continue,
-   and the agent's evidence gate will correctly refuse to
-   conclude a fault on it.
+   Attachments are live too: a photo goes inline with the
+   message, a video through POST /uploads (needs the media
+   bucket). Either one counts as evidence for a ticket.
    ============================================================ */
 var OPENING = "Hi! I'm an AI assistant here to help with your EMotorad bike.\n\nWhat's going on?";
+
+/* Testing switches, read from this page's own address. Neither is for
+   customers; the page is internal (see /chat in api.py).
+     ?agent=battery_support  pin one agent. Jev is not asked and the narrow
+                             path is not taken. Leave it off to test the bot
+                             staging runs: Jev routing, narrow and full paths.
+     ?debug=1                show under each reply which path answered it. */
+var PAGE_PARAMS = new URLSearchParams(window.location.search);
+var PINNED_AGENT = PAGE_PARAMS.get("agent");
+var DEBUG = PAGE_PARAMS.get("debug") === "1";
 
 var state = {
   conversationId: null,  // assigned by the server on the first reply
@@ -596,6 +605,12 @@ function renderAiTurnHtml(turn) {
         '" alt="Guide photo, tap to enlarge" /></div>';
     }
   });
+  if (DEBUG && turn.route && turn.route.handledBy) {
+    var note = "via " + turn.route.handledBy;
+    if (turn.route.ticketId) note += " \u00b7 ticket " + turn.route.ticketId;
+    if (turn.route.escalated) note += " \u00b7 handed to a person";
+    html += '<div class="msg-row ai"><div class="route-note">' + esc(note) + "</div></div>";
+  }
   return html;
 }
 
@@ -791,7 +806,7 @@ function ask(text, location) {
     body: JSON.stringify({
       conversation_id: state.conversationId,
       em_aid: emAid(),
-      agent: "battery_support",
+      agent: PINNED_AGENT || null,
       text: text,
       attachments: attachments,
       location: location || null
@@ -803,7 +818,10 @@ function ask(text, location) {
     dropWaitingNotice();
     state.conversationId = reply.conversation_id;
     state.busy = false;
-    state.turns.push({ isUser: false, text: reply.text, attachments: reply.attachments || [], actions: reply.actions || [] });
+    state.turns.push({
+      isUser: false, text: reply.text, attachments: reply.attachments || [], actions: reply.actions || [],
+      route: { handledBy: reply.handled_by, ticketId: reply.ticket_id, escalated: reply.escalated }
+    });
     render();
     pollDevCode();
   }).catch(function (err) {
@@ -943,6 +961,13 @@ function onVideoPicked(event) {
     // A 415 is the file, not the network: retrying the same clip cannot help.
     if (err && err.status === 415) {
       notice("That format is not supported, please send an MP4 or a clip recorded on your phone camera.");
+      return;
+    }
+    // A 503 is a server with no video storage set up (EMOTORAD_AI_MEDIA_BUCKET,
+    // e.g. a laptop): it will say the same thing every time, so do not ask
+    // for a retry. A photo goes inline and needs no storage.
+    if (err && err.status === 503) {
+      notice("Video upload is not available here yet. Please send a photo instead.");
       return;
     }
     notice("Sorry, the video did not upload. Please try again.");

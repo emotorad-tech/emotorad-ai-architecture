@@ -284,6 +284,11 @@ class MessageIn(BaseModel):
     # `classify_issue` is keyword-only, returns None for "bike nahi chal rahi",
     # and the None branch re-asks the same sentence forever. Its own docstring
     # says None means "the model decides", and nothing asks the model yet.
+    #
+    # A pin also skips Jev and the narrow path (Runtime._node_classify), so
+    # since 2026-09-29 the chat page sends one only when its URL has
+    # ?agent=...; without it, openrouter mode routes as staging does. The
+    # keyword triage above still answers first for text it cannot classify.
     agent: Optional[str] = None
     # A tapped "Share my location". Turned into the customer's own message
     # (pincode and area) before anything else sees it; the coordinates are
