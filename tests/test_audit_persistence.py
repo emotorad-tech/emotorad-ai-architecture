@@ -390,6 +390,8 @@ class SaveLoopTests(unittest.TestCase):
         """Kills: the handover after a failed merge dropping the ticket the
         turn raised, so the customer has no reference to quote."""
         store = ConflictingStore(conflicts=2)
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        InMemoryConversationStore.get(store, "conv-1").evidence_seen = True
         runtime = runtime_on(store, [TICKET_CALL, say("Your reference is EM-00001; the team will call you.")])
         answer = send(runtime, "my battery won't charge")
         self.assertEqual((answer.handled_by, answer.escalated, answer.ticket_id), ("store_unavailable", True, "EM-00001"))
@@ -411,7 +413,10 @@ class SaveLoopTests(unittest.TestCase):
             return real_call(name, arguments, context, **kw)
 
         registry.call = call
-        runtime = runtime_on(InMemoryConversationStore(), [TICKET_CALL, call_tool(LOOKUP_WARRANTY_RECORD, {}, "t2"), say("x")],
+        store = InMemoryConversationStore()
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        store.get("conv-1").evidence_seen = True
+        runtime = runtime_on(store, [TICKET_CALL, call_tool(LOOKUP_WARRANTY_RECORD, {}, "t2"), say("x")],
                              registry=registry)
         answer = send(runtime, "my battery won't charge")
         self.assertEqual((answer.handled_by, answer.ticket_id), ("store_unavailable", "EM-00001"))
@@ -443,6 +448,8 @@ class ConversationOutcomeTests(unittest.TestCase):
         or forgetting its ticket, so the person's history reads "open" with no
         reference to quote."""
         store = InMemoryConversationStore()
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        store.get("conv-1").evidence_seen = True
         runtime = runtime_on(store, [TICKET_CALL, say("Your reference is EM-00001; the team will call you."),
                                      say("Anything else?")])
         send(runtime, "my battery won't charge")

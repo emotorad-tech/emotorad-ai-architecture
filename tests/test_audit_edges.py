@@ -170,6 +170,8 @@ class PostCheckBookkeepingTests(unittest.TestCase):
         customer is not told it, and the transcript never reaches it."""
         rt = runtime(replies=[self.TICKET, say(self.CLAIM)])
         rt.conversations.get("c1").route_to("battery_support")
+        # The customer sent a photo earlier: a fault ticket needs evidence (test_evidence_before_ticket).
+        rt.conversations.get("c1").evidence_seen = True
         answer = web(rt, "my battery won't charge")
         self.assertEqual(answer.handled_by, "guardrail:coverage_post_check")
         self.assertIsNotNone(answer.ticket_id)
