@@ -56,7 +56,7 @@ from .decisions import (
     route,
 )
 from .disclosure import apply_disclosure
-from .enrichment import ContextEnricher
+from .enrichment import ContextEnricher, summarise_past
 from .graph import TurnNodes, build_turn_graph
 from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
@@ -249,7 +249,17 @@ class Runtime:
         # caching), and cannot change the answer — a customer's bikes and history
         # do not move mid-chat.
         if state.context_block is None:
-            context = self.enricher.build(resolved)
+            # Memory: a proven person's last few conversations, as code-built
+            # lines. The enricher shows them only to a verified identity.
+            last_contact = None
+            if state.user_key:
+                try:
+                    last_contact = summarise_past(self.conversations.recent_summaries(
+                        state.user_key, limit=3, exclude=state.conversation_id))
+                except StoreUnavailable as exc:
+                    # Memory is a nicety; the conversation goes on without it.
+                    self.log.emit("memory_unavailable", message.conversation_id, error=str(exc))
+            context = self.enricher.build(resolved, last_conversation=last_contact)
             state.context_block = context.render()
             self.log.emit(
                 "context_built", message.conversation_id,

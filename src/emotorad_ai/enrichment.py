@@ -22,6 +22,7 @@ shape the whole file:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 from .identity import ResolvedIdentity
@@ -87,6 +88,32 @@ def summarise_signals(signals: Sequence[str]) -> Optional[str]:
     }
     named = [readable.get(signal, signal) for signal in signals]
     return "Intent signals: " + ", ".join(named)
+
+
+def summarise_past(summaries: Sequence[Any]) -> Optional[str]:
+    """Earlier conversations, one line each, newest first, at most three.
+
+    Built only from fields code wrote (a record title or a fixed label, the
+    bike, the outcome, the ticket), never from what the customer typed, so a
+    past message cannot steer a future prompt.
+    """
+    lines: List[str] = []
+    for item in list(summaries)[:3]:
+        try:
+            day = datetime.fromisoformat(item.started_at).strftime("%d %b")
+        except (TypeError, ValueError):
+            day = "Earlier"
+        line = "%s: %s" % (day, item.title or "General question")
+        if item.product_name:
+            line += " on the %s" % item.product_name
+        if item.frame_number:
+            line += " (…%s)" % item.frame_number[-4:]
+        if item.outcome == "escalated":
+            line += ", escalated"
+        if item.ticket_id:
+            line += ", ticket %s" % item.ticket_id
+        lines.append(line)
+    return "\n".join(lines) if lines else None
 
 
 class ContextEnricher:
