@@ -234,8 +234,9 @@ shell.
    db.media.find().sort({stored_at: -1}).limit(1)
    ```
 
-   Copy the `key` field from the one document it returns, then check the object is
-   really in the bucket:
+   Copy the `key` field from the one document it returns (and note its
+   `conversation_id` field too, needed for cleanup in step 8), then check the object
+   is really in the bucket:
 
    ```powershell
    aws s3api head-object --bucket emotorad-ai-stage-media --key "<key from the query above>"
@@ -249,8 +250,13 @@ shell.
    Either one showing up means a presigned URL leaked into the permanent record,
    which the design forbids.
 
-7. If step 5's query returns nothing, the photo was not stored. Read the failure
-   event, from the server's own console output or `logs/conversations.jsonl`:
+7. If step 5's query returns nothing, the photo was not stored. The event that
+   explains why is always written to `logs/conversations.jsonl`; the server's own
+   console shows it too only if `EMOTORAD_AI_LOG_STDOUT` was set to `1` before the
+   server started (it defaults to off, and neither `chat_local.py` nor step 3 turns
+   it on). If you would rather watch the console, add
+   `$env:EMOTORAD_AI_LOG_STDOUT = "1"` alongside the other variables in step 3,
+   before you run step 4.
    - `media_not_stored` with `reason: no_cluster`: nothing identified who sent it, no
      session and no cookie, so there was nowhere to key the object under. Sign in
      first, then send the photo again.
@@ -259,20 +265,32 @@ shell.
    - `media_record_failed`: the object reached S3 but the MongoDB write failed.
      Check `EMOTORAD_MONGO_URI` and that Atlas is reachable.
 
-8. Clean up the test conversation and its media. First a dry run, which deletes
-   nothing:
+8. Clean up the test conversation and its media. A photo sent without first
+   verifying is filed under the browser's anonymous cluster, not a phone number, so
+   `--phone 9876543210` would find nothing here; erase by conversation instead,
+   using the `conversation_id` you noted from the document in step 5. First a dry
+   run, which deletes nothing:
 
    ```powershell
-   python scripts/delete_person.py --phone 9876543210
+   python scripts/delete_person.py --conversation-id "<conversation_id from step 5>"
    ```
 
-   You should see a count of what would be deleted, including the S3 key from step 5.
+   You should see `subject: CONVERSATION#<conversation_id>`, then one line per
+   collection with its count (`conversations`, `transcript_turns`,
+   `conversation_summaries`, `idempotency_keys`, `media`), then, since there is
+   media, `media objects in S3:` followed by the key from step 5, and finally
+   `dry run: nothing deleted. Add --yes --reason "..." to delete.`
+
    Then delete it for real, which needs credentials allowed to delete object
-   versions, not just put and get:
+   versions in the bucket, not just put and get:
 
    ```powershell
-   python scripts/delete_person.py --phone 9876543210 --yes --reason "staging media test"
+   python scripts/delete_person.py --conversation-id "<conversation_id from step 5>" --yes --reason "staging media test"
    ```
 
-   You should see the same counts printed again, this time as done, and the object
-   gone if you rerun step 5's `head-object` command.
+   The layout is different this time: the same subject line, per-collection counts
+   and media key print first, exactly as in the dry run, but instead of the "dry
+   run" line you should see one `deleted: conversations 1, transcript_turns ..., media 1`
+   summary line, then `s3 objects` and `s3 versions` counts, then
+   `audit record written to erasure_log`. Rerunning step 5's `head-object` command
+   afterwards should now fail with "Not Found".
