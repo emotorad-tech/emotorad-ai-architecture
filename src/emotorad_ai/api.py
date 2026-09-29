@@ -35,9 +35,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -825,6 +827,30 @@ CHAT_FILE = WEB_DIR / "emotorad-support-chat-dev.html"
 # /dev/verification: the playground login, and off unless DEV_CODES is on.
 E2E_CONSOLE_FILE = WEB_DIR / "e2e-console.html"
 E2E_SAMPLE_PHOTO = WEB_DIR.parent / "tests" / "data" / "live_media" / "smoke-battery.jpg"
+# A console run is saved here (git-ignored, like the event log), so it outlives
+# the browser tab and scripts/e2e_report.py can turn it into a report.
+E2E_RESULTS_DIR = WEB_DIR.parent / "logs" / "e2e"
+E2E_RESULTS_LIMIT = 2 * 1024 * 1024
+
+
+@app.post("/dev/e2e/results", dependencies=[Depends(require_playground_auth)])
+async def dev_e2e_save_results(request: Request) -> dict:
+    if not DEV_CODES:
+        raise HTTPException(status_code=404, detail="not found")
+    raw = await request.body()
+    if len(raw) > E2E_RESULTS_LIMIT:
+        raise HTTPException(status_code=413, detail="A run is capped at %d bytes." % E2E_RESULTS_LIMIT)
+    try:
+        run = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Not JSON.") from None
+    if not isinstance(run, dict) or not isinstance(run.get("results"), list):
+        raise HTTPException(status_code=400, detail="Expected an object with a results list.")
+    E2E_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    name = "run-%s.json" % time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    path = E2E_RESULTS_DIR / name
+    path.write_text(json.dumps(run, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"saved": "logs/e2e/" + name}
 
 
 @app.get("/dev/e2e", response_class=HTMLResponse, dependencies=[Depends(require_playground_auth)])

@@ -181,7 +181,7 @@ class BothAttachmentShapesTests(unittest.TestCase):
 
     def test_an_inline_photo_still_reaches_the_model(self):
         """The chat page's inline photo path. It must not need media configured
-        (NoBucketTests covers that laptop case) — but here a bucket *is*
+        (NoBucketTests covers that laptop case): but here a bucket *is*
         configured and the session resolves, so Task 2 applies: the server
         stores the photo itself and reads it back for the model exactly like a
         claimed upload, rather than carrying the data: URL through untouched."""

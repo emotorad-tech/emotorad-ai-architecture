@@ -98,6 +98,42 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(record["source"], "inline")
 
 
+class SavedResultsTests(unittest.TestCase):
+    """A run is saved on the server (logs/e2e/), so it survives the browser tab
+    and scripts/e2e_report.py can turn it into a report."""
+
+    def setUp(self):
+        import tempfile
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.api = fresh_api(dev_codes=True)
+        self.api.E2E_RESULTS_DIR = pathlib.Path(self.dir.name)
+        self.client = TestClient(self.api.app)
+        self.addCleanup(lambda: fresh_api(dev_codes=False))
+
+    def test_a_run_is_saved_and_named_by_its_time(self):
+        run = {"at": "2026-09-29T16:56:05Z", "results": [{"id": "smoke-typed", "status": "finding", "steps": []}]}
+        saved = self.client.post("/dev/e2e/results", json=run, headers={"Authorization": AUTH})
+        self.assertEqual(saved.status_code, 200)
+        [path] = list(pathlib.Path(self.dir.name).glob("*.json"))
+        self.assertEqual(saved.json()["saved"], "logs/e2e/" + path.name)
+        import json
+
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), run)
+
+    def test_it_needs_the_login_and_dev_codes(self):
+        self.assertEqual(self.client.post("/dev/e2e/results", json={"results": []}).status_code, 401)
+        off = TestClient(fresh_api(dev_codes=False).app)
+        self.assertEqual(off.post("/dev/e2e/results", json={"results": []}, headers={"Authorization": AUTH}).status_code, 404)
+
+    def test_a_run_without_results_or_too_large_is_refused(self):
+        self.assertEqual(self.client.post("/dev/e2e/results", json={"at": "x"}, headers={"Authorization": AUTH}).status_code, 400)
+        big = {"results": [{"text": "x" * (2 * 1024 * 1024 + 1)}]}
+        self.assertEqual(self.client.post("/dev/e2e/results", json=big, headers={"Authorization": AUTH}).status_code, 413)
+        self.assertEqual(list(pathlib.Path(self.dir.name).glob("*.json")), [])
+
+
 class ConsolePageTests(unittest.TestCase):
     def setUp(self):
         self.html = CONSOLE.read_text(encoding="utf-8")
