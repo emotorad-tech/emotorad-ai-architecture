@@ -32,6 +32,12 @@ class _Store:
         self.fetched.append(key)
         return b"\x89PNG fake"
 
+    def put_bytes(self, key, data, mime):
+        # Task 2: an inline photo the server stores itself. Recorded in the
+        # same shape `head` expects, exactly as the presigned flow's tests
+        # already fake a completed PUT by setting `objects[key]` directly.
+        self.objects[key] = {"size": len(data), "mime": mime}
+
 
 def fresh_api(store):
     with mock.patch.dict(os.environ, {"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_MEDIA_BUCKET": "fake" if store else ""}):
@@ -174,8 +180,11 @@ class BothAttachmentShapesTests(unittest.TestCase):
         return body
 
     def test_an_inline_photo_still_reaches_the_model(self):
-        """The path the chat page uses today. It must not need media configured
-        and it must not go anywhere near S3."""
+        """The chat page's inline photo path. It must not need media configured
+        (NoBucketTests covers that laptop case) — but here a bucket *is*
+        configured and the session resolves, so Task 2 applies: the server
+        stores the photo itself and reads it back for the model exactly like a
+        claimed upload, rather than carrying the data: URL through untouched."""
         inline = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 fake").decode()
         r = self.client.post("/message", json={
             "conversation_id": "c1", "session_token": "sess-ananya", "text": "here is the terminal",
@@ -183,7 +192,8 @@ class BothAttachmentShapesTests(unittest.TestCase):
             "attachments": [{"kind": "image", "url": inline}],
         })
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.store.fetched, [])
+        [key] = list(self.store.objects.keys())
+        self.assertEqual(self.store.fetched, [key])
 
     def test_inline_and_presigned_mix_in_one_message(self):
         presigned = self._presigned()
@@ -194,7 +204,10 @@ class BothAttachmentShapesTests(unittest.TestCase):
             "attachments": [{"kind": "image", "url": inline}, {"upload_id": presigned["upload_id"]}],
         })
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.store.fetched, [presigned["key"]])
+        # Task 2: the inline photo is now stored under its own fresh key too,
+        # and both are fetched back for the model, in the order they were sent.
+        [inline_key] = [k for k in self.store.objects if k != presigned["key"]]
+        self.assertEqual(self.store.fetched, [inline_key, presigned["key"]])
 
     def test_the_count_limit_is_on_the_total_not_on_each_path(self):
         from emotorad_ai.attachments import MAX_ATTACHMENTS

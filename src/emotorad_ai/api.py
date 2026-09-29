@@ -62,9 +62,11 @@ from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
-from .conversation import StoreUnavailable
+from .conversation import StoreUnavailable, utc_now_iso
+from .media_records import media_record
 from .runtime import Runtime
-from .storage.keys import cluster_of, is_customer_key, is_valid_key
+from .storage import keys
+from .storage.keys import KeyValidationError, cluster_of, is_customer_key, is_valid_key
 from .storage.s3 import StorageError, store_from_env
 from . import tracing
 from .storage.uploads import UploadError, UploadRegistry
@@ -459,17 +461,60 @@ def get_media(key: str, session_token: str = "") -> RedirectResponse:
     return RedirectResponse(MEDIA_STORE.presign_get(key), status_code=302)
 
 
+def _persist_media(
+    conversation_id: str,
+    cluster_id: str,
+    key: str,
+    kind: str,
+    mime_type: str,
+    size_bytes: int,
+    source: str,
+) -> None:
+    """The permanent record of an object already in the bucket (spec §2): an
+    inline photo just written by `_inbound_attachments`, or an upload just
+    claimed. Called only once the bytes are safely stored, so a failure here
+    is never raised to the customer — the object is in the bucket either way,
+    and `media_record_failed` is how that gap becomes visible.
+    """
+    try:
+        record = media_record(
+            bucket=MEDIA_STORE.bucket,
+            key=key,
+            kind=kind,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            conversation_id=conversation_id,
+            cluster_id=cluster_id,
+            source=source,
+            stored_at=utc_now_iso(),
+        )
+        stores.conversations.record_media(record)
+    except (StoreUnavailable, ValueError) as exc:
+        log.emit(
+            "media_record_failed",
+            conversation_id,
+            key=key,
+            kind=kind,
+            error=type(exc).__name__,
+        )
+
+
 def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str, Any]]:
     """What the customer sent, in the shape the adapter takes, in the order they
     sent it.
 
     Two ways in, and a message may mix them. An inline `data:` URL is the
     website chat's photo-evidence path: validated here against
-    `attachments.validate` — type, size, count, base64 that decodes — carried in
-    the request and stored nowhere. An `{"upload_id": ...}` is an object already
-    PUT to S3 through `POST /uploads`; it is checked against this session and
-    claimed once, and becomes an `s3://` key the runtime reads with the instance
-    role. No S3 URL ever reaches the model either way.
+    `attachments.validate` — type, size, count, base64 that decodes. When a
+    bucket is configured and the caller resolves to a cluster, the decoded
+    photo is written to S3 here (`MEDIA_STORE.put_bytes`) and turned into an
+    `s3://` attachment, recorded exactly as a claimed upload is; it is no
+    longer "stored nowhere" once a bucket exists. With no bucket, or no
+    cluster to key it under, it stays inline and unstored, as before. An
+    `{"upload_id": ...}` is an object already PUT to S3 through
+    `POST /uploads`; it is checked against this session and claimed once, and
+    becomes an `s3://` key the runtime reads with the instance role. No S3
+    URL ever reaches the model either way.
 
     The count limit is on the total, not on each path, so adding the presigned
     route cannot be used to send more pictures than the inline one allows.
@@ -482,11 +527,57 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
             "Too many attachments: %d sent, %d allowed." % (len(items), MAX_ATTACHMENTS)
         )
 
-    # Validated as a batch, because that is where the count and type rules live.
-    # The originals are then passed through unchanged, exactly as the inline path
-    # did before: `user_content` decodes the data URL when the turn is built.
+    # Validated as a batch, because that is where the count and type rules
+    # live. `validated` lines up position for position with `inline`
+    # (`attachments.validate` promises the same order back), which is what
+    # lets the loop below pair a decoded photo with the raw item it replaces.
     inline = [item for item in items if not item.get("upload_id")]
-    validate_attachments(inline)
+    validated = validate_attachments(inline)
+
+    # Raw inline items the storage loop below replaced, keyed by object
+    # identity rather than mutated in place: a bucket-less deployment, a
+    # missing cluster or a store failure must leave `items` exactly as the
+    # customer sent it, and nothing else touches these dicts to tell apart.
+    stored: Dict[int, Dict[str, Any]] = {}
+    if MEDIA_STORE is not None and inline:
+        try:
+            inline_cluster = _cluster_for_session(body.session_token, body.em_aid)
+        except HTTPException:
+            # No session, no cookie: nowhere to derive a customer key from.
+            # Not the customer's fault and not worth a 400 for — the photo
+            # simply is not stored this turn.
+            inline_cluster = None
+            log.emit("media_not_stored", conversation_id, reason="no_cluster", kind="image")
+        if inline_cluster is not None:
+            for raw_item, item in zip(inline, validated):
+                mime = item["media_type"]
+                data = base64.b64decode(item["data"])
+                try:
+                    key = keys.customer_key(inline_cluster, conversation_id, "images", keys.new_upload_id(), mime)
+                except KeyValidationError as exc:
+                    # `conversation_id` is client-supplied on the wire — the
+                    # chat page always echoes back the UUID it was minted, but
+                    # nothing stops a caller sending something outside the key
+                    # grammar. Not worth failing the turn over: same outcome
+                    # as a store that refused the object.
+                    log.emit(
+                        "media_not_stored", conversation_id, reason="store_failed",
+                        error=type(exc).__name__, kind="image",
+                    )
+                    continue
+                try:
+                    MEDIA_STORE.put_bytes(key, data, mime)
+                except StorageError as exc:
+                    log.emit(
+                        "media_not_stored", conversation_id, reason="store_failed",
+                        error=type(exc).__name__, kind="image", key=key,
+                    )
+                    continue
+                _persist_media(
+                    conversation_id=conversation_id, cluster_id=inline_cluster, key=key,
+                    kind="image", mime_type=mime, size_bytes=len(data), source="inline",
+                )
+                stored[id(raw_item)] = {"kind": "image", "url": "s3://" + key, "mime_type": mime}
 
     uploaded = [item for item in items if item.get("upload_id")]
     claims: Dict[str, Dict[str, Any]] = {}
@@ -517,6 +608,11 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
                     "url": "s3://" + claimed.key,
                     "mime_type": claimed.mime,
                 }
+                _persist_media(
+                    conversation_id=conversation_id, cluster_id=caller_cluster, key=claimed.key,
+                    kind=_ATTACHMENT_KIND[claimed.kind], mime_type=claimed.mime,
+                    size_bytes=claimed.size, source="upload",
+                )
                 if claimed.kind == "videos":
                     summary = _summarise_video(claimed.key, claimed.mime)
                     if summary is not None:
@@ -537,7 +633,10 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
-    return [claims[item["upload_id"]] if item.get("upload_id") else item for item in items]
+    return [
+        claims[item["upload_id"]] if item.get("upload_id") else stored.get(id(item), item)
+        for item in items
+    ]
 
 
 def _summarise_video(key: str, mime: str) -> Optional[str]:
