@@ -84,6 +84,21 @@ class StoreContract:
         [only] = store.recent_summaries("PHONE#+919876543210")
         self.assertEqual((only.turns, only.outcome), (2, "escalated"))
 
+    def test_delete_person_removes_everything_for_one_person_only(self):
+        store = self.make_store()
+        for cid, user in (("mine", "PHONE#+919876543210"), ("theirs", "PHONE#+919812345678")):
+            state = store.get(cid)
+            state.user_key, state.turns = user, 1
+            store.save(state)
+            store.record_turn(state, inbound("x", cid), reply("y", cid), summary(cid, user_key=user))
+        counts = store.delete_person("PHONE#+919876543210")
+        self.assertEqual(counts, {"conversations": 1, "transcript_turns": 2, "conversation_summaries": 1})
+        self.assertEqual(store.transcript("mine"), [])
+        self.assertEqual(store.recent_summaries("PHONE#+919876543210"), [])
+        self.assertEqual(store.get("mine").turns, 0)  # a fresh state: the old one is gone
+        self.assertEqual(len(store.transcript("theirs")), 2)
+        self.assertEqual(len(store.recent_summaries("PHONE#+919812345678")), 1)
+
     def test_no_summary_is_written_without_a_user_key(self):
         store = self.make_store()
         state = store.get("a")

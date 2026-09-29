@@ -238,6 +238,20 @@ class InMemoryConversationStore:
         items = [s for s in self._summaries.get(user_key, {}).values() if s.conversation_id != exclude]
         return sorted(items, key=lambda s: s.started_at, reverse=True)[:limit]
 
+    def delete_person(self, user_key: str) -> Dict[str, int]:
+        """Everything held about one person: the right to erasure (DPDP, GDPR).
+
+        Working state, transcript turns and summaries, found by user key. The
+        counts say what went, for the person running the deletion to confirm.
+        """
+        mine = [cid for cid, state in self._states.items() if state.user_key == user_key]
+        turns = 0
+        for cid in mine:
+            del self._states[cid]
+            turns += len(self._turns.pop(cid, {}))
+        summaries = len(self._summaries.pop(user_key, {}))
+        return {"conversations": len(mine), "transcript_turns": turns, "conversation_summaries": summaries}
+
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history
 

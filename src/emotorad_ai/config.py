@@ -12,6 +12,8 @@ from dataclasses import dataclass
 # OpenRouter reply models, and sends customer text outside AWS, so it needs
 # sign-off before real customer traffic (spec §1.8).
 MODES = ("offline", "bedrock", "openrouter")
+# Where conversations live (spec 2026-09-29-mongodb-conversation-store).
+STORES = ("memory", "mongodb")
 
 
 @dataclass(frozen=True)
@@ -48,9 +50,23 @@ class Settings:
     # Zero-data-retention providers only, unless someone deliberately turns it off.
     openrouter_zdr: bool = os.environ.get("EMOTORAD_OPENROUTER_ZDR", "1") == "1"
 
+    # Where conversations live. `memory` is one process, lost on restart;
+    # `mongodb` survives restarts and scales out. The connection string is
+    # deliberately not a setting: it holds a password, and Settings gets
+    # printed. stores/mongo.py reads EMOTORAD_MONGO_URI itself.
+    store: str = os.environ.get("EMOTORAD_STORE", "memory")
+    mongo_db: str = os.environ.get("EMOTORAD_MONGO_DB", "emotorad_ai")
+    # Only the scratchpad and the write receipts expire. Transcripts and
+    # summaries are the conversation record and are kept (user decision,
+    # 2026-09-28), with deletion on request instead (scripts/delete_person.py).
+    state_ttl_hours: int = int(os.environ.get("EMOTORAD_STATE_TTL_HOURS", "48"))
+    idempotency_ttl_days: int = int(os.environ.get("EMOTORAD_IDEMPOTENCY_TTL_DAYS", "7"))
+
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise ValueError("EMOTORAD_AI_MODE must be one of %s, not %r" % (", ".join(MODES), self.mode))
+        if self.store not in STORES:
+            raise ValueError("EMOTORAD_STORE must be one of %s, not %r" % (", ".join(STORES), self.store))
 
 
 def load_settings() -> Settings:
