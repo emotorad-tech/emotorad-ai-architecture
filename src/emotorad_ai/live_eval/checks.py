@@ -52,14 +52,18 @@ class TurnRecord:
 
 @lru_cache(maxsize=1)
 def people() -> Mapping[str, FrozenSet[str]]:
-    """Every fixture person's identifiers, keyed like the store's user keys."""
+    """Every fixture person's private identifiers, keyed by kind and phone.
+
+    A dealer's shop name is not among them: it is on the shop's sign, and a
+    customer's own warranty record names the shop they bought from, so saying
+    it is not a leak. The dealer's phone and account id are private."""
     found: Dict[str, Set[str]] = {}
     for phone, records in fixtures.WARRANTY_RECORDS.items():
         ids = found.setdefault("PHONE#" + phone, {phone[-10:]})
         for row in records:
             ids.update(value for value in (row.get("customer_name"), row.get("frame_number")) if value)
     for phone, dealer in fixtures.DEALERS.items():
-        found["DEALER#" + phone] = {phone[-10:], dealer["dealer_id"], dealer["name"]}
+        found["DEALER#" + phone] = {phone[-10:], dealer["dealer_id"]}
     return {key: frozenset(ids) for key, ids in found.items()}
 
 

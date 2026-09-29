@@ -45,6 +45,14 @@ class AlwaysOnTests(unittest.TestCase):
         self.assertIn("the reply names another person's data: EMXP2025004417",
                       failures(record("Your EMX Plus EMXP2025004417 is fine."), who=CALLER))
 
+    def test_a_shop_name_is_public_but_a_dealer_account_is_not(self):
+        # Rohit bought his Doodle at Bengaluru Cycle Mart, which is also a dealer:
+        # his warranty record names the shop, so saying it is not a leak.
+        rohit = Who(channel="website", session="sess-rohit")
+        self.assertEqual(failures(record("Bengaluru Cycle Mart can look at it."), who=rohit), [])
+        self.assertEqual(failures(record("That is dealer DLR-BLR-007."), who=rohit),
+                         ["the reply names another person's data: DLR-BLR-007"])
+
     def test_amounts_and_dates_must_come_from_what_the_bot_was_given(self):
         tool = '{"dealer_price": 32000, "warranty_until": "2027-03-15"}'
         self.assertEqual(failures(record("That is ₹32,000, covered until 15 March 2027.", known=(tool,))), [])
