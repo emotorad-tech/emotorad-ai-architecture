@@ -18,11 +18,18 @@ def fresh_api(env):
 
 class HealthTests(unittest.TestCase):
     def test_offline_reports_no_secret(self):
-        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
+        # Both video keys blanked, so the frames fallback is what is reported on
+        # any machine, including one with a real key in its environment.
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
+                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": ""})
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured", "video_summary": "frames", "tracing": "off"},
         )
+
+    def test_health_names_the_video_summariser(self):
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "OPENROUTER_API_KEY": "sk-or-test", "GEMINI_API_KEY": ""})
+        self.assertEqual(api.health()["video_summary"], "openrouter")
 
     def test_health_says_whether_tracing_is_on(self):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})

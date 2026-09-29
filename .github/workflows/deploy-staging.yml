@@ -13,8 +13,11 @@ env:
   AWS_REGION: ap-south-1
   S3_BUCKET: emotorad-ai-stage-851725486214
   INSTANCE_ID: i-02e7dc2874e0fdacb
-  # Secrets (Anthropic key, OMS key, playground auth) are NOT here. See
-  # docs/runbooks/config-store.md.
+  # Secrets (OpenRouter key, MongoDB URI, OMS key, playground auth) are NOT
+  # here. See docs/runbooks/config-store.md. Staging runs Jev and Haiku through
+  # OpenRouter with conversations in MongoDB (the person's choice, 2026-09-29);
+  # the container fails at startup if the secret lacks OPENROUTER_API_KEY or
+  # EMOTORAD_MONGO_URI, so the health check below fails the deploy.
 
 permissions:
   id-token: write   # required for OIDC role assumption below
@@ -92,7 +95,7 @@ jobs:
               \"tar xzf app.tar.gz\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=anthropic -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=openrouter -e EMOTORAD_STORE=mongodb -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"

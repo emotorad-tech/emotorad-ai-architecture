@@ -105,9 +105,11 @@ models = build_models(settings)
 MEDIA_STORE = store_from_env()
 UPLOADS = UploadRegistry(MEDIA_STORE) if MEDIA_STORE is not None else None
 
-# Video evidence: None when GEMINI_API_KEY is unset, and then a claimed clip
-# reaches the model as sampled frames as before. With a key, the clip is
-# described once here at ingest and only the text travels further.
+# Video evidence: described once here at ingest, and only the text travels
+# further. Through OpenRouter when OPENROUTER_API_KEY is set (the person's
+# choice, 2026-09-29), Gemini direct with EMOTORAD_VIDEO_SUMMARY=gemini or when
+# only GEMINI_API_KEY is set; with neither, a claimed clip reaches the model as
+# sampled frames as before.
 VIDEO_SUMMARISER = summariser_from_env()
 
 _logger = logging.getLogger(__name__)
@@ -374,7 +376,8 @@ def health() -> dict:
         "store": settings.store,
         "secrets": SECRETS_STATE,
         "media": "configured" if MEDIA_STORE is not None else "not configured",
-        "video_summary": "gemini" if VIDEO_SUMMARISER is not None else "frames",
+        # A summariser without a provider label predates the OpenRouter one: Gemini.
+        "video_summary": getattr(VIDEO_SUMMARISER, "provider", "gemini") if VIDEO_SUMMARISER is not None else "frames",
         "tracing": "on" if TRACING is not None else "off",
     }
 

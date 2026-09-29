@@ -21,19 +21,32 @@ what `types.Part.from_bytes` produces, so no SDK type is needed to build it.
 
 Errors never carry the SDK's message: a provider exception can echo request
 content, and this text ends up in a log line.
+
+Through OpenRouter (the person's choice, 2026-09-29): the same model and the
+same fixed prompt, sent with the OpenRouter key every other model call uses,
+with zero data retention, and the billed cost kept for the log. OpenRouter
+takes a clip only inline, as a base64 data URL, so a clip above
+`INLINE_LIMIT` is refused before any request and the frames fallback runs.
+`summariser_from_env` prefers OpenRouter when its key is set;
+`EMOTORAD_VIDEO_SUMMARY=gemini` keeps the Gemini-direct path.
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import os
 import time
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 GEMINI_KEY_ENV = "GEMINI_API_KEY"
 # Decided by the person on 2026-09-22; do not change without them.
 DEFAULT_MODEL = "gemini-3.8-flash"
+# The same model through OpenRouter (the person's choice on 2026-09-29).
+OPENROUTER_VIDEO_MODEL = "google/gemini-3.8-flash"
+# "openrouter" (the default when its key is set) or "gemini".
+SUMMARY_CHOICE_ENV = "EMOTORAD_VIDEO_SUMMARY"
 # Gemini's 20 MB ceiling on an inline request applies to the request as
 # sent, and inline bytes travel base64-encoded at 4/3 their size, so the
 # raw clip must stay under 15 MB. 14 MiB leaves room for the prompt and the
@@ -73,6 +86,8 @@ class VideoSummaryError(Exception):
 
 
 class GeminiVideoSummariser:
+    provider = "gemini"
+
     def __init__(
         self,
         api_key: str,
@@ -167,13 +182,70 @@ class GeminiVideoSummariser:
         return text
 
 
+class OpenRouterVideoSummariser:
+    """The clip described by Gemini through OpenRouter, in one inline request."""
+
+    provider = "openrouter"
+
+    def __init__(self, transport: Any, model: str = OPENROUTER_VIDEO_MODEL, zdr: bool = True) -> None:
+        self.model = model
+        self.zdr = zdr
+        self._transport = transport
+        # The billed usage of the last summary, for the caller to log with the
+        # conversation it belongs to; None until a summary has succeeded.
+        self.last_usage: Optional[Dict[str, Any]] = None
+
+    def summarise(self, data: bytes, mime: str, name: str = "video") -> str:
+        """Plain-text description of the clip, or `VideoSummaryError`."""
+        from .llm import from_openai_response
+        from .openrouter import CHAT_PATH, OpenRouterError
+
+        if len(data) > INLINE_LIMIT:
+            # No Files API on this route: say so, and the frames run instead.
+            raise VideoSummaryError("too large to send inline")
+        url = "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii"))
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": PROMPT},
+                {"type": "video_url", "video_url": {"url": url}},
+            ]}],
+            "usage": {"include": True},
+        }
+        if self.zdr:
+            body["provider"] = {"zdr": True, "data_collection": "deny"}
+        try:
+            response = from_openai_response(self._transport.post(CHAT_PATH, body, timeout=TIMEOUT_SECONDS))
+        except OpenRouterError as exc:
+            # The stable code only: the message can echo the request.
+            raise VideoSummaryError(exc.code) from None
+        text = (response.text or "").strip()
+        if not text:
+            raise VideoSummaryError("empty summary")
+        self.last_usage = response.usage
+        return text
+
+
 def summariser_from_env(
     environ: Optional[Mapping[str, str]] = None, client: Any = None
-) -> Optional[GeminiVideoSummariser]:
-    """None when there is no key: the frames path then runs, so nothing
-    regresses on a deployment that has not opted in."""
+) -> Optional[Union[GeminiVideoSummariser, OpenRouterVideoSummariser]]:
+    """OpenRouter when its key is set (unless EMOTORAD_VIDEO_SUMMARY=gemini),
+    else Gemini direct when its key is set, else None: the frames path then
+    runs, so nothing regresses on a deployment that has not opted in."""
+    from .openrouter import API_KEY_ENV as OPENROUTER_KEY_ENV
+    from .openrouter import OpenRouterTransport
+
     env = os.environ if environ is None else environ
-    key = (env.get(GEMINI_KEY_ENV) or "").strip()
-    if not key:
-        return None
-    return GeminiVideoSummariser(key, client=client)
+    choice = (env.get(SUMMARY_CHOICE_ENV) or "").strip().lower()
+    openrouter_key = (env.get(OPENROUTER_KEY_ENV) or "").strip()
+    gemini_key = (env.get(GEMINI_KEY_ENV) or "").strip()
+    if openrouter_key and choice != "gemini":
+        transport = OpenRouterTransport(
+            api_key=openrouter_key,
+            base_url=env.get("EMOTORAD_OPENROUTER_BASE_URL") or "https://openrouter.ai/api",
+            timeout=TIMEOUT_SECONDS,
+        )
+        return OpenRouterVideoSummariser(transport, zdr=env.get("EMOTORAD_OPENROUTER_ZDR", "1") == "1")
+    if gemini_key:
+        return GeminiVideoSummariser(gemini_key, client=client)
+    return None

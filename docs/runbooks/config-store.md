@@ -6,8 +6,10 @@ a flat JSON object. Field names are the environment variables the code reads:
 
 | Field | Read by |
 |---|---|
+| `OPENROUTER_API_KEY` | **required on staging since 2026-09-29** (`EMOTORAD_AI_MODE=openrouter`): Jev routing, the narrow and full agents, and `video_summary.py`, which describes a customer's uploaded video through OpenRouter once at ingest (`/health` reports `"video_summary":"openrouter"`) |
+| `EMOTORAD_MONGO_URI` | **required on staging since 2026-09-29** (`EMOTORAD_STORE=mongodb`): `stores/mongo.py`, conversations in database `emotorad_ai`. The instance's egress address must be on the Atlas access list |
 | `API_KEY_CLAUDE` | exported as `ANTHROPIC_API_KEY` too; the API in `anthropic` mode and the playground |
-| `API_KEY_GEMINI` | exported as `GEMINI_API_KEY` too; `video_summary.py` describes a customer's uploaded video through Gemini once at ingest. Optional: without it the video is sent to Claude as sampled frames instead, and `/health` reports `"video_summary":"frames"` rather than `"gemini"` |
+| `API_KEY_GEMINI` | exported as `GEMINI_API_KEY` too; `video_summary.py` uses Gemini directly only with `EMOTORAD_VIDEO_SUMMARY=gemini` or when there is no OpenRouter key. Optional: with neither key the video is sent to the model as sampled frames, and `/health` reports `"video_summary":"frames"` |
 | `EMOTORAD_OMS_API_KEY` | `tools/oms.py` |
 | `EMOTORAD_AI_PLAYGROUND_USER` | `api.py` basic auth on `/playground` |
 | `EMOTORAD_AI_PLAYGROUND_PASSWORD` | `api.py` basic auth on `/playground` |
