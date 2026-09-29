@@ -46,10 +46,14 @@ Resources:
               SSEAlgorithm: AES256
       LifecycleConfiguration:
         Rules:
-          - Id: customer-evidence-180d
+          # Customer media is kept permanently (decision 2026-09-29, see
+          # docs/superpowers/specs/2026-09-29-customer-media-in-s3-design.md
+          # §4): no ExpirationInDays/ExpirationDate here. Only a superseded
+          # (noncurrent) version still expires, so an overwrite does not
+          # grow the bucket forever.
+          - Id: customer-evidence-old-versions-30d
             Status: Enabled
             Prefix: customers/
-            ExpirationInDays: 180
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
           - Id: abandoned-multipart

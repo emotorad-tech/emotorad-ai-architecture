@@ -134,8 +134,20 @@ Run this with a person's own admin credentials, not the instance role — the ro
 policy only grants `PutObject`/`GetObject`/`ListBucket` (see `MediaAccessPolicy` in
 `infra/media.yaml`), on purpose, so a compromised instance cannot delete evidence.
 
-The 180-day lifecycle rule (`customer-evidence-180d`) handles the routine case; this is
-for an explicit deletion request ahead of that.
+Customer media is kept permanently (decision 2026-09-29): the bucket's lifecycle rule
+that used to expire `customers/` objects after 180 days has been removed (it is now
+`customer-evidence-old-versions-30d`, which only expires superseded versions, at 30
+days). There is no routine expiry any more, so every erasure is an explicit request, run
+through `scripts/delete_person.py`, which removes a person's conversation records.
+Media erasure (their `media` records and the matching S3 objects, every version) is
+added to it by Task 4, and is not yet present as of this runbook update. Until that
+lands, the `aws s3 rm` command above is the only way to remove a person's objects from
+the bucket, and it must be paired with deleting their `media` records so the two stay
+in step.
+
+Redeploying `infra/media.yaml` with the command in §1 applies the lifecycle change to
+the existing bucket: CloudFormation updates the bucket's lifecycle configuration in
+place, nothing is recreated and nothing already stored is touched.
 
 ## 7. Housekeeping
 
