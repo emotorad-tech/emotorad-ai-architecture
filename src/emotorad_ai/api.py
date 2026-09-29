@@ -476,7 +476,7 @@ def _persist_media(
     """The permanent record of an object already in the bucket (spec §2): an
     inline photo just written by `_inbound_attachments`, or an upload just
     claimed. Called only once the bytes are safely stored, so a failure here
-    is never raised to the customer — the object is in the bucket either way,
+    is never raised to the customer: the object is in the bucket either way,
     and `media_record_failed` is how that gap becomes visible.
     """
     try:
@@ -508,7 +508,7 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
 
     Two ways in, and a message may mix them. An inline `data:` URL is the
     website chat's photo-evidence path: validated here against
-    `attachments.validate` — type, size, count, base64 that decodes. When a
+    `attachments.validate` (type, size, count, base64 that decodes). When a
     bucket is configured and the caller resolves to a cluster, the decoded
     photo is written to S3 here (`MEDIA_STORE.put_bytes`) and turned into an
     `s3://` attachment, recorded exactly as a claimed upload is; it is no
@@ -547,7 +547,7 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
             inline_cluster = _cluster_for_session(body.session_token, body.em_aid)
         except HTTPException:
             # No session, no cookie: nowhere to derive a customer key from.
-            # Not the customer's fault and not worth a 400 for — the photo
+            # Not the customer's fault and not worth a 400 for: the photo
             # simply is not stored this turn.
             inline_cluster = None
             log.emit("media_not_stored", conversation_id, reason="no_cluster", kind="image")

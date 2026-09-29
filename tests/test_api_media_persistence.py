@@ -1,7 +1,7 @@
 """Task 2 of the customer-media-in-s3 plan (spec §1, §2, §3): the server
 stores an inline photo in S3 itself when a bucket is configured, and every
-object that becomes part of a conversation — an inline photo just stored, or
-an upload just claimed — gets a permanent record in the conversation store.
+object that becomes part of a conversation (an inline photo just stored, or
+an upload just claimed) gets a permanent record in the conversation store.
 
 Through FastAPI's TestClient, the way tests/test_api_uploads.py does it: a
 fake S3 store, no AWS, no Mongo (EMOTORAD_STORE is unset, so the in-memory
@@ -24,7 +24,7 @@ from emotorad_ai.storage.s3 import StorageError
 
 
 def jpeg_data_url() -> str:
-    """A real, small, decodable JPEG — not the placeholder bytes other tests
+    """A real, small, decodable JPEG, not the placeholder bytes other tests
     use, because this path's own code (fit_for_model) opens it with Pillow."""
     out = io.BytesIO()
     Image.new("RGB", (16, 12), (60, 90, 120)).save(out, format="JPEG")
@@ -229,7 +229,7 @@ class MalformedConversationIdTests(unittest.TestCase):
     """`conversation_id` is client-supplied; the chat page always echoes back
     the UUID the server minted, but nothing on the wire enforces that. A
     value outside the key grammar must degrade the same way a refused S3
-    write does — never a 500 for a photo that simply is not stored."""
+    write does: never a 500 for a photo that simply is not stored."""
 
     def setUp(self):
         self.store = _Store()
@@ -259,7 +259,7 @@ class MalformedConversationIdTests(unittest.TestCase):
 
 class RecordFailureTests(unittest.TestCase):
     """The object is safely in the bucket; only the database row fails. The
-    turn still carries the s3:// reference — the object really is there."""
+    turn still carries the s3:// reference: the object really is there."""
 
     def setUp(self):
         self.store = _Store()
