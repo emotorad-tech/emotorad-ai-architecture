@@ -62,7 +62,7 @@ scenarios:
       - text: "my battery won't charge"
         expect:
           path: narrow                 # see "path" below
-          agent: battery_support       # the reply's handled_by
+          handled_by: narrow_support   # the reply's handled_by; a name or a list
           sub_category: battery-wont-charge
           no_tools: [create_support_ticket]
           ticket: false
@@ -80,6 +80,8 @@ cost_mixes:
 ```
 
 Loaded and validated on read: an unknown field, family, path or tool name, a mix that does not total 10, or a mix naming an unknown scenario is an error, so a typo fails loudly instead of passing quietly. Every expectation is optional: a turn checks only what it states.
+
+Expectation keys: `path` and `handled_by` (a name or a list of acceptable names), `sub_category`, `tools`, `no_tools`, `ticket`, `quotes_ticket`, `escalated`, `guardrail` (or `none`), `media`, `script`, `mentions_any`, `never_mentions`, `reply_model`, `jev`. A turn may set `repeat: N` to send its text N times.
 
 `path` is taken from the turn's `turn_path` event when Jev routed the turn (`standard`, `narrow` or `full`). A turn that ended before Jev is `guardrail` (handled_by starts `guardrail:`), `triage` (handled_by `triage`, such as the which-bike question) or `direct` (a persona route with no Jev: dealer, warranty registration, unsupported persona, or a handover).
 
