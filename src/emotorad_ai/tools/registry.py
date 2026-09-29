@@ -161,7 +161,9 @@ class IdempotencyStore:
         with self._lock:
             existing = self._seen.get(key)
             now = self._clock()
-            if existing is None or (isinstance(existing, _Pending) and now - existing.claimed_at >= self._lease):
+            # Strictly older than the lease, as the MongoDB store's `$lt` has
+            # it: at exactly the lease both stores still hold the claim.
+            if existing is None or (isinstance(existing, _Pending) and now - existing.claimed_at > self._lease):
                 self._seen[key] = _Pending(now)
                 return None
             if isinstance(existing, _Pending):
