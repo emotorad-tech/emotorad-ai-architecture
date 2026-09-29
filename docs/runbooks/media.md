@@ -134,6 +134,14 @@ through `scripts/delete_person.py`, which removes a person's conversation record
 (working state, transcript turns, summaries, idempotency receipts) and their media:
 the `media` records in MongoDB and the matching S3 objects, every version.
 
+**Open question, decide before deploying.** Removing the expiry also keeps objects
+that are nobody's evidence: an upload that was presigned and PUT but never claimed by
+a message has no `media` record, and playground attachments (`customers/playground/`)
+are test traffic. Both now sit under `customers/` for ever, and `delete_person.py`
+cannot find an unclaimed upload because it works from the records. Do not deploy the
+template change in `infra/media.yaml` (section 1, section 8 step 1) until the person
+has decided how never-claimed uploads and playground objects are expired.
+
 ```bash
 .venv/bin/python3 scripts/delete_person.py --phone 9876543210                          # dry run: counts only
 .venv/bin/python3 scripts/delete_person.py --phone 9876543210 --yes --reason "email from customer, 2026-09-29"
@@ -178,8 +186,9 @@ after any change to how photos are stored. Do not run any of the commands below 
 anything real from inside a Claude session; this section is for a person, in their own
 shell.
 
-1. Deploy the template change, if it has not already gone out. This is the same command
-   as section 1 above, nothing new to invent:
+1. Deploy the template change, if it has not already gone out, and only once the open
+   question in section 6 (never-claimed uploads and playground objects) is decided.
+   This is the same command as section 1 above, nothing new to invent:
 
    ```powershell
    aws cloudformation deploy --profile emotorad-staging --region ap-south-1 `
@@ -260,8 +269,13 @@ shell.
    - `media_not_stored` with `reason: no_cluster`: nothing identified who sent it, no
      session and no cookie, so there was nowhere to key the object under. Sign in
      first, then send the photo again.
+   - `media_not_stored` with `reason: bad_key`: the message's conversation id does
+     not fit the key grammar, so no key could be made and nothing was sent to S3. The
+     chat page always sends the id the server minted, so this means something other
+     than the page sent the message. The bucket and credentials are not the problem.
    - `media_not_stored` with `reason: store_failed`: the write to S3 itself failed.
-     Check the bucket name and the AWS credentials in this shell.
+     Check the bucket name and the AWS credentials in this shell. Its `key` field is
+     the object's file name only (the last part of the key), not the whole key.
    - `media_record_failed`: the object reached S3 but the MongoDB write failed.
      Check `EMOTORAD_MONGO_URI` and that Atlas is reachable.
 

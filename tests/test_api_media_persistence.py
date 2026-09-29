@@ -218,6 +218,11 @@ class StorePutFailureTests(unittest.TestCase):
         self.assertEqual(event["reason"], "store_failed")
         self.assertEqual(event["error"], "StorageError")
         self.assertNotIn("data:", str(event))
+        # The key's last segment only, as every other media log line: the
+        # full key names the customer's cluster and conversation.
+        self.assertNotIn("/", event["key"])
+        self.assertTrue(event["key"].endswith(".jpg"), event["key"])
+        self.assertNotIn("customers/", str(event))
 
 
 class MalformedConversationIdTests(unittest.TestCase):
@@ -246,7 +251,9 @@ class MalformedConversationIdTests(unittest.TestCase):
         self.assertEqual(self.api.stores.conversations.media_of("c/1"), [])
 
         [event] = [e for e in self.api.log.events if e["event"] == "media_not_stored"]
-        self.assertEqual(event["reason"], "store_failed")
+        # Its own reason: nothing was sent to S3, so "store_failed" would send
+        # the person to check the bucket and credentials for nothing.
+        self.assertEqual(event["reason"], "bad_key")
         self.assertEqual(event["error"], "KeyValidationError")
 
 
@@ -277,6 +284,47 @@ class RecordFailureTests(unittest.TestCase):
         [event] = [e for e in self.api.log.events if e["event"] == "media_record_failed"]
         self.assertEqual(event["key"], key)
         self.assertEqual(event["error"], "StoreUnavailable")
+
+
+class UnknownAgentTests(unittest.TestCase):
+    """A request refused for an unknown agent is refused before anything is
+    stored: otherwise the photo is put and recorded for a conversation that
+    never exists, and a claimed upload id is spent."""
+
+    def setUp(self):
+        self.store = _Store()
+        self.api = fresh_api(self.store)
+        self.client = TestClient(self.api.app)
+        self.addCleanup(lambda: fresh_api(None))
+
+    def test_an_unknown_agent_with_an_inline_photo_stores_and_records_nothing(self):
+        with mock.patch.object(self.api.stores.conversations, "record_media") as record:
+            r = self.client.post("/message", json={
+                "conversation_id": "c1", "session_token": "sess-ananya", "text": "here is the terminal",
+                "agent": "no_such_agent",
+                "attachments": [{"kind": "image", "url": jpeg_data_url()}],
+            })
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("Unknown agent", r.text)
+        self.assertEqual(self.store.objects, {})
+        record.assert_not_called()
+        self.assertEqual([e for e in self.api.log.events if e["event"].startswith("media_")], [])
+
+    def test_an_unknown_agent_leaves_an_upload_unclaimed(self):
+        body = self.client.post("/uploads", json={
+            "session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers",
+            "mime_type": "video/mp4", "size_bytes": 12345,
+        }).json()
+        self.store.objects[body["key"]] = b"x" * 12345
+        self.store.meta[body["key"]] = {"size": 12345, "mime": "video/mp4"}
+
+        r = self.client.post("/message", json={
+            "conversation_id": "c1", "session_token": "sess-ananya", "text": "video attached",
+            "agent": "no_such_agent", "attachments": [{"upload_id": body["upload_id"]}],
+        })
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIsNotNone(self.api.UPLOADS.peek(body["upload_id"]))
+        self.assertEqual(self.api.stores.conversations.media_of("c1"), [])
 
 
 class NoClusterTests(unittest.TestCase):

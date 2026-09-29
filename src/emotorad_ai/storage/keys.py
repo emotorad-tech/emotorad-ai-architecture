@@ -121,9 +121,12 @@ def customer_key(cluster_id: str, conversation_id: str, kind: str, upload_id: st
 
 
 def playground_key(chat_id: str, kind: str, blob_id: str, mime: str) -> str:
-    """Playground attachments live under the customers/ tree (so the 180-day
-    rule applies) with a fixed `playground` cluster: they are test traffic, not
-    a person's evidence."""
+    """Playground attachments live under the customers/ tree with a fixed
+    `playground` cluster: they are test traffic, not a person's evidence.
+
+    That tree is now kept permanently (infra/media.yaml has no expiry on
+    `customers/`), so playground objects are kept too. How they are expired
+    is an open question for the person: see docs/runbooks/media.md."""
     if kind not in CUSTOMER_KINDS:
         raise KeyValidationError("customer kind must be one of %s (got %r)" % (", ".join(CUSTOMER_KINDS), kind))
     return "customers/playground/%s/%s/%s.%s" % (

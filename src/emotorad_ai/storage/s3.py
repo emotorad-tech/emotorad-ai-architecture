@@ -1,7 +1,10 @@
 """The S3 client, and the only file that imports boto3 for media.
 
-Presigned URLs are the whole design: the browser talks to S3 directly for the
-bytes, and this service only ever signs. A PUT signature pins the content type
+Presigned URLs carry the customer's uploads: the browser talks to S3 directly
+for an upload's bytes (the chat page sends videos this way), and this service
+only signs the PUT. The exception is an inline photo on a message, which the
+server writes itself (`put_bytes`) once it has decoded and checked it. A PUT
+signature pins the content type
 and length, so a client cannot presign a 2MB JPEG and then upload a 90MB file
 under it. Reads are signed for fifteen minutes — long enough to load a
 transcript, short enough that a leaked link is not a lasting one.

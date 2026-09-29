@@ -4,8 +4,13 @@
 key, content type, size. `claim` is called when a message references the
 upload: it HEADs the object and refuses anything that does not match. A client
 therefore cannot presign one thing and upload another, and an upload nobody
-ever references is an id nobody claims — the bucket lifecycle rule handles the
-bytes, and there is no cleanup job to build.
+ever references is an id nobody claims.
+
+Its bytes are not expired either. Customer media is now kept permanently
+(infra/media.yaml has no expiry on `customers/`), and an upload that is never
+claimed sits under the same prefix, so it is kept too. How never-claimed
+uploads are expired is an open question for the person: see
+docs/runbooks/media.md.
 
 In-memory, like ConversationStore. A pending upload lives for the PUT window
 plus an hour, so a customer who uploads and then types for a while can still
@@ -133,9 +138,10 @@ class UploadRegistry:
         if head is None:
             raise UploadError(409, "the upload has not completed")
         if head["size"] != pending.size or head["mime"] != pending.mime:
-            # Not a claim we can honour; the object stays and the lifecycle rule
-            # removes it. The id stays too, so a retry after a correct re-upload
-            # to the same signed URL still works.
+            # Not a claim we can honour. The object stays, and is not expired
+            # (never-claimed uploads are an open question, see the module
+            # docstring). The id stays too, so a retry after a correct
+            # re-upload to the same signed URL still works.
             raise UploadError(409, "the uploaded object does not match what was presigned")
 
         # The pop under the lock is what makes an id single-use: whichever

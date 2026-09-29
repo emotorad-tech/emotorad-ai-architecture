@@ -265,10 +265,13 @@ class MessageIn(BaseModel):
     # What the customer sent with the message. Two shapes, one field:
     #
     #   {"kind": "image", "url": "data:image/jpeg;base64,..."}
-    #       Inline and never stored. The evidence gate asks for a picture of the
-    #       terminal before it will conclude a fault, and this is how the chat
-    #       page answers it. `attachments.validate` holds the limits, which are
-    #       the whole security story for that path.
+    #       Sent inline. The evidence gate asks for a picture of the terminal
+    #       before it will conclude a fault, and this is how the chat page
+    #       answers it. `attachments.validate` holds the limits. With media
+    #       configured the server stores the photo in S3 itself, under the
+    #       caller's cluster, records it permanently, and the turn carries the
+    #       `s3://` reference; without it, or when storing fails, the photo
+    #       stays inline for this turn and is not kept.
     #   {"upload_id": "upl_..."}
     #       An object already PUT to S3 through `POST /uploads`. The id is minted
     #       by the server, claimed once, and becomes an `s3://` attachment the
@@ -555,22 +558,25 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
                 try:
                     key = keys.customer_key(inline_cluster, conversation_id, "images", keys.new_upload_id(), mime)
                 except KeyValidationError as exc:
-                    # `conversation_id` is client-supplied on the wire — the
+                    # `conversation_id` is client-supplied on the wire: the
                     # chat page always echoes back the UUID it was minted, but
                     # nothing stops a caller sending something outside the key
-                    # grammar. Not worth failing the turn over: same outcome
-                    # as a store that refused the object.
+                    # grammar. Not worth failing the turn over, and not a store
+                    # failure either: nothing was sent to S3, so it has its
+                    # own reason and nobody goes checking the bucket for it.
                     log.emit(
-                        "media_not_stored", conversation_id, reason="store_failed",
+                        "media_not_stored", conversation_id, reason="bad_key",
                         error=type(exc).__name__, kind="image",
                     )
                     continue
                 try:
                     MEDIA_STORE.put_bytes(key, data, mime)
                 except StorageError as exc:
+                    # The key's last segment only, as the video summary line
+                    # logs it: the full key names the cluster and conversation.
                     log.emit(
                         "media_not_stored", conversation_id, reason="store_failed",
-                        error=type(exc).__name__, kind="image", key=key,
+                        error=type(exc).__name__, kind="image", key=key.rsplit("/", 1)[-1],
                     )
                     continue
                 _persist_media(
@@ -665,6 +671,15 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
             status_code=429,
             detail="Too many messages. Wait a moment and try again.",
         )
+    # Before the attachments: `_inbound_attachments` stores and records inline
+    # photos and claims uploads, and a request refused here must leave no
+    # object, no record and no spent upload id behind.
+    if body.agent and body.agent not in CHAT_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown agent %r. Expected one of: %s"
+            % (body.agent, ", ".join(CHAT_AGENTS)),
+        )
     conversation_id = body.conversation_id or new_conversation_id()
     try:
         attachments = _inbound_attachments(body, conversation_id)
@@ -703,12 +718,6 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     # the warranty lookup is refused for want of a phone exactly as it was
     # before they bothered.
     message = apply_verified_identity(message, verification_store)
-    if body.agent and body.agent not in CHAT_AGENTS:
-        raise HTTPException(
-            status_code=400,
-            detail="Unknown agent %r. Expected one of: %s"
-            % (body.agent, ", ".join(CHAT_AGENTS)),
-        )
     # The cluster that started this conversation, and a pinned agent, are
     # applied by the runtime inside the turn (Runtime._node_prepare), not
     # written to the state here: with a durable store, a change made outside
