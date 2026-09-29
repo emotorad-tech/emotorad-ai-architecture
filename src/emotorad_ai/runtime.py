@@ -320,6 +320,7 @@ class Runtime:
             # trims to the same length, so its own trim then changes nothing.
             state.history[:] = trim_history(state.history, HISTORY_TURNS - 1)
             history_mark, log_mark = len(state.history), len(self.log.events)
+            coverage_loaded = state.coverage_result
             try:
                 final = self.graph.invoke({"message": message, "conversation": state})
             except StoreUnavailable as exc:
@@ -337,7 +338,9 @@ class Runtime:
                 self.log.emit("conversation_conflict", cid, attempt=attempt)
                 if self._side_effects_since(log_mark, cid):
                     try:
-                        state = self._merge_onto_fresh(state, this_turn, reply)
+                        state = self._merge_onto_fresh(
+                            state, this_turn, reply, looked_up=state.coverage_result != coverage_loaded
+                        )
                     except (ConversationConflict, StoreUnavailable) as exc:
                         return self._store_down(message, exc, reply.ticket_id)
                     break
@@ -372,20 +375,26 @@ class Runtime:
                 ticket_id=reply.ticket_id, error="%s: %s" % (type(exc).__name__, exc),
             )
 
-    def _merge_onto_fresh(self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply) -> ConversationState:
+    def _merge_onto_fresh(
+        self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply, looked_up: bool = False
+    ) -> ConversationState:
         """Add a turn that lost the save race, and did something, to the state
         the other server saved. Its words and its ticket are kept; the routing
         the other server saved stands. One attempt: a second clash hands over."""
         fresh = self.conversations.get(ours.conversation_id)
         fresh.turns += 1
+        # The other server's copy gets the same window this turn's did.
+        fresh.history[:] = trim_history(fresh.history, HISTORY_TURNS - 1)
         fresh.history.extend(this_turn)
         fresh.escalated = fresh.escalated or ours.escalated
         fresh.ticket_id = reply.ticket_id or fresh.ticket_id
         fresh.evidence_seen = fresh.evidence_seen or ours.evidence_seen
         fresh.disclosed = fresh.disclosed or ours.disclosed
-        # What this turn learnt stands: its lookup is the newer one, and its
-        # orders and spent codes are added to the other server's.
-        fresh.coverage_result = ours.coverage_result or fresh.coverage_result
+        # What this turn learnt stands: its lookup, if it made one, is the
+        # newer one (otherwise the other server's stands: ours is only what we
+        # loaded), and its orders and spent codes are added to the other's.
+        if looked_up and ours.coverage_result is not None:
+            fresh.coverage_result = ours.coverage_result
         fresh.placed_order_ids += [o for o in ours.placed_order_ids if o not in fresh.placed_order_ids]
         fresh.consumed_codes += [c for c in ours.consumed_codes if c not in fresh.consumed_codes]
         for name in ("user_key", "channel", "context_block", "cluster_id"):
@@ -682,14 +691,19 @@ class Runtime:
         warranty, a full topic agent) is a handover, never a crashed turn. Only
         the OpenRouter models raise this; Bedrock behaviour is unchanged."""
         mark = len(state.history)
+        log_mark = len(self.log.events)
         try:
             return self._run_agent(agent_name, message, resolved, state)
         except OpenRouterError as exc:
             del state.history[mark:]
             self.log.emit("llm_error", message.conversation_id, agent=agent_name, error=exc.code)
-            self.log.escalation(message.conversation_id, "llm_error", None)
+            # A ticket the turn raised before the model failed exists: keep its
+            # id, so the conversation remembers it and the customer can quote it.
+            ticket_id = self._ticket_since(log_mark, message.conversation_id)
+            self.log.escalation(message.conversation_id, "llm_error", ticket_id)
+            text = HANDOVER_TEXT + ("\n\nYour reference is %s." % ticket_id if ticket_id else "")
             return self._finish(
-                message, state, HANDOVER_TEXT, "llm_error", escalated=True, metadata={"code": exc.code},
+                message, state, text, "llm_error", escalated=True, ticket_id=ticket_id, metadata={"code": exc.code},
             )
 
     def _side_effects_since(self, log_mark: int, conversation_id: str) -> List[Dict[str, Any]]:
@@ -698,7 +712,11 @@ class Runtime:
         spent), which a rerun would repeat or break."""
         done: List[Dict[str, Any]] = []
         for event in self.log.events[log_mark:]:
-            if event.get("event") != "tool_call" or event.get("conversation_id") != conversation_id or not event.get("ok"):
+            if event.get("event") != "tool_call" or event.get("conversation_id") != conversation_id:
+                continue
+            # A failed call changed nothing, except a code tried: that attempt
+            # is spent either way, so a rerun would cost the customer another.
+            if not event.get("ok") and event.get("tool") != VERIFY_IDENTITY:
                 continue
             spec = self.registry.specs.get(event.get("tool"))
             if spec is None or not (spec.write or spec.name in SIDE_EFFECT_TOOLS):

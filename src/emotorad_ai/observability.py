@@ -47,6 +47,8 @@ _SENSITIVE_KEYS = frozenset({"code", "otp", "phone", "mobile", "stated_contact"}
 # the thing it exists for. The fact that a photo was sent still survives, in
 # the surrounding fields.
 _DATA_URI = re.compile(r"^data:[^;,]*;base64,", re.I)
+# A presigned S3 (or other signed) link: the query string carries the signature.
+_SIGNED_URL = re.compile(r"^https?://[^\s?]+\?\S*(?:X-Amz-Signature|X-Amz-Credential|Signature=)", re.I)
 
 
 def redact_pii(text: str) -> str:
@@ -90,6 +92,10 @@ def redact_fields(value: Any, key: Optional[str] = None, parent: Optional[str] =
     if isinstance(value, str):
         if _DATA_URI.match(value):
             return "[attachment]"
+        if _SIGNED_URL.match(value):
+            # A presigned link is a credential until it expires: keep where it
+            # points, drop the signature.
+            return value.split("?", 1)[0] + "?[signed]"
         return redact_pii(value)
     if isinstance(value, dict):
         return {k: redact_fields(v, k, key) for k, v in value.items()}

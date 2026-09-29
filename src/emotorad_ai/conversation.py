@@ -339,7 +339,10 @@ def render_transcript(turns: Sequence[TranscriptTurn]) -> str:
             clock = datetime.fromisoformat(turn.at).strftime("%H:%M")
         except (TypeError, ValueError):
             clock = "--:--"
-        lines.append("[%s] %s: %s" % (clock, "Customer" if turn.role == "customer" else "Bot", turn.text))
+        # A photo sent on its own must not read as an empty line on a ticket.
+        marks = " ".join("[%s]" % {"image": "photo"}.get(a.get("kind"), a.get("kind") or "attachment") for a in turn.attachments)
+        said = " ".join(part for part in (turn.text, marks) if part)
+        lines.append("[%s] %s: %s" % (clock, "Customer" if turn.role == "customer" else "Bot", said))
     return "\n".join(lines)
 
 

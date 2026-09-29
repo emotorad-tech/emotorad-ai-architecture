@@ -201,6 +201,25 @@ class MongoConversationStore:
     def _trim(self, state: ConversationState) -> None:
         """Keep the document well under MongoDB's 16 MB limit by dropping the
         oldest whole turns. The transcript is separate and keeps everything."""
+        if len(state.to_json().encode("utf-8")) > self._max_state_bytes:
+            # A photo's bytes are the bulk. Replace the data of every photo
+            # before the latest customer turn with a note, before dropping any
+            # turn: one large photo must not push out the symptoms typed and
+            # the warranty looked up. The model saw each photo on its own turn.
+            starts = _turn_starts(state.history)
+            latest = starts[-1] if starts else len(state.history)
+            compacted = 0
+            for entry in state.history[:latest]:
+                content = entry.get("content")
+                if entry.get("role") != "user" or not isinstance(content, list):
+                    continue
+                for i, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") in ("image", "document"):
+                        content[i] = {"type": "text", "text": "[The customer sent a %s here.]" % (
+                            "photo" if block.get("type") == "image" else "document")}
+                        compacted += 1
+            if compacted and self._log is not None:
+                self._log.emit("history_media_compacted", state.conversation_id, blocks=compacted)
         dropped = 0
         while len(state.to_json().encode("utf-8")) > self._max_state_bytes:
             starts = _turn_starts(state.history)

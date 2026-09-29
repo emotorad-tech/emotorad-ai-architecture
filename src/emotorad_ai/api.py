@@ -62,6 +62,7 @@ from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
+from .conversation import StoreUnavailable
 from .runtime import Runtime
 from .storage.keys import cluster_of, is_customer_key, is_valid_key
 from .storage.s3 import StorageError, store_from_env
@@ -415,7 +416,10 @@ def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
             # A conversation id that already exists must have been started under
             # the same cluster; a brand new one is accepted as-is (minted by the
             # client on turn one, before /message has ever seen it).
-            existing = runtime.conversations.peek(body.conversation_id)
+            try:
+                existing = runtime.conversations.peek(body.conversation_id)
+            except StoreUnavailable:
+                raise HTTPException(503, "Conversation storage is unavailable; try again shortly.")
             if existing is not None and existing.cluster_id is not None and existing.cluster_id != cluster_id:
                 raise HTTPException(403, "not your conversation")
             pending, presign = UPLOADS.begin_customer(cluster_id, body.conversation_id, body.mime_type, body.size_bytes)

@@ -306,9 +306,36 @@ def to_openai_messages(
                         "content": result if isinstance(result, str) else json.dumps(result, default=str),
                     }
                 )
-        if texts:
+        media = [b for b in blocks if b.get("type") in ("image", "document")]
+        if media:
+            # A photo is an image part beside the words (a caption-less photo
+            # used to vanish, while the conversation counted it as seen). A PDF
+            # has no part the reply models all accept, so it is named instead.
+            parts: List[Dict[str, Any]] = []
+            for b in blocks:
+                if b.get("type") == "text" and b.get("text"):
+                    parts.append({"type": "text", "text": b["text"]})
+                elif b.get("type") == "image":
+                    url = _image_url(b.get("source") or {})
+                    if url:
+                        parts.append({"type": "image_url", "image_url": {"url": url}})
+                elif b.get("type") == "document":
+                    parts.append({"type": "text", "text": "[The customer sent a PDF, which cannot be shown to you here.]"})
+            if parts:
+                out.append({"role": "user", "content": parts})
+        elif texts:
             out.append({"role": "user", "content": "\n".join(texts)})
     return out
+
+
+def _image_url(source: Dict[str, Any]) -> Optional[str]:
+    """An Anthropic image source as an OpenAI image_url: base64 becomes a
+    data URL; a URL passes through."""
+    if source.get("type") == "base64" and source.get("data"):
+        return "data:%s;base64,%s" % (source.get("media_type") or "image/jpeg", source["data"])
+    if source.get("type") == "url" and source.get("url"):
+        return str(source["url"])
+    return None
 
 
 def to_openai_tools(tools: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
