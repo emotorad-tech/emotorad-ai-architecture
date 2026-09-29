@@ -7,6 +7,7 @@ quietly during a paid run.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
@@ -196,7 +197,30 @@ def _who(where: str, raw: Any) -> Who:
     return who
 
 
-def _turn(where: str, raw: Any, known: Known) -> Turn:
+# A photo a scenario sends, named `fixture:<file>` and read from
+# tests/data/live_media/ beside the scenario file. Inlined as a data URL: an
+# http(s) image is fetched by the model's provider, and a test host such as
+# example.test never resolves, so the turn would fail on the fetch.
+FIXTURE_PREFIX = "fixture:"
+FIXTURE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+
+
+def _fixture_url(where: str, url: str, media_dir: Path) -> str:
+    if not url.startswith(FIXTURE_PREFIX):
+        return url
+    name = url[len(FIXTURE_PREFIX):]
+    if not name or name != Path(name).name or "\\" in name or name.startswith("."):
+        raise ScenarioError("%s: %r is not a plain file name in %s" % (where, name, media_dir.name))
+    mime = FIXTURE_TYPES.get(Path(name).suffix.lower())
+    if mime is None:
+        raise ScenarioError("%s: %r is not a photo (%s)" % (where, name, ", ".join(sorted(FIXTURE_TYPES))))
+    path = media_dir / name
+    if not path.is_file():
+        raise ScenarioError("%s: no fixture photo %s in %s" % (where, name, media_dir))
+    return "data:%s;base64,%s" % (mime, base64.b64encode(path.read_bytes()).decode())
+
+
+def _turn(where: str, raw: Any, known: Known, media_dir: Path) -> Turn:
     raw = _mapping(where, raw, ("text", "repeat", "attachments", "expect"), required=("text",))
     if not isinstance(raw["text"], str):
         raise ScenarioError("%s.text: expected text" % where)
@@ -206,14 +230,15 @@ def _turn(where: str, raw: Any, known: Known) -> Turn:
     attachments = raw.get("attachments") or []
     if not isinstance(attachments, list):
         raise ScenarioError("%s.attachments: expected a list" % where)
-    parsed = tuple(
-        dict(_mapping("%s.attachments[%d]" % (where, i), a, ("kind", "url"), required=("url",)))
-        for i, a in enumerate(attachments)
-    )
-    return Turn(text=raw["text"], repeat=repeat, attachments=parsed, expect=_expect(where + ".expect", raw.get("expect"), known))
+    parsed = []
+    for i, a in enumerate(attachments):
+        item = dict(_mapping("%s.attachments[%d]" % (where, i), a, ("kind", "url"), required=("url",)))
+        item["url"] = _fixture_url("%s.attachments[%d]" % (where, i), str(item["url"]), media_dir)
+        parsed.append(item)
+    return Turn(text=raw["text"], repeat=repeat, attachments=tuple(parsed), expect=_expect(where + ".expect", raw.get("expect"), known))
 
 
-def _scenario(where: str, raw: Any, known: Known) -> Scenario:
+def _scenario(where: str, raw: Any, known: Known, media_dir: Path) -> Scenario:
     raw = _mapping(where, raw, ("id", "family", "who", "turns", "note", "settings"), required=("id", "family", "who", "turns"))
     if not isinstance(raw["id"], str) or not raw["id"].strip():
         raise ScenarioError("%s.id: expected a name" % where)
@@ -232,7 +257,7 @@ def _scenario(where: str, raw: Any, known: Known) -> Scenario:
         id=raw["id"],
         family=family,
         who=_who(where + ".who", raw["who"]),
-        turns=tuple(_turn("%s.turns[%d]" % (where, i), t, known) for i, t in enumerate(raw["turns"])),
+        turns=tuple(_turn("%s.turns[%d]" % (where, i), t, known, media_dir) for i, t in enumerate(raw["turns"])),
         note=str(raw.get("note") or ""),
         settings=dict(settings),
     )
@@ -243,7 +268,8 @@ def load_suite(path: Path, known: Known) -> Suite:
     raw = _mapping(str(path), raw, ("scenarios", "cost_mixes"), required=("scenarios", "cost_mixes"))
     if not isinstance(raw["scenarios"], list):
         raise ScenarioError("scenarios: expected a list")
-    scenarios = tuple(_scenario("scenarios[%d]" % i, s, known) for i, s in enumerate(raw["scenarios"]))
+    media_dir = Path(path).parent / "live_media"
+    scenarios = tuple(_scenario("scenarios[%d]" % i, s, known, media_dir) for i, s in enumerate(raw["scenarios"]))
     ids = [s.id for s in scenarios]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
     if duplicates:

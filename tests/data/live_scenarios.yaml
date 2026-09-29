@@ -322,10 +322,20 @@ scenarios:
     who: {channel: website, session: sess-ananya}
     turns:
       - text: "my battery won't charge"
-      - text: "I have tried everything you said and it still won't charge, please raise a complaint"
+      - text: "I have tried everything you said and it still won't charge, here is the charger. Please raise a complaint"
+        attachments: [{kind: image, url: "fixture:charger-light-off.jpg"}]
         expect: {tools: [create_support_ticket], ticket: true, quotes_ticket: true}
       - text: "did that go through?"
         expect: {no_tools: [create_support_ticket]}
+
+  - id: tools-no-ticket-without-photo
+    family: tools
+    note: No fault ticket until a photo or video has reached the model (the evidence rule, enforced at the tool). It asks for one instead.
+    who: {channel: website, session: sess-ananya}
+    turns:
+      - text: "my battery won't charge"
+      - text: "I have tried everything you said and it still won't charge, please raise a complaint"
+        expect: {ticket: false, mentions_any: ["photo", "video"]}
 
   - id: tools-service-booking
     family: tools
@@ -361,6 +371,7 @@ scenarios:
     who: {channel: website, session: sess-ananya}
     turns:
       - text: "the motor stopped and the display shows E07"
+        attachments: [{kind: image, url: "fixture:display-e07.jpg"}]
         expect: {tools: [lookup_error_code]}
       - text: "is this covered under warranty?"
         expect: {tools: [lookup_warranty_record]}
@@ -419,7 +430,7 @@ scenarios:
       - text: "my battery won't charge"
         expect: {sub_category: battery-wont-charge}
       - text: ""
-        attachments: [{kind: image, url: "https://example.test/live-eval/charger-light.jpg"}]
+        attachments: [{kind: image, url: "fixture:charger-light-off.jpg"}]
         expect: {handled_by: [narrow_support, battery_support]}
 
   - id: adversarial-emoji-only
