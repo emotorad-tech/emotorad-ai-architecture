@@ -18,6 +18,11 @@ from typing import Any, Dict, List, Mapping, Optional
 BUCKET_ENV = "EMOTORAD_AI_MEDIA_BUCKET"
 PUT_EXPIRY = 300
 GET_EXPIRY = 900
+# Seconds, and retries after the first try (botocore's `max_attempts`, so
+# three tries in all). See S3Store.__init__.
+CONNECT_TIMEOUT = 3
+READ_TIMEOUT = 10
+MAX_RETRIES = 2
 
 
 class StorageError(Exception):
@@ -37,11 +42,23 @@ class S3Store:
             # SigV4 plus the regional endpoint: without both, botocore signs presigned
             # URLs against bucket.s3.amazonaws.com and S3 answers 307 for a bucket in
             # ap-south-1, which a browser PUT will not follow with its body.
+            #
+            # Short timeouts and two retries: an inline photo is put while the
+            # customer waits for the reply, and botocore's defaults (60 s to
+            # connect, 60 s to read) would hold a turn for minutes on a slow S3.
+            # A put that gives up is logged and the photo stays inline for that
+            # turn (api._inbound_attachments).
             self._client = boto3.client(
                 "s3",
                 region_name=region,
                 endpoint_url="https://s3.%s.amazonaws.com" % region,
-                config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+                config=Config(
+                    signature_version="s3v4",
+                    s3={"addressing_style": "virtual"},
+                    connect_timeout=CONNECT_TIMEOUT,
+                    read_timeout=READ_TIMEOUT,
+                    retries={"max_attempts": MAX_RETRIES, "mode": "standard"},
+                ),
             )
 
     def presign_put(self, key: str, mime: str, size: int) -> Dict[str, Any]:

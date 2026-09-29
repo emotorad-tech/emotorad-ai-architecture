@@ -202,6 +202,24 @@ class RealClientTests(unittest.TestCase):
         self.assertIn("emotorad-ai-stage-media.s3.ap-south-1.amazonaws.com", url)
         self.assertIn("X-Amz-Algorithm=AWS4-HMAC-SHA256", url)
 
+    def test_the_client_gives_up_quickly(self):
+        # An inline photo is put while the customer waits for the reply, and
+        # botocore's defaults are a 60 s connect and read with more retries:
+        # a slow S3 would hold the turn for minutes. No network here: the
+        # client is only built and inspected.
+        with mock.patch.dict("os.environ", {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}):
+            store = S3Store("emotorad-ai-stage-media", region="ap-south-1")
+        config = store._client.meta.config
+        self.assertEqual(config.connect_timeout, 3)
+        self.assertEqual(config.read_timeout, 10)
+        # Built with {"max_attempts": 2, "mode": "standard"}: two retries after
+        # the first try, which botocore keeps as three attempts in all.
+        self.assertEqual(config.retries.get("mode"), "standard")
+        self.assertEqual(config.retries.get("total_max_attempts"), 3)
+        # And what was already there stays.
+        self.assertEqual(config.signature_version, "s3v4")
+        self.assertEqual(store._client.meta.endpoint_url, "https://s3.ap-south-1.amazonaws.com")
+
 
 class FromEnvTests(unittest.TestCase):
     def test_no_bucket_means_no_store(self):
