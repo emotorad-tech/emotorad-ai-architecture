@@ -73,6 +73,7 @@ Full detail lives in `docs/`:
 - **Money guardrails are code:** `quote_order` and `place_order` are separate, and `place_order` re-prices and re-checks credit rather than trusting a total carried across turns.
 - **Retrieval is evaluated on its own** (`tests/test_retrieval_evals.py`), reported per language, never averaged.
 - **Guardrails in code, not prompted.** The model ignored a "wait a turn" instruction within the hour (2026-09-20).
+- **One step per reply** (2026-09-29): every customer agent is given `one_step.ONE_STEP_RULE` by the agent loop, and `Runtime._one_step` cuts a reply over 80 words or 4 sentences once, by the same model, keeping every EM-/BK-/RO- reference; otherwise the original goes and `reply_too_long` is logged. The dealer agent opts out (`AgentDefinition.one_step=False`); hazard warnings are never cut.
 - **A front-end change is reviewed on the device it ships to.** Four days of reading the code missed three defects that two minutes on a phone found (2026-09-20).
 
 ## Commands

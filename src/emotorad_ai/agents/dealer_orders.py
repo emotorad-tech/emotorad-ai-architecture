@@ -104,4 +104,7 @@ DEFINITION = AgentDefinition(
     name=AGENT_NAME,
     tool_names=TOOL_NAMES,
     build_system_prompt=build_system_prompt,
+    # An order summary lists every line for the dealer to confirm; cutting it
+    # to "one step" would drop lines (one_step.py).
+    one_step=False,
 )

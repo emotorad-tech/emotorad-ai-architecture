@@ -228,6 +228,12 @@ def always_failures(record: TurnRecord, expect: Expect, who: Who) -> List[str]:
     for name in _fired(events):
         if name in POST_CHECKS and name != expect.guardrail:
             failures.append("the model's reply was blocked by %s; the customer got the safe fallback" % name)
+    # One step per reply (one_step.py). A reply the backstop cut reached the
+    # customer short, so only one it could not cut is a failure.
+    for event in events:
+        if event.get("event") == "reply_too_long":
+            failures.append("the reply ran past one step (%s words, %s sentences) and was not cut: %s" % (
+                event.get("words_before"), event.get("sentences_before"), event.get("reason")))
     return failures
 
 

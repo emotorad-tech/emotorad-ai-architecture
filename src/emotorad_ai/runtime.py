@@ -78,6 +78,7 @@ from .guardrails import (
     check_order_claim,
     check_safety,
     check_safety_in_description,
+    warns_of_hazard,
 )
 from .errorcodes import load_table
 from .identity import IdentityResolver, ResolvedIdentity
@@ -85,6 +86,10 @@ from .jev import JevError
 from .knowledge import KnowledgeBase
 from .llm import BedrockClaude
 from .observability import EventLog
+from .one_step import is_too_long, replace_turn_text
+from .one_step import sentences as one_step_sentences
+from .one_step import shorten as shorten_reply
+from .one_step import words as one_step_words
 from .openrouter import OpenRouterError
 from .standard_responses import StandardResponse, load_standard_responses
 from .tools.mocks import (
@@ -869,6 +874,8 @@ class Runtime:
             prefetched=prefetched,
             on_user_turn=lambda content: self._note_customer_turn(message, state, content),
         )
+        # Before the post-checks, so they judge the text the customer is sent.
+        turn = self._one_step(agent, message, state, turn)
         if turn.escalate:
             self.log.escalation(
                 message.conversation_id, turn.escalation_reason or "agent_requested_handover", turn.ticket_id
@@ -1075,6 +1082,46 @@ class Runtime:
             escalated=True, ticket_id=ticket_id, metadata={"matched": matched},
             already_in_history=bool(evidence),
         )
+
+    def _one_step(self, agent: Agent, message: InboundMessage, state: ConversationState, turn: Any) -> Any:
+        """The backstop for the one-step rule (one_step.py): a reply that runs
+        over the limits is cut, once, by the model that wrote it.
+
+        Left alone: an agent that opts out (dealer), text written by code (the
+        model-outage handover), and a reply that warns of a hazard, which goes
+        out whole. Whatever happens is logged by counts, never the text; the
+        transcript has the text.
+        """
+        cid = message.conversation_id
+        if (
+            not agent.definition.one_step
+            or turn.escalation_reason == "model_unavailable"
+            or not is_too_long(turn.text)
+            or warns_of_hazard(turn.text)
+        ):
+            return turn
+        before = {"agent": turn.agent, "words_before": one_step_words(turn.text),
+                  "sentences_before": one_step_sentences(turn.text)}
+        started = time.monotonic()
+        self.log.llm_request(cid, "one_step", 0)
+        try:
+            cut, reason, response = shorten_reply(agent.llm, turn.text)
+        except Exception as exc:
+            # The cut is optional; the reply is not. Logged, never silent.
+            self.log.emit("reply_too_long", cid, reason="shorten_failed", error=type(exc).__name__, **before)
+            return turn
+        self.log.llm_turn(
+            cid, "one_step", 0, getattr(response, "stop_reason", None), getattr(response, "usage", None),
+            model=getattr(response, "model", None) or getattr(agent.llm, "model", None),
+            duration_ms=int(round((time.monotonic() - started) * 1000)),
+        )
+        if cut is None:
+            self.log.emit("reply_too_long", cid, reason=reason, **before)
+            return turn
+        replace_turn_text(state.history, cut)
+        self.log.emit("reply_shortened", cid, words_after=one_step_words(cut),
+                      sentences_after=one_step_sentences(cut), **before)
+        return replace(turn, text=cut)
 
     def _note_customer_turn(self, message: InboundMessage, state: ConversationState, content: Any) -> None:
         """Evidence from the customer's turn as it was built for the model.

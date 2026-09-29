@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..attachments import user_content
+from ..one_step import ONE_STEP_RULE
 from ..config import Settings
 from ..conversation import HISTORY_TURNS, trim_history
 from ..contract import InboundMessage
@@ -68,6 +69,9 @@ class AgentDefinition:
     name: str
     tool_names: Sequence[str]
     build_system_prompt: Callable[..., str]
+    # One step per reply (one_step.py): the rule is appended to the prompt and
+    # the runtime cuts a reply that runs over. Off for the dealer agent only.
+    one_step: bool = True
 
 
 @dataclass
@@ -146,6 +150,10 @@ class Agent:
         on_user_turn: Optional[Callable[[Any], None]] = None,
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
+        if self.definition.one_step:
+            # Here, not in each agent's prompt text: last, and outside the
+            # base prompt a promotion replaces.
+            system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]
         )

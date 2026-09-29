@@ -405,6 +405,12 @@ _SAFETY_HANDOVER = re.compile(
 )
 
 
+def warns_of_hazard(reply: str) -> bool:
+    """Whether a reply tells the customer to stop using or charging the bike.
+    Such a reply goes out whole: the one-step cut (one_step.py) never shortens it."""
+    return bool(_SAFETY_HANDOVER.search(reply or ""))
+
+
 @dataclass(frozen=True)
 class EvidenceCheck:
     blocked: bool
