@@ -4,8 +4,8 @@ Spec: docs/superpowers/specs/2026-09-29-mongodb-conversation-store-design.md.
 
 Four collections. `transcript_turns` and `conversation_summaries` are the
 conversation record and are kept permanently: no TTL index, and deletion on
-request through `delete_person`. `conversations` (working state) and
-`idempotency_keys` expire through TTL indexes.
+request through `delete_person` or `delete_conversation`. `conversations`
+(working state) and `idempotency_keys` expire through TTL indexes.
 
 Every driver failure becomes a typed error the runtime handles:
 ConversationConflict when another server saved first, StoreUnavailable for
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -33,9 +34,11 @@ from ..conversation import (
     ConversationSummaryItem,
     StoreUnavailable,
     TranscriptTurn,
+    summary_key,
     transcript_turns,
     utc_now_iso,
 )
+from ..tools.registry import CLAIM_LEASE_SECONDS, write_in_progress
 
 MONGO_URI_ENV = "EMOTORAD_MONGO_URI"
 
@@ -67,16 +70,24 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def connect(uri: Optional[str] = None, db_name: str = "emotorad_ai", client: Any = None, timeout_ms: int = 3000) -> Any:
-    """The `emotorad_ai` database. A short server-selection timeout, so an
-    unreachable cluster fails the turn quickly into a handover, not a hang."""
+def connect(
+    uri: Optional[str] = None,
+    db_name: str = "emotorad_ai",
+    client: Any = None,
+    timeout_ms: int = 3000,
+    operation_timeout_ms: int = 5000,
+) -> Any:
+    """The `emotorad_ai` database. Short timeouts on finding a server and on
+    every operation, so a cluster that is unreachable or stops answering fails
+    the turn quickly into a handover, never a customer left waiting."""
     if client is None:
         uri = uri if uri is not None else os.environ.get(MONGO_URI_ENV, "")
         if not uri:
             raise StoreUnavailable("%s is not set" % MONGO_URI_ENV)
         from pymongo import MongoClient
 
-        client = MongoClient(uri, serverSelectionTimeoutMS=timeout_ms, connectTimeoutMS=timeout_ms, appname="emotorad-ai")
+        client = MongoClient(uri, serverSelectionTimeoutMS=timeout_ms, connectTimeoutMS=timeout_ms,
+                             timeoutMS=operation_timeout_ms, appname="emotorad-ai")
     return client[db_name]
 
 
@@ -92,6 +103,12 @@ def ensure_indexes(db: Any) -> Dict[str, List[str]]:
             db[collection].create_index(keys, **options)
         report[collection] = sorted(db[collection].index_information())
     return report
+
+
+def _receipts_of(conversation_id: str) -> Dict[str, Any]:
+    """Idempotency receipts are keyed `<conversation id>:<tool>:<key>` and can
+    hold what a tool returned about the person (a booking's customer id)."""
+    return {"_id": {"$regex": "^%s:" % re.escape(conversation_id)}}
 
 
 def _turn_starts(history: Sequence[Dict[str, Any]]) -> List[int]:
@@ -134,7 +151,12 @@ class MongoConversationStore:
     def get(self, conversation_id: str) -> ConversationState:
         doc = self._guard("find_one", lambda: self._collection(CONVERSATIONS).find_one({"_id": conversation_id}))
         if not doc:
-            return ConversationState(conversation_id=conversation_id, started_at=self._clock())
+            # New, or its working state expired. The permanent record may hold
+            # an earlier run's turns: number on from the last of them.
+            last = self._guard("find_one", lambda: self._collection(TRANSCRIPT_TURNS).find_one(
+                {"conversation_id": conversation_id}, sort=[("n", -1)], projection={"n": 1}))
+            return ConversationState(conversation_id=conversation_id, started_at=self._clock(),
+                                     turn_offset=int(last["n"]) if last else 0)
         state = ConversationState.from_json(doc["state"])
         state.version = int(doc["version"])
         return state
@@ -194,8 +216,9 @@ class MongoConversationStore:
             self._guard("replace_one", lambda: turns.replace_one({"_id": key}, dict(doc, _id=key), upsert=True))
         if summary is not None and state.user_key:
             summaries = self._collection(CONVERSATION_SUMMARIES)
-            doc = dict(asdict(summary), _id=summary.conversation_id)
-            self._guard("replace_one", lambda: summaries.replace_one({"_id": summary.conversation_id}, doc, upsert=True))
+            key = summary_key(summary.conversation_id, summary.started_at)
+            doc = dict(asdict(summary), _id=key)
+            self._guard("replace_one", lambda: summaries.replace_one({"_id": key}, doc, upsert=True))
 
     def transcript(self, conversation_id: str) -> List[TranscriptTurn]:
         docs = self._guard(
@@ -222,14 +245,44 @@ class MongoConversationStore:
         fields = set(ConversationSummaryItem.__dataclass_fields__)
         return [ConversationSummaryItem(**{k: v for k, v in d.items() if k in fields}) for d in docs]
 
-    def delete_person(self, user_key: str) -> Dict[str, int]:
-        """The right to erasure: everything held about one person, by user key.
-        Idempotency receipts carry no person and expire within seven days."""
-        counts: Dict[str, int] = {}
-        for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES):
+    def conversations_of(self, user_key: str) -> List[str]:
+        """Every conversation id tied to one person, in any collection."""
+        found = set()
+        for name, field in ((CONVERSATIONS, "_id"), (TRANSCRIPT_TURNS, "conversation_id"),
+                            (CONVERSATION_SUMMARIES, "conversation_id")):
             collection = self._collection(name)
-            counts[name] = self._guard("delete_many", lambda: collection.delete_many({"user_key": user_key})).deleted_count
+            found.update(self._guard("distinct", lambda: collection.distinct(field, {"user_key": user_key})))
+        return sorted(found)
+
+    def delete_person(self, user_key: str, dry_run: bool = False) -> Dict[str, int]:
+        """The right to erasure: everything held about one person.
+
+        Every conversation that is theirs, whole: turns recorded before they
+        signed in carry no user key, so conversations are found by any record
+        that does, then removed by id. Their idempotency receipts go too.
+        With `dry_run`, counts what would go and deletes nothing.
+        """
+        counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS)}
+        for conversation_id in self.conversations_of(user_key):
+            for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
+                counts[name] += count
         return counts
+
+    def delete_conversation(self, conversation_id: str, dry_run: bool = False) -> Dict[str, int]:
+        """One conversation, whoever it belongs to: for a chat never tied to a
+        verified person, found by its id."""
+        return {
+            CONVERSATIONS: self._remove(CONVERSATIONS, {"_id": conversation_id}, dry_run),
+            TRANSCRIPT_TURNS: self._remove(TRANSCRIPT_TURNS, {"conversation_id": conversation_id}, dry_run),
+            CONVERSATION_SUMMARIES: self._remove(CONVERSATION_SUMMARIES, {"conversation_id": conversation_id}, dry_run),
+            IDEMPOTENCY_KEYS: self._remove(IDEMPOTENCY_KEYS, _receipts_of(conversation_id), dry_run),
+        }
+
+    def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:
+        collection = self._collection(name)
+        if dry_run:
+            return self._guard("count_documents", lambda: collection.count_documents(query))
+        return self._guard("delete_many", lambda: collection.delete_many(query)).deleted_count
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history
@@ -239,13 +292,17 @@ class MongoIdempotencyStore:
     """The registry's idempotency contract, shared by every server.
 
     Claim-before-execute: inserting a pending receipt is the claim, and a
-    duplicate `_id` means someone else holds it.
+    duplicate `_id` means someone else holds it. A pending claim older than
+    the lease belongs to a server that died mid-call and is taken over.
     """
 
-    def __init__(self, db: Any, now: Callable[[], datetime] = _utc_now, ttl_days: int = 7) -> None:
+    def __init__(
+        self, db: Any, now: Callable[[], datetime] = _utc_now, ttl_days: int = 7, lease_seconds: int = CLAIM_LEASE_SECONDS
+    ) -> None:
         self._receipts = db[IDEMPOTENCY_KEYS]
         self._now = now
         self._ttl = timedelta(days=ttl_days)
+        self._lease = timedelta(seconds=lease_seconds)
 
     def _guard(self, operation: str, fn: Callable[[], Any]) -> Any:
         try:
@@ -256,17 +313,20 @@ class MongoIdempotencyStore:
             raise StoreUnavailable("MongoDB %s failed (%s)" % (operation, type(exc).__name__)) from None
 
     def claim(self, key: str) -> Optional[Dict[str, Any]]:
-        from ..tools.registry import err
-
+        now = self._now()
         try:
             self._guard("insert_one", lambda: self._receipts.insert_one(
-                {"_id": key, "status": "pending", "expires_at": self._now() + self._ttl}))
+                {"_id": key, "status": "pending", "claimed_at": now, "expires_at": now + self._ttl}))
             return None
         except DuplicateKeyError:
-            existing = self.get(key)
-            if existing is not None:
-                return existing
-            return err("write_in_progress", "This action is already being carried out; try again shortly.", retryable=True)
+            pass
+        taken_over = self._guard("find_one_and_update", lambda: self._receipts.find_one_and_update(
+            {"_id": key, "status": "pending", "claimed_at": {"$lt": now - self._lease}},
+            {"$set": {"claimed_at": now, "expires_at": now + self._ttl}}))
+        if taken_over is not None:
+            return None
+        existing = self.get(key)
+        return existing if existing is not None else write_in_progress()
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         doc = self._guard("find_one", lambda: self._receipts.find_one({"_id": key}))

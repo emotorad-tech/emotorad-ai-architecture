@@ -67,8 +67,11 @@ class ConversationState:
     transitions: List[str] = field(default_factory=list)
     # Persistence, for a durable store. `version` guards concurrent saves;
     # `user_key` ties the conversation to a person for memory; the last two
-    # feed the per-user summary.
+    # feed the per-user summary. `turn_offset` is how many transcript turns an
+    # earlier, expired run of this conversation id left: the permanent record
+    # carries on numbering from there rather than overwriting it.
     version: int = 0
+    turn_offset: int = 0
     user_key: Optional[str] = None
     started_at: Optional[str] = None
     channel: Optional[str] = None
@@ -175,9 +178,9 @@ def transcript_turns(
     """The customer's message and the bot's reply for this turn, redacted.
 
     Numbered from the turn counter, so recording the same turn twice (a retry)
-    overwrites rather than duplicates.
+    overwrites rather than duplicates, and after any earlier run's turns.
     """
-    n = state.turns * 2 - 1
+    n = state.turn_offset + state.turns * 2 - 1
     customer = TranscriptTurn(
         n=n, role="customer", text=redact_pii(inbound.message_text or ""), at=at,
         attachments=tuple({"kind": a.kind, "url": a.url} for a in inbound.attachments),
@@ -188,6 +191,13 @@ def transcript_turns(
         handled_by=reply.handled_by or "", path=str(reply.metadata.get("route") or ""),
     )
     return customer, bot
+
+
+def summary_key(conversation_id: str, started_at: Optional[str]) -> str:
+    """One summary per run of a conversation id: a WhatsApp thread that goes
+    quiet past the working-state expiry and starts again is two conversations
+    in the person's history, not one overwritten."""
+    return "%s#%s" % (conversation_id, started_at or "")
 
 
 def render_transcript(turns: Sequence[TranscriptTurn]) -> str:
@@ -220,7 +230,8 @@ class InMemoryConversationStore:
     def get(self, conversation_id: str) -> ConversationState:
         state = self._states.get(conversation_id)
         if state is None:
-            state = ConversationState(conversation_id=conversation_id, started_at=self._clock())
+            state = ConversationState(conversation_id=conversation_id, started_at=self._clock(),
+                                      turn_offset=max(self._turns.get(conversation_id, {}), default=0))
             self._states[conversation_id] = state
         return state
 
@@ -239,7 +250,7 @@ class InMemoryConversationStore:
         for turn in transcript_turns(state, inbound, reply, self._clock()):
             turns[turn.n] = turn
         if summary is not None and state.user_key:
-            self._summaries.setdefault(state.user_key, {})[state.conversation_id] = summary
+            self._summaries.setdefault(state.user_key, {})[summary_key(summary.conversation_id, summary.started_at)] = summary
 
     def transcript(self, conversation_id: str) -> List[TranscriptTurn]:
         return [turn for _, turn in sorted(self._turns.get(conversation_id, {}).items())]
@@ -247,22 +258,38 @@ class InMemoryConversationStore:
     def recent_summaries(
         self, user_key: str, limit: int = 3, exclude: Optional[str] = None
     ) -> List[ConversationSummaryItem]:
-        items = [s for s in self._summaries.get(user_key, {}).values() if s.conversation_id != exclude]
+        items = [s for key, s in self._summaries.get(user_key, {}).items() if key != exclude]
         return sorted(items, key=lambda s: s.started_at, reverse=True)[:limit]
 
     def delete_person(self, user_key: str) -> Dict[str, int]:
         """Everything held about one person: the right to erasure (DPDP, GDPR).
 
-        Working state, transcript turns and summaries, found by user key. The
-        counts say what went, for the person running the deletion to confirm.
+        Every conversation that is theirs, whole: the working state, every
+        transcript turn (those from before they signed in too) and the
+        summaries. The counts say what went, for the person running the
+        deletion to confirm.
         """
-        mine = [cid for cid, state in self._states.items() if state.user_key == user_key]
-        turns = 0
+        mine = {cid for cid, state in self._states.items() if state.user_key == user_key}
+        mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
+        counts = {"conversations": 0, "transcript_turns": 0, "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
-            del self._states[cid]
-            turns += len(self._turns.pop(cid, {}))
-        summaries = len(self._summaries.pop(user_key, {}))
-        return {"conversations": len(mine), "transcript_turns": turns, "conversation_summaries": summaries}
+            for name, count in self.delete_conversation(cid).items():
+                counts[name] += count
+        return counts
+
+    def delete_conversation(self, conversation_id: str) -> Dict[str, int]:
+        """One conversation, whoever it belongs to: for a chat that was never
+        tied to a verified person, found by its id."""
+        summaries = 0
+        for items in self._summaries.values():
+            for key in [k for k, s in items.items() if s.conversation_id == conversation_id]:
+                del items[key]
+                summaries += 1
+        return {
+            "conversations": 1 if self._states.pop(conversation_id, None) is not None else 0,
+            "transcript_turns": len(self._turns.pop(conversation_id, {})),
+            "conversation_summaries": summaries,
+        }
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history

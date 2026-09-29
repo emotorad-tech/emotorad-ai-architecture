@@ -5,7 +5,7 @@ durable store (MongoDB next) are held to the same contract, not two similar ones
 """
 
 from emotorad_ai.contract import Attachment, Identity, InboundMessage, Reply
-from emotorad_ai.conversation import ConversationSummaryItem
+from emotorad_ai.conversation import ConversationSummaryItem, summary_key
 
 
 def inbound(text, cid="c1", attachments=()):
@@ -71,7 +71,8 @@ class StoreContract:
             state.user_key, state.turns = "PHONE#+919876543210", 1
             store.record_turn(state, inbound("x", cid), reply("y", cid), summary(cid, started_at="2026-09-%sT10:00:00+00:00" % day))
         self.assertEqual([s.conversation_id for s in store.recent_summaries("PHONE#+919876543210")], ["d", "c", "b"])
-        self.assertEqual([s.conversation_id for s in store.recent_summaries("PHONE#+919876543210", limit=2, exclude="d")], ["c", "b"])
+        current = summary_key("d", "2026-09-25T10:00:00+00:00")
+        self.assertEqual([s.conversation_id for s in store.recent_summaries("PHONE#+919876543210", limit=2, exclude=current)], ["c", "b"])
         self.assertEqual(store.recent_summaries("PHONE#+910000000000"), [])
 
     def test_a_summary_is_upserted_not_duplicated(self):
@@ -92,7 +93,8 @@ class StoreContract:
             store.save(state)
             store.record_turn(state, inbound("x", cid), reply("y", cid), summary(cid, user_key=user))
         counts = store.delete_person("PHONE#+919876543210")
-        self.assertEqual(counts, {"conversations": 1, "transcript_turns": 2, "conversation_summaries": 1})
+        self.assertEqual({k: counts[k] for k in ("conversations", "transcript_turns", "conversation_summaries")},
+                         {"conversations": 1, "transcript_turns": 2, "conversation_summaries": 1})
         self.assertEqual(store.transcript("mine"), [])
         self.assertEqual(store.recent_summaries("PHONE#+919876543210"), [])
         self.assertEqual(store.get("mine").turns, 0)  # a fresh state: the old one is gone

@@ -26,7 +26,7 @@
    | `conversations` (working state) | 48 hours after the last message |
    | `idempotency_keys` | 7 days |
 
-3. **Deletion on request.** `delete_person(user_key)` removes a person's working state, transcript turns and summaries. `scripts/delete_person.py` does a dry run first, then deletes with `--yes`. This serves the right to erasure under DPDP (India) and GDPR (Spain), which permanent retention makes necessary.
+3. **Deletion on request.** `delete_person(user_key)` removes every conversation that is the person's, whole: working state, every transcript turn (including turns from before they signed in), summaries and idempotency receipts. `delete_conversation(id)` removes one conversation never tied to a verified person. `scripts/delete_person.py` does a dry run first, then deletes with `--yes --reason "..."`, and writes an audit record to `erasure_log` holding the person's key only as a SHA-256 hash. (Revised after the final review, 2026-09-29.) This serves the right to erasure under DPDP (India) and GDPR (Spain), which permanent retention makes necessary.
 4. **The user key** is `PHONE#<verified phone>` for customers and `DEALER#<dealer_id>` for dealers. There is none for an anonymous or merely asserted identity, which gets no memory.
 5. **Concurrency is optimistic**, based on a `version` field:
    - a first save uses `insert_one`, where a duplicate `_id` means a conflict;
@@ -83,3 +83,11 @@ On the first turn, a verified person's three most recent summaries become the "L
 
 - Set `EMOTORAD_STORE=memory` to return to today's behaviour.
 - The `emotorad_ai` database can be dropped by the cluster owner. Nothing else reads it.
+
+## Revisions after the final review (2026-09-29)
+
+- **A receipt-store outage never crashes a turn.** `ToolRegistry.call` returns a retryable `idempotency_unavailable` error when a claim cannot be made, and flags `idempotency_warning` when a receipt cannot be written. The safety ticket runs without a receipt when the store is down (`run_without_idempotency`): a duplicate safety ticket is a lesser harm than none. `Runtime.handle` hands over on any `StoreUnavailable` that escapes the turn.
+- **A conversation id reused after its working state expired keeps its record.** A new state numbers turns on from the last stored turn (`turn_offset`), and summaries are keyed `<conversation id>#<started_at>`, one per run, so an earlier run is remembered, not overwritten.
+- **A conflict never repeats or hides a write.** A turn that raised a ticket, booked or sent media is not run again after a conflict: it is added to the freshly loaded state (`conversation_merged`). If that save fails too, the customer is handed over with the ticket reference. Every store handover names a ticket the turn raised.
+- **A claim has a five-minute lease.** A pending claim left by a server that died mid-call is taken over after `CLAIM_LEASE_SECONDS` (300), not held for the week receipts are kept.
+- **Every MongoDB operation is bounded** by `timeoutMS=5000`, so a cluster that stops answering is a handover, not a hang.

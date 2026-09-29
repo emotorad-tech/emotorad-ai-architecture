@@ -53,7 +53,7 @@ class MongoStoreTests(StoreContract, unittest.TestCase):
         self.assertEqual(saved["expires_at"].replace(tzinfo=timezone.utc), NOW + timedelta(hours=48))
         for turn in self.db["transcript_turns"].find():
             self.assertNotIn("expires_at", turn)
-        self.assertNotIn("expires_at", self.db["conversation_summaries"].find_one({"_id": "c1"}))
+        self.assertNotIn("expires_at", self.db["conversation_summaries"].find_one({"conversation_id": "c1"}))
 
     def test_transcript_turns_carry_the_person_for_deletion(self):
         store = self.make_store()

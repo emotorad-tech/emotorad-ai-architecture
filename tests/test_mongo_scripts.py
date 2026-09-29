@@ -67,7 +67,8 @@ class DeletePersonScriptTests(unittest.TestCase):
         db["transcript_turns"].insert_one({"_id": "c#00001", "conversation_id": "c", "n": 1, "user_key": "PHONE#+919876543210"})
         module = load("delete_person")
         with mock.patch.object(module, "connect", lambda db_name: client[db_name]):
-            for argv, remaining in ((["--phone", "98765 43210"], 1), (["--phone", "+91 98765 43210", "--yes"], 0)):
+            for argv, remaining in ((["--phone", "98765 43210"], 1),
+                                    (["--phone", "+91 98765 43210", "--yes", "--reason", "customer email"], 0)):
                 out = io.StringIO()
                 with mock.patch.object(sys, "argv", ["delete_person.py"] + argv), redirect_stdout(out):
                     module.main()

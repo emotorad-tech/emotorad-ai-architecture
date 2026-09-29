@@ -10,7 +10,8 @@ restart, transcripts, summaries, memory, tickets carrying the transcript,
 conflict protection, duplicate-ticket protection, expiry and deletion.
 
 Everything it writes is under a unique smoke-... id, and it deletes it all at
-the end, whether the checks pass or fail. Deleting the test rider's data also
+the end, whether the checks pass or fail. A check that errors is reported as
+failed, with the error, and the run goes on to the next. Deleting the test rider's data also
 removes any other conversations held for that fixture phone, which is test
 data only. Run by a person, never by a Claude session.
 """
@@ -47,9 +48,16 @@ def run_smoke(client: Any = None, db_name: Optional[str] = None, out: Callable[[
     settings = Settings(store="mongodb", mode="offline", mongo_db=db_name, log_path="")
     results: List[Tuple[str, bool]] = []
 
-    def check(name: str, passed: Any, detail: str = "") -> None:
-        results.append((name, bool(passed)))
-        out("%s  %s%s" % ("PASS" if passed else "FAIL", name, "  (%s)" % detail if detail and not passed else ""))
+    def check(name: str, test: Callable[[], Any], detail: Callable[[], Any] = lambda: "") -> None:
+        # Evaluated here, so an error in one check is a FAIL line, not a traceback.
+        try:
+            passed, why = bool(test()), ""
+            if not passed:
+                why = str(detail())
+        except Exception as exc:
+            passed, why = False, "%s: %s" % (type(exc).__name__, exc)
+        results.append((name, passed))
+        out("%s  %s%s" % ("PASS" if passed else "FAIL", name, "  (%s)" % why if why else ""))
 
     def new_runtime():
         # A fresh connection and fresh stores each time: a restart, or a second server.
@@ -65,7 +73,8 @@ def run_smoke(client: Any = None, db_name: Optional[str] = None, out: Callable[[
     db = connect(db_name=db_name, client=client)
     missing = {c: sorted(o["name"] for _, o in idx if o["name"] not in db[c].index_information()) for c, idx in INDEXES.items()}
     missing = {c: names for c, names in missing.items() if names}
-    check("0. setup has been run: every collection has its indexes", not missing, "missing %s; run mongo_setup.py" % missing)
+    check("0. setup has been run: every collection has its indexes", lambda: not missing,
+          lambda: "missing %s; run mongo_setup.py" % missing)
     if missing:
         return False
 
@@ -75,44 +84,48 @@ def run_smoke(client: Any = None, db_name: Optional[str] = None, out: Callable[[
         rt, ad, stores = new_runtime()
         stores_for_cleanup = stores
         first = send(rt, ad, a, "hi")
-        check("1. a new chat is answered (the rider has two bikes, so it asks which)", "Which one" in first.text, first.text[:80])
+        check("1. a new chat is answered (the rider has two bikes, so it asks which)",
+              lambda: "Which one" in first.text, lambda: first.text[:80])
         send(rt, ad, a, "1")
         routed = send(rt, ad, a, "my battery won't charge")
-        check("2. the chat reaches battery support", routed.handled_by == "battery_support", routed.handled_by)
+        check("2. the chat reaches battery support", lambda: routed.handled_by == "battery_support", lambda: routed.handled_by)
 
         rt2, ad2, stores2 = new_runtime()
         after = send(rt2, ad2, a, "still not charging, my number is 9812345678")
-        check("3. after a restart, the chat continues where it was", after.handled_by == "battery_support", after.handled_by)
+        check("3. after a restart, the chat continues where it was",
+              lambda: after.handled_by == "battery_support", lambda: after.handled_by)
 
         turns = stores2.conversations.transcript(a)
-        check("4. the transcript holds every message, in order", [t.role for t in turns] == ["customer", "bot"] * 4,
-              str([t.role for t in turns]))
-        check("5. the transcript blanks out phone numbers", turns and "9812345678" not in turns[6].text)
+        check("4. the transcript holds every message, in order",
+              lambda: [t.role for t in turns] == ["customer", "bot"] * 4, lambda: [t.role for t in turns])
+        check("5. the transcript blanks out phone numbers", lambda: "9812345678" not in turns[6].text)
 
         summary = [s for s in stores2.conversations.recent_summaries(USER_KEY) if s.conversation_id == a]
-        check("6. a summary is kept for the person", summary and summary[0].title == "Battery issue"
-              and summary[0].product_name == "EMX Plus", str(summary[:1]))
+        check("6. a summary is kept for the person",
+              lambda: summary[0].title == "Battery issue" and summary[0].product_name == "EMX Plus", lambda: summary[:1])
 
         send(rt2, ad2, b, "hi")
         memory = stores2.conversations.get(b).context_block or ""
-        check("7. a new chat remembers the last one", "Last contact:" in memory and "Battery issue" in memory)
+        check("7. a new chat remembers the last one", lambda: "Last contact:" in memory and "Battery issue" in memory)
 
         # The bike is chosen first: a two-bike rider's safety ticket needs one
         # named (a separate, known gap in the safety branch, tracked on its own).
         send(rt2, ad2, b, "1")
         safety = send(rt2, ad2, b, "my battery is swollen")
-        check("8. a safety report raises a ticket", bool(safety.ticket_id), safety.handled_by)
+        check("8. a safety report raises a ticket", lambda: bool(safety.ticket_id), lambda: safety.handled_by)
         ticket = rt2.registry.tickets.tickets.get(safety.ticket_id or "", {})
-        check("9. the ticket carries the conversation transcript", "my battery is swollen" in ticket.get("transcript", ""))
+        check("9. the ticket carries the conversation transcript",
+              lambda: "my battery is swollen" in ticket.get("transcript", ""))
 
-        one, other = stores2.conversations.get(a), stores2.conversations.get(a)
-        stores2.conversations.save(one)
-        try:
-            stores2.conversations.save(other)
-            conflicted = False
-        except ConversationConflict:
-            conflicted = True
-        check("10. two servers cannot overwrite each other's save", conflicted)
+        def conflicts() -> bool:
+            one, other = stores2.conversations.get(a), stores2.conversations.get(a)
+            stores2.conversations.save(one)
+            try:
+                stores2.conversations.save(other)
+            except ConversationConflict:
+                return True
+            return False
+        check("10. two servers cannot overwrite each other's save", conflicts)
 
         tickets = MockTicketSystem()
         server_one = build_registry(ticket_system=tickets, idempotency=stores.idempotency)
@@ -122,26 +135,49 @@ def run_smoke(client: Any = None, db_name: Optional[str] = None, out: Callable[[
         context = ToolContext(conversation_id=tag + "-idem", phone="+919700000010")
         first_try = server_one.call(CREATE_SUPPORT_TICKET, dict(call), context)
         retry = server_two.call(CREATE_SUPPORT_TICKET, dict(call), context)
-        check("11. a retried ticket is raised once, even across servers", first_try == retry and len(tickets.tickets) == 1)
+        check("11. a retried ticket is raised once, even across servers",
+              lambda: first_try == retry and len(tickets.tickets) == 1, lambda: "%d tickets" % len(tickets.tickets))
 
         working = db["conversations"].find_one({"_id": a}) or {}
         record = db["transcript_turns"].find_one({"conversation_id": a}) or {"expires_at": "?"}
-        check("12. working state expires; the transcript is permanent", working.get("expires_at") and "expires_at" not in record)
+        check("12. working state expires; the transcript is permanent",
+              lambda: working.get("expires_at") and "expires_at" not in record)
+    except Exception as exc:
+        # A step between checks failed: say so, then clean up all the same.
+        results.append(("stopped", False))
+        out("FAIL  stopped before the last check: %s: %s" % (type(exc).__name__, exc))
     finally:
         if stores_for_cleanup is not None:
-            deleted = stores_for_cleanup.conversations.delete_person(USER_KEY)
-            pattern = {"$regex": "^" + re.escape(tag)}
-            receipts = db["idempotency_keys"].delete_many({"_id": pattern}).deleted_count
-            leftovers = (db["conversations"].count_documents({"_id": pattern})
-                         + db["transcript_turns"].count_documents({"conversation_id": pattern})
-                         + db["conversation_summaries"].count_documents({"_id": pattern}))
-            check("13. deletion on request removes everything for the person", leftovers == 0, "%d left" % leftovers)
-            out("cleaned up: %s, idempotency_keys %d" % (", ".join("%s %d" % i for i in deleted.items()), receipts))
+            cleanup(stores_for_cleanup, db, tag, check, out)
 
     passed = all(ok for _, ok in results)
+    if passed and len(results) < 14:
+        passed = False
     out("SMOKE OK: %d checks passed" % len(results) if passed else "SMOKE FAILED: %d of %d checks failed"
         % (sum(1 for _, ok in results if not ok), len(results)))
     return passed
+
+
+def cleanup(stores: Any, db: Any, tag: str, check: Callable[..., None], out: Callable[[str], None]) -> None:
+    """Remove the test rider's data and this run's receipts, then prove it went.
+    Its own error is reported as check 13 failing, never raised over an earlier one."""
+    pattern = {"$regex": "^" + re.escape(tag)}
+    deleted: dict = {}
+
+    def erased() -> bool:
+        deleted.update(stores.conversations.delete_person(USER_KEY))
+        deleted["idempotency_keys"] = deleted.get("idempotency_keys", 0) + db["idempotency_keys"].delete_many({"_id": pattern}).deleted_count
+        return leftovers() == 0
+
+    def leftovers() -> int:
+        return (db["conversations"].count_documents({"_id": pattern})
+                + db["transcript_turns"].count_documents({"conversation_id": pattern})
+                + db["conversation_summaries"].count_documents({"conversation_id": pattern})
+                + db["idempotency_keys"].count_documents({"_id": pattern}))
+
+    check("13. deletion on request removes everything for the person", erased, lambda: "%d left" % leftovers())
+    if deleted:
+        out("cleaned up: %s" % ", ".join("%s %d" % item for item in deleted.items()))
 
 
 if __name__ == "__main__":

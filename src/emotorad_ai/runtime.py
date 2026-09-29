@@ -44,6 +44,7 @@ from .conversation import (
     InMemoryConversationStore,
     StoreUnavailable,
     render_transcript,
+    summary_key,
     utc_now_iso,
 )
 from .decisions import (
@@ -176,25 +177,42 @@ class Runtime:
         """One turn: load, run the graph, save, record.
 
         The save is version-checked. If another server saved this conversation
-        in the meantime, the turn is run once more from freshly loaded state,
-        never on top of the losing attempt's; a second clash asks the customer
-        to resend rather than overwrite anyone's work.
+        in the meantime, a turn that changed nothing for the customer is run
+        once more from freshly loaded state, never on top of the losing
+        attempt's; a second clash asks the customer to resend rather than
+        overwrite anyone's work. A turn that did something (a ticket, a
+        booking, a picture sent) is never run again: it is added to the fresh
+        state instead, so it is neither repeated nor forgotten.
         """
         cid = message.conversation_id
+        turn_mark = len(self.log.events)
         for attempt in (1, 2):
             try:
                 state = self.conversations.get(cid)
             except StoreUnavailable as exc:
-                return self._store_down(message, exc)
-            final = self.graph.invoke({"message": message, "conversation": state})
+                return self._store_down(message, exc, self._ticket_since(turn_mark, cid))
+            history_mark, log_mark = len(state.history), len(self.log.events)
+            try:
+                final = self.graph.invoke({"message": message, "conversation": state})
+            except StoreUnavailable as exc:
+                # Every store call inside the turn handles its own failure; this
+                # is the backstop, so one that does not is a handover, not a 500.
+                return self._store_down(message, exc, self._ticket_since(turn_mark, cid))
             reply, resolved = final["reply"], final.get("resolved")
             state.escalated = state.escalated or reply.escalated
             state.ticket_id = reply.ticket_id or state.ticket_id
+            this_turn = list(state.history[history_mark:])  # before the save trims anything
             try:
                 self.conversations.save(state)
                 break
             except ConversationConflict:
                 self.log.emit("conversation_conflict", cid, attempt=attempt)
+                if self._side_effects_since(log_mark, cid):
+                    try:
+                        state = self._merge_onto_fresh(state, this_turn, reply)
+                    except (ConversationConflict, StoreUnavailable) as exc:
+                        return self._store_down(message, exc, reply.ticket_id)
+                    break
                 if attempt == 2:
                     self.log.emit("conversation_busy", cid)
                     return Reply(
@@ -202,7 +220,7 @@ class Runtime:
                         handled_by="conversation_busy",
                     )
             except StoreUnavailable as exc:
-                return self._store_down(message, exc)
+                return self._store_down(message, exc, reply.ticket_id)
         try:
             self.conversations.record_turn(state, message, reply, self._summary_for(state, resolved))
         except StoreUnavailable as exc:
@@ -226,14 +244,39 @@ class Runtime:
                 ticket_id=reply.ticket_id, error="%s: %s" % (type(exc).__name__, exc),
             )
 
-    def _store_down(self, message: InboundMessage, exc: Exception) -> Reply:
-        """The store cannot be reached: hand over, never start from blank."""
+    def _merge_onto_fresh(self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply) -> ConversationState:
+        """Add a turn that lost the save race, and did something, to the state
+        the other server saved. Its words and its ticket are kept; the routing
+        the other server saved stands. One attempt: a second clash hands over."""
+        fresh = self.conversations.get(ours.conversation_id)
+        fresh.turns += 1
+        fresh.history.extend(this_turn)
+        fresh.escalated = fresh.escalated or ours.escalated
+        fresh.ticket_id = reply.ticket_id or fresh.ticket_id
+        fresh.evidence_seen = fresh.evidence_seen or ours.evidence_seen
+        fresh.disclosed = fresh.disclosed or ours.disclosed
+        for name in ("user_key", "channel", "context_block"):
+            if getattr(fresh, name) is None:
+                setattr(fresh, name, getattr(ours, name))
+        fresh.transitions.append("merged_after_conflict")
+        self.conversations.save(fresh)
+        self.log.emit("conversation_merged", ours.conversation_id, ticket_id=reply.ticket_id)
+        return fresh
+
+    def _ticket_since(self, log_mark: int, conversation_id: str) -> Optional[str]:
+        return next((w["ticket_id"] for w in self._side_effects_since(log_mark, conversation_id) if w.get("ticket_id")), None)
+
+    def _store_down(self, message: InboundMessage, exc: Exception, ticket_id: Optional[str] = None) -> Reply:
+        """The store cannot be reached: hand over, never start from blank. A
+        ticket the turn already raised is named, so the customer can quote it."""
         self.log.emit("store_unavailable", message.conversation_id, error=str(exc))
-        self.log.escalation(message.conversation_id, "store_unavailable", None)
+        self.log.escalation(message.conversation_id, "store_unavailable", ticket_id)
         # A throwaway state, so the AI disclosure is always added: we cannot
         # know whether this person has already seen it.
-        text = apply_disclosure(HANDOVER_TEXT, ConversationState(conversation_id=message.conversation_id), message.channel)
-        return Reply(conversation_id=message.conversation_id, text=text, handled_by="store_unavailable", escalated=True)
+        text = HANDOVER_TEXT + ("\n\nYour reference is %s." % ticket_id if ticket_id else "")
+        text = apply_disclosure(text, ConversationState(conversation_id=message.conversation_id), message.channel)
+        return Reply(conversation_id=message.conversation_id, text=text, handled_by="store_unavailable",
+                     escalated=True, ticket_id=ticket_id)
 
     # -- graph nodes (graph.py says what follows what) -----------------------
 
@@ -271,7 +314,7 @@ class Runtime:
             if state.user_key:
                 try:
                     last_contact = summarise_past(self.conversations.recent_summaries(
-                        state.user_key, limit=3, exclude=state.conversation_id))
+                        state.user_key, limit=3, exclude=summary_key(state.conversation_id, state.started_at)))
                 except StoreUnavailable as exc:
                     # Memory is a nicety; the conversation goes on without it.
                     self.log.emit("memory_unavailable", message.conversation_id, error=str(exc))
@@ -673,6 +716,8 @@ class Runtime:
             elif resolved.single_bike:
                 arguments["frame_number"] = resolved.single_bike["frame_number"]
 
+            # Raised even if the receipt store is down: a duplicate safety
+            # ticket is a lesser harm than none.
             envelope = self.registry.call(
                 CREATE_SUPPORT_TICKET,
                 arguments,
@@ -681,6 +726,7 @@ class Runtime:
                     phone=resolved.identity.phone,
                     cluster_id=resolved.cluster_id,
                 ),
+                run_without_idempotency=True,
             )
             self.log.tool_call(
                 message.conversation_id, CREATE_SUPPORT_TICKET, {"category": "battery_safety"}, envelope
