@@ -103,6 +103,8 @@ class NarrowPathTests(unittest.TestCase):
         runtime, adapter, *_ = build([JevDecision(answers=NARROW_WITH_WARRANTY)], narrow=[say("Good news, it's covered under warranty.")])
         reply = send(runtime, adapter, "my battery won't charge, is it under warranty", session="sess-rohit")
         self.assertEqual(reply.handled_by, "guardrail:coverage_post_check")
+        # Contradicted, not merely unsupported: the prefetched lookup reached the check.
+        self.assertEqual(reply.metadata["blocked_reason"], "coverage_claim_contradicts_tool_result")
 
     def test_an_unsure_follow_up_stays_on_the_same_record(self):
         runtime, adapter, jev, narrow, fallback = build(

@@ -76,6 +76,7 @@ class ChoiceTests(unittest.TestCase):
         chosen = summariser_from_env({"OPENROUTER_API_KEY": "sk-or-test", "GEMINI_API_KEY": "g-test"})
         self.assertIsInstance(chosen, OpenRouterVideoSummariser)
         self.assertEqual(chosen.provider, "openrouter")
+        self.assertTrue(chosen.zdr)
 
     def test_gemini_direct_runs_when_asked_for_or_when_it_is_the_only_key(self):
         client = object()

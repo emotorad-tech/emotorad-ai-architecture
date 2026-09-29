@@ -46,7 +46,8 @@ class CostReportTests(unittest.TestCase):
 
 class ModelInLogTests(unittest.TestCase):
     def test_llm_turn_records_the_model_and_the_key_never_reaches_the_log(self):
-        reply = {"choices": [{"finish_reason": "stop", "message": {"content": "Try another socket."}}],
+        reply = {"model": "deepseek/deepseek-v4-flash-20260731",
+                 "choices": [{"finish_reason": "stop", "message": {"content": "Try another socket."}}],
                  "usage": {"prompt_tokens": 50, "completion_tokens": 5, "cost": 0.00001}}
         with FakeServer() as server:
             server.queue(200, reply)
@@ -65,7 +66,8 @@ class ModelInLogTests(unittest.TestCase):
             adapter = WebsiteChatAdapter(runtime.resolver)
             runtime.handle(adapter.to_message({"conversation_id": "c", "session_token": "sess-ananya", "text": "my battery won't charge"}))
         [turn] = [e for e in runtime.log.events if e["event"] == "llm_turn"]
-        self.assertEqual(turn["model"], "deepseek/deepseek-v4-flash-0731")
+        # The id OpenRouter reports answering with, not the one the client asked for.
+        self.assertEqual(turn["model"], "deepseek/deepseek-v4-flash-20260731")
         self.assertEqual(turn["usage"]["cost"], 0.00001)
         self.assertNotIn(KEY, json.dumps(runtime.log.events, default=str))
 

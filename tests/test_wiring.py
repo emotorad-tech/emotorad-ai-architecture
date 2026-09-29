@@ -19,7 +19,9 @@ class BuildModelsTests(unittest.TestCase):
         self.assertIsNone(models.narrow_llm)
 
     def test_openrouter_builds_jev_and_both_reply_models_on_one_transport(self):
-        settings = Settings(mode="openrouter")
+        # Two different models: the defaults name the same one, so a swap passed.
+        settings = Settings(mode="openrouter", fallback_model="anthropic/claude-haiku-4.5",
+                            narrow_model="deepseek/deepseek-v4-flash-0731")
         models = build_models(settings, transport=FakeTransport())
         self.assertIsInstance(models.jev, JevClient)
         self.assertEqual(models.jev.model, settings.jev_model)

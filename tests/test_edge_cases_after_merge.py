@@ -172,11 +172,12 @@ class OpenRouterPhotoTests(unittest.TestCase):
     def test_a_photo_with_text_becomes_an_image_part_beside_the_text(self):
         messages = [{"role": "user", "content": [
             {"type": "text", "text": "look"},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}},
+            # png, not jpeg: jpeg is the fallback, so it cannot show the type is kept.
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
         ]}]
         self.assertEqual(to_openai_messages("S", messages)[-1], {"role": "user", "content": [
             {"type": "text", "text": "look"},
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ]})
 
     def test_a_photo_on_its_own_is_still_sent(self):
