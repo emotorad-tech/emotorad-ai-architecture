@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from .config import Settings
 from .jev import JevClient
-from .llm import MODES as SINGLE_MODEL_MODES
+from .llm import SINGLE_MODEL_MODES
 from .llm import OpenRouterChat, select_llm
 from .openrouter import OpenRouterTransport
 

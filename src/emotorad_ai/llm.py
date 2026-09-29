@@ -180,7 +180,8 @@ class AnthropicClaude:
         return _create(self._client, self.model, self.settings, system, messages, tools)
 
 
-MODES = ("offline", "anthropic", "bedrock")
+# The single-model modes select_llm serves; config.MODES is every mode.
+SINGLE_MODEL_MODES = ("offline", "anthropic", "bedrock")
 
 
 class LLMConfigError(Exception):
@@ -209,7 +210,7 @@ def select_llm(mode: str, settings: Settings, environ: Optional[Mapping[str, str
     if mode == "bedrock":
         model = env.get("EMOTORAD_AI_MODEL") or DEFAULT_MODELS["bedrock"]
         return BedrockClaude(replace(settings, model=model), client=client)
-    raise LLMConfigError("unknown EMOTORAD_AI_MODE %r; expected one of %s" % (mode, ", ".join(MODES)))
+    raise LLMConfigError("unknown EMOTORAD_AI_MODE %r; expected one of %s" % (mode, ", ".join(SINGLE_MODEL_MODES)))
 
 
 

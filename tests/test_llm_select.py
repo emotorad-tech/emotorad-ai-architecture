@@ -5,7 +5,7 @@ import unittest
 
 from emotorad_ai.config import Settings
 from emotorad_ai.llm import (
-    MODES,
+    SINGLE_MODEL_MODES,
     AnthropicClaude,
     BedrockClaude,
     LLMConfigError,
@@ -84,7 +84,7 @@ class AnthropicClaudeTests(unittest.TestCase):
 
 class SelectTests(unittest.TestCase):
     def test_modes_are_the_three_the_deploy_can_name(self):
-        self.assertEqual(MODES, ("offline", "anthropic", "bedrock"))
+        self.assertEqual(SINGLE_MODEL_MODES, ("offline", "anthropic", "bedrock"))
 
     def test_offline_needs_nothing(self):
         self.assertIsInstance(select_llm("offline", Settings(), environ={}), OfflinePlanner)

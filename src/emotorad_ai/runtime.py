@@ -306,6 +306,17 @@ class Runtime:
         booking, a picture sent) is never run again: it is added to the fresh
         state instead, so it is neither repeated nor forgotten.
         """
+        # One customer turn is one `inbound` and one `outcome`, whichever path
+        # it takes (a retry after a conflict, the busy reply, a storage
+        # outage): the metrics count turns by `inbound`, and a Langfuse trace
+        # opens on `inbound` and closes on `outcome`. A turn that crashes logs
+        # no outcome; the trace is closed, flagged, by the next `inbound`.
+        self.log.inbound(message)
+        reply = self._handle(message)
+        self.log.outcome(message.conversation_id, reply.handled_by, reply.escalated, reply.ticket_id, reply.text)
+        return reply
+
+    def _handle(self, message: InboundMessage) -> Reply:
         cid = message.conversation_id
         turn_mark = len(self.log.events)
         for attempt in (1, 2):
@@ -424,7 +435,6 @@ class Runtime:
 
     def _node_prepare(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         message = turn["message"]
-        self.log.inbound(message)
         state = turn["conversation"]  # loaded by handle(), saved after the graph
         state.turns += 1
         # Set by the web chat API (api.post_message): the identity cluster that
@@ -572,6 +582,10 @@ class Runtime:
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         if self.jev is None:
             return {"route": Route(path="full", reasons=("jev_disabled",))}
+        if message.entry_metadata.get("pinned_agent") in self.agents:
+            # A tester pinned the agent (web chat): follow the pin, with no Jev
+            # score to route around it and no narrow path in its place.
+            return {"route": Route(path="full", reasons=("pinned_agent",))}
 
         bike = self._selected_bike(resolved, state)
         decision, error = None, None
@@ -919,7 +933,6 @@ class Runtime:
                 already_in_history=True,
             )
 
-        self.log.outcome(message.conversation_id, turn.agent, turn.escalate, turn.ticket_id, turn.text)
         return Reply(
             conversation_id=message.conversation_id,
             text=self._outbound(turn.text, state, message.channel),
@@ -1055,7 +1068,6 @@ class Runtime:
             # rejects on every later call of the conversation.
             state.history.append({"role": "user", "content": user_content(message, self.fetch)})
         state.history.append({"role": "assistant", "content": [{"type": "text", "text": outbound}]})
-        self.log.outcome(message.conversation_id, handled_by, escalated, ticket_id, outbound)
         return Reply(
             conversation_id=message.conversation_id,
             text=outbound,

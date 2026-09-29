@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -355,9 +356,14 @@ class InMemoryConversationStore:
     them) and must raise ConversationConflict on a stale save.
     """
 
-    def __init__(self, clock: Callable[[], str] = utc_now_iso) -> None:
+    def __init__(self, clock: Callable[[], str] = utc_now_iso, max_conversations: int = 10_000) -> None:
         self._clock = clock
-        self._states: Dict[str, ConversationState] = {}
+        # Bounded, so a long-running process does not grow without limit: past
+        # `max_conversations`, the least recently used conversation goes, whole
+        # (state, transcript, summaries). Everything here is lost on restart
+        # anyway; the durable store is MongoDB.
+        self.max_conversations = max_conversations
+        self._states: "OrderedDict[str, ConversationState]" = OrderedDict()
         self._turns: Dict[str, Dict[int, TranscriptTurn]] = {}
         self._summaries: Dict[str, Dict[str, ConversationSummaryItem]] = {}
 
@@ -367,6 +373,11 @@ class InMemoryConversationStore:
             state = ConversationState(conversation_id=conversation_id, started_at=self._clock(),
                                       turn_offset=max(self._turns.get(conversation_id, {}), default=0))
             self._states[conversation_id] = state
+            while len(self._states) > self.max_conversations:
+                oldest = next(iter(self._states))
+                self.delete_conversation(oldest)
+        else:
+            self._states.move_to_end(conversation_id)
         return state
 
     def peek(self, conversation_id: str) -> Optional[ConversationState]:
@@ -377,6 +388,7 @@ class InMemoryConversationStore:
     def save(self, state: ConversationState) -> None:
         state.version += 1
         self._states[state.conversation_id] = state
+        self._states.move_to_end(state.conversation_id)
 
     def record_turn(
         self,

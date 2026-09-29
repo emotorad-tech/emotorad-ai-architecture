@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 # Claude on Anthropic's own API (what staging runs); `bedrock` is Claude in
 # EMotorad's own AWS account; `openrouter` is Jev routing plus the OpenRouter
 # reply models, and sends customer text outside AWS, so it needs sign-off
-# before real customer traffic. The first three are llm.MODES, the single
+# before real customer traffic. The first three are llm.SINGLE_MODEL_MODES, the single
 # Claude client select_llm builds; openrouter adds Jev and a second model and
 # is built by wiring.build_models, the one place every mode is resolved.
 MODES = ("offline", "anthropic", "bedrock", "openrouter")
