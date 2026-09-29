@@ -32,7 +32,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt  # requirements.txt plus mongomock and pyflakes, which the tests need
 
       # The test suite is the deploy gate, not an afterthought — see
       # CLAUDE.md/docs/Emotorad_Testing_Strategy.md on why these tests are

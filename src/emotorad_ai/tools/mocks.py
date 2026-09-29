@@ -303,6 +303,13 @@ class MockTicketSystem:
         self.tickets[ticket_id] = ticket
         return ticket
 
+    def attach_transcript(self, ticket_id: str, transcript: str) -> None:
+        """The conversation thread on the ticket, for whoever picks it up.
+        Zoho will implement this as a thread or comment; the mock keeps it."""
+        if ticket_id not in self.tickets:
+            raise KeyError("no ticket %s" % ticket_id)
+        self.tickets[ticket_id]["transcript"] = transcript
+
 
 class MockOrderSystem:
     def __init__(self) -> None:
@@ -384,6 +391,9 @@ def build_registry(
     # WhatsApp shares location natively and IVR cannot; neither is offered a
     # button that does not exist there.
     location_sharing: bool = False,
+    # Where write results are remembered. In memory by default; a durable store
+    # with the same claim/get/put/release methods shares it across servers.
+    idempotency: Optional[Any] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -397,7 +407,7 @@ def build_registry(
     tickets = ticket_system or MockTicketSystem()
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
-    registry = ToolRegistry()
+    registry = ToolRegistry(idempotency=idempotency) if idempotency is not None else ToolRegistry()
 
     # Every write validates a frame against the same source the lookup used.
     # Before this, _owned_bike read the fixtures directly, and with a live

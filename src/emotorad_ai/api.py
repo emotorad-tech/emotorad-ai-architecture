@@ -9,6 +9,11 @@ gives you), `anthropic` on the deploy, and `bedrock` via the instance role.
     EMOTORAD_AI_MODE=anthropic ANTHROPIC_API_KEY=... uvicorn emotorad_ai.api:app   # deploy default
     EMOTORAD_AI_MODE=bedrock uvicorn emotorad_ai.api:app                          # instance role
 
+Or Jev routing with the OpenRouter models (needs OPENROUTER_API_KEY; sends
+customer text outside AWS, so not for real customers until signed off):
+
+    EMOTORAD_AI_MODE=openrouter uvicorn emotorad_ai.api:app
+
 Run locally:
 
     pip install -r requirements-dev.txt
@@ -34,6 +39,7 @@ import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -53,7 +59,6 @@ from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .identity import IdentityResolver
 from .address import PincodeDirectory
-from .llm import select_llm
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
@@ -66,8 +71,8 @@ from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 from .tools.verification import VerificationStore, apply_verified_identity
 from .video_summary import VideoSummaryError, summariser_from_env
+from .wiring import build_models, build_stores
 
-MODE = os.environ.get("EMOTORAD_AI_MODE", "offline")
 # Set by docker/start.py's loader to the number of names it exported (as a
 # string), after load_into_environ() succeeds. Reported by /health so a
 # container that started without its secret — or whose secret exported
@@ -84,6 +89,16 @@ else:
     SECRETS_STATE = "empty"
 
 settings = load_settings()
+MODE = settings.mode
+log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
+# Where conversations and write receipts live: memory by default, MongoDB with
+# EMOTORAD_STORE=mongodb (it survives restarts; needs EMOTORAD_MONGO_URI).
+stores = build_stores(settings, log=log)
+# The models for the mode: one Claude client for offline, anthropic and
+# bedrock (select_llm, which raises LLMConfigError at import when the mode
+# cannot be served, so the deploy's health check fails instead of the first
+# customer message), or Jev plus the OpenRouter models for openrouter.
+models = build_models(settings)
 
 # Media: None when EMOTORAD_AI_MEDIA_BUCKET is unset. Then /uploads and /media
 # answer 503 with the reason, and the runtime sends no S3 evidence to the model.
@@ -146,6 +161,7 @@ def _build_registry():
             item_codes=ItemCodes(),
             approval_mode=settings.approval_mode,
             location_sharing=True,
+            idempotency=stores.idempotency,
         )
     client = OMSClient()
     return build_registry(
@@ -158,6 +174,7 @@ def _build_registry():
         item_codes=ItemCodes(),
         approval_mode=settings.approval_mode,
         location_sharing=True,
+        idempotency=stores.idempotency,
     )
 
 
@@ -170,7 +187,6 @@ registry = _build_registry()
 geocoder = NominatimGeocoder()
 pincode_directory = PincodeDirectory.load()
 resolver = IdentityResolver(registry)
-log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
 # Langfuse, when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are in the
 # environment (the config store exports them on staging). Attached as a sink so
 # it only ever sees redacted events; see tracing.py. `tracing.` rather than a
@@ -186,9 +202,12 @@ runtime = Runtime(
     #              Temporary, and the transport every tuned prompt was tuned
     #              against. See AnthropicClaude for why it exists.
     # bedrock   -> BedrockClaude through the instance role.
-    # select_llm raises LLMConfigError at import when the mode cannot be served,
-    # so the deploy's health check fails instead of the first customer message.
-    llm=select_llm(MODE, settings),
+    # openrouter -> Jev routing, the narrow model and the full agent on
+    #              OpenRouter (wiring.build_models); off on staging until signed off.
+    llm=models.llm,
+    narrow_llm=models.narrow_llm,
+    jev=models.jev,
+    conversations=stores.conversations,
     log=log,
     resolver=resolver,
     # Website chat is the one surface that arrives anonymous. Every other
@@ -352,6 +371,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "mode": MODE,
+        "store": settings.store,
         "secrets": SECRETS_STATE,
         "media": "configured" if MEDIA_STORE is not None else "not configured",
         "video_summary": "gemini" if VIDEO_SUMMARISER is not None else "frames",
@@ -557,11 +577,6 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         message_cluster = _cluster_for_session(body.session_token)
     except HTTPException:
         message_cluster = None
-    if message_cluster is not None:
-        state = runtime.conversations.get(conversation_id)
-        if state.cluster_id is None:
-            state.cluster_id = message_cluster
-
     message = adapter.to_message(
         {
             "conversation_id": conversation_id,
@@ -577,14 +592,19 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     # the warranty lookup is refused for want of a phone exactly as it was
     # before they bothered.
     message = apply_verified_identity(message, verification_store)
-    if body.agent:
-        if body.agent not in CHAT_AGENTS:
-            raise HTTPException(
-                status_code=400,
-                detail="Unknown agent %r. Expected one of: %s"
-                % (body.agent, ", ".join(CHAT_AGENTS)),
-            )
-        runtime.conversations.get(conversation_id).route_to(body.agent)
+    if body.agent and body.agent not in CHAT_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown agent %r. Expected one of: %s"
+            % (body.agent, ", ".join(CHAT_AGENTS)),
+        )
+    # The cluster that started this conversation, and a pinned agent, are
+    # applied by the runtime inside the turn (Runtime._node_prepare), not
+    # written to the state here: with a durable store, a change made outside
+    # the turn is to a copy the turn never saves.
+    extra = {key: value for key, value in (("cluster_id", message_cluster), ("pinned_agent", body.agent)) if value}
+    if extra:
+        message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
     reply = runtime.handle(message)
     return MessageOut(
         conversation_id=conversation_id,

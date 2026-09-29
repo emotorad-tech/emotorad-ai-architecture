@@ -7,6 +7,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+# Which models answer. `offline` is a fixed planner, no network; `anthropic` is
+# Claude on Anthropic's own API (what staging runs); `bedrock` is Claude in
+# EMotorad's own AWS account; `openrouter` is Jev routing plus the OpenRouter
+# reply models, and sends customer text outside AWS, so it needs sign-off
+# before real customer traffic. The first three are llm.MODES, the single
+# Claude client select_llm builds; openrouter adds Jev and a second model and
+# is built by wiring.build_models, the one place every mode is resolved.
+MODES = ("offline", "anthropic", "bedrock", "openrouter")
+# Where conversations live (spec 2026-09-29-mongodb-conversation-store).
+STORES = ("memory", "mongodb")
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -26,6 +37,38 @@ class Settings:
     log_path: str = os.environ.get("EMOTORAD_AI_LOG_PATH", "logs/conversations.jsonl")
     log_to_stdout: bool = os.environ.get("EMOTORAD_AI_LOG_STDOUT", "0") == "1"
 
+    # default_factory, like approval_mode below: read per construction, so a
+    # test that patches the environment gets a fresh Settings().
+    mode: str = field(default_factory=lambda: os.environ.get("EMOTORAD_AI_MODE", "offline"))
+
+    # OpenRouter. The key is deliberately not here: Settings gets printed and
+    # logged, a credential must not be. The transport reads it from the
+    # environment itself.
+    openrouter_base_url: str = os.environ.get("EMOTORAD_OPENROUTER_BASE_URL", "https://openrouter.ai/api")
+    jev_model: str = os.environ.get("EMOTORAD_JEV_MODEL", "typesafe/jev-1.13")
+    # Haiku on the narrow path too, for now (2026-09-29): Jev plus one reply
+    # model. EMOTORAD_NARROW_MODEL=deepseek/deepseek-v4-flash-0731 brings DeepSeek back.
+    narrow_model: str = os.environ.get("EMOTORAD_NARROW_MODEL", "anthropic/claude-haiku-4.5")
+    fallback_model: str = os.environ.get("EMOTORAD_FALLBACK_MODEL", "anthropic/claude-haiku-4.5")
+    # Jev sits in front of every turn, so it gets a tight budget: a slow answer
+    # falls back to the full agent rather than holding the customer up.
+    jev_timeout: float = float(os.environ.get("EMOTORAD_JEV_TIMEOUT", "2.0"))
+    openrouter_timeout: float = float(os.environ.get("EMOTORAD_OPENROUTER_TIMEOUT", "30"))
+    # Zero-data-retention providers only, unless someone deliberately turns it off.
+    openrouter_zdr: bool = os.environ.get("EMOTORAD_OPENROUTER_ZDR", "1") == "1"
+
+    # Where conversations live. `memory` is one process, lost on restart;
+    # `mongodb` survives restarts and scales out. The connection string is
+    # deliberately not a setting: it holds a password, and Settings gets
+    # printed. stores/mongo.py reads EMOTORAD_MONGO_URI itself.
+    store: str = field(default_factory=lambda: os.environ.get("EMOTORAD_STORE", "memory"))
+    mongo_db: str = os.environ.get("EMOTORAD_MONGO_DB", "emotorad_ai")
+    # Only the scratchpad and the write receipts expire. Transcripts and
+    # summaries are the conversation record and are kept (user decision,
+    # 2026-09-28), with deletion on request instead (scripts/delete_person.py).
+    state_ttl_hours: int = int(os.environ.get("EMOTORAD_STATE_TTL_HOURS", "48"))
+    idempotency_ttl_days: int = int(os.environ.get("EMOTORAD_IDEMPOTENCY_TTL_DAYS", "7"))
+
     # Who approves a replacement order the bot has decided on. See
     # docs/superpowers/specs/2026-09-20-replacement-fulfilment-design.md.
     #   bot        - the bot approves sure and not-sure cases alike
@@ -33,10 +76,16 @@ class Settings:
     #   human      - everything waits for a human
     # The business-facing names for a panel later are "Bot in love with
     # customer", "Reasonable bot", "No brain, human approval only".
-    # default_factory, unlike the other fields above: it reads the environment
+    # default_factory, like mode and store and unlike the rest: it reads the environment
     # per construction rather than once at import time, which is what lets
     # tests patch EMOTORAD_AI_APPROVAL_MODE and get a fresh Settings() back.
     approval_mode: str = field(default_factory=lambda: os.environ.get("EMOTORAD_AI_APPROVAL_MODE", "reasonable"))
+
+    def __post_init__(self) -> None:
+        if self.mode not in MODES:
+            raise ValueError("EMOTORAD_AI_MODE must be one of %s, not %r" % (", ".join(MODES), self.mode))
+        if self.store not in STORES:
+            raise ValueError("EMOTORAD_STORE must be one of %s, not %r" % (", ".join(STORES), self.store))
 
 
 APPROVAL_MODES = ("bot", "reasonable", "human")

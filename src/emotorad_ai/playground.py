@@ -168,6 +168,13 @@ CUSTOMER_SCENARIOS = [
     Scenario("Single bike, out of warranty (Rohit)", "customer", "website_chat", "+919812345678", VERIFIED),
     Scenario("Multi-bike customer (Priya, 3 bikes)", "customer", "whatsapp", "+919700000001", VERIFIED),
     Scenario(
+        "Amiigo test rider (Kabir, 2 bikes)",
+        "customer",
+        "amiigo_app",
+        fixtures.PHONE_AMIIGO_TEST_RIDER,
+        VERIFIED,
+    ),
+    Scenario(
         "Unregistered — no warranty record",
         "customer",
         "website_chat",

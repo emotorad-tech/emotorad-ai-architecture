@@ -343,6 +343,10 @@ class KnowledgeBase:
                 return False
         return True
 
+    def applicable(self, record: KnowledgeRecord, bike: Mapping[str, Any]) -> bool:
+        """Public form of the hard filter, for routing that picks a record without searching."""
+        return self._applicable(record, bike)
+
     def search(
         self,
         query: str,

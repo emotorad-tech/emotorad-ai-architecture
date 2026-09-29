@@ -20,6 +20,7 @@ from ..conversation import HISTORY_TURNS, trim_history
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..observability import EventLog
+from ..openrouter import OpenRouterError
 from ..tools.registry import ToolContext, ToolRegistry, is_error
 
 HANDOVER_TEXT = (
@@ -141,6 +142,7 @@ class Agent:
         context: str = "",
         facts: Optional[Dict[str, Callable[[], Any]]] = None,
         on_tool_result: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], None]] = None,
+        prefetched: Sequence[Dict[str, Any]] = (),
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
         tools = self.registry.schemas_for(
@@ -159,7 +161,10 @@ class Agent:
         history[:] = trim_history(history, HISTORY_TURNS - 1)
         history.append({"role": "user", "content": user_content(message, self.fetch)})
 
-        turn = AgentTurn(text="", agent=self.definition.name)
+        # Calls the runtime made before the loop (decisions.route prefetch)
+        # count as this turn's tool calls, so the coverage post-check sees the
+        # warranty result the reply was written from.
+        turn = AgentTurn(text="", agent=self.definition.name, tool_calls=list(prefetched))
         # Everything the model writes during the turn, in the order it wrote it.
         #
         # A model narrates before it acts: "Before anything else, check the
@@ -183,6 +188,13 @@ class Agent:
             started = time.monotonic()
             try:
                 response = self.llm.create(system=system, messages=history, tools=tools)
+            except OpenRouterError:
+                # The runtime owns these: it falls back from the narrow model to
+                # the full agent when nothing was written, and otherwise hands
+                # over naming what was done (runtime._node_narrow,
+                # _run_agent_or_handover). Catching them here would make that
+                # fallback unreachable.
+                raise
             except Exception as exc:
                 # The class name only, never str(exc) or any prompt text: an
                 # exception body can carry the customer's own words back to us
@@ -208,7 +220,7 @@ class Agent:
                 iteration,
                 response.stop_reason,
                 response.usage,
-                model=response.model,
+                model=response.model or getattr(self.llm, "model", None),
                 duration_ms=int(round((time.monotonic() - started) * 1000)),
             )
             history.append({"role": "assistant", "content": response.api_content})

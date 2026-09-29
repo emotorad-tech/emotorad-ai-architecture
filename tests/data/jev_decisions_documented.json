@@ -1,0 +1,17 @@
+{
+  "questions": {
+    "team": {"type": "choice", "instructions": "Which team should handle this ticket?",
+             "criteria": {"billing": "Payment or refund issues", "technical": "Bugs or outages", "sales": "Plans or upgrades"}},
+    "refund_requested": {"type": "noul", "instructions": "The customer is explicitly asking for a refund"}
+  },
+  "response": {
+    "id": "gen-documented-example",
+    "model": "typesafe/jev-1.13-20260915",
+    "provider": "TypeSafe",
+    "answers": {
+      "team": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.91, "technical": 0.06, "sales": 0.03}, "confidence": 0.84},
+      "refund_requested": {"type": "noul", "noul": 0.97}
+    },
+    "usage": {"input_tokens": 357, "output_tokens": 38, "cost": 0.000014994}
+  }
+}

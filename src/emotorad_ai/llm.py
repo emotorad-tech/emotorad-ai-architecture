@@ -1,4 +1,4 @@
-"""Model access: Claude on AWS Bedrock, plus a scripted stand-in for tests.
+"""Model access: Claude on AWS Bedrock, reply models on OpenRouter, and scripted stand-ins for tests.
 
 The agent loop talks to the small interface in this module rather than to the
 Anthropic SDK directly, so the whole conversational flow can be exercised
@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .config import Settings
+from .openrouter import CHAT_PATH, OpenRouterBadResponse
 
 # Bedrock model IDs carry the `anthropic.` prefix; the first-party Anthropic
 # API does not. Settings.model (config.py, not changed here) defaults to the
@@ -210,6 +211,203 @@ def select_llm(mode: str, settings: Settings, environ: Optional[Mapping[str, str
         return BedrockClaude(replace(settings, model=model), client=client)
     raise LLMConfigError("unknown EMOTORAD_AI_MODE %r; expected one of %s" % (mode, ", ".join(MODES)))
 
+
+
+class OpenRouterChat:
+    """A reply model on OpenRouter, behind the same interface as BedrockClaude.
+
+    Everything upstream keeps the Anthropic-shaped history it has always used:
+    text, tool_use and tool_result blocks. Translation to OpenRouter's
+    OpenAI-shaped messages happens here and only here, so the agent loop, the
+    playground and ScriptedClaude do not know which provider answered.
+    """
+
+    def __init__(self, model: str, transport: Any, max_tokens: int = 4096, zdr: bool = True) -> None:
+        self.model = model
+        self._transport = transport
+        self.max_tokens = max_tokens
+        self.zdr = zdr
+        # Prompt caching is an explicit breakpoint on Anthropic models and
+        # automatic on the others, so only Anthropic gets the marker.
+        self.cache_system = model.startswith("anthropic/")
+
+    def create(
+        self,
+        system: str,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+    ) -> LLMResponse:
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "messages": to_openai_messages(system, messages, cache_system=self.cache_system),
+            "max_tokens": self.max_tokens,
+            "usage": {"include": True},
+        }
+        if tools:
+            body["tools"] = to_openai_tools(tools)
+        if self.zdr:
+            body["provider"] = {"zdr": True, "data_collection": "deny"}
+        return from_openai_response(self._transport.post(CHAT_PATH, body))
+
+
+def to_openai_messages(
+    system: str, messages: Sequence[Dict[str, Any]], cache_system: bool = False
+) -> List[Dict[str, Any]]:
+    """Anthropic-shaped history to OpenAI-shaped messages.
+
+    Thinking blocks are dropped: they belong to the model that wrote them and
+    another provider cannot verify their signatures.
+    """
+    if cache_system:
+        system_message: Dict[str, Any] = {
+            "role": "system",
+            "content": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        }
+    else:
+        system_message = {"role": "system", "content": system}
+    out: List[Dict[str, Any]] = [system_message]
+
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+        blocks = [b for b in (content or []) if isinstance(b, dict)]
+        texts = [b.get("text", "") for b in blocks if b.get("type") == "text" and b.get("text")]
+
+        if role == "assistant":
+            calls = [
+                {
+                    "id": b["id"],
+                    "type": "function",
+                    "function": {"name": b["name"], "arguments": json.dumps(b.get("input") or {})},
+                }
+                for b in blocks
+                if b.get("type") == "tool_use"
+            ]
+            entry: Dict[str, Any] = {"role": "assistant", "content": "\n".join(texts) if texts else None}
+            if calls:
+                entry["tool_calls"] = calls
+            elif entry["content"] is None:
+                entry["content"] = ""
+            out.append(entry)
+            continue
+
+        # A user turn: tool results become `tool` messages, which must follow
+        # the assistant turn that asked for them, and any text comes after.
+        for block in blocks:
+            if block.get("type") == "tool_result":
+                result = block.get("content")
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": block["tool_use_id"],
+                        "content": result if isinstance(result, str) else json.dumps(result, default=str),
+                    }
+                )
+        if texts:
+            out.append({"role": "user", "content": "\n".join(texts)})
+    return out
+
+
+def to_openai_tools(tools: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
+            },
+        }
+        for tool in tools
+    ]
+
+
+_FINISH_REASONS = {"stop": "end_turn", "length": "max_tokens", "content_filter": "refusal"}
+
+
+def from_openai_response(body: Dict[str, Any]) -> LLMResponse:
+    """Any body we cannot read is a typed OpenRouterBadResponse, never a bare
+    TypeError: the runtime falls back or hands over on the typed error, and an
+    untyped one would crash the turn."""
+    try:
+        return _from_openai_response(body)
+    except OpenRouterBadResponse:
+        raise
+    except (TypeError, AttributeError, KeyError, ValueError, IndexError) as exc:
+        raise OpenRouterBadResponse("unreadable OpenRouter response (%s)" % type(exc).__name__) from None
+
+
+def _from_openai_response(body: Dict[str, Any]) -> LLMResponse:
+    choices = body.get("choices") if isinstance(body, dict) else None
+    if not choices:
+        raise OpenRouterBadResponse("OpenRouter returned no choices")
+    choice = choices[0] or {}
+    message = choice.get("message") or {}
+
+    content = message.get("content")
+    if isinstance(content, list):
+        text = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    else:
+        text = content or ""
+    text = text.strip()
+
+    tool_uses: List[ToolUse] = []
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        raw_arguments = function.get("arguments")
+        try:
+            # Some providers send the arguments as an object rather than the
+            # JSON string the OpenAI shape specifies. Both mean the same call.
+            arguments = raw_arguments if isinstance(raw_arguments, dict) else json.loads(raw_arguments or "{}")
+        except (json.JSONDecodeError, TypeError):
+            # The registry answers missing_arguments and the loop carries on,
+            # which beats failing the whole turn over one malformed call.
+            arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        tool_uses.append(
+            ToolUse(id=call.get("id") or "call_%d" % len(tool_uses), name=function.get("name", ""), arguments=arguments)
+        )
+
+    api_content: List[Dict[str, Any]] = []
+    if text:
+        api_content.append({"type": "text", "text": text})
+    for tool_use in tool_uses:
+        api_content.append({"type": "tool_use", "id": tool_use.id, "name": tool_use.name, "input": tool_use.arguments})
+
+    # Some providers report "stop" alongside tool calls; the calls are the truth.
+    if tool_uses:
+        stop_reason = "tool_use"
+    else:
+        stop_reason = _FINISH_REASONS.get(choice.get("finish_reason") or "stop", "end_turn")
+
+    return LLMResponse(
+        stop_reason=stop_reason,
+        text=text,
+        tool_uses=tool_uses,
+        api_content=api_content,
+        usage=_openrouter_usage(body.get("usage")),
+        # The id OpenRouter says answered, for the trace and the cost report.
+        model=body.get("model") if isinstance(body.get("model"), str) else None,
+    )
+
+
+def _openrouter_usage(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    usage: Dict[str, Any] = {
+        "input_tokens": int(raw.get("prompt_tokens") or 0),
+        "output_tokens": int(raw.get("completion_tokens") or 0),
+    }
+    if raw.get("cost") is not None:
+        usage["cost"] = float(raw["cost"])
+    cached = (raw.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if cached:
+        usage["cache_read_input_tokens"] = int(cached)
+    return usage
 
 
 class ScriptedClaude:

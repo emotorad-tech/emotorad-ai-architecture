@@ -1,0 +1,14 @@
+# Per-question thresholds for Jev routing (src/emotorad_ai/decisions.py).
+#
+# Strict starting values. They are replaced by scripts/calibrate_jev.py from the
+# labelled set, reviewed in a PR, never tuned by feel. Jev's own docs warn that
+# thresholds do not transfer between question formats, so each question has its own.
+standard_response: 0.90
+language: 0.80
+category: 0.85
+sub_category: 0.75
+error_code: 0.85
+tools:
+  lookup_warranty_record: 0.60
+calibrated_at: null
+calibration_set_size: 0

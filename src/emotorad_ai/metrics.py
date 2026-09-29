@@ -48,6 +48,13 @@ class ConversationSummary:
     tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Money, from OpenRouter's reported cost on each model and Jev call. Zero
+    # where a provider reports none (Bedrock, offline), never guessed.
+    cost: float = 0.0
+    # The path that answered each turn (standard / narrow / full).
+    paths: List[str] = field(default_factory=list)
+    # Jev failures by error code, each one a turn that fell back to the full agent.
+    jev_errors: List[str] = field(default_factory=list)
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
 
@@ -75,6 +82,9 @@ class Report:
     guardrail_hits: Dict[str, int] = field(default_factory=dict)
     edge_cases: Dict[str, int] = field(default_factory=dict)
     total_tokens: int = 0
+    total_cost: float = 0.0
+    by_path: Dict[str, int] = field(default_factory=dict)
+    jev_errors: Dict[str, int] = field(default_factory=dict)
 
     @property
     def deflection_rate(self) -> float:
@@ -105,6 +115,10 @@ class Report:
         """Cost per *resolved* conversation. Ten cheap turns that fix nothing are
         not cheaper than one that works."""
         return self.total_tokens / self.resolved if self.resolved else float("inf")
+
+    def cost_per_resolved(self) -> float:
+        """Money per *resolved* conversation, the number the Jev routing exists to lower."""
+        return self.total_cost / self.resolved if self.resolved else float("inf")
 
 
 def detect_language(text: str) -> str:
@@ -164,6 +178,17 @@ def summarise(events: Sequence[Dict[str, Any]]) -> List[ConversationSummary]:
             usage = event.get("usage") or {}
             summary.input_tokens += usage.get("input_tokens", 0) or 0
             summary.output_tokens += usage.get("output_tokens", 0) or 0
+            summary.cost += float(usage.get("cost") or 0.0)
+        elif kind == "jev_decision":
+            summary.cost += float(event.get("cost") or 0.0)
+            # A photo with no text skips Jev on purpose; it is not a Jev failure.
+            if event.get("error") and event["error"] != "empty_message":
+                summary.jev_errors.append(event["error"])
+        elif kind == "turn_path":
+            # The path that answered, not the one Jev first chose: a narrow turn
+            # whose model failed and fell back is a full turn.
+            if event.get("path"):
+                summary.paths.append(event["path"])
         elif kind == "outcome":
             summary.handled_by = event.get("handled_by") or summary.handled_by
             summary.escalated = bool(event.get("escalated")) or summary.escalated
@@ -216,6 +241,9 @@ def build_report(
     report.escalated = sum(1 for s in summaries if s.escalated)
     report.repeat_contacts = _repeat_contacts(summaries)
     report.total_tokens = sum(s.input_tokens + s.output_tokens for s in summaries)
+    report.total_cost = sum(s.cost for s in summaries)
+    report.by_path = dict(Counter(path for s in summaries for path in s.paths))
+    report.jev_errors = dict(Counter(code for s in summaries for code in s.jev_errors))
     report.by_channel = dict(Counter(s.channel for s in summaries if s.channel))
     report.guardrail_hits = dict(Counter(g for s in summaries for g in s.guardrails))
     report.edge_cases = dict(edge_case_signals or {})
@@ -242,6 +270,7 @@ def render(report: Report) -> str:
         "repeat contact <48h  %.1f%% of resolved" % (report.repeat_contact_rate * 100),
         "deflection           %.1f%%  (reported, not a target)" % (report.deflection_rate * 100),
         "tokens per resolved  %.0f" % report.tokens_per_resolved(),
+        "cost per resolved    $%.5f" % report.cost_per_resolved(),
         "",
         "per language (never averaged):",
     ]
@@ -251,6 +280,16 @@ def render(report: Report) -> str:
             % (language, row["conversations"], row["deflection_rate"] * 100,
                row["escalated"], row["avg_turns"])
         )
+    if report.by_path:
+        lines.append("")
+        lines.append("turns by path:")
+        for name, count in sorted(report.by_path.items(), key=lambda kv: -kv[1]):
+            lines.append("  %-28s %d" % (name, count))
+    if report.jev_errors:
+        lines.append("")
+        lines.append("jev fallbacks by error:")
+        for name, count in sorted(report.jev_errors.items(), key=lambda kv: -kv[1]):
+            lines.append("  %-28s %d" % (name, count))
     if report.guardrail_hits:
         lines.append("")
         lines.append("guardrails fired:")

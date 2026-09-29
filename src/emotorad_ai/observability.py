@@ -168,6 +168,24 @@ class EventLog:
     def routed(self, conversation_id: str, agent: str, reason: str) -> None:
         self.emit("routed", conversation_id, agent=agent, reason=reason)
 
+    def jev_decision(self, conversation_id: str, route: Any, decision: Any = None, error: Optional[str] = None) -> None:
+        """The path Jev's scores chose, and why. Scores only: the state text is
+        never logged here; `inbound` already holds the redacted message."""
+        self.emit(
+            "jev_decision",
+            conversation_id,
+            path=route.path,
+            reasons=list(route.reasons),
+            scores=dict(route.scores),
+            sub_category=route.sub_category,
+            standard_response=route.standard_response_id,
+            prefetch=[call.tool for call in route.prefetch],
+            error=error,
+            model=getattr(decision, "model", None),
+            cost=getattr(decision, "cost", None),
+            latency_ms=getattr(decision, "latency_ms", None),
+        )
+
     def guardrail(self, conversation_id: str, name: str, triggered_by: Any) -> None:
         self.emit("guardrail_triggered", conversation_id, guardrail=name, triggered_by=triggered_by)
 

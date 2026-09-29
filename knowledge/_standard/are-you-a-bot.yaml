@@ -1,0 +1,16 @@
+# DRAFT. Needs an SME's approval before Jev may send it.
+id: std-are-you-a-bot
+status: draft
+approved_by: ""
+criteria: >
+  The customer only asks whether they are talking to a bot, an AI or a real person.
+  Not this if they ask to be transferred to a person, which the handoff check handles first.
+replies:
+  english: "Yes, I'm EMotorad's virtual assistant, an AI rather than a person. If you'd prefer someone from our support team, just say so and you'll be passed over."
+  hinglish: "Haan, main EMotorad ka virtual assistant hoon, ek AI, insaan nahi. Agar aap support team se baat karna chahte hain, bas bataiye, aapko team se jod diya jayega."
+  hindi: "हाँ, मैं EMotorad का वर्चुअल असिस्टेंट हूँ, एक AI, कोई इंसान नहीं। अगर आप सपोर्ट टीम से बात करना चाहते हैं, तो बस बताइए, आपको टीम से जोड़ दिया जाएगा।"
+examples: ["are you a bot?", "am I talking to a real person", "kya aap robot ho", "क्या आप इंसान हैं",
+           "is this a chatbot?", "are you human?", "is this automated", "aap insaan ho ya bot",
+           "kya main machine se baat kar raha hoon", "क्या यह ऑटोमेटेड है"]
+counter_examples: ["I want to talk to a real person", "this bot is useless, my battery is still dead",
+                   "bot se nahi, kisi insaan se baat karao"]

@@ -21,7 +21,7 @@ class HealthTests(unittest.TestCase):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
         self.assertEqual(
             api.health(),
-            {"status": "ok", "mode": "offline", "secrets": "not configured", "media": "not configured", "video_summary": "frames", "tracing": "off"},
+            {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured", "video_summary": "frames", "tracing": "off"},
         )
 
     def test_health_says_whether_tracing_is_on(self):

@@ -1,0 +1,17 @@
+# DRAFT. Needs an SME's approval before Jev may send it.
+id: std-acknowledged
+status: draft
+approved_by: ""
+criteria: >
+  The customer only says they will try what was suggested, or asks for a moment, and reports
+  no result yet. Not this if they report what happened, ask a question, or describe a new problem.
+replies:
+  english: "Take your time. Tell me what happens once you've tried it, and we'll go from there."
+  hinglish: "Koi jaldi nahi. Try karne ke baad batayiye kya hua, phir aage dekhte hain."
+  hindi: "कोई जल्दी नहीं। आज़माने के बाद बताइए क्या हुआ, फिर आगे देखते हैं।"
+examples: ["ok I will try", "let me check", "give me 5 minutes", "ruko check karta hoon", "try karke batata hoon",
+           "ok will check and tell you", "one sec", "sure, trying now", "haan ek minute", "abhi karke dekhta hoon",
+           "ठीक है, देखकर बताता हूँ", "एक मिनट रुकिए"]
+counter_examples: ["I tried it and nothing happened", "ok, the light is red now",
+                   "tried it, still dead", "ok but which socket should I use?",
+                   "kar diya, ab bhi on nahi ho rahi", "कर लिया, पर कुछ नहीं हुआ"]

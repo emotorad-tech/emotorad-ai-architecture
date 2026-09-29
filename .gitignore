@@ -53,3 +53,6 @@ logs/
 
 # Session worktrees created by the Claude Code EnterWorktree tool
 .claude/worktrees/
+
+# Live-eval reports (scripts/live_eval.py): model output about fixture people, regenerated per run.
+reports/
