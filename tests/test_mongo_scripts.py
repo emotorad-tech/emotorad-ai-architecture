@@ -12,9 +12,47 @@ from unittest import mock
 
 import mongomock
 
+from emotorad_ai.storage.s3 import StorageError
 from emotorad_ai.stores.mongo import ensure_indexes
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+MEDIA_KEY = "customers/cl_1/c/images/upl_1.jpg"
+
+
+def seed_person_with_media(db, conversation_id="c", user_key="PHONE#+919876543210"):
+    db["transcript_turns"].insert_one(
+        {"_id": conversation_id + "#00001", "conversation_id": conversation_id, "n": 1, "user_key": user_key}
+    )
+    db["media"].insert_one({
+        "_id": MEDIA_KEY,
+        "bucket": "emotorad-ai-stage-media",
+        "key": MEDIA_KEY,
+        "uri": "s3://emotorad-ai-stage-media/" + MEDIA_KEY,
+        "kind": "image",
+        "mime_type": "image/jpeg",
+        "size_bytes": 100,
+        "conversation_id": conversation_id,
+        "cluster_id": "cl_1",
+        "source": "upload",
+        "stored_at": "2026-09-29T00:00:00+00:00",
+    })
+
+
+class FakeMediaStore:
+    """Stands in for S3Store: no boto3, no network, just the one method
+    delete_person.py calls."""
+
+    def __init__(self, versions=None, fail_on=None):
+        self.calls = []
+        self._versions = versions or {}
+        self._fail_on = fail_on
+
+    def delete_every_version(self, key):
+        self.calls.append(key)
+        if key == self._fail_on:
+            raise StorageError("delete %r failed: AccessDenied" % key)
+        return self._versions.get(key, 1)
 
 
 def load(name):
@@ -74,6 +112,89 @@ class DeletePersonScriptTests(unittest.TestCase):
                     module.main()
                 self.assertRegex(out.getvalue(), r"transcript_turns\s+1\b")  # the count, before anything goes
                 self.assertEqual(db["transcript_turns"].count_documents({}), remaining, out.getvalue())
+
+
+class DeletePersonMediaScriptTests(unittest.TestCase):
+    def _run(self, module, client, argv, store_from_env):
+        out = io.StringIO()
+        with mock.patch.object(module, "connect", lambda db_name: client[db_name]), \
+             mock.patch.object(module, "store_from_env", store_from_env), \
+             mock.patch.object(sys, "argv", ["delete_person.py"] + argv), redirect_stdout(out):
+            code = module.main()
+        return code, out.getvalue()
+
+    def test_dry_run_lists_media_keys_and_deletes_nothing(self):
+        client = mongomock.MongoClient()
+        db = client["emotorad_ai"]
+        ensure_indexes(db)
+        seed_person_with_media(db)
+        module = load("delete_person")
+        fake_s3 = FakeMediaStore()
+        code, text = self._run(module, client, ["--phone", "98765 43210"], lambda: fake_s3)
+        self.assertEqual(code, 0)
+        self.assertIn(MEDIA_KEY, text)
+        self.assertEqual(fake_s3.calls, [])
+        self.assertEqual(db["media"].count_documents({}), 1)
+
+    def test_yes_deletes_s3_objects_then_records_and_audits_the_counts(self):
+        client = mongomock.MongoClient()
+        db = client["emotorad_ai"]
+        ensure_indexes(db)
+        seed_person_with_media(db)
+        module = load("delete_person")
+        fake_s3 = FakeMediaStore(versions={MEDIA_KEY: 3})
+        argv = ["--phone", "98765 43210", "--yes", "--reason", "customer email"]
+        code, text = self._run(module, client, argv, lambda: fake_s3)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(fake_s3.calls, [MEDIA_KEY])
+        self.assertEqual(db["media"].count_documents({}), 0)
+        self.assertEqual(db["transcript_turns"].count_documents({}), 0)
+        audit = db["erasure_log"].find_one()
+        self.assertEqual(audit["s3_objects"], 1)
+        self.assertEqual(audit["s3_versions"], 3)
+
+    def test_yes_refuses_when_the_bucket_is_not_configured_and_media_exists(self):
+        client = mongomock.MongoClient()
+        db = client["emotorad_ai"]
+        ensure_indexes(db)
+        seed_person_with_media(db)
+        module = load("delete_person")
+        argv = ["--phone", "98765 43210", "--yes", "--reason", "customer email"]
+        code, text = self._run(module, client, argv, lambda: None)
+        self.assertEqual(code, 2)
+        self.assertIn("nothing was deleted", text.lower())
+        self.assertEqual(db["media"].count_documents({}), 1)
+        self.assertEqual(db["transcript_turns"].count_documents({}), 1)
+        self.assertEqual(db["erasure_log"].count_documents({}), 0)
+
+    def test_yes_proceeds_as_before_when_there_is_no_media_even_without_a_bucket(self):
+        client = mongomock.MongoClient()
+        db = client["emotorad_ai"]
+        ensure_indexes(db)
+        db["transcript_turns"].insert_one(
+            {"_id": "c#00001", "conversation_id": "c", "n": 1, "user_key": "PHONE#+919876543210"}
+        )
+        module = load("delete_person")
+        argv = ["--phone", "98765 43210", "--yes", "--reason", "customer email"]
+        code, text = self._run(module, client, argv, lambda: None)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(db["transcript_turns"].count_documents({}), 0)
+
+    def test_an_s3_failure_stops_before_any_record_is_deleted_and_marks_the_audit_incomplete(self):
+        client = mongomock.MongoClient()
+        db = client["emotorad_ai"]
+        ensure_indexes(db)
+        seed_person_with_media(db)
+        module = load("delete_person")
+        fake_s3 = FakeMediaStore(fail_on=MEDIA_KEY)
+        argv = ["--phone", "98765 43210", "--yes", "--reason", "customer email"]
+        code, text = self._run(module, client, argv, lambda: fake_s3)
+        self.assertEqual(code, 1)
+        self.assertEqual(db["media"].count_documents({}), 1)
+        self.assertEqual(db["transcript_turns"].count_documents({}), 1)
+        audit = db["erasure_log"].find_one()
+        self.assertIsNotNone(audit)
+        self.assertTrue(audit["incomplete"])
 
 
 if __name__ == "__main__":

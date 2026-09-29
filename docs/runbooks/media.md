@@ -126,24 +126,40 @@ record is migrated and confirmed serving from S3, remove `EMOTORAD_CLOUDINARY_CL
 
 ## 6. Delete a customer's evidence on request
 
-```bash
-aws s3 rm --recursive s3://emotorad-ai-stage-media/customers/<cluster_id>/
-```
-
-Run this with a person's own admin credentials, not the instance role — the role's
-policy only grants `PutObject`/`GetObject`/`ListBucket` (see `MediaAccessPolicy` in
-`infra/media.yaml`), on purpose, so a compromised instance cannot delete evidence.
-
 Customer media is kept permanently (decision 2026-09-29): the bucket's lifecycle rule
 that used to expire `customers/` objects after 180 days has been removed (it is now
 `customer-evidence-old-versions-30d`, which only expires superseded versions, at 30
 days). There is no routine expiry any more, so every erasure is an explicit request, run
-through `scripts/delete_person.py`, which removes a person's conversation records.
-Media erasure (their `media` records and the matching S3 objects, every version) is
-added to it by Task 4, and is not yet present as of this runbook update. Until that
-lands, the `aws s3 rm` command above is the only way to remove a person's objects from
-the bucket, and it must be paired with deleting their `media` records so the two stay
-in step.
+through `scripts/delete_person.py`, which removes a person's conversation records
+(working state, transcript turns, summaries, idempotency receipts) and their media:
+the `media` records in MongoDB and the matching S3 objects, every version.
+
+```bash
+.venv/bin/python3 scripts/delete_person.py --phone 9876543210                          # dry run: counts only
+.venv/bin/python3 scripts/delete_person.py --phone 9876543210 --yes --reason "email from customer, 2026-09-29"
+```
+
+The dry run (no `--yes`) lists what would go, including the S3 key of every media
+object, and deletes nothing. `--dealer-id` and `--conversation-id` work the same way;
+see the script's own docstring.
+
+Run this with a person's own admin credentials, not the instance role — the role's
+policy only grants `PutObject`/`GetObject`/`ListBucket` (see `MediaAccessPolicy` in
+`infra/media.yaml`), on purpose, so a compromised instance cannot delete evidence.
+Deleting media needs `EMOTORAD_AI_MEDIA_BUCKET` set and credentials also allowed
+`s3:ListBucketVersions` and `s3:DeleteObjectVersion` on the bucket. If the person had
+no media, the script does not need the bucket at all.
+
+If the person sent media but `EMOTORAD_AI_MEDIA_BUCKET` is not set (or the credentials
+cannot see the bucket), `--yes` refuses outright: it prints that the objects cannot be
+deleted without the bucket and credentials, deletes nothing at all, not even the
+database records, and exits 2. Set the bucket, then rerun.
+
+If the S3 deletion fails partway through (a permissions problem, a network blip), the
+script stops immediately: no database record is touched, the keys deleted so far and
+the keys still remaining are printed, and the audit record is written with
+`"incomplete": true` and the counts so far. Deleting a version twice is harmless, so
+simply rerun the same command once the problem is fixed; it picks up the same keys.
 
 Redeploying `infra/media.yaml` with the command in §1 applies the lifecycle change to
 the existing bucket: CloudFormation updates the bucket's lifecycle configuration in

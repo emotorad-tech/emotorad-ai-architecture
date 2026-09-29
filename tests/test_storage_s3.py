@@ -75,6 +75,122 @@ class ObjectTests(unittest.TestCase):
         stub.assert_no_pending_responses()
 
 
+LONGER_KEY = KEY + "-thumb"
+
+
+class DeleteEveryVersionTests(unittest.TestCase):
+    def test_deletes_every_version_and_marker_across_pages_and_leaves_longer_key_alone(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_response(
+            "list_object_versions",
+            {
+                "Versions": [
+                    {"Key": KEY, "VersionId": "v1"},
+                    {"Key": LONGER_KEY, "VersionId": "lv1"},
+                ],
+                "DeleteMarkers": [],
+                "IsTruncated": True,
+                "NextKeyMarker": KEY,
+                "NextVersionIdMarker": "v1",
+            },
+            {"Bucket": "b", "Prefix": KEY},
+        )
+        stub.add_response(
+            "list_object_versions",
+            {
+                "Versions": [{"Key": KEY, "VersionId": "v2"}],
+                "DeleteMarkers": [{"Key": KEY, "VersionId": "dm1"}],
+                "IsTruncated": False,
+            },
+            {"Bucket": "b", "Prefix": KEY, "KeyMarker": KEY, "VersionIdMarker": "v1"},
+        )
+        stub.add_response(
+            "delete_objects",
+            {},
+            {
+                "Bucket": "b",
+                "Delete": {
+                    "Objects": [
+                        {"Key": KEY, "VersionId": "v1"},
+                        {"Key": KEY, "VersionId": "v2"},
+                        {"Key": KEY, "VersionId": "dm1"},
+                    ],
+                    "Quiet": True,
+                },
+            },
+        )
+        stub.activate()
+        self.assertEqual(S3Store("b", client=c).delete_every_version(KEY), 3)
+        stub.assert_no_pending_responses()
+
+    def test_zero_versions_is_a_normal_zero_not_an_error(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_response(
+            "list_object_versions",
+            {"Versions": [], "DeleteMarkers": [], "IsTruncated": False},
+            {"Bucket": "b", "Prefix": KEY},
+        )
+        stub.activate()
+        self.assertEqual(S3Store("b", client=c).delete_every_version(KEY), 0)
+        stub.assert_no_pending_responses()
+
+    def test_batches_deletes_at_1000_per_call(self):
+        c = client()
+        stub = Stubber(c)
+        versions = [{"Key": KEY, "VersionId": "v%d" % i} for i in range(1500)]
+        stub.add_response(
+            "list_object_versions",
+            {"Versions": versions, "DeleteMarkers": [], "IsTruncated": False},
+            {"Bucket": "b", "Prefix": KEY},
+        )
+        stub.add_response(
+            "delete_objects",
+            {},
+            {"Bucket": "b", "Delete": {"Objects": versions[:1000], "Quiet": True}},
+        )
+        stub.add_response(
+            "delete_objects",
+            {},
+            {"Bucket": "b", "Delete": {"Objects": versions[1000:], "Quiet": True}},
+        )
+        stub.activate()
+        self.assertEqual(S3Store("b", client=c).delete_every_version(KEY), 1500)
+        stub.assert_no_pending_responses()
+
+    def test_errors_in_the_delete_response_raise_storage_error(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_response(
+            "list_object_versions",
+            {"Versions": [{"Key": KEY, "VersionId": "v1"}], "DeleteMarkers": [], "IsTruncated": False},
+            {"Bucket": "b", "Prefix": KEY},
+        )
+        stub.add_response(
+            "delete_objects",
+            {"Errors": [{"Key": KEY, "VersionId": "v1", "Code": "AccessDenied", "Message": "no"}]},
+            {"Bucket": "b", "Delete": {"Objects": [{"Key": KEY, "VersionId": "v1"}], "Quiet": True}},
+        )
+        stub.activate()
+        with self.assertRaises(StorageError) as ctx:
+            S3Store("b", client=c).delete_every_version(KEY)
+        self.assertIn(KEY, str(ctx.exception))
+        self.assertIn("AccessDenied", str(ctx.exception))
+
+    def test_a_raising_client_gives_storage_error(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_client_error(
+            "list_object_versions", service_error_code="AccessDenied", http_status_code=403,
+            expected_params={"Bucket": "b", "Prefix": KEY},
+        )
+        stub.activate()
+        with self.assertRaises(StorageError) as ctx:
+            S3Store("b", client=c).delete_every_version(KEY)
+        self.assertIn(KEY, str(ctx.exception))
+
+
 class RealClientTests(unittest.TestCase):
     def test_presign_get_uses_sigv4_and_the_regional_endpoint(self):
         # No injected client: this exercises the real boto3.client(...) construction

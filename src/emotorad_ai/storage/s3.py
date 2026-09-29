@@ -10,7 +10,7 @@ transcript, short enough that a leaked link is not a lasting one.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 BUCKET_ENV = "EMOTORAD_AI_MEDIA_BUCKET"
 PUT_EXPIRY = 300
@@ -80,6 +80,47 @@ class S3Store:
             self._client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=mime)
         except Exception as exc:
             raise StorageError("put %r failed: %s" % (key, type(exc).__name__)) from None
+
+    def delete_every_version(self, key: str) -> int:
+        """Every version and delete marker of exactly `key`, gone for good:
+        erasure, not a soft delete. Zero versions is a normal return of 0, not
+        an error. Needs credentials allowed s3:ListBucketVersions and
+        s3:DeleteObjectVersion; the instance role has neither, on purpose."""
+        try:
+            objects = self._versions_of(key)
+            deleted = 0
+            for start in range(0, len(objects), 1000):
+                batch = objects[start:start + 1000]
+                response = self._client.delete_objects(
+                    Bucket=self.bucket, Delete={"Objects": batch, "Quiet": True}
+                )
+                errors = response.get("Errors") or []
+                if errors:
+                    raise StorageError(
+                        "delete %r failed: %s" % (key, errors[0].get("Code") or "Error")
+                    )
+                deleted += len(batch)
+            return deleted
+        except StorageError:
+            raise
+        except Exception as exc:
+            raise StorageError("delete %r failed: %s" % (key, type(exc).__name__)) from None
+
+    def _versions_of(self, key: str) -> List[Dict[str, str]]:
+        """Every version and delete marker whose Key is exactly `key`. Prefix
+        also matches longer keys, so each entry is checked before it is kept."""
+        objects: List[Dict[str, str]] = []
+        kwargs: Dict[str, Any] = {"Bucket": self.bucket, "Prefix": key}
+        while True:
+            response = self._client.list_object_versions(**kwargs)
+            entries = list(response.get("Versions") or []) + list(response.get("DeleteMarkers") or [])
+            for entry in entries:
+                if entry.get("Key") == key:
+                    objects.append({"Key": key, "VersionId": entry["VersionId"]})
+            if not response.get("IsTruncated"):
+                return objects
+            kwargs["KeyMarker"] = response.get("NextKeyMarker")
+            kwargs["VersionIdMarker"] = response.get("NextVersionIdMarker")
 
 
 def store_from_env(environ: Optional[Mapping[str, str]] = None, client: Any = None) -> Optional[S3Store]:
