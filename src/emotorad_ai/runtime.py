@@ -355,6 +355,15 @@ class Runtime:
                 # is the backstop, so one that does not is a handover, not a 500.
                 return self._store_down(message, exc, self._ticket_since(turn_mark, cid))
             reply, resolved = final["reply"], final.get("resolved")
+            if state.user_key is None and self.phone_resolver is not None:
+                # A number verified during this very turn makes the conversation
+                # that person's now, before it is saved: otherwise a visitor who
+                # verified in their last message never gets a summary, their
+                # next visit has no memory of it, and erasure by phone cannot
+                # find it (2026-09-29).
+                proven = self.phone_resolver(cid)
+                if proven:
+                    state.user_key = "PHONE#" + proven
             state.escalated = state.escalated or reply.escalated
             state.ticket_id = reply.ticket_id or state.ticket_id
             this_turn = list(state.history[history_mark:])  # before the save trims anything
