@@ -90,6 +90,10 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(references("Ticket EM-00001, booking BK-00002 and order RO-00003."),
                          {"EM-00001", "BK-00002", "RO-00003"})
 
+    def test_a_reference_past_five_digits_is_still_a_reference(self):
+        # The counters do not stop at 99999.
+        self.assertEqual(references("Ticket EM-100000 and order RO-1234567."), {"EM-100000", "RO-1234567"})
+
 
 class RuleTests(unittest.TestCase):
     def test_every_customer_agent_is_given_the_rule_last(self):
@@ -160,6 +164,21 @@ class BackstopTests(unittest.TestCase):
         self.assertIn("Sixth", answer.text)
         [event] = events(rt, "reply_too_long")
         self.assertEqual(event["reason"], "reference_lost")
+
+    def test_a_cut_that_loses_a_six_digit_reference_is_not_used(self):
+        rt = routed(runtime([say(LONG + " Your ticket is EM-100000."), say(SHORT)]))
+        answer = send(rt, "my battery won't charge")
+        self.assertIn("EM-100000", answer.text)
+        self.assertEqual(events(rt, "reply_too_long")[0]["reason"], "reference_lost")
+
+    def test_a_cut_that_adds_a_reference_is_not_used(self):
+        # The cut is told to add nothing. A reference it made up would send the
+        # customer to quote a ticket that does not exist.
+        rt = routed(runtime([say(LONG), say(SHORT + " Your ticket is EM-00007.")]))
+        answer = send(rt, "my battery won't charge")
+        self.assertIn("Sixth", answer.text)
+        self.assertNotIn("EM-00007", answer.text)
+        self.assertEqual(events(rt, "reply_too_long")[0]["reason"], "reference_added")
 
     def test_a_cut_that_is_still_too_long_is_not_used(self):
         rt = routed(runtime([say(LONG), say(LONG + " Also.")]))

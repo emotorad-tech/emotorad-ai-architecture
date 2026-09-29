@@ -10,8 +10,9 @@ cannot lose it. A rule held only in a prompt has been skipped here before (see
 guardrails.py, evidence post-check), so the runtime also checks every agent
 reply against the limits below and, when one runs over, asks the same model
 once to cut it to its first step or question (Runtime._one_step). The cut is
-used only when it is within the limits and keeps every reference; otherwise
-the original is sent and the reason logged. A reply that carries a caution or
+used only when it is within the limits and carries exactly the original's
+references, none lost and none added; otherwise the original is sent and the
+reason logged. A reply that carries a caution or
 a hazard word (guardrails.carries_caution) is never cut at all, and nor is one
 the coverage, order or evidence post-check would block: those checks judge the
 model's own reply first, so a cut cannot hide what it nearly said.
@@ -40,9 +41,11 @@ next, and nothing more."""
 MAX_WORDS = 80
 MAX_SENTENCES = 4
 
-# The ids the tools mint (tickets, bookings, replacement orders). A cut that
-# loses one would leave the customer without the reference to quote.
-_REFERENCE = re.compile(r"\b(?:EM|BK|RO)-\d{5}\b")
+# The ids the tools mint (tickets, bookings, replacement orders): five digits
+# today, more once a counter passes 99999. A cut that loses one would leave the
+# customer without the reference to quote; one that adds one would give them a
+# reference to a ticket that does not exist.
+_REFERENCE = re.compile(r"\b(?:EM|BK|RO)-\d{5,}\b")
 
 # A sentence ends at . ! or ? followed by the end, or by a space and something
 # that does not start in lower case: so "1.8.2026", "10.30" and "a.m. is" are not
@@ -91,8 +94,10 @@ def shorten(llm: Any, text: str) -> Tuple[Optional[str], str, Any]:
     """Ask `llm` once to cut `text` to its first step.
 
     Returns (cut, reason, response): the cut, or None with why it cannot be
-    used ("no_text", "still_too_long", "reference_lost"). A failed call raises
-    to the caller, which logs it and sends the original.
+    used ("no_text", "reference_lost", "reference_added", "still_too_long").
+    The cut must carry exactly the original's references, no fewer and no
+    more. A failed call raises to the caller, which logs it and sends the
+    original.
     """
     response = llm.create(SHORTEN_SYSTEM, [{"role": "user", "content": text}], [])
     cut = (getattr(response, "text", "") or "").strip()
@@ -100,6 +105,8 @@ def shorten(llm: Any, text: str) -> Tuple[Optional[str], str, Any]:
         return None, "no_text", response
     if references(text) - references(cut):
         return None, "reference_lost", response
+    if references(cut) - references(text):
+        return None, "reference_added", response
     if is_too_long(cut):
         return None, "still_too_long", response
     return cut, "shortened", response
