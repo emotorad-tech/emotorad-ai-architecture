@@ -5,6 +5,7 @@ from emotorad_ai.conversation import ConversationSummaryItem, InMemoryConversati
 from emotorad_ai.enrichment import summarise_past
 from emotorad_ai.llm import say
 from emotorad_ai.runtime import Runtime
+from tests.store_contract import inbound, reply
 from tests.test_runtime_persistence import runtime_on, send
 
 
@@ -41,7 +42,16 @@ class RuntimeMemoryTests(unittest.TestCase):
         self.assertIn("Battery issue on the EMX Plus", prompt)
 
     def test_the_current_conversation_is_never_its_own_memory(self):
-        runtime = runtime_on(InMemoryConversationStore(), [say("Ok.")])
+        # This conversation's own summary exists when the context is built.
+        # With no summary anywhere, the test passed whether or not the
+        # current conversation was excluded.
+        store = InMemoryConversationStore()
+        state = store.get("only")
+        state.user_key, state.started_at = "PHONE#+919876543210", "2026-09-20T10:00:00+00:00"
+        store.record_turn(state, inbound("earlier", cid="only"), reply("Ok.", cid="only"),
+                          item("only", 20, title="Battery issue"))
+        self.assertEqual([s.conversation_id for s in store.recent_summaries(state.user_key)], ["only"])
+        runtime = runtime_on(store, [say("Ok.")])
         send(runtime, "my battery won't charge", cid="only")
         self.assertNotIn("Last contact:", runtime.llm.requests[0]["system"])
 
@@ -55,8 +65,12 @@ class RuntimeMemoryTests(unittest.TestCase):
     def test_a_dealer_is_keyed_by_dealer_id_and_a_cookie_gets_no_memory(self):
         dealer = SimpleNamespace(persona="dealer", identity=SimpleNamespace(dealer_id="DLR-PUN-014", may_disclose=True, phone="+919000000001"))
         cookie = SimpleNamespace(persona="customer", identity=SimpleNamespace(dealer_id=None, may_disclose=False, phone=None))
+        # A caller ID carries a phone but proves nothing. The cookie alone has
+        # no phone, so it could not tell "proven" from "has a phone".
+        caller = SimpleNamespace(persona="customer", identity=SimpleNamespace(dealer_id=None, may_disclose=False, phone="+919876543210"))
         self.assertEqual(Runtime._user_key(dealer), "DEALER#DLR-PUN-014")
         self.assertIsNone(Runtime._user_key(cookie))
+        self.assertIsNone(Runtime._user_key(caller))
 
 
 if __name__ == "__main__":

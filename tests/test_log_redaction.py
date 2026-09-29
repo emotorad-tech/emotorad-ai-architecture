@@ -35,12 +35,16 @@ class ToolArgumentsAreRedactedTests(unittest.TestCase):
     def test_a_phone_in_tool_arguments_is_redacted(self):
         self.log.tool_call("c1", "request_identity_verification", {"phone": "9876500000"}, {"data": {}})
         self.assertNotIn("9876500000", str(self.log.events[-1]))
+        # By name, not by the phone pattern (which would say "[phone]").
+        self.assertEqual(self.log.events[-1]["arguments"]["phone"], "[redacted]")
 
     def test_a_one_time_code_is_redacted(self):
         """Six digits are too short for the number patterns to catch, so the code
         is removed by the name of the field it arrives in."""
         self.log.tool_call("c1", "verify_identity", {"code": "039760"}, {"data": {}})
         self.assertNotIn("039760", str(self.log.events[-1]))
+        # By name: the bare-digits rule alone would say "[6 digits]".
+        self.assertEqual(self.log.events[-1]["arguments"]["code"], "[redacted]")
 
     def test_a_code_typed_as_a_message_is_redacted(self):
         """The customer types the code into the chat, so it arrives as message
@@ -138,6 +142,7 @@ class ErrorCodesStayReadableTests(unittest.TestCase):
         in its data would still be redacted."""
         self.log.tool_call("c1", "some_tool", {}, {"data": {"code": "039760"}})
         self.assertNotIn("039760", str(self.log.events[-1]))
+        self.assertEqual(self.log.events[-1]["result"]["data"]["code"], "[redacted]")
 
     def test_a_code_nested_deeper_under_error_is_still_hidden(self):
         """The exemption is by immediate parent, not by anything above it. A
@@ -150,12 +155,14 @@ class ErrorCodesStayReadableTests(unittest.TestCase):
         logged = str(self.log.events[-1])
         self.assertIn("keep", logged)
         self.assertNotIn("039760", logged)
+        self.assertEqual(self.log.events[-1]["result"]["error"]["details"]["code"], "[redacted]")
 
     def test_a_list_named_errors_is_not_exempt(self):
         """The exemption is keyed on the literal parent name "error", singular.
         A list of error dicts under "errors" is not that shape."""
         self.log.tool_call("c1", "some_tool", {}, {"errors": [{"code": "039760"}]})
         self.assertNotIn("039760", str(self.log.events[-1]))
+        self.assertEqual(self.log.events[-1]["result"]["errors"][0]["code"], "[redacted]")
 
 
 if __name__ == "__main__":

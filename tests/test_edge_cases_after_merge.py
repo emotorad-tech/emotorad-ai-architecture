@@ -255,8 +255,11 @@ class ApiTests(unittest.TestCase):
         db = mongomock.MongoClient()["emotorad_ai"]
         ensure_indexes(db)
         api = api_on(MongoConversationStore(db))
+        # Battery words with the motor agent pinned: triage alone would pick
+        # the battery agent, so only the pin puts motor_support here. With
+        # motor words this passed even when /message dropped the pin.
         r = TestClient(api.app).post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya",
-                                                       "text": "the motor makes a noise", "agent": "motor_support"})
+                                                       "text": "my battery won't charge", "agent": "motor_support"})
         self.assertEqual(r.status_code, 200, r.text)
         saved = MongoConversationStore(db).get("c1")
         self.assertEqual(saved.agent, "motor_support")
