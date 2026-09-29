@@ -312,3 +312,47 @@ shell.
    summary line, then `s3 objects` and `s3 versions` counts, then
    `audit record written to erasure_log`. Rerunning step 5's `head-object` command
    afterwards should now fail with "Not Found".
+
+## 9. End-to-end test console
+
+A chat-like page that plays scripted customer conversations against this
+server's real `POST /message` (a photo downscaled as the chat page does, sent
+inline, no agent pin) and checks every reply: which path answered it, the
+handover, the ticket, one step per reply, and for a photo its permanent media
+record. A failed check is listed as a finding; the run goes on. It is served at
+`/dev/e2e` behind the playground login, and only with `EMOTORAD_AI_DEV_CODES=1`,
+which `scripts/chat_local.py` sets. Each "Run every scenario" costs about $0.05
+on OpenRouter.
+
+1. Start the chat. With no AWS access, keep photos in a folder instead of the
+   bucket (photos only; videos need the real bucket):
+
+   ```powershell
+   python scripts/chat_local.py --store memory --local-bucket "$env:TEMP\e2e-bucket"
+   ```
+
+   Without `--local-bucket`, and with `EMOTORAD_AI_MEDIA_BUCKET` set as in
+   section 8, photos go to S3.
+2. Open the sign-in link it prints and sign in with the login it prints. Do not
+   put the login in the address (`http://user:pass@...`): the browser then
+   refuses every request the page makes.
+3. Open `http://localhost:8000/dev/e2e` and click "Run every scenario". The smoke
+   photo in `tests/data/live_media/smoke-battery.jpg` is the default; choose
+   another file to send that instead.
+4. The findings are listed at the top. The run is saved to `logs/e2e/run-<time>.json`
+   (git-ignored); the header says where.
+5. A static report of a saved run, which needs no server:
+
+   ```powershell
+   python scripts/e2e_report.py logs/e2e/run-<time>.json --out logs/e2e/report.html
+   ```
+
+   Add `--only <scenario id>` for one conversation on its own page (for a
+   screenshot).
+6. `http://localhost:8000/dev/media/<conversation id>` shows one conversation's
+   media records.
+
+The scenarios live in `web/e2e-console.html` (`SCENARIOS`). Some checks state
+what a customer should get and does not yet (2026-09-29): a hazard seen only in
+the photo is handed to a person; an anonymous visitor is not promised a call on
+a number the bot does not have. They fail until that behaviour is fixed.
