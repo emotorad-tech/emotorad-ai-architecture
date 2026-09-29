@@ -279,6 +279,13 @@ class MockTicketSystem:
         self.tickets[ticket_id] = ticket
         return ticket
 
+    def attach_transcript(self, ticket_id: str, transcript: str) -> None:
+        """The conversation thread on the ticket, for whoever picks it up.
+        Zoho will implement this as a thread or comment; the mock keeps it."""
+        if ticket_id not in self.tickets:
+            raise KeyError("no ticket %s" % ticket_id)
+        self.tickets[ticket_id]["transcript"] = transcript
+
 
 class MockOrderSystem:
     def __init__(self) -> None:

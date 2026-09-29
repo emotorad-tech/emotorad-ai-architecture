@@ -17,7 +17,7 @@ import dataclasses
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .contract import InboundMessage, Reply
 from .observability import redact_pii
@@ -188,6 +188,18 @@ def transcript_turns(
         handled_by=reply.handled_by or "", path=str(reply.metadata.get("route") or ""),
     )
     return customer, bot
+
+
+def render_transcript(turns: Sequence[TranscriptTurn]) -> str:
+    """The thread as a person reads it on a ticket: time, speaker, words."""
+    lines = []
+    for turn in turns:
+        try:
+            clock = datetime.fromisoformat(turn.at).strftime("%H:%M")
+        except (TypeError, ValueError):
+            clock = "--:--"
+        lines.append("[%s] %s: %s" % (clock, "Customer" if turn.role == "customer" else "Bot", turn.text))
+    return "\n".join(lines)
 
 
 class InMemoryConversationStore:

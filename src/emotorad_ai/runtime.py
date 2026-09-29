@@ -43,6 +43,7 @@ from .conversation import (
     ConversationSummaryItem,
     InMemoryConversationStore,
     StoreUnavailable,
+    render_transcript,
     utc_now_iso,
 )
 from .decisions import (
@@ -208,7 +209,22 @@ class Runtime:
             # The turn happened and the state is saved; only the record of it
             # failed. Said in the log, and the customer still gets the answer.
             self.log.emit("transcript_write_failed", cid, error=str(exc))
+        self._attach_transcript(cid, reply)
         return reply
+
+    def _attach_transcript(self, conversation_id: str, reply: Reply) -> None:
+        """Every ticket, from an agent or the safety branch, gets the whole
+        thread, this turn included, so a person never starts from nothing."""
+        tickets = getattr(self.registry, "tickets", None)
+        if not reply.ticket_id or not hasattr(tickets, "attach_transcript"):
+            return
+        try:
+            tickets.attach_transcript(reply.ticket_id, render_transcript(self.conversations.transcript(conversation_id)))
+        except Exception as exc:  # the ticket exists either way; say the thread did not reach it
+            self.log.emit(
+                "transcript_attach_failed", conversation_id,
+                ticket_id=reply.ticket_id, error="%s: %s" % (type(exc).__name__, exc),
+            )
 
     def _store_down(self, message: InboundMessage, exc: Exception) -> Reply:
         """The store cannot be reached: hand over, never start from blank."""
@@ -594,8 +610,11 @@ class Runtime:
                 message.conversation_id, "evidence_post_check",
                 {"reason": evidence.reason, "matched": evidence.matched},
             )
+            # The reply is replaced, but a ticket the turn already raised still
+            # exists: keep its id so it is tracked and gets the transcript.
             return self._finish(
                 message, state, EVIDENCE_BLOCKED_MESSAGE, "guardrail:evidence_post_check",
+                ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text},
                 already_in_history=True,
             )
