@@ -79,7 +79,7 @@ scenarios:
       - text: "the motor makes a grinding noise"
         expect: {sub_category: motor-noise}
       - text: "wait, are you a bot?"
-        expect: {mentions_any: ["virtual assistant", "automated assistant", "an ai", "a bot", "not a person", "not a human"]}
+        expect: {mentions_any: ["virtual assistant", "automated assistant", "an ai", "a bot", "support bot", "not a person", "not a human"]}
 
   - id: routing-warranty-question
     family: routing
