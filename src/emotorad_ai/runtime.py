@@ -37,7 +37,7 @@ from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
 from .agents.motor_support import DEFINITION as MOTOR_SUPPORT_DEFINITION
 from .agents.narrow_support import AGENT_NAME as NARROW_SUPPORT
 from .agents.narrow_support import build_narrow_definition
-from .attachments import user_content
+from .attachments import shows_media, user_content
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import (
@@ -504,8 +504,9 @@ class Runtime:
                 kept=list(context.sections), dropped=context.dropped, tokens=context.tokens,
             )
 
-        if message.attachments:
-            state.evidence_seen = True
+        # evidence_seen is not set here, on arrival: it is set where the
+        # customer's turn is built for the model (_note_customer_turn), and
+        # only when that turn shows a photo or video.
         return {"conversation": state, "resolved": resolved}
 
     def _node_safety(self, turn: Dict[str, Any]) -> Dict[str, Any]:
@@ -866,6 +867,7 @@ class Runtime:
                 state, name, arguments, envelope
             ),
             prefetched=prefetched,
+            on_user_turn=lambda content: self._note_customer_turn(message, state, content),
         )
         if turn.escalate:
             self.log.escalation(
@@ -1060,12 +1062,32 @@ class Runtime:
             # not leave an empty text block behind, because the API rejects it
             # on every later turn of the conversation (staging, 2026-09-22).
             described = replace(message, attachments=[a for a in message.attachments if a.summary])
-            state.history.append({"role": "user", "content": user_content(described)})
+            content = user_content(described)
+            state.history.append({"role": "user", "content": content})
+            self._note_customer_turn(message, state, content)
         return self._finish(
             message, state, text, "guardrail:battery_safety",
             escalated=True, ticket_id=ticket_id, metadata={"matched": matched},
             already_in_history=bool(evidence),
         )
+
+    def _note_customer_turn(self, message: InboundMessage, state: ConversationState, content: Any) -> None:
+        """Evidence from the customer's turn as it was built for the model.
+
+        Every place that builds that turn calls this with what it built: the
+        agent loop (before its first model call), the short-circuit replies
+        and the safety branch. A photo or video counts only when the model is
+        shown it (attachments.shows_media); one that could not be fetched or
+        read, or a PDF, does not (the person's decision, 2026-09-29).
+        """
+        if shows_media(content):
+            state.evidence_seen = True
+        elif message.attachments:
+            # By kind only: the URL can be a signed link or a customer's key.
+            self.log.emit(
+                "attachment_not_evidence", message.conversation_id,
+                kinds=[attachment.kind for attachment in message.attachments],
+            )
 
     # -- outbound ------------------------------------------------------------
 
@@ -1096,7 +1118,9 @@ class Runtime:
             # Written the same way the agent path writes a turn: a photo with no
             # caption must become image blocks, not an empty string the API
             # rejects on every later call of the conversation.
-            state.history.append({"role": "user", "content": user_content(message, self.fetch)})
+            content = user_content(message, self.fetch)
+            state.history.append({"role": "user", "content": content})
+            self._note_customer_turn(message, state, content)
         state.history.append({"role": "assistant", "content": [{"type": "text", "text": outbound}]})
         return Reply(
             conversation_id=message.conversation_id,

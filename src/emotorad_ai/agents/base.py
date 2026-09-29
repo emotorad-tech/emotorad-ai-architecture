@@ -143,6 +143,7 @@ class Agent:
         facts: Optional[Dict[str, Callable[[], Any]]] = None,
         on_tool_result: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], None]] = None,
         prefetched: Sequence[Dict[str, Any]] = (),
+        on_user_turn: Optional[Callable[[Any], None]] = None,
     ) -> AgentTurn:
         system = self.definition.build_system_prompt(message, resolved, context)
         tools = self.registry.schemas_for(
@@ -159,7 +160,12 @@ class Agent:
         # the conversation's own history list and the store hands out the same
         # object every turn.
         history[:] = trim_history(history, HISTORY_TURNS - 1)
-        history.append({"role": "user", "content": user_content(message, self.fetch)})
+        content = user_content(message, self.fetch)
+        history.append({"role": "user", "content": content})
+        if on_user_turn is not None:
+            # Before the first model call, so a tool in this turn already sees
+            # what the customer's turn showed (a photo that did reach the model).
+            on_user_turn(content)
 
         # Calls the runtime made before the loop (decisions.route prefetch)
         # count as this turn's tool calls, so the coverage post-check sees the

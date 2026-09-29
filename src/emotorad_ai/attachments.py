@@ -343,3 +343,21 @@ def user_content(message: InboundMessage, fetch: Optional[Callable[[str], bytes]
     if (message.message_text or "").strip():
         blocks.append({"type": "text", "text": message.message_text})
     return blocks
+
+
+def shows_media(content: Union[str, List[Dict[str, Any]]]) -> bool:
+    """Whether a customer turn, as built for the model, shows it a photo or a
+    video: an image (a photo, or frames of a clip) or a video description.
+
+    What the evidence rule counts (the person's decision, 2026-09-29): what the
+    model was shown, not what arrived. A file that could not be fetched or
+    read reaches the model only as a note saying so, and a PDF is a document,
+    not a picture of the fault.
+    """
+    if not isinstance(content, list):
+        return False
+    return any(
+        block.get("type") == "image"
+        or (block.get("type") == "text" and str(block.get("text", "")).startswith(VIDEO_DESCRIPTION_LABEL))
+        for block in content
+    )

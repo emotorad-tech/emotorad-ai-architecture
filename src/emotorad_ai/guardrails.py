@@ -351,8 +351,11 @@ def check_coverage_claim(reply: str, tool_results: Sequence[dict]) -> CoverageCh
 # where it is written, and a long prompt cannot have it written everywhere.
 #
 # Deliberately narrow. It does not ask whether the evidence was *good* — a human
-# judges that — only whether any arrived. "The bot concluded a fault having seen
-# nothing" is a question with an answer; "was the photo convincing" is not.
+# judges that — only whether the model was shown any. "The bot concluded a fault
+# having seen nothing" is a question with an answer; "was the photo convincing"
+# is not. A file that arrived but could not be fetched or read, or a PDF, shows
+# the model nothing, so it does not count (the person's decision, 2026-09-29;
+# attachments.shows_media).
 
 EVIDENCE_BLOCKED_MESSAGE = (
     "Before I can take this further I need to see it — please send a photo or a short video "
@@ -412,8 +415,8 @@ class EvidenceCheck:
 def check_evidence(reply: str, evidence_seen: bool, safety_triggered: bool = False) -> EvidenceCheck:
     """Block a fault conclusion reached without any photo or video.
 
-    ``evidence_seen`` is whether *any* attachment has arrived in this
-    conversation, not this turn: a customer who sent the picture three turns ago
+    ``evidence_seen`` is whether the model has been shown any photo or video in
+    this conversation, not this turn: a customer who sent the picture three turns ago
     should not be asked again because the model concluded later.
     """
     if safety_triggered or _SAFETY_HANDOVER.search(reply or ""):

@@ -61,7 +61,9 @@ class ConversationState:
     context_block: Optional[str] = None
     turns: int = 0
     disclosed: bool = False
-    # Whether any photo or video has arrived in this conversation. Held per
+    # Whether the model has been shown any photo or video in this conversation
+    # (set by Runtime._note_customer_turn; one that could not be read does not
+    # count). Held per
     # conversation, not per turn: a customer who sent the picture three turns ago
     # must not be asked for it again because the model concluded later.
     evidence_seen: bool = False
