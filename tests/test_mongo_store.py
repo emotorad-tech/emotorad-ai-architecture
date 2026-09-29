@@ -75,6 +75,7 @@ class MongoStoreTests(StoreContract, unittest.TestCase):
         kept = store.get("c1").history
         self.assertLess(len(json.dumps(kept)), 20_000)
         self.assertIsInstance(kept[0]["content"], str)  # starts at a turn boundary
+        self.assertEqual(kept[-4]["content"], "turn 39")  # and the oldest turns are the ones dropped
         uses = {b["id"] for m in kept if isinstance(m["content"], list) for b in m["content"] if b.get("type") == "tool_use"}
         results = {b["tool_use_id"] for m in kept if isinstance(m["content"], list) for b in m["content"] if b.get("type") == "tool_result"}
         self.assertEqual(uses, results)

@@ -72,6 +72,7 @@ class DeletePersonScriptTests(unittest.TestCase):
                 out = io.StringIO()
                 with mock.patch.object(sys, "argv", ["delete_person.py"] + argv), redirect_stdout(out):
                     module.main()
+                self.assertRegex(out.getvalue(), r"transcript_turns\s+1\b")  # the count, before anything goes
                 self.assertEqual(db["transcript_turns"].count_documents({}), remaining, out.getvalue())
 
 

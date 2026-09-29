@@ -72,12 +72,14 @@ class IdempotencyOutageTests(unittest.TestCase):
         registry, calls = self.registry_with(ReceiptsDown())
         envelope = registry.call("w", {"idempotency_key": "k"}, CTX)
         self.assertEqual(envelope["error"]["code"], "idempotency_unavailable")
+        self.assertIn("MongoDB insert_one failed", envelope["idempotency_warning"])  # for the caller to log
         self.assertEqual(calls, [])
 
     def test_a_write_that_must_not_wait_runs_without_the_receipt(self):
         registry, calls = self.registry_with(ReceiptsDown())
         envelope = registry.call("w", {"idempotency_key": "k"}, CTX, run_without_idempotency=True)
         self.assertEqual(envelope["data"], {"done": True})
+        self.assertIn("MongoDB insert_one failed", envelope["idempotency_warning"])  # a possible duplicate, said
         self.assertEqual(calls, ["k"])
 
     def test_a_receipt_that_cannot_be_written_is_flagged_not_lost(self):
@@ -214,9 +216,10 @@ class ErasureTests(unittest.TestCase):
         db, store = self.mongo()
         self.login_midway(store)
         MongoIdempotencyStore(db).put("c1:book_service_slot:k", ok({"customer_id": "+919876543210"}))
+        MongoIdempotencyStore(db).put("c10:book_service_slot:k", ok({"customer_id": "+919812345678"}))  # someone else's
         counts = store.delete_person("PHONE#+919876543210")
         self.assertEqual(counts["idempotency_keys"], 1)
-        self.assertEqual(db["idempotency_keys"].count_documents({}), 0)
+        self.assertEqual([d["_id"] for d in db["idempotency_keys"].find()], ["c10:book_service_slot:k"])
 
     def test_an_unkeyed_conversation_can_be_erased_by_its_id(self):
         for store in (InMemoryConversationStore(), self.mongo()[1]):
