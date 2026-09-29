@@ -13,6 +13,9 @@
     # Jev routing + OpenRouter models (needs OPENROUTER_API_KEY)
     python -m emotorad_ai.cli --mode openrouter --channel amiigo --session sess-amiigo-test
 
+    # conversations kept in MongoDB (needs EMOTORAD_MONGO_URI)
+    python -m emotorad_ai.cli --offline --store mongodb --channel amiigo --session sess-amiigo-test
+
 Offline mode is what you use to demo the safety hard-stop and the escalation
 path, because neither of those calls the model at all.
 """
@@ -26,13 +29,13 @@ from dataclasses import replace
 from typing import Optional, Sequence
 
 from .adapters import AmiigoAdapter, WebsiteChatAdapter
-from .config import MODES, load_settings
+from .config import MODES, STORES, load_settings
 from .contract import new_conversation_id
 from .identity import IdentityResolver
 from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
-from .wiring import build_models
+from .wiring import build_models, build_stores
 
 # Both carry a session token, which is all the CLI supplies.
 ADAPTERS = {"website": WebsiteChatAdapter, "amiigo": AmiigoAdapter}
@@ -55,13 +58,16 @@ def main(argv: Sequence[str] = ()) -> int:
     parser.add_argument("--pill", default=None, help="entry pill the visitor tapped, e.g. battery_issue")
     parser.add_argument("--offline", action="store_true", help="use the offline planner instead of Bedrock")
     parser.add_argument("--mode", choices=MODES, default=None, help="offline, bedrock or openrouter; overrides EMOTORAD_AI_MODE")
+    parser.add_argument("--store", choices=STORES, default=None, help="memory or mongodb; overrides EMOTORAD_STORE")
     parser.add_argument("--diagnostics", action="store_true", help="pretend battery telematics exist")
     parser.add_argument("message", nargs="*", help="one-shot message; omit for an interactive session")
     args = parser.parse_args(list(argv) or sys.argv[1:])
 
-    settings = replace(load_settings(), mode=resolve_mode(args.offline, args.mode))
-    registry = build_registry(diagnostics_available=args.diagnostics)
+    settings = load_settings()
+    settings = replace(settings, mode=resolve_mode(args.offline, args.mode), store=args.store or settings.store)
     log = EventLog(path=settings.log_path, to_stdout=False)
+    stores = build_stores(settings, log=log)
+    registry = build_registry(diagnostics_available=args.diagnostics, idempotency=stores.idempotency)
     models = build_models(settings)
     runtime = Runtime(
         settings=settings,
@@ -71,6 +77,7 @@ def main(argv: Sequence[str] = ()) -> int:
         jev=models.jev,
         log=log,
         resolver=IdentityResolver(registry),
+        conversations=stores.conversations,
     )
     adapter = ADAPTERS[args.channel](runtime.resolver)
     conversation_id = new_conversation_id()

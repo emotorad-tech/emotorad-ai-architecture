@@ -52,12 +52,14 @@ from .identity import IdentityResolver
 from .observability import EventLog
 from .runtime import Runtime
 from .tools.mocks import build_registry
-from .wiring import build_models
+from .wiring import build_models, build_stores
 
 settings = load_settings()
-registry = build_registry()
-resolver = IdentityResolver(registry)
 log = EventLog(path=settings.log_path, to_stdout=settings.log_to_stdout)
+# EMOTORAD_STORE=mongodb keeps conversations across restarts and servers.
+stores = build_stores(settings, log=log)
+registry = build_registry(idempotency=stores.idempotency)
+resolver = IdentityResolver(registry)
 models = build_models(settings)
 runtime = Runtime(
     settings=settings,
@@ -67,6 +69,7 @@ runtime = Runtime(
     jev=models.jev,
     log=log,
     resolver=resolver,
+    conversations=stores.conversations,
 )
 adapter = WebsiteChatAdapter(resolver)
 

@@ -35,3 +35,30 @@ def build_models(settings: Settings, transport: Optional[Any] = None) -> Models:
         narrow_llm=OpenRouterChat(settings.narrow_model, transport, max_tokens=settings.max_tokens, zdr=settings.openrouter_zdr),
         jev=JevClient(transport, model=settings.jev_model, timeout=settings.jev_timeout),
     )
+
+
+@dataclass
+class Stores:
+    conversations: Any
+    idempotency: Any
+
+
+def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Stores:
+    """Where conversations and write receipts live, chosen from Settings.store.
+
+    `mongodb` reads the connection string from EMOTORAD_MONGO_URI (never from
+    Settings) and fails loudly without one, rather than quietly falling back to
+    memory and losing every conversation on the next restart.
+    """
+    if settings.store == "memory":
+        from .conversation import InMemoryConversationStore
+        from .tools.registry import IdempotencyStore
+
+        return Stores(conversations=InMemoryConversationStore(), idempotency=IdempotencyStore())
+    from .stores.mongo import MongoConversationStore, MongoIdempotencyStore, connect
+
+    db = connect(db_name=settings.mongo_db, client=client)
+    return Stores(
+        conversations=MongoConversationStore(db, state_ttl_hours=settings.state_ttl_hours, log=log),
+        idempotency=MongoIdempotencyStore(db, ttl_days=settings.idempotency_ttl_days),
+    )
