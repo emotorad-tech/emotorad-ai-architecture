@@ -10,34 +10,24 @@ symptoms: [melted, burnt, burnt smell, fused, melted terminal, melted connector,
 # Every bike has a battery terminal and a controller connector, Doodles included.
 applies_to: {}
 source: AFS battery diagnostic — melting, both ends
-media:
-  - id: afs/battery/photos/melted-battery-vs-non-melted.png
-    kind: image
-    caption: >-
-      Battery terminal, melted versus normal. A damaged one shows fused metal pins and
-      blackened plastic; an intact one has four clean, evenly spaced contacts with the
-      + and - markings still readable.
-  - id: afs/battery/photos/controller-melted-vs-non-melted.png
-    kind: image
-    caption: >-
-      Controller battery connector, normal versus melted. The failed one shows fused pins,
-      warped plastic and heat marks around the housing.
+# No comparison pictures are available to send (2026-09-30); the steps describe
+# what to look for instead.
+media: []
 steps:
   - >-
     ASK FOR TWO PHOTOS, AND ASK FOR THE SECOND ONE WHATEVER THE FIRST SHOWS. One end
     being clean says nothing about the other.
   - >-
-    FIRST, THE BATTERY TERMINAL. Send the melted-versus-normal terminal picture with the
-    request, so the customer is comparing rather than guessing. Fused metal pins and
-    blackened plastic mean melted; four clean, evenly spaced contacts with readable + and
+    FIRST, THE BATTERY TERMINAL. Tell them what to look for, so they are comparing rather
+    than guessing: fused metal pins and blackened plastic mean melted; four clean, evenly spaced contacts with readable + and
     - markings mean it is not.
   - >-
     SECOND, THE CONTROLLER'S BATTERY CONNECTOR — asked for even when the terminal turned
     out to be fine. This is the step that will feel unnecessary and is not: melting at one
     end tells you nothing about the other, and which ends are damaged is what decides
     whether one part is replaced or two. A customer sent away after a clean terminal photo
-    comes back a week later with the same fault. Send the controller comparison picture
-    with this request too.
+    comes back a week later with the same fault. Tell them what a melted one looks like:
+    fused pins, warped plastic and heat marks around the housing.
   - >-
     Say why you are asking for the second one, or it reads as not having listened: you are
     checking how far the heat travelled, not doubting what they showed you.

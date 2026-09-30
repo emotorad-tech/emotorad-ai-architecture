@@ -5,9 +5,9 @@ symptoms: [no_assist, pas not working, no power assist, motor not running, pedal
            chal nahi rahi, मोटर नहीं चल]
 applies_to: {}
 source: Drive system manual §3.1
-media:
-  - url: https://cdn.emotorad.test/kb/pas-sensor.png
-    caption: Pedal assist sensor and magnet ring alignment at the crank
+# Only the two battery photos are sent (2026-09-30); the placeholder picture of
+# the sensor, on a test domain, never could be.
+media: []
 steps:
   - Check the assist level on the display is not set to zero.
   - Confirm the battery has charge and the display is powered.

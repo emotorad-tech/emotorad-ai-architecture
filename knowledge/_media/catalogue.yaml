@@ -2,8 +2,12 @@
 #
 # Each key is a name the prompt can refer to and the model can pick from a list
 # it is shown; the model never types a filename or a URL, so it cannot invent one
-# and cannot mistype one. Adding a picture is an entry here plus an upload — no
+# and cannot mistype one. Adding a picture is an entry here plus an upload: no
 # code, no prompt edit.
+#
+# Only these two are sent (the person's choice, 2026-09-30). Both live in
+# emotorad-ai-stage-media under assets/afs/battery/photos/, each with a
+# .w900.webp copy.
 #
 # This is an interim home. Media properly belongs on the knowledge record whose
 # steps it illustrates, and moves there when the battery flow is lifted out of
@@ -24,24 +28,4 @@ soc_button:
 battery_onoff_switch:
   id: afs/battery/photos/battery-onoff-switch.png
   kind: image
-  caption: The battery On/Off switch — set it to ON before charging
-
-battery_revival:
-  id: afs/battery/videos/battery-revival-steps.mp4
-  kind: video
-  caption: Reviving a pack that has gone completely flat
-
-melted_battery_terminal:
-  id: afs/battery/photos/melted-battery-vs-non-melted.png
-  kind: image
-  caption: >-
-    Battery terminal, melted versus normal. A damaged one shows fused metal pins and
-    blackened plastic; an intact one has four clean, evenly spaced contacts with the
-    + and - markings still readable.
-
-melted_controller_connector:
-  id: afs/battery/photos/controller-melted-vs-non-melted.png
-  kind: image
-  caption: >-
-    Controller battery connector, normal versus melted. The failed one shows fused pins,
-    warped plastic and heat marks around the housing.
+  caption: The battery On/Off switch, set it to ON before charging

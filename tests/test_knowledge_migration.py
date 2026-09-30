@@ -420,8 +420,8 @@ class FlowHandoffTests(unittest.TestCase):
     and how to check it. It invented "look at the connector for melting", which
     is right, and then asked for one photo of one end with nothing to compare
     against, because it had no reason to know `battery-melted-terminal` existed:
-    that record sets the order, requires both ends, and carries the
-    melted-versus-normal pictures. Everything it needed was authored and
+    that record sets the order, requires both ends, and says what melted
+    looks like at each end. Everything it needed was authored and
     unreachable from where it stood.
 
     Records live in separate files and none imports another, so a pointer that
@@ -440,23 +440,14 @@ class FlowHandoffTests(unittest.TestCase):
 
     def test_the_target_still_carries_what_the_handoff_promises(self):
         # The pointer is only worth having while these hold. Both ends, in
-        # order, each asked for with its comparison picture.
+        # order, each asked for with what melted looks like. There are no
+        # comparison pictures to send any more (the person, 2026-09-30).
         body = _body(self.POINTS_AT)
         for promise in ("two photos", "first, the battery terminal", "second, the controller"):
             self.assertIn(promise, body, promise)
-        media = {
-            item.get("id")
-            for record in load_records()
-            if record.id == self.POINTS_AT
-            for item in record.media
-        }
-        self.assertEqual(
-            media,
-            {
-                "afs/battery/photos/melted-battery-vs-non-melted.png",
-                "afs/battery/photos/controller-melted-vs-non-melted.png",
-            },
-        )
+        media = [item for record in load_records() if record.id == self.POINTS_AT for item in record.media]
+        self.assertEqual(media, [], "no comparison pictures to send (2026-09-30)")
+        self.assertIn("fused metal pins", body)
 
 
 class MigratedFlowsAreScopedTests(unittest.TestCase):

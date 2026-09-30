@@ -24,11 +24,12 @@ from tests.test_media import _WithStore
 TODAY = date(2026, 8, 6)
 
 
-def make_runtime(script):
+def make_runtime(script, guide_media=None):
     # The guide-media catalogue is what makes `send_guide_media` exist at all —
     # the registry skips it when there are no pictures, so an agent with none is
     # never told it can send one.
-    registry = build_registry(today=TODAY, guide_media=load_catalogue(), sent_media={})
+    guide_media = guide_media if guide_media is not None else load_catalogue()
+    registry = build_registry(today=TODAY, guide_media=guide_media, sent_media={})
     llm = ScriptedClaude(script)
     runtime = Runtime(
         settings=Settings(log_to_stdout=False, log_path=None),
@@ -176,11 +177,14 @@ class ReplyAttachmentsTests(unittest.TestCase):
 
     def test_a_clip_is_not_announced_to_the_channel_as_a_photo(self):
         # kind used to be hardcoded "image", so a video rendered as a broken
-        # picture on every channel that trusts the field.
+        # picture on every channel that trusts the field. The catalogue no
+        # longer has a clip (2026-09-30), so the test brings its own.
+        clip = {"test_clip": {"url": "https://cdn.emotorad.test/kb/revival.mp4", "kind": "video",
+                              "caption": "A test clip"}}
         runtime, _ = make_runtime([
-            call_tool(SEND_GUIDE_MEDIA, {"key": "battery_revival"}, "t1"),
+            call_tool(SEND_GUIDE_MEDIA, {"key": "test_clip"}, "t1"),
             say("This clip shows the revival process."),
-        ])
+        ], guide_media=dict(load_catalogue(), **clip))
         reply = whatsapp(runtime, "battery not charging")
         self.assertEqual([a.kind for a in reply.attachments], ["video"])
 

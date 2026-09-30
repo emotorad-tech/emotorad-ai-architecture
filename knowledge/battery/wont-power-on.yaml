@@ -16,10 +16,7 @@ media:
     caption: The SOC button and charge indicator, on the side of the pack
   - id: afs/battery/photos/battery-onoff-switch.png
     kind: image
-    caption: The battery On/Off switch — set it to ON before charging
-  - id: afs/battery/videos/battery-revival-steps.mp4
-    kind: video
-    caption: Reviving a pack that has gone completely flat
+    caption: The battery On/Off switch, set it to ON before charging
 steps:
   # The steps below are a branch, not a running order, and they are labelled by
   # their precondition for that reason. They used to be numbered STEP 1 / STEP 2,
@@ -63,7 +60,7 @@ steps:
     battery connector, and the cable between. Both ends can melt, and there is a record for
     exactly that check — battery-melted-terminal — which sets the order (terminal first,
     controller second), requires both to be looked at whatever the first one shows, and
-    carries the melted-versus-normal comparison photographs you send with each request.
+    says what melted looks like at each end.
     Search for it and follow it. Do not start asking the customer to inspect connectors
     off your own reasoning: unaided they are being asked to judge melting with nothing to
     compare against, and the end you did not think to ask about is the one that is damaged.
@@ -141,8 +138,8 @@ steps:
   - >-
     TERMINAL CHECK, after a failed revival and before concluding anything. Have them
     unplug the charger, take the pack off the bike, and photograph the metal terminals,
-    with the melted-versus-normal picture sent alongside so they are comparing rather than
-    guessing. Burnt or fused terminals are a different fault with a different remedy, and
+    and tell them what melted looks like (fused metal pins, blackened plastic) so they are
+    comparing rather than guessing. Burnt or fused terminals are a different fault with a different remedy, and
     they are cheap to rule out. If either end looks damaged, leave this flow for
     battery-melted-terminal.
   - >-
