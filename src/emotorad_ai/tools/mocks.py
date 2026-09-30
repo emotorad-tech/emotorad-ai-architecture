@@ -383,6 +383,9 @@ def build_registry(
     # Order/invoice code -> registered phone, for a customer who cannot recall
     # their number. Absent unless a real orders API is wired.
     account_finder: Optional[Callable[[str], Optional[str]]] = None,
+    # Sends the one-time code (api.py passes MockOtpSender until the OTP
+    # service is wired). None: the code is only stored, as before.
+    send_code: Optional[Callable[[str, str], None]] = None,
     # The replacement order the bot places on the customer's behalf. Absent
     # unless a store is supplied, so an agent that cannot place one is never
     # told it can. Item codes default to the mock resolver.
@@ -579,7 +582,7 @@ def build_registry(
             return ok({"sent": True, "kind": found["kind"], "caption": found["caption"], "media": [found]})
 
     if verification is not None:
-        register_verification_tools(registry, verification, account_finder=account_finder)
+        register_verification_tools(registry, verification, send=send_code, account_finder=account_finder)
         registry.verification = verification  # type: ignore[attr-defined]
 
         @registry.register(

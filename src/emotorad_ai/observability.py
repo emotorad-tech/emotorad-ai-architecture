@@ -20,8 +20,11 @@ from typing import Any, Callable, Dict, List, Optional
 # `\b` cannot match before a "+", so the leading sign was left behind and the
 # log read "+[phone]". A lookbehind that rejects a digit or a sign also stops
 # this matching the tail of a longer digit run, which is what the word
-# boundary was there for.
-_PHONE = re.compile(r"(?<![\d+])(?:\+?91[\s-]?)?[6-9]\d{9}(?!\d)")
+# boundary was there for. A leading 0 (the trunk prefix), and one space or
+# dash in the middle, are how people type a number they are reading out
+# ("97000 00010"). The verify-first step accepts those forms, so the log and
+# the transcript must hide them too.
+_PHONE = re.compile(r"(?<![\d+])(?:\+?91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\d)")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # 16-digit-ish sequences: card numbers pasted into a support chat.
 _LONG_DIGITS = re.compile(r"\b\d{12,19}\b")

@@ -8,7 +8,7 @@ and types are the part to review against the real systems.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # --- PROVISIONAL WARRANTY TERM — the single replacement seam -----------------
 #
@@ -202,6 +202,22 @@ PHONE_WITH_NO_DATES = "+919700000003"
 # "not a customer": this is the Late Warranty Registration path. Present here as
 # a named constant so tests state their intent.
 PHONE_WITH_NO_RECORD = "+919700000009"
+
+# Test order and invoice numbers for the order-number fallback, invented, so
+# `find_account_by_code` can be tried without the OMS key (the person,
+# 2026-09-30). With EMOTORAD_OMS_API_KEY set, the live lookup
+# (tools/oms.live_account_finder) is used instead.
+ORDER_CODES: Dict[str, str] = {
+    "EMO-100234": PHONE_AMIIGO_TEST_RIDER,
+    "INV-2026-0042": PHONE_AMIIGO_TEST_RIDER,
+    "EMO-100117": "+919876543210",
+}
+
+
+def find_account_by_order_code(code: str) -> Optional[str]:
+    """The phone an order or invoice number belongs to, or None. Case and
+    spaces do not matter: customers read these off paper."""
+    return ORDER_CODES.get("".join((code or "").split()).upper())
 
 # --- dealers -----------------------------------------------------------------
 #

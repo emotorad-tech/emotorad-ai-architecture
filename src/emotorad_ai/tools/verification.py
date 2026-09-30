@@ -31,15 +31,18 @@ an SMS. Replace ``send`` with the real SMS provider; nothing else changes.
 
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..contract import VERIFIED, InboundMessage
 from .oms import OMSConfigError, normalise_mobile
 from .registry import ToolError, ToolRegistry, ok
+
+_logger = logging.getLogger(__name__)
 
 REQUEST_IDENTITY_VERIFICATION = "request_identity_verification"
 VERIFY_IDENTITY = "verify_identity"
@@ -206,6 +209,19 @@ class VerificationStore:
                 return None
             return pending.code
 
+    def pending_phone(self, conversation_id: str) -> Optional[str]:
+        """The number an unproved code was last issued to, for a resend.
+
+        Kept after the code expires (a resend is most needed then), until the
+        store sweeps the entry on a later issue. Never for the model: the
+        request tool uses it and returns only the masked form.
+        """
+        with self._lock:
+            pending = self._pending.get(conversation_id)
+            if pending is None or pending.verified:
+                return None
+            return pending.phone
+
     def attempts_left(self, conversation_id: str) -> int:
         with self._lock:
             pending = self._pending.get(conversation_id)
@@ -218,6 +234,23 @@ class VerificationStore:
 
 def _six_digits() -> str:
     return "%06d" % random.randint(0, 999999)
+
+
+class MockOtpSender:
+    """Stands in for the OTP service until it is wired (the person, 2026-09-30).
+
+    Sends nothing. Logs that a code went to the masked number, and never the
+    code: on a test server the code is read from /dev/verification instead.
+    The real service replaces this object and nothing else changes.
+    """
+
+    def __init__(self) -> None:
+        self.sent: List[str] = []
+
+    def __call__(self, phone: str, code: str) -> None:
+        masked = mask_phone(phone)
+        self.sent.append(masked)
+        _logger.info("otp_sent to %s (mock: no SMS sent)", masked)
 
 
 def register_verification_tools(
@@ -242,7 +275,8 @@ def register_verification_tools(
         "best way to find anyone — and pass it here to send them a one-time code. Never guess "
         "the number, and do not offer an order number as an equal alternative; it is only for "
         "customers who cannot recall their mobile. Omit the phone argument entirely to send the "
-        "code to a number already recovered by find_account_by_code. This returns no customer "
+        "code to a number already recovered by find_account_by_code, or again to the number the "
+        "last code went to. This returns no customer "
         "information and does not say whether the number is registered — it only sends a code.",
         parameters={
             "phone": {
@@ -262,7 +296,8 @@ def register_verification_tools(
         if not phone:
             # Recovered from an order code and deliberately never shown to the
             # model; sending to it is the only thing the model may do with it.
-            phone = store.candidate_phone(conversation_id)
+            # Otherwise a resend, to the number the last code went to.
+            phone = store.candidate_phone(conversation_id) or store.pending_phone(conversation_id)
             if not phone:
                 raise ToolError(
                     "no_number_on_file",
@@ -371,16 +406,20 @@ def apply_verified_identity(
     existing phone is never overwritten, so a stale entry on a reused
     conversation id can never redirect a lookup to somebody else's number.
 
-    This is the one place the disclosure gate opens, and it opens on the store's
+    This and `apply_proven_phone` (which the runtime's verify-first step also
+    uses) are where the disclosure gate opens, and it opens on the store's
     verdict rather than the model's. `Identity.may_disclose` follows from the
-    strength set here, so no prompt wording can reach it.
+    strength set there, so no prompt wording can reach it.
     """
-    if message.identity.phone:
+    return apply_proven_phone(message, store.verified_phone(message.conversation_id))
+
+
+def apply_proven_phone(message: InboundMessage, phone: Optional[str]) -> InboundMessage:
+    """The inbound identity with a proved phone on it, or the message unchanged.
+
+    An existing phone is never overwritten, so a stale proof on a reused
+    conversation id can never redirect a lookup to somebody else's number.
+    """
+    if message.identity.phone or not phone:
         return message
-    phone = store.verified_phone(message.conversation_id)
-    if not phone:
-        return message
-    return replace(
-        message,
-        identity=replace(message.identity, strength=VERIFIED, phone=phone),
-    )
+    return replace(message, identity=replace(message.identity, strength=VERIFIED, phone=phone))
