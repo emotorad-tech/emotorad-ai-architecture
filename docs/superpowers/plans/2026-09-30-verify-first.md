@@ -1936,7 +1936,7 @@ class CatalogueTests(unittest.TestCase):
 
     def test_no_caption_has_an_em_dash(self):
         for key, item in load_catalogue().items():
-            self.assertNotIn("—", item["caption"], key)
+            self.assertNotIn("\u2014", item["caption"], key)  # an em dash, written as its escape
 
     def test_no_knowledge_record_names_another_picture(self):
         for record in load_records():
