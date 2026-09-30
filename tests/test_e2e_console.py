@@ -153,6 +153,11 @@ class ConsolePageTests(unittest.TestCase):
         for scenario in ("smoke-neutral-words", "smoke-typed", "smoke-hinglish", "smoke-photo-only"):
             self.assertIn('"%s"' % scenario, self.html)
 
+    def test_it_runs_the_verify_first_scenarios(self):
+        for scenario in ("verify-then-warranty", "verify-by-order-number"):
+            self.assertIn('"%s"' % scenario, self.html)
+        self.assertIn("verify_first:order_code_sent", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

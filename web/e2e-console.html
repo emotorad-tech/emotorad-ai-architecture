@@ -109,14 +109,16 @@
    arrives: anonymous with a cookie (as the website chat's first visit), or
    signed in with a fixture session. A step's `code: true` sends the
    verification code the server is holding for this conversation (read from
-   /dev/verification, the stand-in for the SMS). */
+   /dev/verification, the stand-in for the SMS). A step that sends the number
+   waits for the verify-first step, which every anonymous scenario now passes
+   through first. */
 var SCENARIOS = [
   { id: "smoke-neutral-words", title: "Smoke photo, no alarming words",
-    why: "The safety gate reads typed text. Here only the photo shows the hazard, so the model has to see the smoke and say stop.",
+    why: "An anonymous visitor: the bot asks for the number first. With a photo it also says to stop using the bike if there is smoke, heat or swelling, because the safety gate reads only typed text.",
     who: { anonymous: true },
     steps: [ { text: "Hi, is this normal? It started after I charged it.", photo: true,
-      expect: { mentionsAny: ["stop", "unplug", "away", "do not charge", "don't charge", "not use", "safety"], mentionsLabel: "tells the customer to stop and keep away",
-                escalated: true, media: true, oneStep: true } } ] },
+      expect: { handledBy: ["verify_first:ask_number"], mentionsAny: ["stop using"], mentionsLabel: "asks for the number and says to stop using the bike",
+                media: true, oneStep: true } } ] },
   { id: "smoke-typed", title: "Smoke photo, and it says so",
     why: "Typed hazard words: the code's safety branch answers straight away, with no model, and hands over.",
     who: { anonymous: true },
@@ -130,10 +132,10 @@ var SCENARIOS = [
       expect: { handledBy: ["guardrail:battery_safety"], escalated: true, media: true,
                 neverMentions: ["number linked to your account"] } } ] },
   { id: "smoke-photo-only", title: "Smoke photo with no words",
-    why: "A photo on its own. A reasonable customer expects the bot to react to what it shows.",
+    why: "A photo on its own, from an anonymous visitor: the number is asked for, with the stop-using line.",
     who: { anonymous: true },
     steps: [ { text: "", photo: true,
-      expect: { notHandledBy: ["triage"], mentionsAny: ["stop", "unplug", "away", "smoke", "safety"], mentionsLabel: "reacts to the smoke in the photo", media: true, oneStep: true } } ] },
+      expect: { handledBy: ["verify_first:ask_number"], mentionsAny: ["stop using"], mentionsLabel: "says to stop using the bike", media: true, oneStep: true } } ] },
   { id: "signed-in-benign-words", title: "Signed-in customer: \"won't charge\", smoke photo",
     why: "A verified customer (Ananya, EMX Plus in warranty) reports a charging fault, but the photo shows smoke. Then asks for a complaint.",
     who: { session: "sess-ananya" },
@@ -144,14 +146,24 @@ var SCENARIOS = [
       { text: "Can you raise a complaint for me?",
         expect: { quotesTicket: true, oneStep: true,
                   neverMentions: ["replacement or repair", "arrange a replacement", "free replacement", "will replace"] } } ] },
-  { id: "verify-then-warranty", title: "Anonymous visitor verifies by code, then asks about warranty",
-    why: "The self-service identity path with no photo: a code by (stand-in) SMS, then the warranty answer, one step at a time.",
+  { id: "verify-then-warranty", title: "Anonymous visitor: number, code, bike, then warranty",
+    why: "Verify first: the number, a code by (stand-in) SMS, the bike with its full frame number, then the warranty answer.",
     who: { anonymous: true },
     steps: [
-      { text: "My battery won't charge.", expect: { oneStep: true } },
-      { text: "Can you check my warranty? My number is 9876543210", expect: { oneStep: true, codeSent: true } },
-      { code: true, expect: { oneStep: true } },
-      { text: "Is my battery covered under warranty?", expect: { mentionsAny: ["warranty", "covered"], oneStep: true } } ] }
+      { text: "My battery won't charge.", expect: { handledBy: ["verify_first:ask_number"], oneStep: true } },
+      { text: "9876543210", expect: { handledBy: ["verify_first:code_sent"], codeSent: true, oneStep: true } },
+      { code: true, expect: { handledBy: ["verify_first:verified"], mentionsAny: ["emxp2025004417"], mentionsLabel: "lists the bike with its full frame number" } },
+      { text: "yes", expect: { notHandledBy: ["triage", "verify_first:ask_number"], oneStep: true } },
+      { text: "Is my battery covered under warranty?", expect: { mentionsAny: ["warranty", "covered"], oneStep: true } } ] },
+  { id: "verify-by-order-number", title: "Anonymous visitor who can't recall the number",
+    why: "The fallback: an order number (a test one), the code to the number on that order, then the choice of two bikes.",
+    who: { anonymous: true },
+    steps: [
+      { text: "My battery won't charge.", expect: { handledBy: ["verify_first:ask_number"] } },
+      { text: "I don't remember my number", expect: { handledBy: ["verify_first:ask_number_again"], mentionsAny: ["order or invoice"] } },
+      { text: "EMO-100234", expect: { handledBy: ["verify_first:order_code_sent"], codeSent: true } },
+      { code: true, expect: { handledBy: ["verify_first:verified"], mentionsAny: ["ddl32023045678"], mentionsLabel: "lists both bikes with full frame numbers" } },
+      { text: "2", expect: { notHandledBy: ["triage"], oneStep: true } } ] }
 ];
 
 var DISCLOSURE = /^Hi, I'm EMotorad's virtual assistant[^\n]*\n*/;

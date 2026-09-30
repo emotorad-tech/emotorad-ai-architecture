@@ -352,7 +352,11 @@ on OpenRouter.
 6. `http://localhost:8000/dev/media/<conversation id>` shows one conversation's
    media records.
 
-The scenarios live in `web/e2e-console.html` (`SCENARIOS`). Some checks state
-what a customer should get and does not yet (2026-09-29): a hazard seen only in
-the photo is handed to a person; an anonymous visitor is not promised a call on
-a number the bot does not have. They fail until that behaviour is fixed.
+The scenarios live in `web/e2e-console.html` (`SCENARIOS`). Every anonymous
+scenario now starts with the verify-first step (2026-09-30): the bot asks for the
+number, the console reads the code from `/dev/verification`, and the bike is
+chosen before any model runs. `verify-by-order-number` uses the test order number
+`EMO-100234`. Some checks state what a customer should get and does not yet
+(2026-09-29): a signed-in customer whose photo alone shows a hazard is handed to a
+person; an anonymous visitor who types a hazard is not promised a call on a number
+the bot does not have. They fail until that behaviour is fixed.

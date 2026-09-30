@@ -73,9 +73,10 @@ from .storage.keys import KeyValidationError, cluster_of, is_customer_key, is_va
 from .storage.s3 import StorageError, store_from_env
 from . import tracing
 from .storage.uploads import UploadError, UploadRegistry
+from .tools import fixtures
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
-from .tools.verification import VerificationStore, apply_verified_identity
+from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity
 from .video_summary import VideoSummaryError, summariser_from_env
 from .wiring import build_models, build_stores
 
@@ -126,6 +127,11 @@ _logger = logging.getLogger(__name__)
 # visitor asked for their number has no way to prove it — the flow dead-ends.
 verification_store = VerificationStore()
 
+# Sends the one-time code. A stand-in until the OTP service is wired (the
+# person, 2026-09-30): it sends nothing and logs the masked number; the code
+# itself is read from /dev/verification on a test server.
+OTP_SENDER = MockOtpSender()
+
 # The guide photos and clips the agent may show. Loaded once: it is authored
 # content in the repo, not per-request state. load_catalogue() raises on a
 # malformed catalogue, and that is deliberate: a broken catalogue should fail
@@ -172,6 +178,10 @@ def _build_registry():
     if not os.environ.get("EMOTORAD_OMS_API_KEY"):
         return build_registry(
             verification=verification_store,
+            send_code=OTP_SENDER,
+            # Test order numbers (fixtures.ORDER_CODES), so the fallback can
+            # be tried without the OMS key.
+            account_finder=fixtures.find_account_by_order_code,
             guide_media=SENDABLE_MEDIA,
             sent_media=sent_media,
             replacement_orders=replacement_orders,
@@ -183,6 +193,7 @@ def _build_registry():
     client = OMSClient()
     return build_registry(
         verification=verification_store,
+        send_code=OTP_SENDER,
         warranty_source=live_warranty_source(client),
         account_finder=live_account_finder(client),
         guide_media=SENDABLE_MEDIA,
@@ -233,6 +244,10 @@ runtime = Runtime(
     # verification tools are added only here, where the agent has to establish
     # identity inside the conversation.
     self_service_identity=True,
+    # Verify first: an anonymous visitor gives their number, types the code and
+    # picks a bike before triage or any model (the person's decision,
+    # 2026-09-30). Signed-in visitors and the Amiigo session skip it.
+    verify_first=True,
     # The phone this conversation proves mid-turn. The model verifies a code and
     # looks the customer up in the same assistant turn, so a phone snapshotted
     # before the first tool ran is already stale by the second one.
