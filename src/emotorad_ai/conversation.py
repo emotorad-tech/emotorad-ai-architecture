@@ -60,6 +60,8 @@ class ConversationState:
     # replies. Both None when the step is not running.
     verify_step: Optional[str] = None
     verify_masked: Optional[str] = None
+    # Codes the step has sent in this run, capped (verify_first.MAX_CODES).
+    verify_sends: int = 0
     # Rendered enrichment block. Built once per conversation, not per turn: a
     # customer's bikes and history do not change mid-chat, and rebuilding it every
     # turn also moves it in the prompt, which defeats prefix caching.
@@ -128,6 +130,32 @@ class ConversationState:
         data = json.loads(raw)
         known = {f.name for f in dataclasses.fields(cls)}
         return cls(**{key: value for key, value in data.items() if key in known})
+
+    def restart_for(self, user_key: str, started_at: str) -> None:
+        """A new run of this conversation for a different person.
+
+        Reached when someone proves a number on a conversation that belonged to
+        somebody else, whose session had expired (verify first, 2026-09-30).
+        Nothing of the first person's may carry over: not their history, their
+        bikes, tickets or orders, their memory, or their summary. So this is
+        what an expired conversation does: a fresh state, numbered on from the
+        turns already recorded, with a new `started_at` so its summary is a new
+        one. The object is reset in place, because the turn holds it.
+        """
+        fresh = ConversationState(
+            conversation_id=self.conversation_id,
+            # This turn is the new run's first; the ones before it are recorded.
+            turn_offset=self.turn_offset + (self.turns - 1) * 2,
+            turns=1,
+            started_at=started_at,
+            user_key=user_key,
+            version=self.version,
+            channel=self.channel,
+            cluster_id=self.cluster_id,
+            consumed_codes=list(self.consumed_codes),
+        )
+        for f in dataclasses.fields(self):
+            setattr(self, f.name, getattr(fresh, f.name))
 
     def move_to(self, phase: str, reason: str = "") -> None:
         if phase not in PHASES:

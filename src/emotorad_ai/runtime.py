@@ -161,6 +161,15 @@ SELF_SERVICE_SURFACE_TOOLS = (OFFER_LOCATION_SHARE,)
 # (a second code, or a spent code replayed and refused).
 SIDE_EFFECT_TOOLS = (SEND_GUIDE_MEDIA, REQUEST_IDENTITY_VERIFICATION, VERIFY_IDENTITY)
 
+# What a verify-first turn changes, carried whole when it loses a save race
+# (Runtime._merge_onto_fresh).
+VERIFY_FIRST_FIELDS = (
+    "verify_step", "verify_masked", "verify_sends", "phase", "agent", "selected_frame",
+    # started_at: a new person's run keeps its own summary even after a clash.
+    # The turn numbering stays the other server's, which already counts both.
+    "pending_topic", "pending_topic_source", "context_block", "user_key", "started_at",
+)
+
 # Said when a guide picture failed and the reply does not already say so
 # (Runtime._admit_unsent_media).
 MEDIA_NOT_SENT_TEXT = "I couldn't show you the picture just now, sorry."
@@ -400,11 +409,15 @@ class Runtime:
             except StoreUnavailable as exc:
                 return self._store_down(message, exc, reply.ticket_id)
         try:
-            recorded = message
+            recorded, summary = message, self._summary_for(state, resolved)
             if "transcript_text" in reply.metadata:
                 # The verify-first step's turns: the number or code replaced.
                 recorded = replace(message, message_text=reply.metadata["transcript_text"])
-            self.conversations.record_turn(state, recorded, reply, self._summary_for(state, resolved))
+                if not (resolved and resolved.may_disclose):
+                    # Nobody is proved yet (a session that expired): the turn
+                    # must not rewrite the earlier person's summary.
+                    summary = None
+            self.conversations.record_turn(state, recorded, reply, summary)
         except StoreUnavailable as exc:
             # The turn happened and the state is saved; only the record of it
             # failed. Said in the log, and the customer still gets the answer.
@@ -450,6 +463,13 @@ class Runtime:
         fresh.consumed_codes += [c for c in ours.consumed_codes if c not in fresh.consumed_codes]
         for name in ("user_key", "channel", "context_block", "cluster_id"):
             if getattr(fresh, name) is None:
+                setattr(fresh, name, getattr(ours, name))
+        if reply.handled_by.startswith("verify_first:"):
+            # The verify-first step's progress is this turn's: a code went out
+            # or was tried, so the next message is read against where this
+            # turn left the step, not where the other server did. That
+            # includes a context block this turn cleared for rebuilding.
+            for name in VERIFY_FIRST_FIELDS:
                 setattr(fresh, name, getattr(ours, name))
         fresh.transitions.append("merged_after_conflict")
         self.conversations.save(fresh)

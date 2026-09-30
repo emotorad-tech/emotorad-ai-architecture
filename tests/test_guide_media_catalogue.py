@@ -35,6 +35,18 @@ class CatalogueTests(unittest.TestCase):
             for item in record.media:
                 self.assertIn(item.get("id"), set(KEPT.values()), "%s: %r" % (record.id, item))
 
+    def test_no_prompt_or_error_code_names_a_picture_it_no_longer_has(self):
+        # Finding 8 of the final review: the battery prompt still listed the
+        # revival clip as a key, and E-06's text promised comparison pictures.
+        root = CATALOGUE_FILE.parents[2]
+        files = sorted((root / "prompts").glob("*.md")) + sorted((root / "knowledge" / "_errors").glob("*.yaml"))
+        self.assertTrue(files)
+        for path in files:
+            text = path.read_text(encoding="utf-8").lower()
+            for promise in ("battery_revival", "comparison picture", "comparison photo", "short clip",
+                            "melted_battery_terminal", "melted_controller_connector"):
+                self.assertNotIn(promise, text, "%s: %s" % (path.name, promise))
+
     def test_no_record_tells_the_bot_to_send_a_picture_it_no_longer_has(self):
         for record in load_records():
             body = " ".join(record.steps).lower()

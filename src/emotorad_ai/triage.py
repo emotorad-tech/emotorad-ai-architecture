@@ -200,25 +200,36 @@ def which_bike_text(bikes: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# A yes or a no to "is this the bike?", in English and Hindi. A no must be the
-# whole reply: "no power at all" is an issue, not an answer.
+# A yes or a no to "is this the bike?", in English and Hindi. A no is the whole
+# reply, or a no followed by a comma or a stop ("no, a different one", "nahi,
+# dusri"), and may be polite ("ji nahi"): "no power at all" is an issue, not an
+# answer. A yes that goes on to say "the other one" is not a yes. The no is
+# checked first, so "ji nahi" is never read as its leading "ji".
 _YES = re.compile(
-    r"^\s*(?:yes|yeah|yep|yup|ya|haan|haa|han|ha|ji|correct|right|sure|ok|okay|that'?s it|this one|same one|हाँ|हां|जी)(?!\w)",
+    r"^\s*(?:yes|yeah|yep|yup|ya|haan|haa|han|ha|ji|correct|right|sure|ok|okay|that'?s it|this one|same one|हाँ|हां|जी)(?!\w)"
+    r"(?!.*\b(?:other|different|another|dusri|dusra)\b)",
     re.IGNORECASE,
 )
 _NO = re.compile(
-    r"^\s*(?:no|nope|nah|nahi|nahin|नहीं|not this(?: one)?|not that(?: one)?|wrong(?: bike)?|"
+    r"^\s*(?:(?:ji|जी)\s+)?(?:no|nope|nah|nahi|nahin|नहीं)\s*(?:[,.!]|$)"
+    r"|^\s*(?:not this(?: one)?|not that(?: one)?|wrong(?: bike)?|"
     r"a different one|different bike|another one|another bike|other bike)\s*[.!]*\s*$",
     re.IGNORECASE,
 )
-
-
-def says_yes(text: str) -> bool:
-    return bool(_YES.match(text or ""))
+# A frame number: a few letters, then six or more digits (EMXP2026001234).
+_FRAME = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{2,5}\d{6,}(?![A-Za-z0-9])")
 
 
 def says_no(text: str) -> bool:
     return bool(_NO.match(text or ""))
+
+
+def says_yes(text: str) -> bool:
+    return not says_no(text) and bool(_YES.match(text or ""))
+
+
+def names_a_frame(text: str) -> bool:
+    return bool(_FRAME.search(text or ""))
 
 
 class TriageAgent:
@@ -280,9 +291,13 @@ class TriageAgent:
             state.move_to(AWAITING_ISSUE, "no_bikes_to_choose")
             return self._route_or_ask(self._take_pending(state)[0], state, "text")
 
-        bike = bikes[0] if len(bikes) == 1 and says_yes(text) else match_bike(text, bikes)
+        single = len(bikes) == 1
+        bike = bikes[0] if single and says_yes(text) else match_bike(text, bikes)
         if bike is None:
-            if len(bikes) == 1 and self.unlisted_agent and says_no(text):
+            # One bike listed and the customer says it is not theirs, or sends
+            # the frame number of one that is not on the list (as the question
+            # invites): the bike they mean is not registered on this number.
+            if single and self.unlisted_agent and (says_no(text) or names_a_frame(text)):
                 self._take_pending(state)
                 state.route_to(self.unlisted_agent)
                 return TriageOutcome(agent=self.unlisted_agent, reason="bike_not_listed")

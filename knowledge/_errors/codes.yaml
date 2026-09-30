@@ -66,14 +66,14 @@ codes:
     # which made this a second copy of battery-melted-terminal, and the copy is
     # what got followed: `lookup_error_code` runs first by §5b0, this read as
     # complete instructions, and search_knowledge was never called. The real
-    # record carries the melted-versus-normal comparison pictures that go out
-    # with each request; this field cannot, so a bot working from here asks a
-    # customer to judge melting against nothing and stops after one photo.
+    # record says what melted looks like at each end, and in what order to ask;
+    # a bot working from here alone asks a customer to judge melting against
+    # nothing and stops after one photo.
     verification: >-
       Both ends seen and compared before either case holds — the battery terminal and the
       controller's battery connector, melted or not, whatever the first one shows. Do not
       run that check from this line: it is battery-melted-terminal, and only that record
-      carries the melted-versus-normal comparison pictures and the order they go in.
+      says what melted looks like at each end and the order to ask for them in.
       Search for it. Case 2 is only reachable once both photographs are in and neither
       end is melted.
     technician_chain: >-

@@ -40,11 +40,12 @@ def jpeg():
 class Chat:
     """One website visitor, turn by turn."""
 
-    def __init__(self, replies=(), verify_first=True, account_finder=fixtures.find_account_by_order_code, clock=None):
+    def __init__(self, replies=(), verify_first=True, account_finder=fixtures.find_account_by_order_code, clock=None,
+                 conversations=None):
         self.store = VerificationStore(clock=clock) if clock else VerificationStore()
         self.registry = build_registry(verification=self.store, today=TODAY, account_finder=account_finder)
         self.llm = ScriptedClaude(list(replies))
-        self.conversations = InMemoryConversationStore()
+        self.conversations = conversations if conversations is not None else InMemoryConversationStore()
         self.log = EventLog(path=None)
         self.runtime = Runtime(
             settings=Settings(log_path="", log_to_stdout=False), registry=self.registry, llm=self.llm,
@@ -320,6 +321,174 @@ class ExpiredSessionTests(unittest.TestCase):
         chat.say("2")
         now[0] += 12 * 60 * 60 + 1
         self.assertEqual(chat.say("still not charging").handled_by, "verify_first:ask_number")
+
+
+# -- the final review's findings (2026-09-30) ---------------------------------
+
+
+class DifferentPersonAfterExpiryTests(unittest.TestCase):
+    """Finding 1: after the first person's session expires, a different person
+    who verifies in the same conversation starts a run of their own and
+    inherits nothing of the first person's: not their memory, their records,
+    their summary, or their words in the model's history."""
+
+    def test_nothing_of_the_first_person_carries_over(self):
+        now = [0.0]
+        chat = Chat(replies=[say("Is the charger light on?"), say("Is the charger light on?")], clock=lambda: now[0])
+        a_key, b_key = "PHONE#" + RIDER, "PHONE#" + ONE_BIKE
+        chat.verify()
+        chat.say("2")
+        first_started = chat.state().started_at
+        self.assertEqual(chat.state().user_key, a_key)
+
+        now[0] += 12 * 60 * 60 + 1
+        chat.say("hello again")
+        chat.say(ONE_BIKE[3:])
+        self.assertEqual(chat.say(chat.code()).handled_by, "verify_first:verified")
+        state = chat.state()
+        self.assertEqual(state.user_key, b_key)
+        self.assertNotEqual(state.started_at, first_started)
+        self.assertIsNone(state.coverage_result)
+
+        # B's own run kept no topic from A, so the bike choice is followed by
+        # the issue question; B's issue is what reaches the model.
+        self.assertEqual(chat.say("yes").handled_by, "triage")
+        chat.say("battery dead")
+        self.assertEqual(len(chat.llm.requests), 2, "B's turn reached the model")
+        seen = repr(chat.llm.requests[-1])
+        self.assertNotIn("DDL32023045678", seen)
+        self.assertNotIn("my battery isn't charging", seen)
+        [a_summary] = chat.conversations.recent_summaries(a_key)
+        self.assertEqual(a_summary.frame_number, "DDL32023045678")
+        [b_summary] = chat.conversations.recent_summaries(b_key)
+        self.assertEqual(b_summary.frame_number, "EMXP2025004417")
+
+    def test_the_same_person_again_keeps_their_conversation(self):
+        now = [0.0]
+        chat = Chat(replies=[say("Is the charger light on?")], clock=lambda: now[0])
+        chat.verify()
+        chat.say("2")
+        started = chat.state().started_at
+        now[0] += 12 * 60 * 60 + 1
+        chat.say("hello again")
+        chat.say(RIDER[3:])
+        chat.say(chat.code())
+        self.assertEqual(chat.state().started_at, started)
+
+
+class ConflictedStore(InMemoryConversationStore):
+    """Hands out a fresh copy on every load, as a real database does, and
+    refuses the next `conflicts` saves (as tests/test_runtime_persistence.py)."""
+
+    def __init__(self):
+        super().__init__()
+        self.conflicts = 0
+
+    def get(self, conversation_id):
+        from emotorad_ai.conversation import ConversationState
+
+        return ConversationState.from_json(super().get(conversation_id).to_json())
+
+    def save(self, state):
+        from emotorad_ai.conversation import ConversationConflict
+
+        if self.conflicts:
+            self.conflicts -= 1
+            raise ConversationConflict("someone else saved")
+        super().save(state)
+
+
+class SaveConflictTests(unittest.TestCase):
+    """Finding 2: a step turn that lost the save race keeps its progress."""
+
+    def test_a_conflict_on_the_code_turn_keeps_the_step(self):
+        store = ConflictedStore()
+        chat = Chat(conversations=store)
+        chat.say("hi")
+        store.conflicts = 1
+        self.assertEqual(chat.say("9700000010").handled_by, "verify_first:code_sent")
+        self.assertEqual(chat.say(chat.code()).handled_by, "verify_first:verified")
+
+    def test_a_conflict_on_the_verified_turn_keeps_the_bike_choice(self):
+        store = ConflictedStore()
+        chat = Chat(replies=[say("Is the charger light on?")], conversations=store)
+        chat.say("my battery isn't charging")
+        chat.say("9700000010")
+        store.conflicts = 1
+        self.assertEqual(chat.say(chat.code()).handled_by, "verify_first:verified")
+        state = chat.state()
+        self.assertEqual(state.phase, AWAITING_BIKE_SELECTION)
+        self.assertIsNone(state.context_block)
+        chat.say("2")
+        self.assertEqual(chat.state().selected_frame, "DDL32023045678")
+        self.assertEqual(chat.state().agent, battery_support.AGENT_NAME)
+
+
+class LockoutAndCapTests(unittest.TestCase):
+    """Finding 3: once locked, the step only repeats the handover; and no more
+    than three codes are sent in one conversation."""
+
+    def codes_sent(self, chat):
+        return sum(1 for e in chat.log.events if e["event"] == "tool_call" and e["tool"] == "request_identity_verification")
+
+    def test_after_the_lockout_nothing_more_is_sent_or_tried(self):
+        chat = Chat()
+        chat.say("hi")
+        chat.say("9700000010")
+        wrong = "000000" if chat.code() != "000000" else "111111"
+        for _ in range(5):
+            chat.say(wrong)
+        sent = self.codes_sent(chat)
+        for text in ("ok", "resend", "9876543210"):
+            reply = chat.say(text)
+            self.assertEqual(reply.handled_by, "verify_first:locked", text)
+            self.assertTrue(reply.escalated)
+        self.assertEqual(self.codes_sent(chat), sent)
+
+    def test_no_more_than_three_codes_in_a_conversation(self):
+        chat = Chat()
+        chat.say("hi")
+        chat.say("9700000010")
+        chat.say("resend")
+        chat.say("resend")
+        self.assertEqual(self.codes_sent(chat), 3)
+        reply = chat.say("resend")
+        self.assertEqual(reply.handled_by, "verify_first:too_many_codes")
+        self.assertTrue(reply.escalated)
+        self.assertEqual(chat.say("9876543210").handled_by, "verify_first:too_many_codes")
+        self.assertEqual(self.codes_sent(chat), 3)
+
+
+DEVANAGARI = "०१२३४५६७८९"
+
+
+def in_devanagari(digits):
+    return "".join(DEVANAGARI[int(d)] for d in digits)
+
+
+class DevanagariDigitsTests(unittest.TestCase):
+    """Finding 6: digits typed in Devanagari are read as the same digits."""
+
+    def test_a_number_and_a_code_in_devanagari(self):
+        chat = Chat()
+        chat.say("namaste")
+        self.assertEqual(chat.say(in_devanagari("9700000010")).handled_by, "verify_first:code_sent")
+        self.assertEqual(chat.say(in_devanagari(chat.code())).handled_by, "verify_first:verified")
+
+
+class PhotoAtEveryStepTests(unittest.TestCase):
+    """Finding 7: a photo at any step gets the stop-using line, not only the first."""
+
+    def test_a_photo_while_waiting_for_the_number(self):
+        chat = Chat()
+        chat.say("hi")
+        self.assertIn(PHOTO_SAFETY, chat.say("here", photo=True).text)
+
+    def test_a_photo_while_waiting_for_the_code(self):
+        chat = Chat()
+        chat.say("hi")
+        chat.say("9700000010")
+        self.assertIn(PHOTO_SAFETY, chat.say("look", photo=True).text)
 
 
 if __name__ == "__main__":

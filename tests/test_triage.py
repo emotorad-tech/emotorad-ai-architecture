@@ -219,6 +219,14 @@ class YesNoTests(unittest.TestCase):
         for typed in ("no power at all", "yes", "nothing happens"):
             self.assertFalse(says_no(typed), typed)
 
+    def test_a_polite_no_is_a_no_and_not_a_yes(self):
+        # Finding 5 of the final review: "ji nahi" began with "ji" and was a yes.
+        for typed in ("ji nahi", "जी नहीं", "no, a different one", "nahi, dusri"):
+            self.assertTrue(says_no(typed), typed)
+            self.assertFalse(says_yes(typed), typed)
+        self.assertFalse(says_yes("ok but it's the other one"))
+        self.assertTrue(says_yes("yes it's not charging"))
+
 
 class OneBikeSelectionTests(unittest.TestCase):
     """Only the verify-first step puts one bike into selection; triage on its
@@ -246,6 +254,17 @@ class OneBikeSelectionTests(unittest.TestCase):
         self.assertFalse(outcome.is_handoff)
         self.assertIn("did not catch", outcome.reply)
         self.assertIn(BIKES[0]["frame_number"], outcome.reply)
+
+    def test_ji_nahi_goes_to_the_unlisted_agent(self):
+        outcome = self.triage.handle(message("ji nahi"), resolved(BIKES[:1]), self.state)
+        self.assertEqual(outcome.agent, "late_warranty_registration")
+        self.assertIsNone(self.state.selected_frame)
+
+    def test_the_frame_number_of_a_bike_not_listed_goes_to_the_unlisted_agent(self):
+        # The question invites it ("send the frame number of the bike you
+        # mean"); it used to loop on "did not catch" for ever.
+        outcome = self.triage.handle(message("DDL32023045678"), resolved(BIKES[:1]), self.state)
+        self.assertEqual(outcome.agent, "late_warranty_registration")
 
     def test_no_bikes_to_choose_from_carries_on_to_the_issue(self):
         # A lookup that failed after verification: no list to ask about.

@@ -18,12 +18,14 @@ step (`VerifyFirst`).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from .contract import InboundMessage
-from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState
+from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState, utc_now_iso
 from .identity import IdentityResolver, ResolvedIdentity
+from .observability import LOOSE_PHONE
 from .tools.oms import OMSConfigError, normalise_mobile
 from .tools.registry import ToolContext, ToolRegistry, is_error
 from .tools.verification import (
@@ -40,8 +42,9 @@ Found = Tuple[str, Tuple[int, int]]
 
 # A mobile typed in one piece, with or without +91 or a leading 0.
 _PHONE_TIGHT = re.compile(r"(?<![\d+])(?:\+?91|0)?[6-9]\d{9}(?!\d)")
-# ...or read out in groups, with spaces or dashes.
-_PHONE_LOOSE = re.compile(r"(?<![\d+])\+?\d[\d \-]{8,16}\d(?!\d)")
+# ...or read out in groups, with spaces or dashes: the log's own pattern, so
+# every form read here is also hidden there (observability.redact_pii).
+_PHONE_LOOSE = LOOSE_PHONE
 # Six digits, optionally split three and three.
 _CODE = re.compile(r"(?<!\d)(\d{3})[ \-]?(\d{3})(?!\d)")
 # A run of letters, digits, dashes and slashes, which an order number is.
@@ -129,8 +132,26 @@ NO_BIKES = "I couldn't find a bike registered on this number. Would you like to 
 LOOKUP_FAILED = "I can't load your bikes just now. What's happening with the bike?"
 
 
+TOO_MANY_CODES = (
+    "I can't send any more codes in this chat. I'm passing you to our support team, who can verify you "
+    "another way."
+)
+# Codes one conversation may send before the step hands over: the first, and
+# two more (a resend, or another number). Each is an SMS once the OTP service
+# is wired, so the step must not be a way to send them without end.
+MAX_CODES = 3
+
+
 def tries(left: int) -> str:
     return "1 try" if left == 1 else "%d tries" % left
+
+
+def ascii_digits(text: str) -> str:
+    """Digits of any script (Devanagari ९७००…) as ASCII, everything else as typed."""
+    return "".join(
+        str(unicodedata.decimal(ch)) if not ch.isascii() and unicodedata.decimal(ch, None) is not None else ch
+        for ch in text
+    )
 
 
 # -- the step ----------------------------------------------------------------
@@ -171,8 +192,14 @@ class VerifyFirst:
         )
 
     def handle(self, message: InboundMessage, state: ConversationState) -> GateReply:
-        text = message.message_text or ""
+        # Digits typed in Devanagari (or any script) are the same digits.
+        message = replace(message, message_text=ascii_digits(message.message_text or ""))
+        text = message.message_text
         self._keep_topic(message, state)
+        if state.verify_step == CODE and self.store.attempts_left(message.conversation_id) <= 0:
+            # Locked: the handover stands. No code is sent or tried again,
+            # whatever the message, until the store lets the entry go.
+            return self._reply(message, state, LOCKED, "locked", text, escalated=True)
         phone = find_phone(text)
 
         if state.verify_step == CODE:
@@ -190,10 +217,7 @@ class VerifyFirst:
         if state.verify_step is None:
             # First contact: the number, and only the number (phone first).
             state.verify_step = NUMBER
-            ask = ASK_NUMBER
-            if any(a.kind in ("image", "video") for a in message.attachments):
-                ask += " " + PHOTO_SAFETY
-            return self._reply(message, state, ask, "ask_number", text)
+            return self._reply(message, state, ASK_NUMBER, "ask_number", text)
 
         order = find_order_code(text) if FIND_ACCOUNT_BY_CODE in self.registry.specs else None
         if order:
@@ -207,29 +231,38 @@ class VerifyFirst:
     def _send_code(self, message: InboundMessage, state: ConversationState, phone: Found) -> GateReply:
         number, span = phone
         model_text = redact(message.message_text, span, "[phone]")
+        if state.verify_sends >= MAX_CODES:
+            return self._too_many(message, state, model_text)
         envelope = self._call(message, REQUEST_IDENTITY_VERIFICATION, {"phone": number})
         if is_error(envelope):
             return self._reply(message, state, INVALID_NUMBER, "invalid_number", model_text)
+        state.verify_sends += 1
         state.verify_step = CODE
         state.verify_masked = envelope["data"]["phone_masked"]
         return self._reply(message, state, CODE_SENT.format(masked=state.verify_masked), "code_sent", model_text)
 
     def _resend(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
+        if state.verify_sends >= MAX_CODES:
+            return self._too_many(message, state, text)
         envelope = self._call(message, REQUEST_IDENTITY_VERIFICATION, {})
         if is_error(envelope):
             # Nothing pending any more (swept): start again from the number.
             return self._ask_number_again(message, state, text)
+        state.verify_sends += 1
         state.verify_masked = envelope["data"]["phone_masked"]
         return self._reply(message, state, CODE_RESENT.format(masked=state.verify_masked), "code_resent", text)
 
     def _find_order(self, message: InboundMessage, state: ConversationState, order: Found) -> GateReply:
         value, span = order
         model_text = redact(message.message_text, span, "[order number]")
+        if state.verify_sends >= MAX_CODES:
+            return self._too_many(message, state, model_text)
         if is_error(self._call(message, FIND_ACCOUNT_BY_CODE, {"code": value})):
             return self._reply(message, state, ORDER_NOT_FOUND, "order_not_found", model_text)
         sent = self._call(message, REQUEST_IDENTITY_VERIFICATION, {})
         if is_error(sent):
             return self._reply(message, state, ORDER_NOT_FOUND, "order_not_found", model_text)
+        state.verify_sends += 1
         state.verify_step = CODE
         state.verify_masked = sent["data"]["phone_masked"]
         return self._reply(message, state, ORDER_CODE_SENT.format(masked=state.verify_masked),
@@ -251,10 +284,19 @@ class VerifyFirst:
         return self._verified(message, state, model_text)
 
     def _verified(self, message: InboundMessage, state: ConversationState, model_text: str) -> GateReply:
-        proved = apply_proven_phone(message, self.store.verified_phone(message.conversation_id))
+        phone = self.store.verified_phone(message.conversation_id)
+        owner = "PHONE#" + phone
+        if state.user_key and state.user_key != owner:
+            # Somebody else's conversation, whose session had expired: a run
+            # of this person's own, so nothing of the first person's reaches
+            # them (the final review, 2026-09-30).
+            state.restart_for(owner, utc_now_iso())
+            self.log.emit("verify_first_new_person", message.conversation_id)
+        proved = apply_proven_phone(message, phone)
         resolved = self.resolver.hydrate(proved)
         state.verify_step = None
         state.verify_masked = None
+        state.verify_sends = 0
         # Rebuilt next turn with the bikes and past conversations; and the
         # agent cleared so the bike choice runs through triage, pin or not.
         state.context_block = None
@@ -272,6 +314,9 @@ class VerifyFirst:
         reply = self._reply(message, state, text, outcome, model_text)
         reply.resolved = resolved
         return reply
+
+    def _too_many(self, message: InboundMessage, state: ConversationState, model_text: str) -> GateReply:
+        return self._reply(message, state, TOO_MANY_CODES, "too_many_codes", model_text, escalated=True)
 
     def _ask_number_again(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
         state.verify_step = NUMBER
@@ -302,5 +347,9 @@ class VerifyFirst:
 
     def _reply(self, message: InboundMessage, state: ConversationState, text: str, outcome: str,
                model_text: str, escalated: bool = False) -> GateReply:
+        if any(a.kind in ("image", "video") for a in message.attachments) and PHOTO_SAFETY not in text:
+            # At every step, not only the first: the keyword gate cannot see
+            # a hazard that is only in a picture.
+            text += " " + PHOTO_SAFETY
         self.log.emit("verify_first", message.conversation_id, outcome=outcome, step=state.verify_step)
         return GateReply(text=text, outcome=outcome, model_text=model_text, escalated=escalated)

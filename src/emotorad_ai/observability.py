@@ -25,6 +25,11 @@ from typing import Any, Callable, Dict, List, Optional
 # ("97000 00010"). The verify-first step accepts those forms, so the log and
 # the transcript must hide them too.
 _PHONE = re.compile(r"(?<![\d+])(?:\+?91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\d)")
+# A number read out in any grouping ("+91 970 000 0010", "97 00 00 00 10").
+# The verify-first step reads a number with exactly this pattern
+# (verify_first.find_phone), so what it accepts and what the log hides cannot
+# drift apart. Hidden only when its digits are a valid Indian mobile.
+LOOSE_PHONE = re.compile(r"(?<![\d+])\+?\d[\d \-]{8,16}\d(?!\d)")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # 16-digit-ish sequences: card numbers pasted into a support chat.
 _LONG_DIGITS = re.compile(r"\b\d{12,19}\b")
@@ -72,8 +77,18 @@ def redact_pii(text: str) -> str:
     # thing about what had been there. A card number cannot be caught by _PHONE
     # in passing: its word boundaries cannot land inside a longer digit run.
     text = _PHONE.sub("[phone]", text)
+    text = LOOSE_PHONE.sub(_phone_or_as_typed, text)
     text = _LONG_DIGITS.sub("[number]", text)
     return text
+
+
+def _phone_or_as_typed(match: "re.Match[str]") -> str:
+    digits = re.sub(r"\D", "", match.group())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    return "[phone]" if len(digits) == 10 and digits[0] in "6789" else match.group()
 
 
 def redact_fields(value: Any, key: Optional[str] = None, parent: Optional[str] = None) -> Any:

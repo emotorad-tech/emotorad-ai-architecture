@@ -29,13 +29,21 @@ class RedactionTests(unittest.TestCase):
         for typed in ("97000 00010", "97000-00010", "09700000010", "+91 97000-00010", "+91-9700000010"):
             self.assertNotIn("00010", redact_pii("call me on " + typed), typed)
 
+    def test_every_grouping_the_step_accepts_is_hidden(self):
+        # Finding 4 of the final review: the log hid fewer forms than the
+        # verify-first step reads as a number.
+        for typed in ("+91 970 000 0010", "970 000 0010", "97 00 00 00 10", "9700 000 010"):
+            hidden = redact_pii("call me on " + typed)
+            self.assertIn("[phone]", hidden, typed)
+            self.assertFalse(any(ch.isdigit() for ch in hidden), hidden)
+
     def test_the_forms_already_hidden_still_are(self):
         self.assertEqual(redact_pii("call me on 9876500000"), "call me on [phone]")
         self.assertEqual(redact_pii("+919876500000"), "[phone]")
 
     def test_other_numbers_are_left_alone(self):
         for text in ("1500 km and the range has dropped by half", "it shows E-06", "48V 14.4Ah removable",
-                     "frame EMXP2026001234"):
+                     "frame EMXP2026001234", "bought on 2026-09-30", "pincode 411045"):
             self.assertEqual(redact_pii(text), text)
 
 
