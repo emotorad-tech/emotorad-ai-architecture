@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .conversation import (
     AWAITING_BIKE_SELECTION,
@@ -178,21 +178,58 @@ def _contains_token(haystack: str, token: str) -> bool:
 
 
 def describe_bike(bike: Dict[str, Any]) -> str:
-    parts = [bike.get("product_name") or "your bike"]
+    """One line of the list. The whole frame number, so the customer can match
+    it to the sticker on the frame (the person's rule, 2026-09-30)."""
+    name = bike.get("product_name") or "Your bike"
     if bike.get("product_color"):
-        parts.append("(%s)" % bike["product_color"])
+        name += " (%s)" % bike["product_color"]
     frame = bike.get("frame_number")
-    if frame:
-        parts.append("ending %s" % frame[-4:])
-    return " ".join(parts)
+    return "%s, frame %s" % (name, frame) if frame else name
+
+
+def which_bike_text(bikes: Sequence[Dict[str, Any]]) -> str:
+    """The list and the question, for one bike or several. Shared by triage and
+    the verify-first step, so the two never word it differently."""
+    count = len(bikes)
+    lines = ["I found %d bike%s on this number:" % (count, "" if count == 1 else "s")]
+    lines += ["%d. %s" % (index, describe_bike(bike)) for index, bike in enumerate(bikes, start=1)]
+    if count == 1:
+        lines.append("Is this the bike that needs help? Reply yes, or send the frame number of the bike you mean.")
+    else:
+        lines.append("Which one needs help? Reply with its number in the list or its frame number.")
+    return "\n".join(lines)
+
+
+# A yes or a no to "is this the bike?", in English and Hindi. A no must be the
+# whole reply: "no power at all" is an issue, not an answer.
+_YES = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ya|haan|haa|han|ha|ji|correct|right|sure|ok|okay|that'?s it|this one|same one|हाँ|हां|जी)(?!\w)",
+    re.IGNORECASE,
+)
+_NO = re.compile(
+    r"^\s*(?:no|nope|nah|nahi|nahin|नहीं|not this(?: one)?|not that(?: one)?|wrong(?: bike)?|"
+    r"a different one|different bike|another one|another bike|other bike)\s*[.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def says_yes(text: str) -> bool:
+    return bool(_YES.match(text or ""))
+
+
+def says_no(text: str) -> bool:
+    return bool(_NO.match(text or ""))
 
 
 class TriageAgent:
     """Greets, narrows to one bike, captures the issue, hands off."""
 
-    def __init__(self, topic_agents: Dict[str, str]) -> None:
+    def __init__(self, topic_agents: Dict[str, str], unlisted_agent: Optional[str] = None) -> None:
         # topic -> sub-agent name, e.g. {"battery": "battery_support"}.
         self.topic_agents = topic_agents
+        # Where a customer goes who says the one bike listed is not theirs:
+        # the bike they mean is not registered on this number.
+        self.unlisted_agent = unlisted_agent
 
     def handle(
         self,
@@ -231,34 +268,43 @@ class TriageAgent:
     # -- phases --------------------------------------------------------------
 
     def _ask_which_bike(self, bikes: Sequence[Dict[str, Any]]) -> str:
-        lines = ["You have %d bikes registered with us. Which one is this about?" % len(bikes)]
-        for index, bike in enumerate(bikes, start=1):
-            lines.append("%d. %s" % (index, describe_bike(bike)))
-        return "\n".join(lines)
+        return which_bike_text(bikes)
 
     def _resolve_selection(
         self, text: str, resolved: ResolvedIdentity, state: ConversationState
     ) -> TriageOutcome:
-        bike = match_bike(text, resolved.bikes)
+        bikes = resolved.bikes
+        if not bikes:
+            # Nothing to choose from (the lookup failed after verification):
+            # carry on to the issue rather than asking about an empty list.
+            state.move_to(AWAITING_ISSUE, "no_bikes_to_choose")
+            return self._route_or_ask(self._take_pending(state)[0], state, "text")
+
+        bike = bikes[0] if len(bikes) == 1 and says_yes(text) else match_bike(text, bikes)
         if bike is None:
+            if len(bikes) == 1 and self.unlisted_agent and says_no(text):
+                self._take_pending(state)
+                state.route_to(self.unlisted_agent)
+                return TriageOutcome(agent=self.unlisted_agent, reason="bike_not_listed")
             # Re-ask rather than guess. An unmatched reply usually means the
             # customer answered something else entirely, and picking a bike here
             # would silently attach the whole conversation to the wrong one.
             return TriageOutcome(
-                reply=(
-                    "Sorry, I did not catch which bike you meant. "
-                    + self._ask_which_bike(resolved.bikes)
-                ),
+                reply="Sorry, I did not catch which bike you meant. " + which_bike_text(bikes),
                 reason="selection_unmatched",
             )
 
         state.select_bike(bike["frame_number"])
         state.move_to(AWAITING_ISSUE, "bike_selected")
-        topic = state.pending_topic
-        source = state.pending_topic_source or "text"
+        topic, source = self._take_pending(state)
+        return self._route_or_ask(topic, state, source)
+
+    @staticmethod
+    def _take_pending(state: ConversationState) -> Tuple[Optional[str], str]:
+        topic, source = state.pending_topic, state.pending_topic_source or "text"
         state.pending_topic = None
         state.pending_topic_source = None
-        return self._route_or_ask(topic, state, source)
+        return topic, source
 
     def _route_or_ask(
         self, topic: Optional[str], state: ConversationState, source: str = "text"

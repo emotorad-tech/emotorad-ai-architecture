@@ -8,7 +8,15 @@ from emotorad_ai.conversation import (
     ConversationState,
 )
 from emotorad_ai.identity import ResolvedIdentity
-from emotorad_ai.triage import TriageAgent, classify_issue, match_bike
+from emotorad_ai.triage import (
+    TriageAgent,
+    classify_issue,
+    describe_bike,
+    match_bike,
+    says_no,
+    says_yes,
+    which_bike_text,
+)
 
 BIKES = [
     {"frame_number": "TREX2024881201", "product_name": "T-Rex Air", "product_color": "Blue"},
@@ -171,6 +179,79 @@ class TriageFlowTests(unittest.TestCase):
 
         self.assertEqual(state.selected_frame, "DDL32021100455")
         self.assertIn("bike_changed:TREX2024881201->DDL32021100455", state.transitions)
+
+
+class FullFrameNumbersTests(unittest.TestCase):
+    """The person's rule (2026-09-30): the list shows each bike's frame number
+    so the customer can match it to the sticker on the frame."""
+
+    def test_the_whole_frame_number_is_shown(self):
+        self.assertEqual(
+            describe_bike({"product_name": "EMX Plus", "product_color": "Grey", "frame_number": "EMXP2026001234"}),
+            "EMX Plus (Grey), frame EMXP2026001234",
+        )
+        self.assertEqual(describe_bike({"product_name": "EMX Plus", "product_color": "", "frame_number": "F1"}),
+                         "EMX Plus, frame F1")
+
+    def test_several_bikes_ask_which(self):
+        text = which_bike_text(BIKES)
+        self.assertIn("I found %d bikes on this number:" % len(BIKES), text)
+        for bike in BIKES:
+            self.assertIn(bike["frame_number"], text)
+        self.assertIn("Which one needs help?", text)
+
+    def test_one_bike_asks_to_confirm(self):
+        text = which_bike_text(BIKES[:1])
+        self.assertIn("I found 1 bike on this number:", text)
+        self.assertIn("Is this the bike that needs help? Reply yes", text)
+
+
+class YesNoTests(unittest.TestCase):
+    def test_yes(self):
+        for typed in ("yes", "Yes, that's the one", "haan", "ji", "correct", "ok", "हाँ"):
+            self.assertTrue(says_yes(typed), typed)
+        for typed in ("yesterday it stopped", "no", "okayish"):
+            self.assertFalse(says_yes(typed), typed)
+
+    def test_no(self):
+        for typed in ("no", "No.", "nope", "nahi", "नहीं", "not this one", "a different one"):
+            self.assertTrue(says_no(typed), typed)
+        for typed in ("no power at all", "yes", "nothing happens"):
+            self.assertFalse(says_no(typed), typed)
+
+
+class OneBikeSelectionTests(unittest.TestCase):
+    """Only the verify-first step puts one bike into selection; triage on its
+    own still picks a lone bike without asking."""
+
+    def setUp(self):
+        self.triage = TriageAgent(TOPIC_AGENTS, unlisted_agent="late_warranty_registration")
+        self.state = ConversationState("c1")
+        self.state.move_to(AWAITING_BIKE_SELECTION, "verified")
+        self.state.pending_topic = "battery"
+
+    def test_yes_selects_the_bike_and_routes_by_the_kept_topic(self):
+        outcome = self.triage.handle(message("yes"), resolved(BIKES[:1]), self.state)
+        self.assertEqual(outcome.agent, "battery_support")
+        self.assertEqual(self.state.selected_frame, BIKES[0]["frame_number"])
+
+    def test_no_goes_to_the_unlisted_agent(self):
+        outcome = self.triage.handle(message("no"), resolved(BIKES[:1]), self.state)
+        self.assertEqual(outcome.agent, "late_warranty_registration")
+        self.assertEqual(outcome.reason, "bike_not_listed")
+        self.assertIsNone(self.state.selected_frame)
+
+    def test_anything_else_asks_again(self):
+        outcome = self.triage.handle(message("what?"), resolved(BIKES[:1]), self.state)
+        self.assertFalse(outcome.is_handoff)
+        self.assertIn("did not catch", outcome.reply)
+        self.assertIn(BIKES[0]["frame_number"], outcome.reply)
+
+    def test_no_bikes_to_choose_from_carries_on_to_the_issue(self):
+        # A lookup that failed after verification: no list to ask about.
+        outcome = self.triage.handle(message("2"), resolved([]), self.state)
+        self.assertEqual(outcome.agent, "battery_support")
+        self.assertNotIn("0 bikes", outcome.reply or "")
 
 
 if __name__ == "__main__":
