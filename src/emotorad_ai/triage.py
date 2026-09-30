@@ -183,13 +183,19 @@ def bike_ref(bike: Dict[str, Any]) -> Optional[str]:
     return bike.get("bike_ref") or bike.get("frame_number")
 
 
+def bike_name(bike: Dict[str, Any]) -> str:
+    """The model and colour, with no identifier."""
+    name = bike.get("product_name") or "Your bike"
+    if bike.get("product_color"):
+        name += " (%s)" % bike["product_color"]
+    return name
+
+
 def describe_bike(bike: Dict[str, Any]) -> str:
     """One line of the list. The whole frame number, so the customer can match
     it to the sticker on the frame (the person's rule, 2026-09-30). A bike
     whose frame number is not on record says so, and never shows its IMEI."""
-    name = bike.get("product_name") or "Your bike"
-    if bike.get("product_color"):
-        name += " (%s)" % bike["product_color"]
+    name = bike_name(bike)
     frame = bike.get("frame_number")
     if frame:
         return "%s, frame %s" % (name, frame)
@@ -204,7 +210,10 @@ def which_bike_text(bikes: Sequence[Dict[str, Any]]) -> str:
     count = len(bikes)
     lines = ["I found %d bike%s on this number:" % (count, "" if count == 1 else "s")]
     lines += ["%d. %s" % (index, describe_bike(bike)) for index, bike in enumerate(bikes, start=1)]
-    if count == 1:
+    if count == 1 and not bikes[0].get("frame_number"):
+        # No frame number on record to match one against, so none is asked for.
+        lines.append("Is this the bike that needs help? Reply yes or no.")
+    elif count == 1:
         lines.append("Is this the bike that needs help? Reply yes, or send the frame number of the bike you mean.")
     else:
         lines.append("Which one needs help? Reply with its number in the list or its frame number.")
@@ -283,7 +292,7 @@ class TriageAgent:
                     metadata={"bikes": [bike_ref(b) for b in bikes]},
                 )
             if len(bikes) == 1:
-                state.select_bike(bike_ref(bikes[0]))
+                state.select_bike(bike_ref(bikes[0]), bike_name(bikes[0]))
 
         return self._route_or_ask(topic, state, source)
 
@@ -304,6 +313,10 @@ class TriageAgent:
 
         single = len(bikes) == 1
         bike = bikes[0] if single and says_yes(text) else match_bike(text, bikes)
+        if bike is None and single and not bikes[0].get("frame_number") and names_a_frame(text):
+            # The only bike has no frame number on record, so a frame number
+            # typed now is the rider reading theirs, not a different bike.
+            bike = bikes[0]
         if bike is None:
             # One bike listed and the customer says it is not theirs, or sends
             # the frame number of one that is not on the list (as the question
@@ -320,7 +333,7 @@ class TriageAgent:
                 reason="selection_unmatched",
             )
 
-        state.select_bike(bike_ref(bike))
+        state.select_bike(bike_ref(bike), bike_name(bike))
         state.move_to(AWAITING_ISSUE, "bike_selected")
         topic, source = self._take_pending(state)
         return self._route_or_ask(topic, state, source)

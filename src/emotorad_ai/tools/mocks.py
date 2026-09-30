@@ -111,9 +111,10 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
     """
     bike = {
         "frame_number": record.get("frame_number"),
-        # The key selection and ownership checks use: the frame number, or
-        # `vin:<VIN>` for a bike whose frame number is not on record (an app
-        # bike registered by IMEI, tools/amigo.py). Never shown to the rider.
+        # The key selection and ownership checks use: the frame number, or an
+        # opaque `app:` reference for a bike whose frame number is not on
+        # record (an app bike registered by IMEI, tools/amigo.app_ref). Never
+        # the VIN, and never shown to the rider.
         "bike_ref": record.get("bike_ref") or record.get("frame_number"),
         "frame_on_record": record.get("frame_on_record", True),
         "in_app": bool(record.get("in_app")),
@@ -133,7 +134,7 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         "product_id": record.get("product_id"),
     }
 
-    # Two states only an Amigo bike can be in (tools/amigo.merged_source).
+    # Three states only an Amigo bike can be in (tools/amigo.merged_source).
     if record.get("warranty_unavailable"):
         bike.update({
             "in_warranty": None,
@@ -142,14 +143,25 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
                      "Say so plainly. Do not state or estimate coverage."),
         })
         return bike
+    if record.get("warranty_unknown"):
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "warranty_unknown",
+            "note": ("This bike is in the EMotorad app with no frame number on record, and this number has "
+                     "more than one bike of the same model with EMotorad, so which warranty record is this "
+                     "bike's cannot be told. Do not state or estimate coverage. If warranty matters to what "
+                     "they need, ask them to read the frame number from the sticker on the frame."),
+        })
+        return bike
     if record.get("warranty_on_record") is False:
         bike.update({
             "in_warranty": None,
             "coverage_status": "not_registered",
             "remedy": "late_warranty_registration",
             "note": ("This bike is in the EMotorad app but is not registered for warranty with EMotorad. "
-                     "Do not state or estimate coverage. If warranty matters to what they need, offer to "
-                     "register it."),
+                     "Do not state or estimate coverage. Registering it cannot be done in this chat: if "
+                     "warranty matters to what they need, say the support team will help register it, and "
+                     "raise a support ticket that says so."),
         })
         return bike
 
@@ -279,11 +291,30 @@ def _price_order(dealer: Dict[str, Any], lines: List[Dict[str, Any]]) -> Dict[st
     }
 
 
+# A frame number as riders read it off the sticker; the same shape triage
+# listens for (triage._FRAME), whole-string here because it is an argument.
+_FRAME_SHAPE = re.compile(r"[A-Z]{2,5}\d{6,}")
+
+
+def _within_two_edits(a: str, b: str) -> bool:
+    """Whether two frame numbers are at most two edits apart."""
+    if abs(len(a) - len(b)) > 2:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, char in enumerate(a, start=1):
+        current = [i]
+        for j, other in enumerate(b, start=1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (char != other)))
+        previous = current
+    return previous[-1] <= 2
+
+
 def _owned_bike(
     phone: str,
     frame_number: Optional[str],
     bikes_on: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
     allow_rider_read: bool = False,
+    selected: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Resolve which bike a write is about, refusing anything not owned.
 
@@ -300,7 +331,11 @@ def _owned_bike(
 
     A bike whose frame number is not on record (an app bike registered by
     IMEI) is matched by its internal reference. For a ticket, a frame number
-    the customer reads off it is accepted and marked as read by the rider.
+    the customer reads off it is accepted and marked as read by the rider, but
+    only for the bike the conversation chose (`selected`, or the only bike on
+    the number), only if it is shaped like a frame number, and never when it
+    is one or two characters from a frame number that is on record: that is a
+    typo of a bike we know, not a reading of one we do not.
     """
     records = bikes_on(phone) if bikes_on else (fixtures.WARRANTY_RECORDS.get(phone) or [])
     if not records:
@@ -315,14 +350,24 @@ def _owned_bike(
             if frame_number == ref(record) or wanted == re.sub(r"\s+", "", record.get("frame_number") or "").upper():
                 return record
         unknown = [r for r in records if r.get("frame_on_record") is False]
-        if allow_rider_read and len(unknown) == 1:
-            return dict(unknown[0], frame_number=frame_number.strip(), frame_number_source="read by the rider")
+        chosen = [r for r in unknown if selected and ref(r) == selected] or (unknown if len(records) == 1 else [])
+        on_record = [re.sub(r"\s+", "", r.get("frame_number") or "").upper() for r in records]
+        if (allow_rider_read and len(chosen) == 1 and _FRAME_SHAPE.fullmatch(wanted)
+                and not any(_within_two_edits(wanted, known) for known in on_record if known)):
+            return dict(chosen[0], frame_number=wanted, frame_number_source="read by the rider")
         raise ToolError(
             "frame_number_not_owned",
             "Frame number %s is not registered to this customer. Do not use a frame number "
             "the customer typed without checking it against lookup_warranty_record; ask them "
             "to confirm it from the sticker on the frame." % frame_number,
         )
+
+    if selected:
+        # The conversation's chosen bike, when the call names none. If this
+        # read no longer lists it (Amigo stopped answering since it was
+        # chosen), the ticket is raised without a bike rather than refused or
+        # put on a bike the rider did not mean.
+        return next((record for record in records if ref(record) == selected), None)
 
     if len(records) > 1:
         raise ToolError(
@@ -876,7 +921,9 @@ def build_registry(
                     "Frame number of the bike this ticket is about. Required when the customer "
                     "owns more than one bike. Must be one of the frame numbers returned by "
                     "lookup_warranty_record — never invented, and never taken from what the "
-                    "customer typed without checking it against that list."
+                    "customer typed without checking it against that list. The one exception: "
+                    "for the chosen bike when its frame number is not on record, ask the "
+                    "customer to read it from the sticker on the frame and pass what they read."
                 ),
             },
         },
@@ -884,7 +931,7 @@ def build_registry(
         injects=("phone",),
         # Whether any photo or video has arrived in the conversation, from the
         # runtime's facts; absent for a caller that has none (the safety branch).
-        optional_injects=("evidence_seen",),
+        optional_injects=("evidence_seen", "selected_bike"),
         write=True,
     )
     def create_support_ticket(
@@ -895,6 +942,7 @@ def build_registry(
         idempotency_key: str,
         frame_number: Optional[str] = None,
         evidence_seen: Optional[bool] = None,
+        selected_bike: Optional[str] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
@@ -911,7 +959,7 @@ def build_registry(
                 "(a voice call, or they say they cannot), hand the conversation to a person instead.",
                 remedy="collect_evidence",
             )
-        bike = _owned_bike(phone, frame_number, bikes_on, allow_rider_read=True)
+        bike = _owned_bike(phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
         ticket = tickets.create(
             phone=phone,
             category=category,

@@ -174,14 +174,19 @@ class ContextEnricher:
                 coverage = "out of warranty"
             else:
                 coverage = "coverage unknown"
-            # Two states only an app bike can be in (tools/amigo.py).
+            # Three states only an app bike can be in (tools/amigo.py).
             if bike.get("coverage_status") == "not_registered":
-                coverage = "warranty not on record (in the app only; offer to register it if warranty matters)"
+                coverage = ("warranty not on record (in the app only; it cannot be registered in this chat, so "
+                            "if warranty matters say the support team will help and raise a ticket saying so)")
             elif bike.get("coverage_status") == "warranty_unavailable":
                 coverage = "warranty cannot be checked right now"
+            elif bike.get("coverage_status") == "warranty_unknown":
+                coverage = "warranty cannot be matched to this bike"
             # A bike registered in the app by IMEI has no frame number on
             # record; its IMEI and VIN are never shown.
-            frame = "frame %s" % bike["frame_number"] if bike.get("frame_number") else "frame number not on record"
+            frame = ("frame %s" % bike["frame_number"] if bike.get("frame_number") else
+                     "frame number not on record (if a ticket needs it, ask them to read it from the sticker "
+                     "on the frame)")
             lines.append("- %s, %s, %s" % (descriptor, frame, coverage))
         return "\n".join(lines)
 

@@ -10,7 +10,7 @@ from emotorad_ai.conversation import AWAITING_BIKE_SELECTION, ConversationState
 from emotorad_ai.enrichment import ContextEnricher
 from emotorad_ai.identity import IdentityResolver
 from emotorad_ai.tools import fixtures
-from emotorad_ai.tools.amigo import merged_source
+from emotorad_ai.tools.amigo import app_ref, merged_source
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, PLACE_REPLACEMENT_ORDER, build_registry
 from emotorad_ai.tools.registry import ToolContext
 from emotorad_ai.triage import TriageAgent, bike_ref, describe_bike, which_bike_text
@@ -61,7 +61,7 @@ class ChosenTests(unittest.TestCase):
             InboundMessage(conversation_id="c1", persona="customer", channel="website_chat", message_text="yes",
                            identity=Identity(strength=VERIFIED, phone=RIDER_B, em_aid="a")), who, state)
         self.assertEqual(outcome.agent, "battery_support")
-        self.assertEqual(state.selected_frame, "vin:FRPVINTEST0000000000000b")
+        self.assertEqual(state.selected_frame, app_ref("FRPVINTEST0000000000000b"))
         self.assertEqual(bike_ref(who.bikes[0]), state.selected_frame)
 
 

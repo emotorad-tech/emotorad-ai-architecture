@@ -110,13 +110,20 @@ def _describe(bike: Dict[str, Any]) -> str:
 
 def _coverage_line(bike: Dict[str, Any]) -> str:
     """One line of coverage, or an explicit instruction not to claim any."""
-    # Two states only an app bike can be in (tools/amigo.py). Neither has a
+    # Three states only an app bike can be in (tools/amigo.py). None has a
     # term to quote, so they come before the lines that quote one.
     if bike.get("coverage_status") == "not_registered":
         return (
             "  Coverage: NOT ON RECORD. The bike is in the EMotorad app but is not registered for "
-            "warranty with EMotorad. Do not state or estimate coverage. If warranty matters to what "
-            "they need, offer to register it."
+            "warranty with EMotorad. Do not state or estimate coverage. It cannot be registered in "
+            "this chat: if warranty matters to what they need, say the support team will help "
+            "register it, and raise a support ticket that says so."
+        )
+    if bike.get("coverage_status") == "warranty_unknown":
+        return (
+            "  Coverage: CANNOT BE MATCHED. The bike is in the app with no frame number on record, "
+            "and more than one bike of its model is registered on this number. Do not state or "
+            "estimate coverage; if it matters, ask them to read the frame number from the sticker."
         )
     if bike.get("coverage_status") == "warranty_unavailable":
         return (

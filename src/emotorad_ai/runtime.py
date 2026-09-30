@@ -944,6 +944,9 @@ class Runtime:
             facts={
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
+                # The ticket tool's check on a frame number the rider reads
+                # off the sticker: only for the bike this conversation chose.
+                "selected_bike": lambda: state.selected_frame,
                 # The customer's own words, for the address backstop: an
                 # address is accepted only if it matches the record or
                 # something the customer actually typed in this conversation.
@@ -1148,8 +1151,15 @@ class Runtime:
             }
             # With several bikes the ticket needs one named, and triage may not
             # have run yet — the safety branch fires before it.
+            # The chosen bike goes as the conversation's choice, not as a
+            # frame number: if this turn's bike list no longer holds it (Amigo
+            # stopped answering since it was chosen), the ticket is raised
+            # without a bike, naming it here, rather than refused.
+            late: Dict[str, Any] = {}
             if state.selected_frame:
-                arguments["frame_number"] = state.selected_frame
+                late["selected_bike"] = lambda: state.selected_frame
+                if state.selected_bike_label:
+                    arguments["description"] += " The rider's bike: %s." % state.selected_bike_label
             elif resolved.single_bike:
                 arguments["frame_number"] = bike_ref(resolved.single_bike)
 
@@ -1164,6 +1174,7 @@ class Runtime:
                     conversation_id=message.conversation_id,
                     phone=resolved.identity.phone,
                     cluster_id=resolved.cluster_id,
+                    late=late,
                 ),
                 run_without_idempotency=True,
             )

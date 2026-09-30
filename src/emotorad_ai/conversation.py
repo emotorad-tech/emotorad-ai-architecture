@@ -49,6 +49,9 @@ class ConversationState:
     # The bike under discussion. A frame number, always taken from the owned set
     # — never from what the customer typed, and never guessed when several exist.
     selected_frame: Optional[str] = None
+    # The chosen bike's model and colour, as the rider saw it in the list. For
+    # a safety ticket raised when that bike has since left the bike list.
+    selected_bike_label: Optional[str] = None
     agent: Optional[str] = None
     # Topic understood before we knew which bike it was about. A customer taps
     # "Battery issue" and *then* picks a bike from three; without this the intent
@@ -163,7 +166,7 @@ class ConversationState:
         self.transitions.append("%s->%s%s" % (self.phase, phase, ":" + reason if reason else ""))
         self.phase = phase
 
-    def select_bike(self, frame_number: str) -> None:
+    def select_bike(self, frame_number: str, label: Optional[str] = None) -> None:
         """Record which bike this conversation is about.
 
         Changing it mid-conversation is legitimate — customers do say "no, the
@@ -175,6 +178,7 @@ class ConversationState:
             self.sub_category = None
             self.transitions.append("bike_changed:%s->%s" % (self.selected_frame, frame_number))
         self.selected_frame = frame_number
+        self.selected_bike_label = label
 
     def route_to(self, agent: str) -> None:
         self.agent = agent

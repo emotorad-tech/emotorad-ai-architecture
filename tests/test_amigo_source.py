@@ -4,7 +4,7 @@ import unittest
 from datetime import date
 
 from emotorad_ai.tools import fixtures
-from emotorad_ai.tools.amigo import amigo_records, display_model, frame_on_record, merged_source
+from emotorad_ai.tools.amigo import amigo_records, app_ref, display_model, frame_on_record, merged_source
 from emotorad_ai.tools.mocks import LOOKUP_WARRANTY_RECORD, build_registry
 from emotorad_ai.tools.registry import ToolContext, ToolError
 from tests.amigo_fake import RIDER_A, RIDER_B, RIDER_C, RIDERS, FakeAmigo
@@ -39,11 +39,13 @@ class FrameOnRecordTests(unittest.TestCase):
 
 
 class AmigoRecordsTests(unittest.TestCase):
-    def test_rider_b_has_no_frame_number_and_a_vin_reference(self):
+    def test_rider_b_has_no_frame_number_and_an_opaque_reference(self):
+        # Opaque, not the VIN: the model reads bike_ref in tool results.
         [record] = amigo_records(RIDERS[RIDER_B])
         self.assertIsNone(record["frame_number"])
         self.assertFalse(record["frame_on_record"])
-        self.assertEqual(record["bike_ref"], "vin:FRPVINTEST0000000000000b")
+        self.assertEqual(record["bike_ref"], app_ref("FRPVINTEST0000000000000b"))
+        self.assertRegex(record["bike_ref"], r"^app:[0-9a-f]{12}$")
         self.assertEqual(record["product_name"], "T-Rex Smart")
         self.assertEqual(record["product_color"], "Grey")
         self.assertFalse(record["warranty_on_record"])

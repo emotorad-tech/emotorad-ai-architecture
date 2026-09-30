@@ -13,6 +13,7 @@ and never the connection string.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -27,6 +28,9 @@ _logger = logging.getLogger(__name__)
 DSN_ENV = "EMOTORAD_AMIGO_PG_DSN"
 # Hydration asks for a rider's bikes every turn; the database is a db.t3.micro.
 BIKES_TTL_SECONDS = 300
+# After a failed read, reads fail at once for this long rather than each
+# waiting on the connect timeout again (a small circuit breaker).
+FAILURE_TTL_SECONDS = 60
 CONNECT_TIMEOUT_SECONDS = 3
 APPLICATION_NAME = "emotorad-ai-chatbot"
 
@@ -88,18 +92,34 @@ class AmigoReader:
         self._clock = clock
         self._cache: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
         self._lock = threading.Lock()
+        self._failed: Optional[Tuple[float, str]] = None
 
-    def _query(self, database: str, sql: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
+    def _queries(self, database: str, statements: Sequence[Tuple[str, Sequence[Any]]]) -> List[List[Dict[str, Any]]]:
+        """Several statements on one connection, each answered as rows."""
+        with self._lock:
+            failed = self._failed
+        if failed and self._clock() - failed[0] < FAILURE_TTL_SECONDS:
+            raise AmigoUnavailable(failed[1])
         try:
             with self._connect(self._dsn, dbname=self._databases[database],
                                connect_timeout=CONNECT_TIMEOUT_SECONDS, application_name=APPLICATION_NAME) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, params)
-                    names = [column[0] for column in cursor.description]
-                    return [dict(zip(names, row)) for row in cursor.fetchall()]
+                answers = []
+                for sql, params in statements:
+                    with conn.cursor() as cursor:
+                        cursor.execute(sql, params)
+                        names = [column[0] for column in cursor.description]
+                        answers.append([dict(zip(names, row)) for row in cursor.fetchall()])
         except Exception as exc:
             # The class only: a driver error can quote the connection string.
+            with self._lock:
+                self._failed = (self._clock(), type(exc).__name__)
             raise AmigoUnavailable(type(exc).__name__) from None
+        with self._lock:
+            self._failed = None
+        return answers
+
+    def _query(self, database: str, sql: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
+        return self._queries(database, [(sql, params)])[0]
 
     def bikes(self, phone: str) -> Optional[Dict[str, Any]]:
         forms = phone_forms(phone)
@@ -109,7 +129,17 @@ class AmigoReader:
             cached = self._cache.get(forms[0])
             if cached and self._clock() - cached[0] < BIKES_TTL_SECONDS:
                 return cached[1]
-        rows = self._query("userbike", _BIKES_SQL, [forms])
+        try:
+            rows = self._query("userbike", _BIKES_SQL, [forms])
+        except AmigoUnavailable as exc:
+            if cached is None:
+                raise
+            # A bike list that changes between turns can strand a conversation
+            # on a bike that has vanished from it, so an outage keeps the last
+            # good list rather than dropping the app bikes.
+            _logger.warning("amigo_unavailable (%s): using the bike list from %d s ago", exc,
+                            self._clock() - cached[0])
+            return cached[1]
         rider: Optional[Dict[str, Any]] = None
         if rows:
             rider = {"emuserid": rows[0]["emuserid"], "username": rows[0]["username"], "bikes": [
@@ -124,11 +154,10 @@ class AmigoReader:
         rider = self.bikes(phone)
         if rider is None:
             return None
-        detail = self._query("garage", _SERVICE_SQL, [rider["emuserid"]])
+        detail, done, types = self._queries("garage", [
+            (_SERVICE_SQL, [rider["emuserid"]]), (_DONE_SQL, [rider["emuserid"]]), (_TYPES_SQL, [])])
         if not detail:
             return None
-        done = self._query("garage", _DONE_SQL, [rider["emuserid"]])
-        types = self._query("garage", _TYPES_SQL, [])
         row = detail[0]
         return {"vin": row["vin"], "bikemodel": row["bikemodel"], "odometer": row["odometer"],
                 "services": row["services"] or {}, "done_types": {d["servicetype"] for d in done}, "types": types}
@@ -177,6 +206,17 @@ def _norm(frame: Optional[str]) -> str:
     return re.sub(r"\s+", "", frame or "").upper()
 
 
+def app_ref(vin: str) -> str:
+    """The selection and ownership key for a bike with no frame number on
+    record. Opaque and stable: the model reads it in tool results, and the VIN
+    must never reach the model, the trace or the rider."""
+    return "app:" + hashlib.sha256(vin.encode("utf-8")).hexdigest()[:12]
+
+
+def _model_key(name: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
 def amigo_records(rider: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """The rider's app bikes, shaped like OMS records so the warranty tool,
     tickets and orders handle them without knowing where they came from."""
@@ -191,7 +231,7 @@ def amigo_records(rider: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         records.append({
             "customer_name": name,
             "frame_number": frame,
-            "bike_ref": frame or "vin:%s" % bike["vin"],
+            "bike_ref": frame or app_ref(bike["vin"]),
             "frame_on_record": on_record,
             "product_name": display_model(bike.get("model")),
             "product_color": (bike.get("color") or "").strip().capitalize(),
@@ -229,11 +269,29 @@ def merged_source(oms_source: Callable[[str], Optional[List[Dict[str, Any]]]], r
                 raise oms_error
             return oms or None
         unmatched = {_norm(a["frame_number"]): a for a in app if a["frame_on_record"]}
-        merged = []
+        merged, spare = [], []
         for record in oms:
             match = unmatched.pop(_norm(record.get("frame_number")), None)
             merged.append(dict(record, in_app=True) if match else record)
-        extra = [a for a in app if not a["frame_on_record"] or _norm(a["frame_number"]) in unmatched]
+            if not match:
+                spare.append(len(merged) - 1)
+        extra = [a for a in app if a["frame_on_record"] and _norm(a["frame_number"]) in unmatched]
+        # An app bike registered by IMEI has no frame number to match an OMS
+        # record by. The only OMS bike of its model that nothing else matched
+        # is taken to be it; with several, which one is its record cannot be
+        # told, and calling it unregistered would be wrong.
+        frameless = [a for a in app if not a["frame_on_record"]]
+        for bike in frameless:
+            model = _model_key(bike["product_name"])
+            same_model = [i for i in spare if _model_key(merged[i].get("product_name")) == model]
+            twins = [a for a in frameless if _model_key(a["product_name"]) == model]
+            if model and len(same_model) == 1 and len(twins) == 1:
+                merged[same_model[0]] = dict(merged[same_model[0]], in_app=True)
+                spare.remove(same_model[0])
+            elif model and same_model:
+                extra.append(dict(bike, warranty_unknown=True))
+            else:
+                extra.append(bike)
         if oms_error is not None:
             if not extra:
                 raise oms_error
