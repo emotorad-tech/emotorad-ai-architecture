@@ -21,11 +21,12 @@ class HealthTests(unittest.TestCase):
         # Both video keys blanked, so the frames fallback is what is reported on
         # any machine, including one with a real key in its environment.
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
-                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": ""})
+                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": ""})
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
-             "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off"},
+             "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
+             "amigo": "not configured"},
         )
 
     def test_with_no_bucket_no_guide_picture_is_offered(self):
