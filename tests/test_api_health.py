@@ -21,13 +21,21 @@ class HealthTests(unittest.TestCase):
         # Both video keys blanked, so the frames fallback is what is reported on
         # any machine, including one with a real key in its environment.
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
-                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": ""})
+                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
+                         "EMOTORAD_AI_BUILD": ""})
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
-             "amigo": "not configured"},
+             "amigo": "not configured", "build": "unknown"},
         )
+
+    def test_health_names_the_commit_it_was_built_from(self):
+        # The deploy checks this, so a build that failed on the server and
+        # left an older image running fails the deploy instead of passing it
+        # (staging ran 22 September's image through two "deploys", 2026-09-30).
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_BUILD": "bf666748703b"})
+        self.assertEqual(api.health()["build"], "bf666748703b")
 
     def test_with_no_bucket_no_guide_picture_is_offered(self):
         # The person's rule (2026-09-29): a picture the server cannot send is

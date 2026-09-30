@@ -417,6 +417,11 @@ class UploadIn(BaseModel):
     path: Optional[AssetPath] = None
 
 
+# The commit this image was built from. The deploy passes it and checks for it,
+# so an older image left running by a failed build fails the deploy.
+BUILD = os.environ.get("EMOTORAD_AI_BUILD") or "unknown"
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -430,6 +435,7 @@ def health() -> dict:
         "video_summary": getattr(VIDEO_SUMMARISER, "provider", "gemini") if VIDEO_SUMMARISER is not None else "frames",
         "tracing": "on" if TRACING is not None else "off",
         "amigo": "configured" if AMIGO is not None else "not configured",
+        "build": BUILD,
     }
 
 

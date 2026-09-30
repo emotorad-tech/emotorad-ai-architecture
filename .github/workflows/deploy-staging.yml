@@ -90,19 +90,22 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --parameters commands="[
+              \"set -e\",
               \"cd /opt/emotorad-ai\",
               \"aws s3 cp s3://$S3_BUCKET/deploy/app.tar.gz app.tar.gz --region $AWS_REGION\",
               \"tar xzf app.tar.gz\",
+              \"docker image prune -f\",
               \"docker build -t emotorad-ai:stage .\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=openrouter -e EMOTORAD_STORE=mongodb -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage\"
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=openrouter -e EMOTORAD_STORE=mongodb -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media -e EMOTORAD_AI_BUILD=$GITHUB_SHA emotorad-ai:stage\",
+              \"docker image prune -f\"
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_ENV"
 
           # Poll rather than `ssm wait command-executed`, which doesn't
           # reliably report shell-script exit codes as command failure.
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 60); do
             STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text)
             [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
             sleep 5
@@ -115,9 +118,11 @@ jobs:
 
       - name: Health check
         run: |
-          for attempt in $(seq 1 6); do
+          for attempt in $(seq 1 12); do
             sleep 5
-            if curl -sf https://ai-release-stage.emotorad.com/health | tee /dev/stderr | grep -q '"secrets":"loaded"'; then
+            health=$(curl -sf https://ai-release-stage.emotorad.com/health || true)
+            echo "$health" >&2
+            if echo "$health" | grep -q '"secrets":"loaded"' && echo "$health" | grep -q "\"build\":\"$GITHUB_SHA\""; then
               exit 0
             fi
             echo "health check attempt $attempt: not ready yet" >&2
