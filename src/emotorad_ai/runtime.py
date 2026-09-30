@@ -113,7 +113,7 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
-from .triage import TriageAgent
+from .triage import TriageAgent, bike_ref
 from .verify_first import VerifyFirst
 
 UNSUPPORTED_MESSAGE = (
@@ -895,7 +895,9 @@ class Runtime:
     @staticmethod
     def _selected_bike(resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
         for bike in resolved.bikes:
-            if bike.get("frame_number") == state.selected_frame:
+            # By reference: a bike with no frame number on record would
+            # otherwise match a conversation with no bike chosen.
+            if state.selected_frame and bike_ref(bike) == state.selected_frame:
                 return bike
         return resolved.single_bike
 
@@ -907,7 +909,7 @@ class Runtime:
         if name:
             terms.append(name)
             terms.extend(part for part in name.split() if len(part) > 2)
-        terms.extend(bike.get("frame_number") or "" for bike in resolved.bikes)
+        terms.extend(term for bike in resolved.bikes for term in (bike.get("frame_number") or "", bike_ref(bike) or ""))
         return [term for term in terms if term]
 
     # -- steps ---------------------------------------------------------------
@@ -1149,7 +1151,7 @@ class Runtime:
             if state.selected_frame:
                 arguments["frame_number"] = state.selected_frame
             elif resolved.single_bike:
-                arguments["frame_number"] = resolved.single_bike["frame_number"]
+                arguments["frame_number"] = bike_ref(resolved.single_bike)
 
             # Raised even if the receipt store is down: a duplicate safety
             # ticket is a lesser harm than none.

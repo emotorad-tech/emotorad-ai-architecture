@@ -280,6 +280,7 @@ def _owned_bike(
     phone: str,
     frame_number: Optional[str],
     bikes_on: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+    allow_rider_read: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Resolve which bike a write is about, refusing anything not owned.
 
@@ -293,21 +294,32 @@ def _owned_bike(
     * **Silently picking one of several.** With three bikes on the number, an
       unspecified frame number is missing information, not a default — so this
       refuses rather than guessing, and the refusal tells the agent to ask.
+
+    A bike whose frame number is not on record (an app bike registered by
+    IMEI) is matched by its internal reference. For a ticket, a frame number
+    the customer reads off it is accepted and marked as read by the rider.
     """
     records = bikes_on(phone) if bikes_on else (fixtures.WARRANTY_RECORDS.get(phone) or [])
     if not records:
         return None  # no record at all; the ticket is still worth raising
 
-    owned = {record["frame_number"] for record in records}
+    def ref(record: Dict[str, Any]) -> Optional[str]:
+        return record.get("bike_ref") or record.get("frame_number")
+
     if frame_number:
-        if frame_number not in owned:
-            raise ToolError(
-                "frame_number_not_owned",
-                "Frame number %s is not registered to this customer. Do not use a frame number "
-                "the customer typed without checking it against lookup_warranty_record; ask them "
-                "to confirm it from the sticker on the frame." % frame_number,
-            )
-        return next(r for r in records if r["frame_number"] == frame_number)
+        wanted = re.sub(r"\s+", "", frame_number).upper()
+        for record in records:
+            if frame_number == ref(record) or wanted == re.sub(r"\s+", "", record.get("frame_number") or "").upper():
+                return record
+        unknown = [r for r in records if r.get("frame_on_record") is False]
+        if allow_rider_read and len(unknown) == 1:
+            return dict(unknown[0], frame_number=frame_number.strip(), frame_number_source="read by the rider")
+        raise ToolError(
+            "frame_number_not_owned",
+            "Frame number %s is not registered to this customer. Do not use a frame number "
+            "the customer typed without checking it against lookup_warranty_record; ask them "
+            "to confirm it from the sticker on the frame." % frame_number,
+        )
 
     if len(records) > 1:
         raise ToolError(
@@ -856,13 +868,14 @@ def build_registry(
                 "(a voice call, or they say they cannot), hand the conversation to a person instead.",
                 remedy="collect_evidence",
             )
-        bike = _owned_bike(phone, frame_number, bikes_on)
+        bike = _owned_bike(phone, frame_number, bikes_on, allow_rider_read=True)
         ticket = tickets.create(
             phone=phone,
             category=category,
             description=description,
             severity=severity,
             frame_number=bike.get("frame_number") if bike else None,
+            frame_number_source=bike.get("frame_number_source") if bike else None,
             bike_model=bike.get("product_name") if bike else None,
         )
         return ok(
@@ -1231,6 +1244,14 @@ def build_registry(
             bike = _owned_bike(phone, frame_number, bikes_on)
             if bike is None:
                 raise ToolError("frame_number_required", "No bike could be resolved for this order.")
+            if not bike.get("frame_number"):
+                # An app bike registered by IMEI: no order goes out against a
+                # frame number nobody has checked.
+                raise ToolError(
+                    "frame_number_not_on_record",
+                    "This bike's frame number is not on record, so a replacement cannot be ordered here. "
+                    "Ask the customer to read the frame number off the sticker and raise a support ticket instead.",
+                )
             frame = bike["frame_number"]
 
             # The address backstop. Two ways in, both decided here.

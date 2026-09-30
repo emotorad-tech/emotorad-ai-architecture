@@ -177,14 +177,25 @@ def _contains_token(haystack: str, token: str) -> bool:
     return token in haystack
 
 
+def bike_ref(bike: Dict[str, Any]) -> Optional[str]:
+    """The key a bike is chosen by: its frame number, or an internal reference
+    for a bike whose frame number is not on record. Never shown."""
+    return bike.get("bike_ref") or bike.get("frame_number")
+
+
 def describe_bike(bike: Dict[str, Any]) -> str:
     """One line of the list. The whole frame number, so the customer can match
-    it to the sticker on the frame (the person's rule, 2026-09-30)."""
+    it to the sticker on the frame (the person's rule, 2026-09-30). A bike
+    whose frame number is not on record says so, and never shows its IMEI."""
     name = bike.get("product_name") or "Your bike"
     if bike.get("product_color"):
         name += " (%s)" % bike["product_color"]
     frame = bike.get("frame_number")
-    return "%s, frame %s" % (name, frame) if frame else name
+    if frame:
+        return "%s, frame %s" % (name, frame)
+    if bike.get("frame_on_record") is False:
+        return "%s, frame number not on record" % name
+    return name
 
 
 def which_bike_text(bikes: Sequence[Dict[str, Any]]) -> str:
@@ -269,10 +280,10 @@ class TriageAgent:
                 return TriageOutcome(
                     reply=self._ask_which_bike(bikes),
                     reason="multiple_bikes:%d" % len(bikes),
-                    metadata={"bikes": [b["frame_number"] for b in bikes]},
+                    metadata={"bikes": [bike_ref(b) for b in bikes]},
                 )
             if len(bikes) == 1:
-                state.select_bike(bikes[0]["frame_number"])
+                state.select_bike(bike_ref(bikes[0]))
 
         return self._route_or_ask(topic, state, source)
 
@@ -309,7 +320,7 @@ class TriageAgent:
                 reason="selection_unmatched",
             )
 
-        state.select_bike(bike["frame_number"])
+        state.select_bike(bike_ref(bike))
         state.move_to(AWAITING_ISSUE, "bike_selected")
         topic, source = self._take_pending(state)
         return self._route_or_ask(topic, state, source)

@@ -100,7 +100,7 @@ def _describe(bike: Dict[str, Any]) -> str:
     parts = [bike.get("product_name") or "unknown model"]
     if bike.get("product_color"):
         parts.append("(%s)" % bike["product_color"])
-    parts.append("frame %s" % bike["frame_number"])
+    parts.append("frame %s" % bike["frame_number"] if bike.get("frame_number") else "frame number not on record")
     return " ".join(parts)
 
 
