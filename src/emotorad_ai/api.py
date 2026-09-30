@@ -73,6 +73,7 @@ from .storage.keys import KeyValidationError, cluster_of, is_customer_key, is_va
 from .storage.s3 import StorageError, store_from_env
 from . import tracing
 from .storage.uploads import UploadError, UploadRegistry
+from .tools import amigo as amigo_tools
 from .tools import fixtures
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
@@ -132,6 +133,10 @@ verification_store = VerificationStore()
 # itself is read from /dev/verification on a test server.
 OTP_SENDER = MockOtpSender()
 
+# Amigo, read-only (tools/amigo.py), when EMOTORAD_AMIGO_PG_DSN is set; the
+# config store exports it from the staging secret. None: behaviour as before.
+AMIGO = amigo_tools.from_env()
+
 # The guide photos and clips the agent may show. Loaded once: it is authored
 # content in the repo, not per-request state. load_catalogue() raises on a
 # malformed catalogue, and that is deliberate: a broken catalogue should fail
@@ -182,6 +187,10 @@ def _build_registry():
             # Test order numbers (fixtures.ORDER_CODES), so the fallback can
             # be tried without the OMS key.
             account_finder=fixtures.find_account_by_order_code,
+            # The fixture bikes merged with the rider's app bikes, when Amigo
+            # can be read; the fixtures alone otherwise.
+            warranty_source=amigo_tools.merged_source(fixtures.WARRANTY_RECORDS.get, AMIGO) if AMIGO else None,
+            amigo=AMIGO,
             guide_media=SENDABLE_MEDIA,
             sent_media=sent_media,
             replacement_orders=replacement_orders,
@@ -194,7 +203,9 @@ def _build_registry():
     return build_registry(
         verification=verification_store,
         send_code=OTP_SENDER,
-        warranty_source=live_warranty_source(client),
+        warranty_source=(amigo_tools.merged_source(live_warranty_source(client), AMIGO)
+                         if AMIGO else live_warranty_source(client)),
+        amigo=AMIGO,
         account_finder=live_account_finder(client),
         guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
@@ -418,6 +429,7 @@ def health() -> dict:
         # A summariser without a provider label predates the OpenRouter one: Gemini.
         "video_summary": getattr(VIDEO_SUMMARISER, "provider", "gemini") if VIDEO_SUMMARISER is not None else "frames",
         "tracing": "on" if TRACING is not None else "off",
+        "amigo": "configured" if AMIGO is not None else "not configured",
     }
 
 

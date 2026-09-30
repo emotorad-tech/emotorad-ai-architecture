@@ -110,6 +110,19 @@ def _describe(bike: Dict[str, Any]) -> str:
 
 def _coverage_line(bike: Dict[str, Any]) -> str:
     """One line of coverage, or an explicit instruction not to claim any."""
+    # Two states only an app bike can be in (tools/amigo.py). Neither has a
+    # term to quote, so they come before the lines that quote one.
+    if bike.get("coverage_status") == "not_registered":
+        return (
+            "  Coverage: NOT ON RECORD. The bike is in the EMotorad app but is not registered for "
+            "warranty with EMotorad. Do not state or estimate coverage. If warranty matters to what "
+            "they need, offer to register it."
+        )
+    if bike.get("coverage_status") == "warranty_unavailable":
+        return (
+            "  Coverage: CANNOT BE CHECKED RIGHT NOW. The warranty system is not responding. Say so "
+            "plainly; do not state or estimate coverage."
+        )
     if bike.get("coverage_status") == "purchase_date_missing":
         # The one case where saying nothing is not enough — the agent has to know
         # what to *do*, or it will apologise and stop rather than ask for the

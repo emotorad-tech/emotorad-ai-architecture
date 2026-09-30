@@ -62,6 +62,7 @@ WITHHELD = ("EMOTORAD_OMS_API_KEY",)
 OPTIONAL = (
     ("EMOTORAD_AI_MEDIA_BUCKET", "photo and video storage in S3"),
     ("LANGFUSE_PUBLIC_KEY", "Langfuse tracing"),
+    ("EMOTORAD_AMIGO_PG_DSN", "Amigo bikes, service records and trips, read-only"),
 )
 
 
