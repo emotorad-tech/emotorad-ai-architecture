@@ -18,9 +18,21 @@ step (`VerifyFirst`).
 from __future__ import annotations
 
 import re
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
+from .contract import InboundMessage
+from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState
+from .identity import IdentityResolver, ResolvedIdentity
 from .tools.oms import OMSConfigError, normalise_mobile
+from .tools.registry import ToolContext, ToolRegistry, is_error
+from .tools.verification import (
+    FIND_ACCOUNT_BY_CODE,
+    REQUEST_IDENTITY_VERIFICATION,
+    VERIFY_IDENTITY,
+    apply_proven_phone,
+)
+from .triage import classify_issue, topic_from_pill, which_bike_text
 
 # What was found, and where in the text it was, so it can be replaced by a
 # placeholder before the model or the transcript sees the message.
@@ -119,3 +131,176 @@ LOOKUP_FAILED = "I can't load your bikes just now. What's happening with the bik
 
 def tries(left: int) -> str:
     return "1 try" if left == 1 else "%d tries" % left
+
+
+# -- the step ----------------------------------------------------------------
+
+NUMBER = "number"
+CODE = "code"
+
+
+@dataclass
+class GateReply:
+    """The step's answer. `model_text` is the customer's message as the model's
+    history and the transcript get it: the number, code or order number
+    replaced by a placeholder. `resolved` is set once the person is verified,
+    with their bikes."""
+
+    text: str
+    outcome: str
+    model_text: str
+    escalated: bool = False
+    resolved: Optional[ResolvedIdentity] = None
+
+
+class VerifyFirst:
+    def __init__(self, registry: ToolRegistry, resolver: IdentityResolver, log: Any) -> None:
+        self.registry = registry
+        self.resolver = resolver
+        self.log = log
+        self.store = getattr(registry, "verification", None)
+
+    def applies(self, resolved: ResolvedIdentity) -> bool:
+        """An anonymous customer, on a registry that can verify them."""
+        return (
+            self.store is not None
+            and REQUEST_IDENTITY_VERIFICATION in self.registry.specs
+            and VERIFY_IDENTITY in self.registry.specs
+            and resolved.persona == "customer"
+            and not resolved.may_disclose
+        )
+
+    def handle(self, message: InboundMessage, state: ConversationState) -> GateReply:
+        text = message.message_text or ""
+        self._keep_topic(message, state)
+        phone = find_phone(text)
+
+        if state.verify_step == CODE:
+            if phone:
+                return self._send_code(message, state, phone)
+            if asks_resend(text):
+                return self._resend(message, state, text)
+            code = find_code(text)
+            if code:
+                return self._check_code(message, state, code)
+            return self._reply(message, state, ASK_CODE.format(masked=state.verify_masked), "ask_code", text)
+
+        if phone:
+            return self._send_code(message, state, phone)
+        if state.verify_step is None:
+            # First contact: the number, and only the number (phone first).
+            state.verify_step = NUMBER
+            ask = ASK_NUMBER
+            if any(a.kind in ("image", "video") for a in message.attachments):
+                ask += " " + PHOTO_SAFETY
+            return self._reply(message, state, ask, "ask_number", text)
+
+        order = find_order_code(text) if FIND_ACCOUNT_BY_CODE in self.registry.specs else None
+        if order:
+            return self._find_order(message, state, order)
+        if looks_like_a_number(text):
+            return self._reply(message, state, INVALID_NUMBER, "invalid_number", text)
+        return self._ask_number_again(message, state, text)
+
+    # -- steps ---------------------------------------------------------------
+
+    def _send_code(self, message: InboundMessage, state: ConversationState, phone: Found) -> GateReply:
+        number, span = phone
+        model_text = redact(message.message_text, span, "[phone]")
+        envelope = self._call(message, REQUEST_IDENTITY_VERIFICATION, {"phone": number})
+        if is_error(envelope):
+            return self._reply(message, state, INVALID_NUMBER, "invalid_number", model_text)
+        state.verify_step = CODE
+        state.verify_masked = envelope["data"]["phone_masked"]
+        return self._reply(message, state, CODE_SENT.format(masked=state.verify_masked), "code_sent", model_text)
+
+    def _resend(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
+        envelope = self._call(message, REQUEST_IDENTITY_VERIFICATION, {})
+        if is_error(envelope):
+            # Nothing pending any more (swept): start again from the number.
+            return self._ask_number_again(message, state, text)
+        state.verify_masked = envelope["data"]["phone_masked"]
+        return self._reply(message, state, CODE_RESENT.format(masked=state.verify_masked), "code_resent", text)
+
+    def _find_order(self, message: InboundMessage, state: ConversationState, order: Found) -> GateReply:
+        value, span = order
+        model_text = redact(message.message_text, span, "[order number]")
+        if is_error(self._call(message, FIND_ACCOUNT_BY_CODE, {"code": value})):
+            return self._reply(message, state, ORDER_NOT_FOUND, "order_not_found", model_text)
+        sent = self._call(message, REQUEST_IDENTITY_VERIFICATION, {})
+        if is_error(sent):
+            return self._reply(message, state, ORDER_NOT_FOUND, "order_not_found", model_text)
+        state.verify_step = CODE
+        state.verify_masked = sent["data"]["phone_masked"]
+        return self._reply(message, state, ORDER_CODE_SENT.format(masked=state.verify_masked),
+                           "order_code_sent", model_text)
+
+    def _check_code(self, message: InboundMessage, state: ConversationState, code: Found) -> GateReply:
+        value, span = code
+        model_text = redact(message.message_text, span, "[code]")
+        cid = message.conversation_id
+        expired = self.store.pending_code(cid) is None
+        envelope = self._call(message, VERIFY_IDENTITY, {"code": value})
+        if is_error(envelope):
+            if envelope["error"]["code"] == "verification_locked":
+                return self._reply(message, state, LOCKED, "locked", model_text, escalated=True)
+            if expired:
+                return self._reply(message, state, CODE_EXPIRED, "code_expired", model_text)
+            left = tries(self.store.attempts_left(cid))
+            return self._reply(message, state, WRONG_CODE.format(left=left), "wrong_code", model_text)
+        return self._verified(message, state, model_text)
+
+    def _verified(self, message: InboundMessage, state: ConversationState, model_text: str) -> GateReply:
+        proved = apply_proven_phone(message, self.store.verified_phone(message.conversation_id))
+        resolved = self.resolver.hydrate(proved)
+        state.verify_step = None
+        state.verify_masked = None
+        # Rebuilt next turn with the bikes and past conversations; and the
+        # agent cleared so the bike choice runs through triage, pin or not.
+        state.context_block = None
+        state.agent = None
+        state.selected_frame = None
+        if resolved.bikes:
+            state.move_to(AWAITING_BIKE_SELECTION, "verified")
+            text, outcome = CONFIRMED + " " + which_bike_text(resolved.bikes), "verified"
+        elif resolved.method == "no_warranty_record":
+            state.move_to(AWAITING_ISSUE, "verified_no_bikes")
+            text, outcome = CONFIRMED + " " + NO_BIKES, "verified_no_bikes"
+        else:
+            state.move_to(AWAITING_ISSUE, "verified_lookup_failed")
+            text, outcome = CONFIRMED + " " + LOOKUP_FAILED, "verified_lookup_failed"
+        reply = self._reply(message, state, text, outcome, model_text)
+        reply.resolved = resolved
+        return reply
+
+    def _ask_number_again(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
+        state.verify_step = NUMBER
+        state.verify_masked = None
+        fallback = FALLBACK_ORDER if FIND_ACCOUNT_BY_CODE in self.registry.specs else FALLBACK_PERSON
+        return self._reply(message, state, ASK_NUMBER_AGAIN + " " + fallback, "ask_number_again", text)
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _keep_topic(message: InboundMessage, state: ConversationState) -> None:
+        """What the problem is, from the first message that says, so it is not
+        asked for again once the bike is chosen."""
+        if state.pending_topic is not None:
+            return
+        pill = message.pill_clicked
+        topic = topic_from_pill(pill) or classify_issue(message.message_text or "")
+        if topic:
+            state.pending_topic = topic
+            state.pending_topic_source = "pill:%s" % pill if pill and topic_from_pill(pill) else "text"
+
+    def _call(self, message: InboundMessage, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        envelope = self.registry.call(name, arguments, ToolContext(conversation_id=message.conversation_id))
+        # Logged like an agent's tool call, so Runtime._side_effects_since sees
+        # a code sent or tried and a save conflict never runs the turn again.
+        self.log.tool_call(message.conversation_id, name, arguments, envelope)
+        return envelope
+
+    def _reply(self, message: InboundMessage, state: ConversationState, text: str, outcome: str,
+               model_text: str, escalated: bool = False) -> GateReply:
+        self.log.emit("verify_first", message.conversation_id, outcome=outcome, step=state.verify_step)
+        return GateReply(text=text, outcome=outcome, model_text=model_text, escalated=escalated)

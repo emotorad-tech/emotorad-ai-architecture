@@ -55,6 +55,11 @@ class ConversationState:
     # is lost between turns and they get asked what is wrong all over again.
     pending_topic: Optional[str] = None
     pending_topic_source: Optional[str] = None
+    # The verify-first step (verify_first.py): which answer it is waiting for,
+    # "number" or "code", and the masked number the code went to, for its
+    # replies. Both None when the step is not running.
+    verify_step: Optional[str] = None
+    verify_masked: Optional[str] = None
     # Rendered enrichment block. Built once per conversation, not per turn: a
     # customer's bikes and history do not change mid-chat, and rebuilding it every
     # turn also moves it in the prompt, which defeats prefix caching.
