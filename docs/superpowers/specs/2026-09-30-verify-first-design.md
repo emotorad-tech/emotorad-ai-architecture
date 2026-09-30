@@ -151,6 +151,17 @@ The pictures: the catalogue has exactly the two keys, no knowledge record names 
 
 The whole suite runs with the command in `CLAUDE.md`.
 
+## Changed after the final review (2026-09-30)
+
+- A different person proving a number on a conversation whose first person's session expired gets a new run (`ConversationState.restart_for`): nothing of the first person's history, records, memory or summary carries over. The step's turns before anyone is proved write no summary.
+- A step turn that loses a save race keeps the step's progress (`runtime.VERIFY_FIRST_FIELDS`).
+- Once locked, the step only repeats the handover. At most three codes go out per run (`verify_first.MAX_CODES`); after that the chat is handed to a person.
+- The log hides every phone grouping the step reads: both use `observability.LOOSE_PHONE`.
+- "ji nahi", "जी नहीं" and "no, a different one" are a no; a frame number not on the one-bike list goes to registration.
+- Digits typed in Devanagari are read as ASCII.
+- A photo at any step gets the stop-using line.
+- The battery prompt and E-06's text no longer name the removed pictures.
+
 ## Not in this change
 
 - The real SMS or OTP service and the real order lookup outside the OMS.
