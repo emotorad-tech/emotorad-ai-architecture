@@ -18,6 +18,9 @@ langgraph>=1.2,<2
 # Conversation store (src/emotorad_ai/stores/mongo.py), when EMOTORAD_STORE=mongodb.
 pymongo>=4.6
 
+# Amigo, read-only (src/emotorad_ai/tools/amigo.py), when EMOTORAD_AMIGO_PG_DSN is set.
+psycopg[binary]>=3.1
+
 # Prompt-tuning playground (src/emotorad_ai/playground.py). Ships in the
 # deployed container too — api.py reverse-proxies /playground to it so the
 # internal team can reach it through the one port that's exposed, rather
