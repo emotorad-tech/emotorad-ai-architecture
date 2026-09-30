@@ -27,6 +27,9 @@ from .registry import ToolError, ToolRegistry, ok
 # a second network hop.
 LOOKUP_WARRANTY_RECORD = "lookup_warranty_record"
 GET_BATTERY_DIAGNOSTICS = "get_battery_diagnostics"
+# From the Amigo app, read-only (tools/amigo.py); registered only with a reader.
+GET_SERVICE_STATUS = "get_service_status"
+GET_RECENT_TRIPS = "get_recent_trips"
 SEARCH_KNOWLEDGE = "search_knowledge"
 # The battery agent was written against the old name.
 SEARCH_BATTERY_KNOWLEDGE = SEARCH_KNOWLEDGE
@@ -424,6 +427,9 @@ def build_registry(
     # Sends the one-time code (api.py passes MockOtpSender until the OTP
     # service is wired). None: the code is only stored, as before.
     send_code: Optional[Callable[[str, str], None]] = None,
+    # The Amigo reader (tools/amigo.py), read-only. None: the two Amigo tools
+    # are not registered, so no agent is told it can call them.
+    amigo: Optional[Any] = None,
     # The replacement order the bot places on the customer's behalf. Absent
     # unless a store is supplied, so an agent that cannot place one is never
     # told it can. Item codes default to the mock resolver.
@@ -759,6 +765,43 @@ def build_registry(
                 },
                 freshness_seconds=1800,
             )
+
+    if amigo is not None:
+        from .amigo import AmigoUnavailable, describe_service, describe_trips
+
+        def _amigo_down(exc: Exception) -> ToolError:
+            return ToolError("amigo_unavailable",
+                             "The app's records cannot be read right now (%s). Carry on without them." % exc,
+                             retryable=True)
+
+        @registry.register(
+            GET_SERVICE_STATUS,
+            "The customer's service stages from the EMotorad app (250 km / 1 month, 1000 km / 6 months, "
+            "2000 km / 12 months): done, due or upcoming, and the odometer. Use it when a motor, brake or "
+            "noise problem might come from a missed service. It is the app's record, not a booking: never "
+            "book or promise a service from it.",
+            parameters={},
+            injects=("phone",),
+        )
+        def get_service_status(phone: str) -> Dict[str, Any]:
+            try:
+                return ok(describe_service(amigo.service_status(phone)), freshness_seconds=300)
+            except AmigoUnavailable as exc:
+                raise _amigo_down(exc)
+
+        @registry.register(
+            GET_RECENT_TRIPS,
+            "The customer's last five rides from the EMotorad app, newest first: when, which bike, distance "
+            "in km, duration in minutes and average speed. Use it to check a range or power complaint "
+            "against real rides. It holds no locations.",
+            parameters={},
+            injects=("phone",),
+        )
+        def get_recent_trips(phone: str) -> Dict[str, Any]:
+            try:
+                return ok(describe_trips(amigo.recent_trips(phone), amigo.bikes(phone)), freshness_seconds=300)
+            except AmigoUnavailable as exc:
+                raise _amigo_down(exc)
 
     @registry.register(
         SEARCH_KNOWLEDGE,

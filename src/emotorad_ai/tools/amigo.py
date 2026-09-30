@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
@@ -240,3 +241,44 @@ def merged_source(oms_source: Callable[[str], Optional[List[Dict[str, Any]]]], r
         return (merged + extra) or None
 
     return source
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+_STATUS_WORDS = {"complete": "done", "pending": "due", "upcoming": "upcoming"}
+
+
+def describe_service(status: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The rider's service stages in words, for the model. No identifiers."""
+    if not status:
+        return {"bike": None, "odometer_km": None, "stages": None, "note": "No service record in the app."}
+    stages = []
+    for kind in status["types"]:
+        word = "done" if kind["id"] in status["done_types"] else _STATUS_WORDS.get(
+            (status["services"] or {}).get(kind["servicename"], ""), "unknown")
+        months = kind["months"]
+        stages.append({"stage": "%d km / %d month%s" % (kind["kmtravelled"], months, "" if months == 1 else "s"),
+                       "status": word})
+    return {"bike": display_model(status["bikemodel"]), "odometer_km": status["odometer"], "stages": stages}
+
+
+def _epoch_seconds(value: Any) -> float:
+    value = float(value)
+    return value / 1000.0 if value > 1e11 else value  # milliseconds, as the app writes them
+
+
+def describe_trips(trips: Sequence[Mapping[str, Any]], rider: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The rider's recent rides in words, for the model. No identifiers or places."""
+    models = {b["vin"]: display_model(b.get("model")) for b in (rider or {}).get("bikes") or []}
+    rows = []
+    for trip in trips:
+        started = datetime.fromtimestamp(_epoch_seconds(trip["startsat"]), tz=IST)
+        seconds = float(trip["duration"] or 0)
+        distance = round(float(trip["distance"] or 0), 1)
+        rows.append({
+            "when": started.strftime("%d %b %Y, %H:%M"),
+            "bike": models.get(trip["vin"]),
+            "distance_km": distance,
+            "duration_min": round(seconds / 60),
+            "average_kmh": round(distance / (seconds / 3600), 1) if seconds else None,
+        })
+    return {"trips": rows, **({} if rows else {"note": "No rides in the app."})}

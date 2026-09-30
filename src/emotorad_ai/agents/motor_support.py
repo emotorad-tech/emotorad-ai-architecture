@@ -24,6 +24,8 @@ from ..tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
     FIND_SERVICE_SLOTS,
+    GET_RECENT_TRIPS,
+    GET_SERVICE_STATUS,
     LOOKUP_WARRANTY_RECORD,
     SEARCH_KNOWLEDGE,
 )
@@ -34,13 +36,17 @@ AGENT_NAME = "motor_support"
 TOPIC = "motor"
 
 # No diagnostics tool: there is no motor telematics either, and an absent tool is
-# a fact the model can reason about where an empty one invites a guess.
+# a fact the model can reason about where an empty one invites a guess. The
+# two Amigo tools are the app's service record and rides, registered only
+# when the app can be read (tools/amigo.py).
 TOOL_NAMES = (
     LOOKUP_WARRANTY_RECORD,
     SEARCH_KNOWLEDGE,
     CREATE_SUPPORT_TICKET,
     FIND_SERVICE_SLOTS,
     BOOK_SERVICE_SLOT,
+    GET_SERVICE_STATUS,
+    GET_RECENT_TRIPS,
 )
 
 _BASE_PROMPT = """\
