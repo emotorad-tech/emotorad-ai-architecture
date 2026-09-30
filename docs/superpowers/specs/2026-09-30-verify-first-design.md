@@ -79,6 +79,7 @@ The step's progress is two new fields on `ConversationState`, saved with it: `ve
 - "resend", "send again", "new code", "didn't get it" and similar: a new code to the same number. `request_identity_verification` with no phone argument now falls back to the number already pending for this conversation, after the order-code candidate.
 - A 6-digit code (spaces allowed): `verify_identity(code)`.
   - Wrong: "That code isn't right. You have {n} tries left. Please check the SMS and type it again."
+  - Expired (older than 10 minutes, which costs no try): "That code has expired. Say 'resend' and I'll send you a new one."
   - Locked (5 wrong): "That's too many wrong codes, so I can't confirm it's you here. I'm passing you to our support team, who can verify you another way." The reply is escalated.
   - Right: see "verified".
 - Anything else: "Please type the 6-digit code I sent to {masked}. Say 'resend' for a new code, or send a different number."
@@ -94,13 +95,14 @@ The step's progress is two new fields on `ConversationState`, saved with it: `ve
 **Choosing the bike** (the next turn, now verified, handled by triage):
 - Selection works as today: a number from the list, "first", "the second one", the frame number or its tail, the model name, or the colour to break a tie.
 - With one bike, "yes", "haan", "correct" and similar select it. "no", "nahi", "a different one" and similar hand the chat to the warranty registration agent, because the bike they mean is not registered on this number.
-- Unmatched: "Sorry, I didn't catch which bike you meant." and the list again.
+- Unmatched: "Sorry, I did not catch which bike you meant." and the list again (today's wording, kept).
+- No bikes to choose from (the lookup failed on the choosing turn): straight on to the issue, never a list of none.
 - After the choice: the kept topic routes to its agent, or the bot asks "What is happening with the bike?".
 
 **Also:**
 - The "which bike" list shows full frame numbers everywhere, including for a verified person on the Amiigo app with several bikes. One renderer serves both.
 - A pinned agent (the test page's `?agent=`) is not applied while the bike is being chosen; it applies once the bike is chosen. The persona step runs the selection whenever the phase is `awaiting_bike_selection`.
-- The model's history gets the step's turns with the number, code and order number replaced (`[phone]`, `[code]`, `[order number]`), so no model and no Jev call sees them. The transcript already hides phone numbers and codes (`observability.redact_pii`).
+- The model's history and the transcript get the step's turns with the number, code and order number replaced (`[phone]`, `[code]`, `[order number]`), so no model, no Jev call and no transcript reader sees them. `observability.redact_pii` is also widened to hide a number typed with a leading 0 or with a space or dash in the middle ("97000 00010"), which it missed, so the event log hides those forms too.
 - A verified session that has expired (12 hours) makes the person anonymous again, and the step starts from the top.
 - Every step logs one `verify_first` event with the step and its outcome, never the number or the code.
 
