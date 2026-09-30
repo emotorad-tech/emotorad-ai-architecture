@@ -107,7 +107,13 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
     the customer help with bikes we can answer for.
     """
     bike = {
-        "frame_number": record["frame_number"],
+        "frame_number": record.get("frame_number"),
+        # The key selection and ownership checks use: the frame number, or
+        # `vin:<VIN>` for a bike whose frame number is not on record (an app
+        # bike registered by IMEI, tools/amigo.py). Never shown to the rider.
+        "bike_ref": record.get("bike_ref") or record.get("frame_number"),
+        "frame_on_record": record.get("frame_on_record", True),
+        "in_app": bool(record.get("in_app")),
         "product_name": _clean(record.get("product_name")),
         "product_color": _clean(record.get("product_color")),
         "battery_variant": _clean(record.get("battery_variant")),
@@ -123,6 +129,26 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         # empty-string conventions, and an id is never one of those.
         "product_id": record.get("product_id"),
     }
+
+    # Two states only an Amigo bike can be in (tools/amigo.merged_source).
+    if record.get("warranty_unavailable"):
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "warranty_unavailable",
+            "note": ("The warranty system is not responding, so coverage cannot be checked right now. "
+                     "Say so plainly. Do not state or estimate coverage."),
+        })
+        return bike
+    if record.get("warranty_on_record") is False:
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "not_registered",
+            "remedy": "late_warranty_registration",
+            "note": ("This bike is in the EMotorad app but is not registered for warranty with EMotorad. "
+                     "Do not state or estimate coverage. If warranty matters to what they need, offer to "
+                     "register it."),
+        })
+        return bike
 
     # `purchase_date` is the right answer and `created_at` is the available one.
     # Verified against live OMS 2026-08-29: purchase_date and ocr_date were null

@@ -13,12 +13,15 @@ and never the connection string.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
+
+_logger = logging.getLogger(__name__)
 
 DSN_ENV = "EMOTORAD_AMIGO_PG_DSN"
 # Hydration asks for a rider's bikes every turn; the database is a db.t3.micro.
@@ -140,3 +143,100 @@ def from_env(environ: Optional[Mapping[str, str]] = None) -> Optional[AmigoReade
     env = environ if environ is not None else os.environ
     dsn = (env.get(DSN_ENV) or "").strip()
     return AmigoReader(dsn) if dsn else None
+
+
+# Amigo stores a model code; riders know the name. The knowledge base filters
+# by name (a "doodle" record applies to "Doodle Pro"), so this matters beyond
+# display. An unknown code is shown as it is.
+MODEL_NAMES = {
+    "EMXPLUS": "EMX Plus", "EMX": "EMX", "DOODLEPRO": "Doodle Pro", "TREXAIR": "T-Rex Air",
+    "TREXPLUS": "T-Rex Plus", "TREXPLUSV2": "T-Rex Plus V2", "TREXPLUSV3": "T-Rex Plus V3",
+    "TREXSMART": "T-Rex Smart", "X1": "X1", "X2": "X2", "X3": "X3", "S2": "S2", "DYNEM": "Dynem", "DY": "Dynem",
+}
+# The Amigo app's name for a rider who never set one.
+_DEFAULT_USERNAME = "User"
+
+
+def display_model(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    return MODEL_NAMES.get(code.strip().upper(), code.strip())
+
+
+def frame_on_record(bike: Mapping[str, Any]) -> bool:
+    """Since July 2026 the app registers by IMEI and stores it as the frame
+    number: that is not a frame number, and must never be shown as one."""
+    frame = (bike.get("framenumber") or "").strip()
+    if not frame or frame == (bike.get("imei") or "").strip():
+        return False
+    return not (frame.isdigit() and len(frame) == 15)
+
+
+def _norm(frame: Optional[str]) -> str:
+    return re.sub(r"\s+", "", frame or "").upper()
+
+
+def amigo_records(rider: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The rider's app bikes, shaped like OMS records so the warranty tool,
+    tickets and orders handle them without knowing where they came from."""
+    if not rider:
+        return []
+    username = (rider.get("username") or "").strip()
+    name = username if username and username != _DEFAULT_USERNAME else None
+    records = []
+    for bike in rider.get("bikes") or []:
+        on_record = frame_on_record(bike)
+        frame = (bike.get("framenumber") or "").strip() if on_record else None
+        records.append({
+            "customer_name": name,
+            "frame_number": frame,
+            "bike_ref": frame or "vin:%s" % bike["vin"],
+            "frame_on_record": on_record,
+            "product_name": display_model(bike.get("model")),
+            "product_color": (bike.get("color") or "").strip().capitalize(),
+            "warranty_on_record": False,
+            "in_app": True,
+            "vin": bike["vin"],
+        })
+    return records
+
+
+def merged_source(oms_source: Callable[[str], Optional[List[Dict[str, Any]]]], reader: Any
+                  ) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
+    """The OMS's bikes and the rider's app bikes, one list (spec section 2).
+
+    OMS records come first and keep their warranty; an app bike with the same
+    frame number (ignoring case and spaces) only marks it `in_app`. The rest
+    of the app bikes follow, with no warranty on record. Amigo down leaves the
+    OMS list; the OMS down leaves the app bikes, with warranty unavailable.
+    """
+    from .registry import ToolError  # local: registry imports tools, not the reverse
+
+    def source(phone: str) -> Optional[List[Dict[str, Any]]]:
+        oms_error = None
+        try:
+            oms = list(oms_source(phone) or [])
+        except ToolError as exc:
+            if exc.code != "oms_unavailable":
+                raise
+            oms, oms_error = [], exc
+        try:
+            app = amigo_records(reader.bikes(phone))
+        except AmigoUnavailable as exc:
+            _logger.warning("amigo_unavailable (%s): carrying on with the OMS bikes only", exc)
+            if oms_error is not None:
+                raise oms_error
+            return oms or None
+        unmatched = {_norm(a["frame_number"]): a for a in app if a["frame_on_record"]}
+        merged = []
+        for record in oms:
+            match = unmatched.pop(_norm(record.get("frame_number")), None)
+            merged.append(dict(record, in_app=True) if match else record)
+        extra = [a for a in app if not a["frame_on_record"] or _norm(a["frame_number"]) in unmatched]
+        if oms_error is not None:
+            if not extra:
+                raise oms_error
+            extra = [dict(a, warranty_unavailable=True) for a in extra]
+        return (merged + extra) or None
+
+    return source
