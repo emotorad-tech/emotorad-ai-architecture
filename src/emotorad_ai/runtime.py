@@ -41,6 +41,7 @@ from .attachments import shows_media, user_content
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import (
+    AWAITING_BIKE_SELECTION,
     HISTORY_TURNS,
     ConversationConflict,
     ConversationState,
@@ -110,8 +111,10 @@ from .tools.verification import (
     FIND_ACCOUNT_BY_CODE,
     REQUEST_IDENTITY_VERIFICATION,
     VERIFY_IDENTITY,
+    apply_proven_phone,
 )
 from .triage import TriageAgent
+from .verify_first import VerifyFirst
 
 UNSUPPORTED_MESSAGE = (
     "I am not able to help with this from here. Let me pass you to a member of our support "
@@ -192,6 +195,7 @@ class Runtime:
         self_service_identity: bool = False,
         phone_resolver: Optional[Callable[[str], Optional[str]]] = None,
         media_store: Any = None,
+        verify_first: bool = False,
     ) -> None:
         self.settings = settings or load_settings()
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
@@ -202,7 +206,13 @@ class Runtime:
         # conversations across restarts and servers.
         self.conversations = conversations if conversations is not None else InMemoryConversationStore()
         self.enricher = ContextEnricher()
-        self.triage = TriageAgent(TOPIC_AGENTS)
+        # A customer who says the one bike listed is not theirs goes to
+        # registration: the bike they mean is not on this number.
+        self.triage = TriageAgent(TOPIC_AGENTS, unlisted_agent=LATE_WARRANTY)
+        # Verify first (the person's decision, 2026-09-30): an anonymous
+        # customer proves their number and picks a bike before triage or any
+        # model. Off unless asked for; the web chat API turns it on.
+        self.verify_gate = VerifyFirst(self.registry, self.resolver, self.log) if verify_first else None
 
         definitions: Dict[str, AgentDefinition] = {
             BATTERY_SUPPORT: BATTERY_SUPPORT_DEFINITION,
@@ -255,6 +265,7 @@ class Runtime:
                 prepare=self._node_prepare,
                 safety_gate=self._node_safety,
                 handoff_gate=self._node_handoff,
+                verify_gate=self._node_verify,
                 persona_route=self._node_persona,
                 jev_classify=self._node_classify,
                 standard_reply=self._node_standard,
@@ -389,7 +400,11 @@ class Runtime:
             except StoreUnavailable as exc:
                 return self._store_down(message, exc, reply.ticket_id)
         try:
-            self.conversations.record_turn(state, message, reply, self._summary_for(state, resolved))
+            recorded = message
+            if "transcript_text" in reply.metadata:
+                # The verify-first step's turns: the number or code replaced.
+                recorded = replace(message, message_text=reply.metadata["transcript_text"])
+            self.conversations.record_turn(state, recorded, reply, self._summary_for(state, resolved))
         except StoreUnavailable as exc:
             # The turn happened and the state is saved; only the record of it
             # failed. Said in the log, and the customer still gets the answer.
@@ -480,6 +495,10 @@ class Runtime:
         message = turn["message"]
         state = turn["conversation"]  # loaded by handle(), saved after the graph
         state.turns += 1
+        if self.verify_gate is not None and self.phone_resolver is not None:
+            # A number this conversation has proved opens the identity here,
+            # so the runtime does not depend on the API having done it.
+            message = apply_proven_phone(message, self.phone_resolver(message.conversation_id))
         # Set by the web chat API (api.post_message): the identity cluster that
         # started this conversation, which a later upload is checked against,
         # and an agent the tester pinned. Applied here so they are saved with
@@ -487,7 +506,9 @@ class Runtime:
         meta = message.entry_metadata
         if state.cluster_id is None and meta.get("cluster_id"):
             state.cluster_id = meta["cluster_id"]
-        if meta.get("pinned_agent"):
+        choosing = self.verify_gate is not None and state.phase == AWAITING_BIKE_SELECTION
+        if meta.get("pinned_agent") and not choosing:
+            # A pin waits while the bike is being chosen (verify first).
             state.route_to(meta["pinned_agent"])
 
         resolved = self.resolver.hydrate(message)
@@ -532,7 +553,7 @@ class Runtime:
         # evidence_seen is not set here, on arrival: it is set where the
         # customer's turn is built for the model (_note_customer_turn), and
         # only when that turn shows a photo or video.
-        return {"conversation": state, "resolved": resolved}
+        return {"message": message, "conversation": state, "resolved": resolved}
 
     def _node_safety(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 1. Safety. A keyword gate ahead of the agent turn, not something the
@@ -568,6 +589,26 @@ class Runtime:
                 escalated=True, metadata={"matched": handoff.matched},
             )}
         return {}
+
+    def _node_verify(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 3. Verify first: an anonymous customer's number, code and bike, by
+        #    fixed replies (verify_first.py). No model is called here.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        if self.verify_gate is None or not self.verify_gate.applies(resolved):
+            return {}
+        gate = self.verify_gate.handle(message, state)
+        if gate.escalated:
+            self.log.escalation(message.conversation_id, "verification_locked", None)
+        # The history gets the message with the number or code replaced, so
+        # no model and no Jev call sees them; the transcript gets the same.
+        shown = replace(message, message_text=gate.model_text)
+        update: Dict[str, Any] = {"reply": self._finish(
+            shown, state, gate.text, "verify_first:" + gate.outcome, escalated=gate.escalated,
+            metadata={"transcript_text": gate.model_text},
+        )}
+        if gate.resolved is not None:
+            update["resolved"] = gate.resolved
+        return update
 
     def _node_persona(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
@@ -620,6 +661,10 @@ class Runtime:
                     message, state, outcome.reply or UNSUPPORTED_MESSAGE, "triage",
                     metadata=dict(outcome.metadata, reason=outcome.reason),
                 )}
+            if outcome.agent == LATE_WARRANTY and LATE_WARRANTY in self.agents:
+                # The one bike listed is not theirs: straight to registration,
+                # with no Jev category to route around it.
+                return {"reply": self._run_agent_or_handover(LATE_WARRANTY, message, resolved, state)}
         return {}
 
     def _node_classify(self, turn: Dict[str, Any]) -> Dict[str, Any]:
