@@ -28,6 +28,24 @@ class RedactPiiTests(unittest.TestCase):
         self.assertEqual(redact_pii("my battery is dead"), "my battery is dead")
 
 
+class IdentifiersAreNotPhonesTests(unittest.TestCase):
+    """A random id can hold a run of digits that reads as a mobile. The CI
+    deploy gate failed once on this: an S3 key logged with part of its
+    customer id replaced by [phone], so the log named an object that does
+    not exist."""
+
+    def test_digits_inside_a_uuid_are_left_alone(self):
+        key = "customers/b0c90584-4584-4cd2-8a28-2be5db526ec4/c1/images/upl_00muo4g98q7c3ywwn2.jpg"
+        self.assertEqual(redact_pii(key), key)
+
+    def test_digits_glued_to_hex_letters_are_left_alone(self):
+        self.assertEqual(redact_pii("run-a9876543210f"), "run-a9876543210f")
+
+    def test_a_number_after_a_label_still_goes(self):
+        self.assertEqual(redact_pii("mobile: 9876543210, call me"), "mobile: [phone], call me")
+        self.assertEqual(redact_pii("reach me on +91 98765-43210."), "reach me on [phone].")
+
+
 class ToolArgumentsAreRedactedTests(unittest.TestCase):
     def setUp(self):
         self.log = EventLog(path=None)

@@ -23,13 +23,15 @@ from typing import Any, Callable, Dict, List, Optional
 # boundary was there for. A leading 0 (the trunk prefix), and one space or
 # dash in the middle, are how people type a number they are reading out
 # ("97000 00010"). The verify-first step accepts those forms, so the log and
-# the transcript must hide them too.
-_PHONE = re.compile(r"(?<![\d+])(?:\+?91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\d)")
+# the transcript must hide them too. A letter on either side means the digits
+# sit inside an identifier (a UUID in an S3 key, a hex id), not a phone: the
+# deploy gate once failed on a customer id logged as "b0c[phone]cd2-...".
+_PHONE = re.compile(r"(?<![\w+])(?:\+?91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\w)")
 # A number read out in any grouping ("+91 970 000 0010", "97 00 00 00 10").
 # The verify-first step reads a number with exactly this pattern
 # (verify_first.find_phone), so what it accepts and what the log hides cannot
 # drift apart. Hidden only when its digits are a valid Indian mobile.
-LOOSE_PHONE = re.compile(r"(?<![\d+])\+?\d[\d \-]{8,16}\d(?!\d)")
+LOOSE_PHONE = re.compile(r"(?<![\w+])\+?\d[\d \-]{8,16}\d(?!\w)")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # 16-digit-ish sequences: card numbers pasted into a support chat.
 _LONG_DIGITS = re.compile(r"\b\d{12,19}\b")
