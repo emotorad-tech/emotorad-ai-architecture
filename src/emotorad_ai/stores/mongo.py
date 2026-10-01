@@ -314,14 +314,16 @@ class MongoConversationStore:
         requests = self._collection(ERASURE_REQUESTS)
         return self._guard("find_one", lambda: requests.find_one({"user_key": user_key, "status": "pending"}))
 
-    def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str) -> str:
+    def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str,
+                        proof: Optional[Dict[str, str]] = None) -> str:
         """One pending request per person: asking again returns it."""
         pending = self.pending_erasure_of(user_key)
         if pending is not None:
             return pending["_id"]
         reference = erasure_rules.new_reference()
         record = {"_id": reference, "user_key": user_key, "status": "pending", "requested_at": now,
-                  "channel": channel, "conversation_id": conversation_id, "attempts": 0, "last_error": None}
+                  "channel": channel, "conversation_id": conversation_id, "attempts": 0, "last_error": None,
+                  "proof": proof}
         requests = self._collection(ERASURE_REQUESTS)
         try:
             self._guard("insert_one", lambda: requests.insert_one(record))
@@ -353,8 +355,9 @@ class MongoConversationStore:
         return self._guard("find_one", lambda: requests.find_one({"_id": reference}))["attempts"]
 
     def close_erasure(self, reference: str, status: str, counts: Optional[Dict[str, int]],
-                      error: Optional[str], now: str) -> None:
-        """Closed: the person's key is replaced by its hash."""
+                      error: Optional[str], now: str, by: Optional[str] = None) -> None:
+        """Closed: the person's key is replaced by its hash. Reviews, a hold
+        and who closed it stay: names and times only."""
         requests = self._collection(ERASURE_REQUESTS)
         record = self._guard("find_one", lambda: requests.find_one({"_id": reference})) or {}
         fields: Dict[str, Any] = {"status": status, "processed_at": now, "counts": counts}
@@ -362,8 +365,27 @@ class MongoConversationStore:
             fields["key_sha256"] = erasure_rules.key_sha256(record["user_key"])
         if error is not None:
             fields["last_error"] = error
+        if by is not None:
+            fields["by"] = by
         self._guard("update_one", lambda: requests.update_one(
             {"_id": reference}, {"$set": fields, "$unset": {"user_key": ""}}))
+
+    def record_erasure_review(self, reference: str, by: str, at: str, totals: Dict[str, int]) -> None:
+        """Who read a request before deciding (erasure_admin show), and what it then held."""
+        requests = self._collection(ERASURE_REQUESTS)
+        self._guard("update_one", lambda: requests.update_one(
+            {"_id": reference}, {"$push": {"reviews": {"by": by, "at": at, "totals": dict(totals)}}}))
+
+    def hold_erasure(self, reference: str, by: str, at: str, note: str) -> None:
+        requests = self._collection(ERASURE_REQUESTS)
+        self._guard("update_one", lambda: requests.update_one(
+            {"_id": reference}, {"$set": {"held": {"by": by, "at": at, "note": note}}}))
+
+    def erasure_history(self, user_key: str) -> List[Dict[str, Any]]:
+        """Every request of one person, open or closed (a closed one by its hash)."""
+        requests = self._collection(ERASURE_REQUESTS)
+        query = {"$or": [{"user_key": user_key}, {"key_sha256": erasure_rules.key_sha256(user_key)}]}
+        return self._guard("find", lambda: list(requests.find(query).sort("requested_at", 1)))
 
     def erasure_record(self, reference: str) -> Optional[Dict[str, Any]]:
         requests = self._collection(ERASURE_REQUESTS)

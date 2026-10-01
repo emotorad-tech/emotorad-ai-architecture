@@ -198,3 +198,56 @@ class StoreContract:
         store = self.make_store()
         store.log_erasure({"key_sha256": "x" * 64, "kind": "PHONE", "reason": "self-service request DEL-222222"})
         self.assertIsNotNone(store)
+
+    def test_a_request_records_its_proof(self):
+        store = self.make_store()
+        otp = {"method": "otp", "verified_at": "2026-10-01T09:58:00+00:00"}
+        reference = store.request_erasure("PHONE#+919700000031", "website_chat", "c1", "2026-10-01T10:00:00+00:00",
+                                          proof=otp)
+        self.assertEqual(store.erasure_record(reference)["proof"], otp)
+        older = store.request_erasure("PHONE#+919812345678", "amiigo_app", None, "2026-10-01T10:00:00+00:00")
+        self.assertIsNone(store.erasure_record(older).get("proof"))
+
+    def test_reviews_and_a_hold_are_recorded_and_kept_when_closed(self):
+        store = self.make_store()
+        reference = store.request_erasure("PHONE#+919700000031", "amiigo_app", None, "2026-10-01T10:00:00+00:00")
+        store.record_erasure_review(reference, "Asha", "2026-10-02T09:00:00+00:00", {"conversations": 1})
+        store.record_erasure_review(reference, "Ravi", "2026-10-02T10:00:00+00:00", {"conversations": 2})
+        store.hold_erasure(reference, "Asha", "2026-10-02T11:00:00+00:00", "safety case open")
+        store.hold_erasure(reference, "Asha", "2026-10-02T12:00:00+00:00", "safety case EM-00001 open")
+        record = store.erasure_record(reference)
+        self.assertEqual(record["status"], "pending")
+        self.assertEqual([(r["by"], r["at"], r["totals"]) for r in record["reviews"]],
+                         [("Asha", "2026-10-02T09:00:00+00:00", {"conversations": 1}),
+                          ("Ravi", "2026-10-02T10:00:00+00:00", {"conversations": 2})])
+        self.assertEqual(record["held"], {"by": "Asha", "at": "2026-10-02T12:00:00+00:00",
+                                          "note": "safety case EM-00001 open"})
+        self.assertEqual(store.pending_erasure_of("PHONE#+919700000031")["_id"], reference)
+        store.close_erasure(reference, "done", {"conversations": 2}, None, "2026-10-02T13:00:00+00:00", by="Asha")
+        closed = store.erasure_record(reference)
+        self.assertEqual((closed["status"], closed["by"], len(closed["reviews"]), closed["held"]["by"]),
+                         ("done", "Asha", 2, "Asha"))
+        self.assertNotIn("user_key", closed)
+
+    def test_a_persons_history_has_open_and_closed_requests(self):
+        store = self.make_store()
+        me = "PHONE#+919700000031"
+        first = store.request_erasure(me, "amiigo_app", None, "2026-09-01T10:00:00+00:00")
+        store.cancel_erasure(me, "2026-09-01T11:00:00+00:00")
+        store.request_erasure("PHONE#+919812345678", "amiigo_app", None, "2026-09-15T10:00:00+00:00")
+        second = store.request_erasure(me, "website_chat", "c2", "2026-10-01T10:00:00+00:00")
+        self.assertEqual([(r["_id"], r["status"]) for r in store.erasure_history(me)],
+                         [(first, "cancelled"), (second, "pending")])
+
+    def test_a_dry_run_counts_and_deletes_nothing(self):
+        store = self.make_store()
+        state = store.get("c1")
+        state.user_key, state.turns = "PHONE#+919700000031", 1
+        store.save(state)
+        store.record_turn(state, inbound("my battery is dead", cid="c1"), reply("Is the light on?", cid="c1"))
+        store.record_origin(self.origin("c1", user_key="PHONE#+919700000031"))
+        counted = store.delete_person("PHONE#+919700000031", dry_run=True)
+        self.assertEqual(store.conversations_of("PHONE#+919700000031"), ["c1"])
+        self.assertEqual(len(store.transcript("c1")), 2)
+        self.assertEqual(counted["transcript_turns"], 2)
+        self.assertEqual(counted, store.delete_person("PHONE#+919700000031"))

@@ -426,7 +426,7 @@ class InMemoryConversationStore:
         self._erasures: Dict[str, Dict[str, Any]] = {}
         # One pending request per person, even for two requests at once.
         self._erasure_lock = threading.Lock()
-        # The erasure_log audit records the nightly job writes.
+        # The erasure_log audit records erasure_admin and delete_person.py write.
         self.erasure_log: List[Dict[str, Any]] = []
 
     def get(self, conversation_id: str) -> ConversationState:
@@ -497,7 +497,8 @@ class InMemoryConversationStore:
         return next((dict(r) for r in self._erasures.values()
                      if r.get("user_key") == user_key and r["status"] == "pending"), None)
 
-    def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str) -> str:
+    def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str,
+                        proof: Optional[Dict[str, str]] = None) -> str:
         """One pending request per person: asking again returns it."""
         with self._erasure_lock:
             pending = self.pending_erasure_of(user_key)
@@ -508,7 +509,8 @@ class InMemoryConversationStore:
                 reference = erasure_rules.new_reference()
             self._erasures[reference] = {"_id": reference, "user_key": user_key, "status": "pending",
                                          "requested_at": now, "channel": channel,
-                                         "conversation_id": conversation_id, "attempts": 0, "last_error": None}
+                                         "conversation_id": conversation_id, "attempts": 0, "last_error": None,
+                                         "proof": proof}
             return reference
 
     def cancel_erasure(self, user_key: str, now: str) -> Optional[str]:
@@ -529,8 +531,9 @@ class InMemoryConversationStore:
         return record["attempts"]
 
     def close_erasure(self, reference: str, status: str, counts: Optional[Dict[str, int]],
-                      error: Optional[str], now: str) -> None:
-        """Closed: the person's key is replaced by its hash."""
+                      error: Optional[str], now: str, by: Optional[str] = None) -> None:
+        """Closed: the person's key is replaced by its hash. Reviews, a hold
+        and who closed it stay: names and times only."""
         record = self._erasures[reference]
         user_key = record.pop("user_key", None)
         if user_key:
@@ -538,6 +541,22 @@ class InMemoryConversationStore:
         record.update(status=status, processed_at=now, counts=counts)
         if error is not None:
             record["last_error"] = error
+        if by is not None:
+            record["by"] = by
+
+    def record_erasure_review(self, reference: str, by: str, at: str, totals: Dict[str, int]) -> None:
+        """Who read a request before deciding (erasure_admin show), and what it then held."""
+        self._erasures[reference].setdefault("reviews", []).append({"by": by, "at": at, "totals": dict(totals)})
+
+    def hold_erasure(self, reference: str, by: str, at: str, note: str) -> None:
+        self._erasures[reference]["held"] = {"by": by, "at": at, "note": note}
+
+    def erasure_history(self, user_key: str) -> List[Dict[str, Any]]:
+        """Every request of one person, open or closed (a closed one by its hash)."""
+        digest = erasure_rules.key_sha256(user_key)
+        mine = [dict(r) for r in self._erasures.values()
+                if r.get("user_key") == user_key or r.get("key_sha256") == digest]
+        return sorted(mine, key=lambda r: r["requested_at"])
 
     def erasure_record(self, reference: str) -> Optional[Dict[str, Any]]:
         record = self._erasures.get(reference)
@@ -552,15 +571,26 @@ class InMemoryConversationStore:
         items = [s for key, s in self._summaries.get(user_key, {}).items() if key != exclude]
         return sorted(items, key=lambda s: s.started_at, reverse=True)[:limit]
 
-    def delete_person(self, user_key: str) -> Dict[str, int]:
+    def delete_person(self, user_key: str, dry_run: bool = False) -> Dict[str, int]:
         """Everything held about one person: the right to erasure (DPDP, GDPR).
 
         Every conversation that is theirs, whole: the working state, every
         transcript turn (those from before they signed in too) and the
         summaries. The counts say what went, for the person running the
-        deletion to confirm.
+        deletion to confirm. With `dry_run`, counts what would go and deletes
+        nothing (erasure_admin's review).
         """
         mine = set(self.conversations_of(user_key))
+        if dry_run:
+            return {
+                "conversations": sum(1 for cid in mine if cid in self._states),
+                "transcript_turns": sum(len(self._turns.get(cid, {})) for cid in mine),
+                "media": sum(len(self._media.get(cid, {})) for cid in mine),
+                "conversation_origins": sum(len(self._origins.get(cid, {})) for cid in mine),
+                "conversation_summaries": len(self._summaries.get(user_key, {})) + sum(
+                    1 for key, items in self._summaries.items() if key != user_key
+                    for item in items.values() if item.conversation_id in mine),
+            }
         counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
                   "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
