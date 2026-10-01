@@ -914,7 +914,7 @@ def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPE
 @app.post("/erasure-requests", status_code=201)
 def post_erasure_request(body: ErasureIn, request: Request, response: Response) -> Dict[str, Any]:
     """The Amiigo app's "Delete my conversation data" button, after its own
-    confirmation dialog. Records a request; the nightly job deletes."""
+    confirmation dialog. Records a request; a person deletes it with erasure_admin."""
     user_key, channel, proof = _erasure_person(request, body)
     if not body.confirm:
         raise HTTPException(status_code=400, detail="Send confirm: true once the rider has confirmed.")

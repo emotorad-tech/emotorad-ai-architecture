@@ -62,20 +62,20 @@ ERASURE_DIALOG = (
 )
 ERASURE_CONFIRM = ERASURE_DIALOG + " Reply DELETE to confirm, or anything else to keep your data."
 ERASURE_REQUESTED = (
-    "Your deletion request is {reference}. Everything this chat holds about you "
-    "will be deleted in tonight's run and removed for good within 30 days. If you "
-    "change your mind before then, say 'cancel my deletion'."
+    "Your deletion request is {reference}. Our team will check it and delete "
+    "everything this chat holds about you within 30 days. If you change your "
+    "mind before then, say 'cancel my deletion'."
 )
 ERASURE_KEPT = "OK, nothing has been deleted."
 ERASURE_EXISTING = (
-    "You've already asked for this. Your request is {reference}, and it will be "
-    "done in tonight's run."
+    "You've already asked for this. Your request is {reference}, and our team "
+    "will complete it within 30 days."
 )
 ERASURE_CANCELLED = "Your deletion request {reference} is cancelled. Nothing has been deleted."
 ERASURE_NOTHING_TO_CANCEL = "There's no deletion request to cancel."
 ERASURE_FAILED = "I couldn't record your request just now. Please try again in a few minutes."
 # A model reply that said something was deleted is replaced by this (the
-# erasure gate and the nightly job are the only things that delete).
+# erasure gate only records a request; a person deletes it with erasure_admin).
 ERASURE_NOT_BY_MODEL = (
     "I can't delete anything myself. To delete what this chat holds about you, "
     "say 'delete my data' and I'll ask you to confirm."
@@ -125,7 +125,7 @@ def audit_record(
     incomplete: bool = False,
 ) -> Dict[str, Any]:
     """An erasure_log record: who was erased, as a hash, and why. The shape
-    scripts/delete_person.py and the nightly job both write."""
+    scripts/delete_person.py and erasure_admin both write."""
     record: Dict[str, Any] = {
         "key_sha256": key_sha256(subject),
         "kind": subject.split("#", 1)[0],

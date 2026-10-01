@@ -683,7 +683,7 @@ class Runtime:
 
     def _node_erasure(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 2b. Delete my data (erasure.py). A customer's request is recorded,
-        #     never carried out here: the nightly job deletes.
+        #     never carried out here: a person deletes it with erasure_admin.
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         if resolved.persona != "customer":
             return {}
@@ -1240,8 +1240,8 @@ class Runtime:
                     metadata={"suppressed_text": turn.text}, already_in_history=True,
                 )
 
-        # Only the erasure gate records a deletion and only the nightly job
-        # makes one: a reply that says data was deleted is never sent.
+        # Only the erasure gate records a deletion and only a person makes one
+        # (erasure_admin): a reply that says data was deleted is never sent.
         if claims_deletion(turn.text):
             self.log.guardrail(message.conversation_id, "deletion_claim", {"suppressed_text": turn.text})
             return self._finish(

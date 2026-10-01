@@ -4,6 +4,7 @@ audit record (spec 2026-10-01)."""
 import re
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from emotorad_ai import erasure
 
@@ -93,3 +94,30 @@ class BareDeleteTests(unittest.TestCase):
     def test_other_deletes_still_are_not(self):
         for text in ("delete the photo", "how do I delete a ride?", "can I delete the app"):
             self.assertFalse(erasure.wants_deletion(text), text)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ManualPromiseTests(unittest.TestCase):
+    """Manual erasure spec, section 3: a person deletes, within 30 days."""
+
+    def test_no_text_promises_a_nightly_run(self):
+        for name in ("ERASURE_CONFIRM", "ERASURE_DIALOG", "ERASURE_REQUESTED", "ERASURE_EXISTING"):
+            text = getattr(erasure, name)
+            self.assertNotIn("tonight", text.lower(), name)
+            self.assertIn("within 30 days", text, name)
+
+    def test_the_two_new_texts(self):
+        self.assertEqual(erasure.ERASURE_REQUESTED.format(reference="DEL-7K3P9Q"), (
+            "Your deletion request is DEL-7K3P9Q. Our team will check it and delete everything this chat "
+            "holds about you within 30 days. If you change your mind before then, say 'cancel my deletion'."))
+        self.assertEqual(erasure.ERASURE_EXISTING.format(reference="DEL-7K3P9Q"), (
+            "You've already asked for this. Your request is DEL-7K3P9Q, and our team will complete it "
+            "within 30 days."))
+
+    def test_the_contract_promises_the_team_not_a_job(self):
+        contract = (ROOT / "docs" / "contracts" / "amiigo-support-chat.md").read_text(encoding="utf-8")
+        self.assertNotIn("nightly", contract)
+        self.assertNotIn("tonight", contract)
+        self.assertIn("Our team checks each request and deletes the data within 30 days.", contract)

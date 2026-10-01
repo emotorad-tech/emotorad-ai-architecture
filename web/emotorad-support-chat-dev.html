@@ -1219,7 +1219,7 @@ document.getElementById("pendingRemove").addEventListener("click", removePending
 // -- Delete my chat data (2026-10-01) -----------------------------------------
 // The header menu opens a dialog; "Delete" records a deletion request through
 // /erasure-requests, proven by this chat's verified number. Nothing is sent
-// into the chat. The nightly job does the deleting.
+// into the chat. A person deletes it after reading it (erasure_admin).
 var ERASE_DIALOG_TEXT = document.getElementById("eraseText").textContent;
 var ERASE_FAILED_TEXT = "I couldn't record your request just now. Please try again in a few minutes.";
 

@@ -163,9 +163,9 @@ The app's "Delete my conversation data" button lets a signed-in rider ask for
 everything the support chat holds about them to be deleted: their past chats,
 the photos and videos they sent, and the record of where they chatted from. It
 does not delete their warranty registration, orders, invoices or service
-tickets. The request is carried out by a nightly job and the data is gone for
-good within 30 days. A rider can also ask in the chat ("delete my data"); both
-make the same request, and a rider has at most one pending request.
+tickets. Our team checks each request and deletes the data within 30 days. A
+rider can also ask in the chat ("delete my data"); both make the same request,
+and a rider has at most one pending request.
 
 **The dialog.** Show it before calling anything.
 

@@ -1,5 +1,8 @@
 # Self-service "delete my data": design
 
+> Changed by `2026-10-01-manual-erasure-design.md`: there is no nightly job. A
+> person reviews and deletes each request with `erasure_admin`.
+
 Date: 1 October 2026. Branch: `feat/self-service-erasure`, cut from
 `feat/conversation-origin` (it erases that branch's `conversation_origins`).
 
