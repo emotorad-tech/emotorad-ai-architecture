@@ -40,6 +40,7 @@ class TurnNodes:
     prepare: Node
     safety_gate: Node
     handoff_gate: Node
+    erasure_gate: Node
     verify_gate: Node
     persona_route: Node
     jev_classify: Node
@@ -49,7 +50,7 @@ class TurnNodes:
 
 
 NODE_NAMES = (
-    "prepare", "safety_gate", "handoff_gate", "verify_gate", "persona_route",
+    "prepare", "safety_gate", "handoff_gate", "erasure_gate", "verify_gate", "persona_route",
     "jev_classify", "standard_reply", "narrow_agent", "full_agent",
 )
 
@@ -76,7 +77,8 @@ def build_turn_graph(nodes: TurnNodes):
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "safety_gate")
     graph.add_conditional_edges("safety_gate", _replied_or("handoff_gate"), ["handoff_gate", END])
-    graph.add_conditional_edges("handoff_gate", _replied_or("verify_gate"), ["verify_gate", END])
+    graph.add_conditional_edges("handoff_gate", _replied_or("erasure_gate"), ["erasure_gate", END])
+    graph.add_conditional_edges("erasure_gate", _replied_or("verify_gate"), ["verify_gate", END])
     graph.add_conditional_edges("verify_gate", _replied_or("persona_route"), ["persona_route", END])
     graph.add_conditional_edges("persona_route", _replied_or("jev_classify"), ["jev_classify", END])
     graph.add_conditional_edges("jev_classify", _by_path, list(_PATH_NODES.values()))

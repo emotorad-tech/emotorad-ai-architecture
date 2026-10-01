@@ -115,7 +115,8 @@ from .tools.verification import (
     apply_proven_phone,
 )
 from .triage import TriageAgent, bike_ref
-from .verify_first import VerifyFirst
+from .verify_first import CONFIRMED, VerifyFirst
+from . import erasure as erasure_rules
 
 UNSUPPORTED_MESSAGE = (
     "I am not able to help with this from here. Let me pass you to a member of our support "
@@ -277,6 +278,7 @@ class Runtime:
                 prepare=self._node_prepare,
                 safety_gate=self._node_safety,
                 handoff_gate=self._node_handoff,
+                erasure_gate=self._node_erasure,
                 verify_gate=self._node_verify,
                 persona_route=self._node_persona,
                 jev_classify=self._node_classify,
@@ -647,6 +649,68 @@ class Runtime:
             )}
         return {}
 
+    def _node_erasure(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 2b. Delete my data (erasure.py). A customer's request is recorded,
+        #     never carried out here: the nightly job deletes.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        if resolved.persona != "customer":
+            return {}
+        text = message.message_text or ""
+        user_key = state.user_key or self._user_key(resolved)
+        if state.erasure_step == erasure_rules.CONFIRMING and user_key:
+            state.erasure_step = None
+            if erasure_rules.is_confirmation(text):
+                reply, label = self._erasure_request(message, state, user_key)
+                return {"reply": self._finish(message, state, reply, label)}
+            self.log.emit("erasure_kept", message.conversation_id)
+            return {"reply": self._finish(message, state, erasure_rules.ERASURE_KEPT, "erasure:kept")}
+        cancel = erasure_rules.wants_cancel(text)
+        if not cancel and not erasure_rules.wants_deletion(text):
+            return {}
+        if user_key is None:
+            # Not verified: the verify step asks for the number, and its
+            # verified reply carries this on (_node_verify).
+            if self.verify_gate is not None and self.verify_gate.applies(resolved):
+                state.erasure_step = erasure_rules.CANCEL_WANTED if cancel else erasure_rules.WANTED
+            return {}
+        reply, label = (self._erasure_cancel(message, state, user_key) if cancel
+                        else self._erasure_offer(message, state, user_key))
+        return {"reply": self._finish(message, state, reply, label)}
+
+    def _erasure_offer(self, message: InboundMessage, state: ConversationState, user_key: str) -> Tuple[str, str]:
+        try:
+            pending = self.conversations.pending_erasure_of(user_key)
+        except Exception as exc:
+            return self._erasure_failed(message, state, exc)
+        if pending is not None:
+            return erasure_rules.ERASURE_EXISTING.format(reference=pending["_id"]), "erasure:existing"
+        state.erasure_step = erasure_rules.CONFIRMING
+        return erasure_rules.ERASURE_CONFIRM, "erasure:confirm"
+
+    def _erasure_request(self, message: InboundMessage, state: ConversationState, user_key: str) -> Tuple[str, str]:
+        try:
+            reference = self.conversations.request_erasure(user_key, message.channel, message.conversation_id,
+                                                           utc_now_iso())
+        except Exception as exc:
+            return self._erasure_failed(message, state, exc)
+        self.log.emit("erasure_requested", message.conversation_id, reference=reference)
+        return erasure_rules.ERASURE_REQUESTED.format(reference=reference), "erasure:requested"
+
+    def _erasure_cancel(self, message: InboundMessage, state: ConversationState, user_key: str) -> Tuple[str, str]:
+        try:
+            reference = self.conversations.cancel_erasure(user_key, utc_now_iso())
+        except Exception as exc:
+            return self._erasure_failed(message, state, exc)
+        if reference is None:
+            return erasure_rules.ERASURE_NOTHING_TO_CANCEL, "erasure:nothing_to_cancel"
+        self.log.emit("erasure_cancelled", message.conversation_id, reference=reference)
+        return erasure_rules.ERASURE_CANCELLED.format(reference=reference), "erasure:cancelled"
+
+    def _erasure_failed(self, message: InboundMessage, state: ConversationState, exc: Exception) -> Tuple[str, str]:
+        state.erasure_step = None
+        self.log.emit("erasure_request_failed", message.conversation_id, error=type(exc).__name__)
+        return erasure_rules.ERASURE_FAILED, "erasure:failed"
+
     def _node_verify(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 3. Verify first: an anonymous customer's number, code and bike, by
         #    fixed replies (verify_first.py). No model is called here.
@@ -656,11 +720,21 @@ class Runtime:
         gate = self.verify_gate.handle(message, state)
         if gate.escalated:
             self.log.escalation(message.conversation_id, "verification_locked", None)
+        text = gate.text
+        if gate.resolved is not None and state.erasure_step in (erasure_rules.WANTED, erasure_rules.CANCEL_WANTED):
+            # Verified for a deletion or a cancel asked before the number:
+            # that, not the bike list (spec 2026-10-01).
+            wanted, state.erasure_step = state.erasure_step, None
+            user_key = self._user_key(gate.resolved)
+            if user_key is not None:
+                follow, _ = (self._erasure_cancel(message, state, user_key) if wanted == erasure_rules.CANCEL_WANTED
+                             else self._erasure_offer(message, state, user_key))
+                text = CONFIRMED + " " + follow
         # The history gets the message with the number or code replaced, so
         # no model and no Jev call sees them; the transcript gets the same.
         shown = replace(message, message_text=gate.model_text)
         update: Dict[str, Any] = {"reply": self._finish(
-            shown, state, gate.text, "verify_first:" + gate.outcome, escalated=gate.escalated,
+            shown, state, text, "verify_first:" + gate.outcome, escalated=gate.escalated,
             metadata={"transcript_text": gate.model_text},
         )}
         if gate.resolved is not None:

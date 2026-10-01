@@ -119,6 +119,9 @@ class ConversationState:
     # Where this run came from (origin.py): the place fields and the person
     # once known. Set from the run's first message; only filled in after.
     origin: Optional[Dict[str, Any]] = None
+    # Self-service erasure (erasure.py): "wanted" or "cancel_wanted" while the
+    # verify step runs, "confirming" while the bot waits for DELETE.
+    erasure_step: Optional[str] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None
