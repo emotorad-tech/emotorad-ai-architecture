@@ -30,6 +30,11 @@ REVIEW_VALID = timedelta(hours=24)
 RECENT = timedelta(hours=48)
 REMIND_AFTER_DAYS = 25
 FILES = "s3_objects"
+# What a review is compared on: the records that never expire, and the files.
+# MongoDB drops `conversations` after 48 hours and `idempotency_keys` after 7
+# days on its own, which made delete refuse when the customer had done nothing
+# (the final review). A new chat adds transcript turns either way.
+PERMANENT = ("transcript_turns", "conversation_summaries", "media", "conversation_origins", FILES)
 
 
 class Refused(Exception):
@@ -51,8 +56,14 @@ def _proof(proof: Optional[Dict[str, Any]]) -> str:
 
 
 def _latest_review(record: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    # The last one made: reviews are kept in the order they were made, and two
+    # in the same second would tie on time.
     mine = [r for r in record.get("reviews") or [] if r["by"].strip().casefold() == name.casefold()]
-    return max(mine, key=lambda r: _when(r["at"])) if mine else None
+    return mine[-1] if mine else None
+
+
+def _permanent(totals: Dict[str, int]) -> Dict[str, int]:
+    return {key: totals.get(key, 0) for key in PERMANENT}
 
 
 def _counts(counts: Dict[str, int]) -> str:
@@ -123,7 +134,6 @@ class Admin:
         summaries: Dict[str, List[Any]] = {}
         for item in self.store.recent_summaries(user_key, limit=1000):
             summaries.setdefault(item.conversation_id, []).append(item)
-        self.store.record_erasure_review(reference, name, now.isoformat(), totals)
 
         out = self.out
         out("%s  %s  asked %s (%d days ago)" % (
@@ -162,6 +172,9 @@ class Admin:
         out("")
         self._print_totals(totals)
         out("")
+        # Recorded last: a show that stopped part way (an error, Ctrl-C) was
+        # not read, so it is not a review (the final review, 2026-10-01).
+        self.store.record_erasure_review(reference, name, now.isoformat(), totals)
         out("Review recorded: %s at %s." % (name, now.isoformat()))
         return 0
 
@@ -185,7 +198,7 @@ class Admin:
             raise Refused("Your review of %s is more than 24 hours old. Run show %s again. Nothing was deleted."
                           % (reference, reference))
         totals = self.totals(user_key)
-        if totals != review["totals"]:
+        if _permanent(totals) != _permanent(review["totals"]):
             raise Refused("What %s holds has changed since your review. Run show %s again. Nothing was deleted."
                           % (reference, reference))
         self._print_totals(totals)
@@ -193,28 +206,50 @@ class Admin:
         if typed != reference:
             raise Refused("Stopped. Nothing was deleted.")
         # The customer may have cancelled while the person read and typed.
-        self._request(reference)
+        record = self._request(reference)
         keys = [f["key"] for f in self._files(user_key)]
+        audit_reason = "self-service request %s: %s" % (reference, reason)
+        if record.get("attempts"):
+            audit_reason += " (finishing after %d failed attempt(s), last: %s)" % (
+                record["attempts"], record.get("last_error") or "-")
+        # Every failure from here, Ctrl-C included, is written to the request
+        # and said: once files are hidden, the records may be partly gone, and
+        # the next attempt's audit record says it is finishing (the final review).
+        stage, hidden = "hide", 0
         try:
             if keys and self.media_store is None:
                 raise StorageError("no media bucket configured")
             for key in keys:
                 self.media_store.hide(key)
-        except Exception as exc:
-            error = type(exc).__name__
-            self.store.record_erasure_failure(reference, error)
-            self.out("Could not hide the files (%s). Nothing in the database was deleted. "
-                     "Fix the cause and run delete %s again." % (error, reference))
+                hidden += 1
+            stage = "delete_person"
+            now = self.now()
+            counts = self.store.delete_person(user_key)
+            stage = "log_erasure"
+            self.store.log_erasure(erasure.audit_record(
+                user_key, audit_reason, name, now, deleted=counts, s3_objects=len(keys)))
+            stage = "close_erasure"
+            self.store.close_erasure(reference, "done", counts, None, now.isoformat(), by=name)
+        except (Exception, KeyboardInterrupt) as exc:
+            error = type(exc).__name__ if stage == "hide" else "%s:%s" % (stage, type(exc).__name__)
+            self._record_failure(reference, error)
+            if stage == "hide":
+                self.out("Could not hide the files (%s). Nothing in the database was deleted. %d of %d files "
+                         "were hidden. Fix the cause and run delete %s again." % (error, hidden, len(keys), reference))
+            else:
+                self.out("Stopped at %s (%s). All %d files are hidden; the records may be partly deleted. "
+                         "Run show %s and delete %s again to finish." % (
+                             stage, type(exc).__name__, len(keys), reference, reference))
             return 1
-        now = self.now()
-        counts = self.store.delete_person(user_key)
-        self.store.log_erasure(erasure.audit_record(
-            user_key, "self-service request %s: %s" % (reference, reason), name, now,
-            deleted=counts, s3_objects=len(keys)))
-        self.store.close_erasure(reference, "done", counts, None, now.isoformat(), by=name)
         self.out("Deleted %s: %d files hidden; records: %s. The audit record is written."
                  % (reference, len(keys), _counts(counts)))
         return 0
+
+    def _record_failure(self, reference: str, error: str) -> None:
+        try:
+            self.store.record_erasure_failure(reference, error)
+        except Exception as exc:
+            self.out("The failure could not be written to %s either (%s)." % (reference, type(exc).__name__))
 
     def check(self) -> int:
         """References and ages only: red at 25 days, held ones included."""

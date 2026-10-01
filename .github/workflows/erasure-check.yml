@@ -4,8 +4,9 @@ name: Erasure check (staging)
 # a person reviews and deletes each request with erasure_admin. This run deletes
 # nothing. It lists open requests by reference and age only, and is red when one
 # is 25 days old or more, so GitHub emails the workflow's owner.
-# GitHub runs a schedule only from the default branch: until this file is on
-# main, start it by hand (Actions -> this workflow -> Run workflow).
+# GitHub runs a workflow, by schedule or by hand, only once it is on the
+# default branch. Until this file is on main it does not run at all: run
+# `python -m emotorad_ai.erasure_admin check` in the container through SSM.
 on:
   schedule:
     - cron: "30 3 * * *"  # 09:00 India time

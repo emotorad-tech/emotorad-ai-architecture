@@ -599,12 +599,15 @@ def claims_ticket(reply: str) -> bool:
 # After a hand-over, "delete" reached the model, which replied "OK, I've
 # deleted this chat and all the data it held". Nothing was deleted, and the
 # model has no tool that deletes. A reply that says otherwise is replaced.
+# What the customer's data is called. "I've removed the old slot" and "your
+# details have been removed from the waiting list" are not about it (the final
+# review, 2026-10-01): the verb alone is not a claim.
+_THEIR_DATA = r"(?:chats?|data|conversations?|history|messages|photos?|videos?|account|everything)"
 _DELETION_CLAIM = re.compile(
-    r"\bI(?:'ve|\s+have)\s+(?:now\s+|just\s+)?(?:deleted|removed|erased|cleared|wiped)\b"
-    r"|\b(?:chats?|data|conversations?|history|messages|details|account)\b.{0,40}?"
-    r"\b(?:has|have)\s+(?:now\s+)?been\s+(?:deleted|removed|erased|cleared|wiped)\b"
-    r"|\b(?:chats?|data|conversations?|history|messages|details|account)\b.{0,40}?"
-    r"\b(?:is|are)\s+now\s+(?:deleted|removed|erased|gone)\b",
+    r"\bI(?:'ve|\s+have)\s+(?:now\s+|just\s+)?(?:deleted|removed|erased|cleared|wiped)\b.{0,40}?\b"
+    + _THEIR_DATA + r"\b"
+    r"|\b" + _THEIR_DATA + r"\b.{0,40}?\b(?:has|have)\s+(?:now\s+)?been\s+(?:deleted|removed|erased|cleared|wiped)\b"
+    r"|\b" + _THEIR_DATA + r"\b.{0,40}?\b(?:is|are)\s+now\s+(?:deleted|removed|erased|gone)\b",
     re.IGNORECASE,
 )
 

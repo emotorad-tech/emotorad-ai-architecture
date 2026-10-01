@@ -398,3 +398,63 @@ class CheckTests(unittest.TestCase):
 class NothingDeletesOnItsOwnTests(unittest.TestCase):
     def test_the_nightly_job_is_gone(self):
         self.assertIsNone(importlib.util.find_spec("emotorad_ai.erasure_job"))
+
+
+class FinalReviewTests(unittest.TestCase):
+    """The final review of the manual erasure branch (2026-10-01)."""
+
+    REASON = "asked in the chat; no open case"
+
+    def setUp(self):
+        self.desk = Desk()
+        self.reference = self.desk.seed()
+
+    def delete(self):
+        return self.desk.run("delete", self.reference, answers=["Asha", self.REASON, self.reference])
+
+    def test_a_show_that_stops_part_way_is_not_a_review(self):
+        with mock.patch.object(self.desk.store, "origins_of", side_effect=StoreUnavailable("down")):
+            code, text = self.desk.run("show", self.reference, answers=["Asha"])
+        self.assertEqual(code, 1)
+        self.assertNotIn("reviews", self.desk.store.erasure_record(self.reference))
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("Run show %s first" % self.reference, text)
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+
+    def test_a_failure_after_the_files_are_hidden_is_recorded_and_said(self):
+        self.desk.run("show", self.reference, answers=["Asha"])
+        with mock.patch.object(self.desk.store, "log_erasure", side_effect=StoreUnavailable("down")):
+            code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("Stopped at log_erasure (StoreUnavailable). All 1 files are hidden", text)
+        record = self.desk.store.erasure_record(self.reference)
+        self.assertEqual((record["status"], record["attempts"], record["last_error"]),
+                         ("pending", 1, "log_erasure:StoreUnavailable"))
+        # The person finishes it, and the audit record says it was a second go.
+        self.desk.run("show", self.reference, answers=["Asha"])
+        code, text = self.delete()
+        self.assertEqual(code, 0, text)
+        (audit,) = self.desk.store.erasure_log
+        self.assertIn("finishing after 1 failed attempt(s), last: log_erasure:StoreUnavailable", audit["reason"])
+
+    def test_ctrl_c_while_hiding_is_recorded(self):
+        class Interrupted(FakeMedia):
+            def hide(self, key):
+                raise KeyboardInterrupt
+
+        self.desk.media = Interrupted()
+        self.desk.run("show", self.reference, answers=["Asha"])
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("Could not hide the files (KeyboardInterrupt). Nothing in the database was deleted.", text)
+        record = self.desk.store.erasure_record(self.reference)
+        self.assertEqual((record["attempts"], record["last_error"]), (1, "KeyboardInterrupt"))
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+
+    def test_records_that_expire_on_their_own_do_not_block_delete(self):
+        self.desk.run("show", self.reference, answers=["Asha"])
+        self.desk.store._states.pop("mine")  # MongoDB drops the working copy after 48 hours
+        code, text = self.delete()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.desk.store.conversations_of(ME), [])

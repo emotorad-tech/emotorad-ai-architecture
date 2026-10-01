@@ -18,5 +18,9 @@ class DeletionClaimTests(unittest.TestCase):
                       "I haven't deleted anything.",
                       "Your deletion request is DEL-H9FECT. Everything will be deleted in tonight's run.",
                       "Shall I delete it?",
+                      # The final review: ordinary replies, not about the customer's data.
+                      "I've removed the old slot and booked you for Tuesday at 11.",
+                      "I have cleared the duplicate ticket so only EM-00012 is open.",
+                      "Your details have been removed from the waiting list.",
                       ""):
             self.assertFalse(claims_deletion(reply), reply)

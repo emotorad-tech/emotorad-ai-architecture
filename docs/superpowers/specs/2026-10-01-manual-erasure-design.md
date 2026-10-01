@@ -195,8 +195,9 @@ The server is not given permanent-delete rights.
   03:30 UTC (09:00 India time) and by hand, it runs `python -m
   emotorad_ai.erasure_admin check` in a one-off container through SSM, exactly
   as the nightly run does now. A red run means a request is 25 days old or
-  more, or the store could not be read; GitHub emails the workflow's owner. A
-  schedule only fires from `main`; until then it is run by hand.
+  more, or the store could not be read; GitHub emails the workflow's owner.
+  GitHub runs a workflow, by schedule or by hand, only once it is on `main`;
+  until then, run `erasure_admin check` in the container by hand.
 - `scripts/delete_person.py` stays, for deletions asked for outside the chat
   (by email, for example).
 

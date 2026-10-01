@@ -41,6 +41,19 @@ from tests.test_runtime_persistence import ConflictingStore, runtime_on, send
 
 TODAY = date(2026, 7, 28)
 NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+
+# mongomock expires TTL documents against the real clock, and these stores run
+# on NOW: once the real date passed NOW + 48 hours (1 October 2026, 10:00 UTC),
+# every saved conversation counted as expired. mongomock's clock is pinned too.
+_MONGOMOCK_CLOCK = mock.patch("mongomock.utcnow", lambda: NOW.replace(tzinfo=None))
+
+
+def setUpModule():
+    _MONGOMOCK_CLOCK.start()
+
+
+def tearDownModule():
+    _MONGOMOCK_CLOCK.stop()
 USER = "PHONE#+919876543210"
 CTX = ToolContext(conversation_id="c1", phone="+919876543210")
 TICKET = {"category": "battery_charging", "severity": "normal", "description": "LED stays off.", "idempotency_key": "k1"}
