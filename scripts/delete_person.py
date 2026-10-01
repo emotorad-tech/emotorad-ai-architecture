@@ -23,7 +23,6 @@ script refuses rather than delete the database records and orphan the objects.
 
 import argparse
 import getpass
-import hashlib
 import os
 import sys
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src")]
 
+from emotorad_ai.erasure import audit_record  # noqa: E402
 from emotorad_ai.identity import PHONE, normalise  # noqa: E402
 from emotorad_ai.observability import redact_pii  # noqa: E402
 from emotorad_ai.storage.s3 import BUCKET_ENV, StorageError, store_from_env  # noqa: E402
@@ -105,31 +105,19 @@ def main() -> int:
             print("deleted from S3: %s" % (", ".join(deleted_keys) if deleted_keys else "none"))
             print("not deleted: %s" % ", ".join(remaining))
             print("rerun the same command once the problem is fixed: deleting a version twice is harmless.")
-            db[ERASURE_LOG].insert_one({
-                "key_sha256": hashlib.sha256(subject.encode("utf-8")).hexdigest(),
-                "kind": subject.split("#", 1)[0],
-                "reason": redact_pii(args.reason.strip()),
-                "run_by": getpass.getuser(),
-                "at": datetime.now(timezone.utc),
-                "incomplete": True,
-                "s3_objects": s3_objects,
-                "s3_versions": s3_versions,
-            })
+            db[ERASURE_LOG].insert_one(audit_record(
+                subject, redact_pii(args.reason.strip()), getpass.getuser(), datetime.now(timezone.utc),
+                s3_objects=s3_objects, s3_versions=s3_versions, incomplete=True,
+            ))
             print("audit record written to %s (incomplete)" % ERASURE_LOG)
             return 1
 
     deleted = erase(dry_run=False)
-    audit = {
-        "key_sha256": hashlib.sha256(subject.encode("utf-8")).hexdigest(),
-        "kind": subject.split("#", 1)[0],
-        "reason": redact_pii(args.reason.strip()),  # a reason can quote a number
-        "run_by": getpass.getuser(),
-        "at": datetime.now(timezone.utc),
-        "deleted": deleted,
-    }
-    if media:
-        audit["s3_objects"] = s3_objects
-        audit["s3_versions"] = s3_versions
+    audit = audit_record(
+        subject, redact_pii(args.reason.strip()),  # a reason can quote a number
+        getpass.getuser(), datetime.now(timezone.utc), deleted=deleted,
+        s3_objects=s3_objects if media else None, s3_versions=s3_versions if media else None,
+    )
     db[ERASURE_LOG].insert_one(audit)
     print("deleted: %s" % ", ".join("%s %d" % item for item in deleted.items()))
     if media:

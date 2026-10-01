@@ -126,6 +126,16 @@ class S3Store:
         except Exception as exc:
             raise StorageError("delete %r failed: %s" % (key, type(exc).__name__)) from None
 
+    def hide(self, key: str) -> None:
+        """A plain delete: the object disappears now, and the bucket's
+        lifecycle erases its versions for good within 30 days
+        (infra/media.yaml). Needs only s3:DeleteObject. Called by the nightly
+        erasure job (erasure_job.py), never by the chat."""
+        try:
+            self._client.delete_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            raise StorageError("hide %r failed: %s" % (key, type(exc).__name__)) from None
+
     def _versions_of(self, key: str) -> List[Dict[str, str]]:
         """Every version and delete marker whose Key is exactly `key`. Prefix
         also matches longer keys, so each entry is checked before it is kept."""

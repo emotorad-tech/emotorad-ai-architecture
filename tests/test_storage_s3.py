@@ -232,3 +232,22 @@ class FromEnvTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HideTests(unittest.TestCase):
+    def test_a_plain_delete_with_no_version(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_response("delete_object", {}, {"Bucket": "b", "Key": "customers/a/c/images/1.jpg"})
+        with stub:
+            S3Store("b", client=c).hide("customers/a/c/images/1.jpg")
+        stub.assert_no_pending_responses()
+
+    def test_a_refusal_is_a_storage_error_naming_the_class(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_client_error("delete_object", service_error_code="AccessDenied", http_status_code=403)
+        with stub, self.assertRaises(StorageError) as raised:
+            S3Store("b", client=c).hide("customers/a/c/images/1.jpg")
+        # The class only (botocore names it after the error code), never more.
+        self.assertRegex(str(raised.exception), r"^hide 'customers/a/c/images/1\.jpg' failed: \w+$")
