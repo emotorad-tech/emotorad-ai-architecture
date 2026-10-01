@@ -309,6 +309,25 @@ def _within_two_edits(a: str, b: str) -> bool:
     return previous[-1] <= 2
 
 
+# A ticket on a bike the customer gave because it is not in their list (spec
+# 2026-10-01, unlisted bike).
+UNLISTED_SOURCE = "given by the customer; not registered on this number"
+
+
+def _unlisted_ticket_bike(
+    frame_number: Optional[str], unlisted_bike: Optional[Dict[str, Optional[str]]]
+) -> Optional[Dict[str, Any]]:
+    """The conversation's unlisted bike, for a ticket that names no frame
+    number or names that bike's; None otherwise (a listed bike's frame number
+    is resolved as before)."""
+    if not unlisted_bike:
+        return None
+    frame = unlisted_bike.get("frame_number")
+    if frame_number and re.sub(r"\s+", "", frame_number).upper() != (frame or ""):
+        return None
+    return {"frame_number": frame, "product_name": unlisted_bike.get("model"), "frame_number_source": UNLISTED_SOURCE}
+
+
 def _owned_bike(
     phone: str,
     frame_number: Optional[str],
@@ -933,7 +952,7 @@ def build_registry(
         injects=("phone",),
         # Whether any photo or video has arrived in the conversation, from the
         # runtime's facts; absent for a caller that has none (the safety branch).
-        optional_injects=("evidence_seen", "selected_bike"),
+        optional_injects=("evidence_seen", "selected_bike", "unlisted_bike"),
         write=True,
     )
     def create_support_ticket(
@@ -945,6 +964,7 @@ def build_registry(
         frame_number: Optional[str] = None,
         evidence_seen: Optional[bool] = None,
         selected_bike: Optional[str] = None,
+        unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
@@ -961,7 +981,8 @@ def build_registry(
                 "(a voice call, or they say they cannot), hand the conversation to a person instead.",
                 remedy="collect_evidence",
             )
-        bike = _owned_bike(phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
+        bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
+            phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
         ticket = tickets.create(
             phone=phone,
             category=category,

@@ -83,6 +83,7 @@ from .guardrails import (
     check_human_handoff,
     check_order_claim,
     check_safety,
+    claims_coverage,
     claims_deletion,
     claims_ticket,
     check_safety_in_description,
@@ -118,7 +119,7 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
-from .triage import TriageAgent, bike_ref
+from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context
 from .verify_first import CONFIRMED, VerifyFirst
 from . import erasure as erasure_rules
 
@@ -1059,6 +1060,9 @@ class Runtime:
 
     @staticmethod
     def _selected_bike(resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
+        if state.unlisted_bike:
+            # Not a listed bike, and never the one bike the customer rejected.
+            return unlisted_as_bike(state.unlisted_bike)
         for bike in resolved.bikes:
             # By reference: a bike with no frame number on record would
             # otherwise match a conversation with no bike chosen.
@@ -1102,7 +1106,7 @@ class Runtime:
         One place, so the narrow agent cannot skip a check the full agents get.
         """
         turn = agent.run(
-            message, resolved, state.history, state.context_block or "",
+            message, resolved, state.history, (state.context_block or "") + unlisted_context(state.unlisted_bike),
             # Conversation facts the order tool decides on. Lambdas, because
             # evidence_seen can flip during this very turn when a photo arrives
             # with the message that triggers the order.
@@ -1112,6 +1116,9 @@ class Runtime:
                 # The ticket tool's check on a frame number the rider reads
                 # off the sticker: only for the bike this conversation chose.
                 "selected_bike": lambda: state.selected_frame,
+                # A bike the customer gave because it is not in their list:
+                # the ticket tool puts its frame number on a ticket.
+                "unlisted_bike": lambda: state.unlisted_bike,
                 # The customer's own words, for the address backstop: an
                 # address is accepted only if it matches the record or
                 # something the customer actually typed in this conversation.
@@ -1336,6 +1343,10 @@ class Runtime:
         if state.coverage_result is not None:
             results = results + [state.coverage_result]
         coverage = check_coverage_claim(text, results)
+        if state.unlisted_bike and claims_coverage(text):
+            # No record of this bike on the number (spec 2026-10-01, unlisted
+            # bike): the listed bikes' cover says nothing about it.
+            coverage = CoverageCheck(blocked=True, reason="unlisted_bike", claimed="coverage", actual="no record")
         order = check_order_claim(
             text,
             [call["result"] for call in turn.tool_calls]
@@ -1368,6 +1379,8 @@ class Runtime:
         # stopped answering since it was chosen), the ticket is raised
         # without a bike, naming it here, rather than refused.
         late: Dict[str, Any] = {}
+        if state.unlisted_bike:
+            late["unlisted_bike"] = lambda: state.unlisted_bike
         if state.selected_frame:
             late["selected_bike"] = lambda: state.selected_frame
             if state.selected_bike_label:

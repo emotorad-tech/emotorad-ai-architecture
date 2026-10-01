@@ -340,6 +340,11 @@ def check_coverage_claim(reply: str, tool_results: Sequence[dict]) -> CoverageCh
     return CoverageCheck(blocked=False)
 
 
+def claims_coverage(reply: str) -> bool:
+    """Whether the reply says something is, or is not, covered."""
+    return bool(_COVERED_CLAIM.search(reply or "") or _NOT_COVERED_CLAIM.search(reply or ""))
+
+
 # --- evidence post-check -----------------------------------------------------
 # A fault conclusion, a warranty path or a raised ticket, asserted in a reply
 # when no photo or video has ever arrived in the conversation.
