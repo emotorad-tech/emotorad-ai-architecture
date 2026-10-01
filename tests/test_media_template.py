@@ -100,6 +100,21 @@ class MediaTemplateRetentionTests(unittest.TestCase):
             )
         )
 
+    def test_the_server_may_only_plainly_delete_customer_files(self):
+        statements = load_template()["Resources"]["MediaAccessPolicy"]["Properties"]["PolicyDocument"]["Statement"]
+        deletes = [s for s in statements if "s3:DeleteObject" in (s["Action"] if isinstance(s["Action"], list)
+                                                                  else [s["Action"]])]
+        self.assertEqual(len(deletes), 1)
+        self.assertIn("/customers/*", str(deletes[0]["Resource"]))
+        for statement in statements:
+            actions = statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
+            self.assertNotIn("s3:DeleteObjectVersion", actions)
+
+    def test_delete_markers_left_after_30_days_are_removed(self):
+        _, rules = _lifecycle_rules()
+        self.assertTrue(any(_applies_to_customers(rule) and rule.get("ExpiredObjectDeleteMarker") is True
+                            for rule in rules))
+
     def test_versioning_stays_enabled(self):
         bucket, _ = _lifecycle_rules()
         self.assertEqual(bucket["VersioningConfiguration"]["Status"], "Enabled")

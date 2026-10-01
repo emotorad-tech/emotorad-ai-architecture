@@ -56,6 +56,9 @@ Resources:
             Prefix: customers/
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
+            # A self-service erasure hides a file with a plain delete; once its
+            # versions have expired, the delete marker left behind goes too.
+            ExpiredObjectDeleteMarker: true
           - Id: abandoned-multipart
             Status: Enabled
             AbortIncompleteMultipartUpload:
@@ -88,6 +91,12 @@ Resources:
           - Effect: Allow
             Action: s3:ListBucket
             Resource: !Sub arn:aws:s3:::emotorad-ai-${Environment}-media
+          # The nightly erasure job (erasure_job.py) hides a customer's files
+          # with a plain delete. No s3:DeleteObjectVersion: the lifecycle
+          # erases the versions within 30 days, so a mistake can be undone.
+          - Effect: Allow
+            Action: s3:DeleteObject
+            Resource: !Sub arn:aws:s3:::emotorad-ai-${Environment}-media/customers/*
 
 Outputs:
   BucketName:
