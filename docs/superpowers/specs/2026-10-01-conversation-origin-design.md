@@ -73,9 +73,10 @@ def choose(*places: Optional[Place]) -> Place:   # first that resolved, else UNK
   `origin_lookup_failed` with the exception class, never the address.
 - **Phone.** The country from the calling code of an E.164 number: `+91` is
   `IN`, `+34` is `ES`, anything else `None`. Country only.
-- **No file.** `ip_locator_from_env()` returns `None` when the file is missing
+- **No file.** `ip_locator_from_env()` returns `None` when the file is missing,
   or unreadable (logged once at start-up as `origin_db_unavailable`); every IP
-  lookup then gives `None` and the phone, or `unknown`, stands.
+  lookup then gives `None` and the phone, or `unknown`, stands. The file's
+  month (`dbip-city-lite-2026-10`) is read from its own build date.
 
 Adding a channel means passing its signals to `choose`; nothing else changes.
 
@@ -142,9 +143,8 @@ the chat carries on. It is never retried inside the turn and never raised.
 - Built into the image: a `RUN` step in the `Dockerfile` downloads
   `https://download.db-ip.com/free/dbip-city-lite-YYYY-MM.mmdb.gz` for the
   current month, falling back to the previous month (the new file appears
-  early in the month), and unpacks it to `/app/geo/dbip-city-lite.mmdb` with
-  the month written beside it. If both downloads fail the build still
-  succeeds, without the file.
+  early in the month), and unpacks it to `/app/geo/dbip-city-lite.mmdb`. If
+  both downloads fail the build still succeeds, without the file.
 - Each deploy therefore takes the newest file. The file is about 121 MB
   compressed, so the image grows; the staging disk (8 GB) has room after the
   build-cache clean-up, and growing it to 20 GB is recommended separately.
