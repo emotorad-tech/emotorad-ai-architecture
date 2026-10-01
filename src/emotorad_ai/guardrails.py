@@ -358,8 +358,8 @@ def check_coverage_claim(reply: str, tool_results: Sequence[dict]) -> CoverageCh
 # attachments.shows_media).
 
 EVIDENCE_BLOCKED_MESSAGE = (
-    "Before I can take this further I need to see it — please send a photo or a short video "
-    "of what you are describing, and I will pick it straight up from there."
+    "Before I can take this further I need to see it. Please send a short video of what you're "
+    "describing. If you can't take a video, a photo will do."
 )
 
 # Conclusions that must rest on something seen. Phrased for what a support bot

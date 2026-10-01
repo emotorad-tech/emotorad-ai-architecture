@@ -93,6 +93,7 @@ from .jev import JevError
 from .knowledge import KnowledgeBase
 from .llm import BedrockClaude
 from .observability import EventLog
+from .evidence_asks import MAX_EVIDENCE_ASKS, added_line, asks_for_media, declines_video
 from .one_step import is_too_long, replace_turn_text
 from .one_step import sentences as one_step_sentences
 from .one_step import shorten as shorten_reply
@@ -490,6 +491,9 @@ class Runtime:
         fresh.escalated = fresh.escalated or ours.escalated
         fresh.ticket_id = reply.ticket_id or fresh.ticket_id
         fresh.evidence_seen = fresh.evidence_seen or ours.evidence_seen
+        # This turn's count is the newer one, and a decline stands.
+        fresh.evidence_asks = ours.evidence_asks
+        fresh.video_declined = fresh.video_declined or ours.video_declined
         if fresh.started_at == ours.started_at:  # an origin belongs to its run
             fresh.origin = fresh.origin or ours.origin
         fresh.disclosed = fresh.disclosed or ours.disclosed
@@ -1201,8 +1205,8 @@ class Runtime:
             )
             # The reply is replaced, but a ticket the turn already raised still
             # exists: keep its id so it is tracked and gets the transcript.
-            if state.evidence_asked:
-                # Asked for a photo once already, and the reply still concludes
+            if state.evidence_asks >= MAX_EVIDENCE_ASKS:
+                # Asked three times already, and the reply still concludes
                 # with nothing seen: a person takes it from here, rather than the
                 # customer being asked the same thing again.
                 self.log.escalation(message.conversation_id, "evidence_not_forthcoming", turn.ticket_id)
@@ -1212,7 +1216,7 @@ class Runtime:
                     metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text, "handover": True},
                     already_in_history=True,
                 )
-            state.evidence_asked = True
+            state.evidence_asks += 1
             return self._finish(
                 message, state, EVIDENCE_BLOCKED_MESSAGE + self._already_done(turn), "guardrail:evidence_post_check",
                 ticket_id=turn.ticket_id,
@@ -1249,6 +1253,29 @@ class Runtime:
                 "guardrail:deletion_claim", ticket_id=turn.ticket_id,
                 metadata={"suppressed_text": turn.text}, already_in_history=True,
             )
+
+        # Video first (spec 2026-10-01-video-first-evidence-design.md): the
+        # model decides when to ask to see something; every ask is a video
+        # first, and three asks with nothing back hand the chat to a person.
+        asked = asks_for_media(turn.text)
+        if asked is not None:
+            if state.evidence_asks >= MAX_EVIDENCE_ASKS:
+                self.log.guardrail(message.conversation_id, "evidence_not_forthcoming",
+                                   {"suppressed_text": turn.text})
+                self.log.escalation(message.conversation_id, "evidence_not_forthcoming", turn.ticket_id)
+                return self._finish(
+                    message, state, HANDOVER_TEXT + self._already_done(turn), "guardrail:evidence_not_forthcoming",
+                    escalated=True, ticket_id=turn.ticket_id,
+                    metadata={"suppressed_text": turn.text, "handover": True}, already_in_history=True,
+                )
+            state.evidence_asks += 1
+            added = added_line(turn.text, asked, state.video_declined)
+            if added is not None:
+                event, line = added
+                text = turn.text.rstrip() + "\n\n" + line
+                self.log.emit(event, message.conversation_id)
+                replace_turn_text(state.history, text)
+                turn = replace(turn, text=text)
 
         return Reply(
             conversation_id=message.conversation_id,
@@ -1505,8 +1532,12 @@ class Runtime:
         shown it (attachments.shows_media); one that could not be fetched or
         read, or a PDF, does not (the person's decision, 2026-09-29).
         """
+        if declines_video(message.message_text):
+            state.video_declined = True
         if shows_media(content):
             state.evidence_seen = True
+            # Something to see arrived: the asks start again (video first).
+            state.evidence_asks = 0
         elif message.attachments:
             # By kind only: the URL can be a signed link or a customer's key.
             self.log.emit(

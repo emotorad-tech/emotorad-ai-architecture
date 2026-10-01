@@ -79,9 +79,12 @@ class ConversationState:
     # conversation, not per turn: a customer who sent the picture three turns ago
     # must not be asked for it again because the model concluded later.
     evidence_seen: bool = False
-    # The evidence post-check has asked for a photo once already. A second
-    # blocked reply hands over to a person rather than asking again.
-    evidence_asked: bool = False
+    # Video first (spec 2026-10-01-video-first-evidence-design.md): asks for a
+    # video or photo since one last reached the model, the evidence post-check's
+    # included, and whether the customer said a video is not possible. Three
+    # asks with nothing back are sent; the fourth hands over to a person.
+    evidence_asks: int = 0
+    video_declined: bool = False
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool

@@ -86,19 +86,24 @@ def send(rt, text, attachments=()):
 class TheCombinedTestSessionTests(unittest.TestCase):
     """The person's session, replayed with scripted models."""
 
-    def test_one_photo_request_then_a_person_and_no_ticket_created_without_evidence(self):
+    def test_three_asks_then_a_person_and_no_ticket_created_without_evidence(self):
+        # Three asks in all (video-first spec, 2026-10-01), then a person.
         rt = runtime([
             call_tool(CREATE_SUPPORT_TICKET, dict(TICKET), "toolu_1"),
             say("I've raised a support ticket for you; the team will be in touch."),
+            say("I have raised a support ticket, as you asked."),
+            say("I have raised a support ticket, as you asked."),
             say("I have raised a support ticket, as you asked."),
         ], store=routed_store())
         first = send(rt, "room temperature")
         self.assertEqual(rt.registry.tickets.tickets, {})  # refused at the tool
         self.assertIn(EVIDENCE_BLOCKED_MESSAGE, first.text)
-        second = send(rt, "please raise a complaint")
-        self.assertNotIn(EVIDENCE_BLOCKED_MESSAGE, second.text)  # not asked a second time
-        self.assertIn(HANDOVER_TEXT, second.text)
-        self.assertTrue(second.escalated)
+        for text in ("please raise a complaint", "raise it please"):
+            self.assertIn(EVIDENCE_BLOCKED_MESSAGE, send(rt, text).text)
+        fourth = send(rt, "I said raise it")
+        self.assertNotIn(EVIDENCE_BLOCKED_MESSAGE, fourth.text)
+        self.assertIn(HANDOVER_TEXT, fourth.text)
+        self.assertTrue(fourth.escalated)
 
 
 class NeverHideAWriteTests(unittest.TestCase):

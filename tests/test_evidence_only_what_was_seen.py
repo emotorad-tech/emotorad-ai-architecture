@@ -105,14 +105,15 @@ class UnreadableIsNotEvidenceTests(unittest.TestCase):
         send(rt, "still dead, photo attached", [S3_PHOTO])
         self.assertEqual(rt.registry.tickets.tickets, {})
 
-    def test_asked_once_then_a_person_takes_it(self):
-        rt = runtime([say(FAULT), say(FAULT)], media_store=Store(fail=True))
-        first = send(rt, "here is the terminal", [S3_PHOTO])
-        second = send(rt, "I sent it again", [S3_PHOTO])
-        self.assertIn(EVIDENCE_BLOCKED_MESSAGE, first.text)
-        self.assertIn(HANDOVER_TEXT, second.text)
-        self.assertTrue(second.escalated)
-
+    def test_asked_three_times_then_a_person_takes_it(self):
+        # Three asks in all (video-first spec, 2026-10-01), then a person.
+        rt = runtime([say(FAULT)] * 4, media_store=Store(fail=True))
+        replies = [send(rt, text, [S3_PHOTO]) for text in ("here is the terminal", "I sent it again", "and again",
+                                                            "once more")]
+        for reply in replies[:3]:
+            self.assertIn(EVIDENCE_BLOCKED_MESSAGE, reply.text)
+        self.assertIn(HANDOVER_TEXT, replies[3].text)
+        self.assertTrue(replies[3].escalated)
     def test_a_pdf_is_not_evidence(self):
         pdf = {"kind": "document", "url": "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.4 invoice").decode()}
         rt = runtime([say(FAULT)])
