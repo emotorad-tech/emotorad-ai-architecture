@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from . import erasure as erasure_rules
 from .attachments import MACHINE_TEXT_PREFIXES
 from .contract import InboundMessage, Reply
 from .observability import redact_pii
@@ -415,6 +416,10 @@ class InMemoryConversationStore:
         self._media: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Where each run came from (origin.py), permanent: conversation id -> run key -> record.
         self._origins: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Self-service erasure requests (erasure.py): reference -> request.
+        self._erasures: Dict[str, Dict[str, Any]] = {}
+        # The erasure_log audit records the nightly job writes.
+        self.erasure_log: List[Dict[str, Any]] = []
 
     def get(self, conversation_id: str) -> ConversationState:
         state = self._states.get(conversation_id)
@@ -472,6 +477,66 @@ class InMemoryConversationStore:
     def origins_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         return sorted(self._origins.get(conversation_id, {}).values(), key=lambda r: r["started_at"])
 
+    def conversations_of(self, user_key: str) -> List[str]:
+        """Every conversation id tied to one person."""
+        mine = {cid for cid, state in self._states.items() if state.user_key == user_key}
+        mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
+        mine |= {cid for cid, runs in self._origins.items()
+                 if any(r.get("user_key") == user_key for r in runs.values())}
+        return sorted(mine)
+
+    def pending_erasure_of(self, user_key: str) -> Optional[Dict[str, Any]]:
+        return next((dict(r) for r in self._erasures.values()
+                     if r.get("user_key") == user_key and r["status"] == "pending"), None)
+
+    def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str) -> str:
+        """One pending request per person: asking again returns it."""
+        pending = self.pending_erasure_of(user_key)
+        if pending is not None:
+            return pending["_id"]
+        reference = erasure_rules.new_reference()
+        while reference in self._erasures:
+            reference = erasure_rules.new_reference()
+        self._erasures[reference] = {"_id": reference, "user_key": user_key, "status": "pending",
+                                     "requested_at": now, "channel": channel, "conversation_id": conversation_id,
+                                     "attempts": 0, "last_error": None}
+        return reference
+
+    def cancel_erasure(self, user_key: str, now: str) -> Optional[str]:
+        pending = self.pending_erasure_of(user_key)
+        if pending is None:
+            return None
+        self.close_erasure(pending["_id"], "cancelled", None, None, now)
+        return pending["_id"]
+
+    def pending_erasures(self) -> List[Dict[str, Any]]:
+        pending = [dict(r) for r in self._erasures.values() if r["status"] == "pending"]
+        return sorted(pending, key=lambda r: r["requested_at"])
+
+    def record_erasure_failure(self, reference: str, error: str) -> int:
+        record = self._erasures[reference]
+        record["attempts"] += 1
+        record["last_error"] = error
+        return record["attempts"]
+
+    def close_erasure(self, reference: str, status: str, counts: Optional[Dict[str, int]],
+                      error: Optional[str], now: str) -> None:
+        """Closed: the person's key is replaced by its hash."""
+        record = self._erasures[reference]
+        user_key = record.pop("user_key", None)
+        if user_key:
+            record["key_sha256"] = erasure_rules.key_sha256(user_key)
+        record.update(status=status, processed_at=now, counts=counts)
+        if error is not None:
+            record["last_error"] = error
+
+    def erasure_record(self, reference: str) -> Optional[Dict[str, Any]]:
+        record = self._erasures.get(reference)
+        return dict(record) if record else None
+
+    def log_erasure(self, entry: Dict[str, Any]) -> None:
+        self.erasure_log.append(dict(entry))
+
     def recent_summaries(
         self, user_key: str, limit: int = 3, exclude: Optional[str] = None
     ) -> List[ConversationSummaryItem]:
@@ -486,10 +551,7 @@ class InMemoryConversationStore:
         summaries. The counts say what went, for the person running the
         deletion to confirm.
         """
-        mine = {cid for cid, state in self._states.items() if state.user_key == user_key}
-        mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
-        mine |= {cid for cid, runs in self._origins.items()
-                 if any(r.get("user_key") == user_key for r in runs.values())}
+        mine = set(self.conversations_of(user_key))
         counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
                   "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:

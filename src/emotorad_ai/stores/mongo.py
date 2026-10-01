@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
+from .. import erasure as erasure_rules
 from ..contract import InboundMessage, Reply
 from ..conversation import (
     ConversationConflict,
@@ -52,6 +53,10 @@ MEDIA = "media"
 # Where each run of a conversation came from (origin.py). Permanent, like the
 # transcript, and erased with the person or the conversation.
 CONVERSATION_ORIGINS = "conversation_origins"
+# Self-service erasure requests (erasure.py), and the audit log every erasure
+# writes. Neither is erased with the person: a closed request holds only a hash.
+ERASURE_REQUESTS = "erasure_requests"
+ERASURE_LOG = "erasure_log"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
 INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
@@ -79,6 +84,10 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
         ([("user_key", 1)], {"name": "user_key"}),
         ([("started_at", 1)], {"name": "started_at"}),
         ([("country", 1), ("region", 1)], {"name": "place"}),
+    ],
+    ERASURE_REQUESTS: [
+        ([("user_key", 1), ("status", 1)], {"name": "user_status"}),
+        ([("status", 1), ("requested_at", 1)], {"name": "status_requested"}),
     ],
 }
 
@@ -296,6 +305,60 @@ class MongoConversationStore:
             lambda: list(self._collection(CONVERSATION_ORIGINS).find({"conversation_id": conversation_id})
                          .sort("started_at", 1)),
         )
+
+    def pending_erasure_of(self, user_key: str) -> Optional[Dict[str, Any]]:
+        requests = self._collection(ERASURE_REQUESTS)
+        return self._guard("find_one", lambda: requests.find_one({"user_key": user_key, "status": "pending"}))
+
+    def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str) -> str:
+        """One pending request per person: asking again returns it."""
+        pending = self.pending_erasure_of(user_key)
+        if pending is not None:
+            return pending["_id"]
+        reference = erasure_rules.new_reference()
+        record = {"_id": reference, "user_key": user_key, "status": "pending", "requested_at": now,
+                  "channel": channel, "conversation_id": conversation_id, "attempts": 0, "last_error": None}
+        requests = self._collection(ERASURE_REQUESTS)
+        self._guard("insert_one", lambda: requests.insert_one(record))
+        return reference
+
+    def cancel_erasure(self, user_key: str, now: str) -> Optional[str]:
+        pending = self.pending_erasure_of(user_key)
+        if pending is None:
+            return None
+        self.close_erasure(pending["_id"], "cancelled", None, None, now)
+        return pending["_id"]
+
+    def pending_erasures(self) -> List[Dict[str, Any]]:
+        requests = self._collection(ERASURE_REQUESTS)
+        return self._guard("find", lambda: list(requests.find({"status": "pending"}).sort("requested_at", 1)))
+
+    def record_erasure_failure(self, reference: str, error: str) -> int:
+        requests = self._collection(ERASURE_REQUESTS)
+        self._guard("update_one", lambda: requests.update_one(
+            {"_id": reference}, {"$inc": {"attempts": 1}, "$set": {"last_error": error}}))
+        return self._guard("find_one", lambda: requests.find_one({"_id": reference}))["attempts"]
+
+    def close_erasure(self, reference: str, status: str, counts: Optional[Dict[str, int]],
+                      error: Optional[str], now: str) -> None:
+        """Closed: the person's key is replaced by its hash."""
+        requests = self._collection(ERASURE_REQUESTS)
+        record = self._guard("find_one", lambda: requests.find_one({"_id": reference})) or {}
+        fields: Dict[str, Any] = {"status": status, "processed_at": now, "counts": counts}
+        if record.get("user_key"):
+            fields["key_sha256"] = erasure_rules.key_sha256(record["user_key"])
+        if error is not None:
+            fields["last_error"] = error
+        self._guard("update_one", lambda: requests.update_one(
+            {"_id": reference}, {"$set": fields, "$unset": {"user_key": ""}}))
+
+    def erasure_record(self, reference: str) -> Optional[Dict[str, Any]]:
+        requests = self._collection(ERASURE_REQUESTS)
+        return self._guard("find_one", lambda: requests.find_one({"_id": reference}))
+
+    def log_erasure(self, entry: Dict[str, Any]) -> None:
+        log = self._collection(ERASURE_LOG)
+        self._guard("insert_one", lambda: log.insert_one(dict(entry)))
 
     def media_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self._guard(

@@ -27,6 +27,11 @@ class MongoStoreTests(StoreContract, unittest.TestCase):
     def make_store(self, **kw):
         return MongoConversationStore(self.db, now=lambda: NOW, **kw)
 
+    def test_the_audit_record_goes_to_erasure_log(self):
+        store = self.make_store()
+        store.log_erasure({"key_sha256": "x" * 64, "kind": "PHONE", "reason": "self-service request DEL-222222"})
+        self.assertEqual(self.db["erasure_log"].count_documents({"kind": "PHONE"}), 1)
+
     def test_a_stale_save_is_refused(self):
         store = self.make_store()
         state = store.get("c1")
@@ -103,7 +108,7 @@ class IndexTests(unittest.TestCase):
         db = fresh_db()
         report = ensure_indexes(db)
         self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media",
-                                       "conversation_origins"})
+                                       "conversation_origins", "erasure_requests"})
         ttl = {}
         for collection in report:
             for index, info in db[collection].index_information().items():
@@ -118,7 +123,8 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(ensure_indexes(db), ensure_indexes(db))
 
     def test_the_index_table_has_no_ttl_on_the_permanent_record(self):
-        for collection in ("transcript_turns", "conversation_summaries", "conversation_origins"):
+        for collection in ("transcript_turns", "conversation_summaries", "conversation_origins",
+                           "erasure_requests"):
             for _, options in INDEXES[collection]:
                 self.assertNotIn("expireAfterSeconds", options)
 

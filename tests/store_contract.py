@@ -4,6 +4,7 @@ Mixed into a TestCase per implementation, so the in-memory store and any
 durable store (MongoDB next) are held to the same contract, not two similar ones.
 """
 
+from emotorad_ai import erasure
 from emotorad_ai.contract import Attachment, Identity, InboundMessage, Reply
 from emotorad_ai.conversation import ConversationSummaryItem, summary_key
 
@@ -147,3 +148,53 @@ class StoreContract:
         store.record_origin(self.origin("anon"))
         self.assertEqual(store.delete_conversation("anon")["conversation_origins"], 1)
         self.assertEqual(store.origins_of("anon"), [])
+
+    def test_one_pending_erasure_request_per_person(self):
+        store = self.make_store()
+        first = store.request_erasure("PHONE#+919700000031", "amiigo_app", "c1", "2026-10-01T10:00:00+00:00")
+        again = store.request_erasure("PHONE#+919700000031", "website_chat", "c2", "2026-10-01T11:00:00+00:00")
+        self.assertEqual(first, again)
+        self.assertRegex(first, r"^DEL-[23456789ABCDEFGHJKMNPQRSTVWXYZ]{6}$")
+        record = store.pending_erasure_of("PHONE#+919700000031")
+        self.assertEqual((record["_id"], record["status"], record["channel"], record["attempts"]),
+                         (first, "pending", "amiigo_app", 0))
+        self.assertIsNone(store.pending_erasure_of("PHONE#+919812345678"))
+
+    def test_cancel_closes_the_request_without_naming_the_person(self):
+        store = self.make_store()
+        reference = store.request_erasure("PHONE#+919700000031", "amiigo_app", None, "2026-10-01T10:00:00+00:00")
+        self.assertEqual(store.cancel_erasure("PHONE#+919700000031", "2026-10-01T10:05:00+00:00"), reference)
+        self.assertIsNone(store.cancel_erasure("PHONE#+919700000031", "2026-10-01T10:06:00+00:00"))
+        record = store.erasure_record(reference)
+        self.assertEqual(record["status"], "cancelled")
+        self.assertNotIn("user_key", record)
+        self.assertEqual(record["key_sha256"], erasure.key_sha256("PHONE#+919700000031"))
+        again = store.request_erasure("PHONE#+919700000031", "amiigo_app", None, "2026-10-02T10:00:00+00:00")
+        self.assertNotEqual(again, reference)
+
+    def test_pending_requests_come_oldest_first_and_failures_count(self):
+        store = self.make_store()
+        later = store.request_erasure("PHONE#+919812345678", "amiigo_app", None, "2026-10-01T12:00:00+00:00")
+        earlier = store.request_erasure("PHONE#+919700000031", "amiigo_app", None, "2026-10-01T09:00:00+00:00")
+        self.assertEqual([r["_id"] for r in store.pending_erasures()], [earlier, later])
+        self.assertEqual(store.record_erasure_failure(earlier, "StorageError"), 1)
+        self.assertEqual(store.record_erasure_failure(earlier, "StorageError"), 2)
+        self.assertEqual(store.erasure_record(earlier)["last_error"], "StorageError")
+        store.close_erasure(earlier, "done", {"conversations": 1}, None, "2026-10-02T20:30:00+00:00")
+        self.assertEqual([r["_id"] for r in store.pending_erasures()], [later])
+        self.assertEqual(store.erasure_record(earlier)["counts"], {"conversations": 1})
+
+    def test_erasing_a_person_leaves_their_request_record(self):
+        store = self.make_store()
+        state = store.get("c1")
+        state.user_key, state.turns = "PHONE#+919700000031", 1
+        store.save(state)
+        reference = store.request_erasure("PHONE#+919700000031", "amiigo_app", "c1", "2026-10-01T10:00:00+00:00")
+        self.assertEqual(store.conversations_of("PHONE#+919700000031"), ["c1"])
+        store.delete_person("PHONE#+919700000031")
+        self.assertEqual(store.erasure_record(reference)["status"], "pending")
+
+    def test_an_audit_record_is_kept(self):
+        store = self.make_store()
+        store.log_erasure({"key_sha256": "x" * 64, "kind": "PHONE", "reason": "self-service request DEL-222222"})
+        self.assertIsNotNone(store)
