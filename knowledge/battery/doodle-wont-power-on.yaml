@@ -24,10 +24,11 @@ steps:
     on/off switch, so there is no SOC check and no revival process here: everything is
     read from the charger LED.
   - >-
-    Ask the customer to connect the charger and report the LED — and to send a photo of
-    it in the same message. The colour decides everything that follows, and a photo
-    costs them five seconds. Ask for both together; asking for the picture afterwards
-    means they have already put the phone down.
+    Ask the customer to connect the charger and report the LED, and to send a short video
+    of it in the same message, from the moment the charger goes in (a photo if they cannot
+    take a video). The colour decides everything that follows, a video catches a red phase
+    a photo can miss, and it costs them a few seconds. Ask for both together; asking for
+    the video afterwards means they have already put the phone down.
   - >-
     NO LIGHT — the charger is the likely fault, not the battery. Rule out the socket and
     the connection first. If both are sound and the LED still shows nothing, say the

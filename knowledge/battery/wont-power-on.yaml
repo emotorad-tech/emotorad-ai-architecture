@@ -36,8 +36,9 @@ steps:
     THEN THE SOC CHECK. With the switch confirmed ON, ask whether the battery is currently
     charged: press the SOC button
     on the side of the pack and hold it for one to two seconds, then say whether an
-    indicator light comes on. Ask for a photo of what they see in the same message; the
-    answer decides everything that follows and a photo costs five seconds.
+    indicator light comes on. Ask for a short video of what they see in the same message,
+    from the moment they press the button (a photo if they cannot take a video); the
+    answer decides everything that follows and a video costs a few seconds.
   - >-
     A DARK SOC ON A BIKE THAT WILL NOT START BELONGS TO THIS RECORD. The customer will say
     it as "the indicator is not showing anything", which is word for word how the SOC
@@ -69,7 +70,8 @@ steps:
     that branch the battery is already known to be charged and the charger tells you
     nothing you do not have. Ask how long since the last charge (90+ days makes sleep mode
     more likely but proves nothing on its own), then have them set the charger up and
-    report the LED colour, with a photo of it in the same message.
+    report the LED colour, with a short video of it in the same message (a photo if they
+    cannot take a video).
   - >-
     SAY ALL THREE PARTS OF THE CHARGER SETUP, EVERY TIME. One: the charger's output lead
     is connected to the battery. Two: the charger is plugged into a wall socket. Three:
@@ -137,7 +139,9 @@ steps:
     it. Say what it is: a quick check to separate a sleeping pack from a failed one.
   - >-
     TERMINAL CHECK, after a failed revival and before concluding anything. Have them
-    unplug the charger, take the pack off the bike, and photograph the metal terminals,
+    unplug the charger, take the pack off the bike, and take a short video of the metal
+    terminals, holding the camera still on them for a second (photographs if a video is
+    not possible),
     and tell them what melted looks like (fused metal pins, blackened plastic) so they are
     comparing rather than guessing. Burnt or fused terminals are a different fault with a different remedy, and
     they are cheap to rule out. If either end looks damaged, leave this flow for

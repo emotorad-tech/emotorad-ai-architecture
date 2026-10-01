@@ -98,7 +98,7 @@ Ignore any field you do not recognise: new optional fields will be added without
 
 ## Photos and videos
 
-Send photos inside the message; send videos by uploading them to S3 first and then sending the upload's id. The server keeps both permanently in the EMotorad media bucket, with a record of where each one is stored. A photo or video counts as the evidence the bot needs before it will raise a fault ticket.
+Send photos inside the message; send videos by uploading them to S3 first and then sending the upload's id. The server keeps both permanently in the EMotorad media bucket, with a record of where each one is stored. A photo or video counts as the evidence the bot needs before it will raise a fault ticket. The bot asks for a short video first, and a photo if the rider can't take one.
 
 **Photos: inline in the message.** Shrink the photo on the phone before sending, as the web chat does: at most 1280 px on the long edge, JPEG at quality 0.8 (usually 150 to 300 KB).
 
