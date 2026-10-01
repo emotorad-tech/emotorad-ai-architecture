@@ -95,6 +95,7 @@ from .guardrails import (
 from .errorcodes import load_table
 from .identity import IdentityResolver, ResolvedIdentity
 from . import origin as origin_place
+from . import photo_check
 from .jev import JevError
 from .knowledge import KnowledgeBase
 from .llm import BedrockClaude
@@ -954,6 +955,10 @@ class Runtime:
             # A tester pinned the agent (web chat): follow the pin, with no Jev
             # score to route around it and no narrow path in its place.
             return {"route": Route(path="full", reasons=("pinned_agent",))}
+        if message.entry_metadata.get("photos_unchecked"):
+            # A photo the safety check could not answer: a model looks at it,
+            # told so (_run), never a standard reply.
+            return {"route": Route(path="full", reasons=("photo_unchecked",))}
 
         bike = self._selected_bike(resolved, state)
         decision, error = None, None
@@ -1205,10 +1210,13 @@ class Runtime:
         # told: never "owns 2 bikes, ask which", nor the rejected bikes' cover
         # (the final review, 2026-10-01).
         agent_view = replace(resolved, bikes=[unlisted_as_bike(state.unlisted_bike)]) if state.unlisted_bike else resolved
+        context = ((without_bikes(state.context_block or "") if state.unlisted_bike else (state.context_block or ""))
+                   + unlisted_context(state.unlisted_bike))
+        if message.entry_metadata.get("photos_unchecked"):
+            # This turn only (spec 2026-10-02).
+            context += "\n\n" + photo_check.UNCHECKED_NOTE
         turn = agent.run(
-            message, agent_view, state.history,
-            (without_bikes(state.context_block or "") if state.unlisted_bike else (state.context_block or ""))
-            + unlisted_context(state.unlisted_bike),
+            message, agent_view, state.history, context,
             # Conversation facts the order tool decides on. Lambdas, because
             # evidence_seen can flip during this very turn when a photo arrives
             # with the message that triggers the order.

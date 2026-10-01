@@ -84,8 +84,18 @@ to show something unless you are about to send it."""
 # never offered.
 NO_PICTURES_RULE = """
 
-Pictures: no pictures or videos can be sent in this chat. Never offer to show the \
-customer one; describe every step in words, using only what the documented steps say."""
+You cannot send pictures or videos to the customer in this chat. The customer can send you photos and videos. \
+Never offer to show the customer one; describe every step in words, using only what the documented steps say."""
+
+# Every customer agent (spec 2026-10-02): a hazard in a photo or video is a
+# safety case whatever the conversation was doing. The registration agent had
+# no safety rule, and a photo of a smoking bike went unremarked (staging,
+# 2026-10-01).
+PHOTO_SAFETY_RULE = """
+
+Safety in photos and videos: if a photo or video shows smoke, flames, swelling, leaking fluid or sparks, that \
+is a safety case, whatever else the conversation was doing. Stop, tell the customer to stop using and charging \
+the bike now, and hand over to a person."""
 
 
 @dataclass(frozen=True)
@@ -180,8 +190,9 @@ class Agent:
             # A customer agent with nothing to show: say so, or it offers anyway.
             system += NO_PICTURES_RULE
         if self.definition.one_step:
-            # Here, not in each agent's prompt text: last, and outside the
-            # base prompt a promotion replaces.
+            # Here, not in each agent's prompt text: outside the base prompt a
+            # promotion replaces, with the one-step rule last.
+            system += PHOTO_SAFETY_RULE
             system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]

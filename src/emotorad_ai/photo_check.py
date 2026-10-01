@@ -31,6 +31,11 @@ INLINE_LIMIT = 12 * 1024 * 1024
 # patterns match.
 LIVE_HAZARDS = ("smoke", "flames", "swelling", "leaking", "sparks")
 _WORDS = {"leaking": "leaking fluid"}
+# For the agent's context when a photo got no answer in time (spec
+# 2026-10-02). Never an attachment's summary: the safety gate scans those, and
+# these words would trip it on every unchecked photo.
+UNCHECKED_NOTE = ("A photo in this message could not be safety-checked. If it shows smoke, flames, swelling, "
+                  "leaking or sparks, tell the customer to stop using and charging the bike and hand over.")
 
 PROMPT = (
     "You are checking a photo a customer sent to an electric cycle company's support chat, for live "

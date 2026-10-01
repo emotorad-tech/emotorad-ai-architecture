@@ -6,27 +6,31 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from emotorad_ai import photo_check
 from emotorad_ai.photo_check import PhotoCheckError
 from tests.test_api_media_persistence import _Store, fresh_api, jpeg_data_url
 
 
 class FakeChecker:
-    """Answers each photo, in order, with a list of live hazards."""
+    """Answers each photo, in order, with a list of live hazards. `fail_first`
+    is raised by the first call only, as a timeout on the first try is."""
 
     provider = "openrouter"
 
-    def __init__(self, answers=(["swelling", "smoke"],), error=None, delay=0.0):
-        self.answers, self.error, self.delay, self.seen = list(answers), error, delay, []
+    def __init__(self, answers=(["swelling", "smoke"],), error=None, delay=0.0, fail_first=None):
+        self.answers, self.error, self.delay, self.fail_first = list(answers), error, delay, fail_first
+        self.seen = []
 
     def check(self, data, mime):
         self.seen.append((len(data), mime))
         n = len(self.seen)
         if self.delay:
             time.sleep(self.delay)
+        if self.fail_first is not None and n == 1:
+            raise self.fail_first
         if self.error is not None:
             raise self.error
         return self.answers[min(n, len(self.answers)) - 1]
-
 
 def photo():
     return {"kind": "image", "url": jpeg_data_url()}
@@ -111,6 +115,46 @@ class PhotoCheckTests(unittest.TestCase):
         with mock.patch.object(self.api, "DEV_CODES", False):
             self.post(FakeChecker(answers=([],)), [photo()])
         self.assertEqual([e for e in self.api.log.events if e["event"] == "photo_check"], [])
+
+    def handled_messages(self, checker, attachments):
+        seen, real = [], self.api.runtime.handle
+        with mock.patch.object(self.api.runtime, "handle", side_effect=lambda m: seen.append(m) or real(m)):
+            reply = self.post(checker, attachments)
+        return reply, seen[0]
+
+    def test_a_check_that_fails_once_is_tried_again(self):
+        checker = FakeChecker(fail_first=PhotoCheckError("timeout"))
+        reply = self.post(checker, [photo()])
+        self.assertEqual(reply["handled_by"], "guardrail:battery_safety")
+        self.assertEqual(len(checker.seen), 2)
+        (event,) = [e for e in self.api.log.events if e["event"] == "photo_check_retry"]
+        self.assertEqual(event["error"], "timeout")
+
+    def test_a_photo_too_large_is_not_tried_again(self):
+        checker = FakeChecker(error=PhotoCheckError("too_large"))
+        self.post(checker, [photo()])
+        self.assertEqual(len(checker.seen), 1)
+
+    def test_a_photo_with_no_answer_is_marked_on_the_message(self):
+        reply, message = self.handled_messages(FakeChecker(error=PhotoCheckError("bad_json")), [photo()])
+        self.assertNotEqual(reply["handled_by"], "guardrail:battery_safety")
+        self.assertEqual(message.entry_metadata.get("photos_unchecked"), 1)
+        # Never in a summary: the safety gate scans those, and the note's words
+        # are hazard words.
+        self.assertNotIn("could not be safety-checked", repr(message.attachments))
+
+    def test_a_photo_past_the_deadline_is_marked_too(self):
+        with mock.patch.object(self.api, "PHOTO_CHECK_DEADLINE_SECONDS", 0.2):
+            _, message = self.handled_messages(FakeChecker(delay=2.0), [photo()])
+        self.assertEqual(message.entry_metadata.get("photos_unchecked"), 1)
+
+    def test_an_answered_photo_is_not_marked(self):
+        _, message = self.handled_messages(FakeChecker(answers=([],)), [photo()])
+        self.assertNotIn("photos_unchecked", message.entry_metadata)
+
+    def test_the_deadline_fits_two_tries(self):
+        self.assertEqual(self.api.PHOTO_CHECK_DEADLINE_SECONDS, 30.0)
+        self.assertGreaterEqual(self.api.PHOTO_CHECK_DEADLINE_SECONDS, 2 * photo_check.TIMEOUT_SECONDS)
 
 
 class HealthTests(unittest.TestCase):

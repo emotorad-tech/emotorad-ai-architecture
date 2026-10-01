@@ -129,7 +129,10 @@ VIDEO_SUMMARISER = summariser_from_env()
 PHOTO_CHECKER = photo_check.photo_checker_from_env()
 # One deadline for all the photos in a message, checked at the same time: the
 # reply is never held longer than this, however many photos there are.
-PHOTO_CHECK_DEADLINE_SECONDS = 15.0
+# Two tries of photo_check.TIMEOUT_SECONDS fit inside it. One 15-second try
+# under a 15-second deadline timed out on staging and a smoking bike went
+# unseen (2026-10-01).
+PHOTO_CHECK_DEADLINE_SECONDS = 30.0
 
 _logger = logging.getLogger(__name__)
 
@@ -568,7 +571,7 @@ def _persist_media(
         )
 
 
-def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str, Any]]:
+def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Dict[str, Any]], int]:
     """What the customer sent, in the shape the adapter takes, in the order they
     sent it.
 
@@ -587,10 +590,12 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
 
     The count limit is on the total, not on each path, so adding the presigned
     route cannot be used to send more pictures than the inline one allows.
+
+    Also returns how many photos the safety check could not answer.
     """
     items = [item for item in (body.attachments or []) if item]
     if not items:
-        return []
+        return [], 0
     if len(items) > MAX_ATTACHMENTS:
         raise AttachmentError(
             "Too many attachments: %d sent, %d allowed." % (len(items), MAX_ATTACHMENTS)
@@ -716,7 +721,7 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
 
     # The description of a live hazard becomes the attachment's summary,
     # which the safety gate scans; a photo with none gets no summary.
-    notes = _check_photos(photo_jobs, conversation_id)
+    notes, unchecked = _check_photos(photo_jobs, conversation_id)
     for (where, key), note in notes.items():
         if where == "upload":
             claims[key]["summary"] = note
@@ -729,7 +734,7 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
         note = notes.get(("inline", id(item)))
         # A copy: the customer's own item is never changed.
         attachments.append(dict(base, summary=note) if note else base)
-    return attachments
+    return attachments, unchecked
 
 
 def _summarise_video(key: str, mime: str) -> Optional[str]:
@@ -753,19 +758,21 @@ def _summarise_video(key: str, mime: str) -> Optional[str]:
 
 def _check_photos(
     jobs: Sequence[Tuple[Tuple[str, Any], Callable[[], bytes], str]], conversation_id: str
-) -> Dict[Tuple[str, Any], str]:
-    """{job key: description} for the photos showing a live hazard.
+) -> Tuple[Dict[Tuple[str, Any], str], int]:
+    """({job key: description} for the photos showing a live hazard, how many
+    photos got no answer).
 
-    All checked at the same time, under one deadline. Never stops the turn: a
-    check past the deadline, a failure or a store error is logged and the
-    photo goes on as before."""
+    All checked at the same time, under one deadline, each with up to two
+    tries. Never stops the turn: a photo with no answer is logged and counted,
+    and the runtime tells the agent (spec 2026-10-02)."""
     if PHOTO_CHECKER is None or not jobs:
-        return {}
+        return {}, 0
     pool = ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="photo-check")
-    futures = {pool.submit(_one_photo, load, mime): key for key, load, mime in jobs}
+    futures = {pool.submit(_one_photo, load, mime, conversation_id): key for key, load, mime in jobs}
     done, pending = wait(futures, timeout=PHOTO_CHECK_DEADLINE_SECONDS)
     # A check still running is abandoned, not waited for.
     pool.shutdown(wait=False, cancel_futures=True)
+    unchecked = len(pending)
     for _ in pending:
         log.emit("photo_check_skipped", conversation_id, error="timeout")
     notes: Dict[Tuple[str, Any], str] = {}
@@ -774,9 +781,11 @@ def _check_photos(
             hazards = future.result()
         except photo_check.PhotoCheckError as exc:
             log.emit("photo_check_skipped", conversation_id, error=str(exc))
+            unchecked += 1
             continue
         except Exception as exc:
             log.emit("photo_check_skipped", conversation_id, error=type(exc).__name__)
+            unchecked += 1
             continue
         # Customer content, as a video's description is: only on a staging
         # box with dev codes on.
@@ -785,11 +794,23 @@ def _check_photos(
         note = photo_check.describe(hazards)
         if note:
             notes[futures[future]] = note
-    return notes
+    return notes, unchecked
 
 
-def _one_photo(load: Callable[[], bytes], mime: str) -> List[str]:
-    return PHOTO_CHECKER.check(load(), mime)
+def _one_photo(load: Callable[[], bytes], mime: str, conversation_id: str) -> List[str]:
+    """The photo's live hazards, with a second try when the first fails (the
+    first try timed out on staging, 2026-10-01). A photo too large to send is
+    not tried again: it would fail the same way."""
+    data = load()
+    try:
+        return PHOTO_CHECKER.check(data, mime)
+    except photo_check.PhotoCheckError as exc:
+        if str(exc) == "too_large":
+            raise
+        log.emit("photo_check_retry", conversation_id, error=str(exc))
+    except Exception as exc:
+        log.emit("photo_check_retry", conversation_id, error=type(exc).__name__)
+    return PHOTO_CHECKER.check(data, mime)
 
 
 @app.post("/message", response_model=MessageOut)
@@ -810,7 +831,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     conversation_id = body.conversation_id or new_conversation_id()
     try:
-        attachments = _inbound_attachments(body, conversation_id)
+        attachments, unchecked = _inbound_attachments(body, conversation_id)
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     text = body.text
@@ -855,6 +876,9 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     place = IP_LOCATOR.place(client_ip(request, TRUSTED_PROXIES)) if IP_LOCATOR is not None else None
     if place is not None:
         extra["origin"] = place.as_dict()
+    if unchecked:
+        # The runtime tells the agent (Runtime._run); never a summary.
+        extra["photos_unchecked"] = unchecked
     if extra:
         message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
     reply = runtime.handle(message)
