@@ -1,33 +1,48 @@
-"""A safety look at every photo (spec 2026-10-01, photo safety).
+"""A safety look at every photo (spec 2026-10-01, photo safety, revised).
 
 The safety gate scans what a customer types and what a video's description
 says. A photo was seen only by the model, so a photo of a burning pack was
-handled by whatever the model chose to write (staging, 2026-10-01). This
-describes each photo once, on arrival, in words the gate can scan: every
-hazard stated, and every absent one written as "no <thing> visible" so the
-gate's negation handling reads it as absent. The model still gets the photo.
+handled by whatever the model chose to write (staging, 2026-10-01).
+
+The model answers yes or no per live hazard, in JSON, and the text the gate
+scans is written here, only when a hazard is present. It is never asked to
+describe the photo in prose: a description that lists hazards to say they are
+absent trips the gate, which is the mistake the video prompt made and fixed on
+22 September. Damage that has already happened (dents, cracks, punctures,
+scorch marks, melting) is not a live hazard: the agents assess it, and the
+damage flows ask for exactly those photos. The model still gets the photo.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import os
-from typing import Any, Mapping, Optional
+import re
+from typing import Any, List, Mapping, Optional, Sequence
 
 OPENROUTER_PHOTO_MODEL = "google/gemini-3.8-flash"
 TIMEOUT_SECONDS = 15
-# Photos are capped at 4 MB on the way in (attachments.py); this is a
-# backstop for whatever else calls the checker.
-INLINE_LIMIT = 8 * 1024 * 1024
+# Uploaded photos are capped at 10 MB (storage/keys.py), inline ones at 4 MB
+# (attachments.py); this is a backstop for whatever else calls the checker.
+INLINE_LIMIT = 12 * 1024 * 1024
+
+# In the order the description lists them. Each word is one the safety gate's
+# patterns match.
+LIVE_HAZARDS = ("smoke", "flames", "swelling", "leaking", "sparks")
+_WORDS = {"leaking": "leaking fluid"}
 
 PROMPT = (
-    "You are checking a photo a customer sent to an electric cycle company's support chat, for "
-    "safety only. In 2 to 4 plain sentences, say what is visible of the bike, battery, charger or "
-    "wiring. Then say, for each of these, whether it is visible: smoke, flames, scorch or burn "
-    "marks, swelling or bulging, melting, leaking fluid, sparks. Write each one that is not visible "
-    "as \"no <thing> visible\", for example \"no smoke visible\". Describe only what is in the photo; "
-    "do not guess at causes or give advice."
+    "You are checking a photo a customer sent to an electric cycle company's support chat, for live "
+    "safety hazards only. Answer with JSON only, with exactly these keys, each true or false: "
+    "smoke, flames, swelling, leaking, sparks. Set a key to true only when it is clearly happening "
+    "in the photo now: smoke or vapour coming from the bike, battery or charger; open flames; a "
+    "battery pack that is swollen or bulging; fluid leaking from the battery; sparks. Damage that has "
+    "already happened (dents, cracks, punctures, scorch marks, melted plastic) is not a live hazard: "
+    "answer false for it. When unsure, answer false."
 )
+
+_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 
 class PhotoCheckError(Exception):
@@ -42,7 +57,8 @@ class OpenRouterPhotoChecker:
         self.zdr = zdr
         self._transport = transport
 
-    def check(self, data: bytes, mime: str) -> str:
+    def check(self, data: bytes, mime: str) -> List[str]:
+        """The live hazards in the photo, in LIVE_HAZARDS order; [] for none."""
         from .llm import from_openai_response
         from .openrouter import CHAT_PATH, OpenRouterError
 
@@ -55,6 +71,7 @@ class OpenRouterPhotoChecker:
                 {"type": "text", "text": PROMPT},
                 {"type": "image_url", "image_url": {"url": url}},
             ]}],
+            "response_format": {"type": "json_object"},
             "usage": {"include": True},
         }
         if self.zdr:
@@ -63,10 +80,28 @@ class OpenRouterPhotoChecker:
             response = from_openai_response(self._transport.post(CHAT_PATH, body, timeout=TIMEOUT_SECONDS))
         except OpenRouterError as exc:
             raise PhotoCheckError(exc.code) from None
-        text = (response.text or "").strip()
-        if not text:
-            raise PhotoCheckError("empty")
-        return text
+        return _hazards(response.text or "")
+
+
+def _hazards(text: str) -> List[str]:
+    try:
+        answer = json.loads(_FENCE.sub("", text.strip()))
+    except ValueError:
+        raise PhotoCheckError("bad_json") from None
+    if not isinstance(answer, dict):
+        raise PhotoCheckError("bad_json")
+    # Only a real true counts: "yes", 1 or a missing key is not a hazard.
+    return [hazard for hazard in LIVE_HAZARDS if answer.get(hazard) is True]
+
+
+def describe(hazards: Sequence[str]) -> Optional[str]:
+    """The text the safety gate scans, or None when there is no live hazard,
+    so a harmless photo cannot trip anything."""
+    if not hazards:
+        return None
+    words = [_WORDS.get(hazard, hazard) for hazard in hazards]
+    listed = words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+    return "The customer's photo shows %s." % listed
 
 
 def photo_checker_from_env(environ: Optional[Mapping[str, str]] = None) -> Optional[OpenRouterPhotoChecker]:

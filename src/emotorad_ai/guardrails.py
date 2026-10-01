@@ -561,45 +561,35 @@ def check_order_claim(reply: str, tool_results: Sequence[dict]) -> OrderCheck:
     return OrderCheck(blocked=False)
 
 
-# --- the backstop's two questions (spec 2026-10-01, photo safety) ------------
-# A reply that gives safety stop instructions about a hazard must come with the
-# safety ticket; a reply that says a ticket exists must have one. The model
-# wrote "I'm raising an urgent support ticket for you right now" about a
-# smoking battery and raised nothing (staging, 2026-10-01).
+# --- the backstop's question (spec 2026-10-01, photo safety, revised) --------
+# A reply that says a ticket exists must have one. The model wrote "I'm raising
+# an urgent support ticket for you right now" about a smoking battery and raised
+# nothing (staging, 2026-10-01). Only a claim counts: advice is never acted on,
+# because reading stop instructions as a safety reply raised critical tickets on
+# ordinary advice (the final review).
 
-_STOP_INSTRUCTION = re.compile(
-    r"\bstop\s+(?:using|charging|riding)\b|\b(?:do\s+not|don'?t)\s+charge\b"
-    r"|\b(?:move|take|keep|put)\s+(?:it|the\s+(?:bike|battery|pack))\s+(?:outside|outdoors)\b"
-    r"|\baway\s+from\s+(?:anything\s+)?(?:flammable|people)\b",
-    re.IGNORECASE,
-)
-_CONDITIONAL = re.compile(r"\b(?:if|in\s+case|should|whenever|when|unless)\b", re.IGNORECASE)
 _SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
 _TICKET_CLAIM = re.compile(
-    r"\bI(?:'ve|\s+have)\s+(?:just\s+)?(?:raised|opened|created|logged)\b[^.!?\n]{0,40}\bticket\b"
-    r"|\bI(?:'m|\s+am)\s+(?:now\s+)?(?:raising|opening|creating|logging)\b[^.!?\n]{0,40}\bticket\b"
-    r"|\bticket\b[^.!?\n]{0,40}\b(?:has\s+been|is\s+now|was)\s+(?:raised|created|opened|logged)\b"
-    r"|^(?![^.!?\n]*\bif\b)[^.!?\n]*\bI(?:'ll|\s+will)\s+(?:raise|open|create|log)\b[^.!?\n]{0,40}\bticket\b"
-    r"[^.!?\n]{0,30}\b(?:now|right\s+away|immediately)\b",
-    re.IGNORECASE | re.MULTILINE,
+    r"\bI(?:'ve|\s+have)\s+(?:just\s+)?(?:raised|opened|created|logged)\b.{0,40}?\bticket\b"
+    r"|\bI(?:'m|\s+am)\s+(?:now\s+)?(?:raising|opening|creating|logging)\b.{0,40}?\bticket\b"
+    r"|\bticket\b.{0,40}?\b(?:has\s+been|is\s+now|was)\s+(?:raised|created|opened|logged)\b"
+    r"|\bI(?:'ll|\s+will)\s+(?:raise|open|create|log)\b.{0,40}?\bticket\b.{0,30}?\b(?:now|right\s+away|immediately)\b"
+    r"|\bticket\s+(?:number|reference)\s+is\b",
+    re.IGNORECASE,
 )
-
-
-def gives_safety_stop(reply: str) -> List[str]:
-    """The hazard labels when `reply` names a hazard and gives a stop
-    instruction that is not conditional ("If you ever see smoke, stop
-    charging it" is advice); [] otherwise."""
-    hazards = check_safety(reply or "").matched
-    if not hazards:
-        return []
-    for sentence in _SENTENCE.findall(reply or ""):
-        found = _STOP_INSTRUCTION.search(sentence)
-        if found and not _CONDITIONAL.search(sentence[:found.start()]):
-            return hazards
-    return []
+# A sentence with any of these is not a claim: "No ticket has been raised yet",
+# "Once a ticket has been raised, the team calls", "If it stays off, I'll raise
+# a ticket", "I haven't raised a ticket".
+_NOT_A_CLAIM = re.compile(r"\b(?:no|not|never|yet|once|when|until|if|after|before|unless)\b|n't", re.IGNORECASE)
 
 
 def claims_ticket(reply: str) -> bool:
-    """Whether `reply` says a ticket was or is being raised. An offer ("I can
-    raise a ticket", "Shall I raise a ticket?") is not a claim."""
-    return bool(_TICKET_CLAIM.search(reply or ""))
+    """Whether a sentence of `reply` says a ticket was or is being raised. A
+    question, an offer, a negation or a condition is not a claim."""
+    for sentence in _SENTENCE.findall(reply or ""):
+        sentence = sentence.strip()
+        if not sentence or sentence.endswith("?"):
+            continue
+        if _TICKET_CLAIM.search(sentence) and not _NOT_A_CLAIM.search(sentence):
+            return True
+    return False

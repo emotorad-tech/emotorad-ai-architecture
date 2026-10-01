@@ -43,7 +43,8 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, wait
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 import websockets
@@ -126,6 +127,9 @@ VIDEO_SUMMARISER = summariser_from_env()
 # The safety look at every photo (photo_check.py), or None without the
 # OpenRouter key: photos then go on as before.
 PHOTO_CHECKER = photo_check.photo_checker_from_env()
+# One deadline for all the photos in a message, checked at the same time: the
+# reply is never held longer than this, however many photos there are.
+PHOTO_CHECK_DEADLINE_SECONDS = 15.0
 
 _logger = logging.getLogger(__name__)
 
@@ -602,15 +606,12 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
     # identity rather than mutated in place: a bucket-less deployment, a
     # missing cluster or a store failure must leave `items` exactly as the
     # customer sent it, and nothing else touches these dicts to tell apart.
-    # Every inline photo gets its safety look first (photo_check.py), whether
-    # or not it can be stored: the description becomes the attachment's
-    # summary, which the safety gate scans.
-    photo_notes: Dict[int, str] = {}
-    for raw_item, item in zip(inline, validated):
-        if item["media_type"].startswith("image/"):
-            note = _check_photo(base64.b64decode(item["data"]), item["media_type"], conversation_id)
-            if note:
-                photo_notes[id(raw_item)] = note
+    # Every photo gets a safety look (photo_check.py), inline or uploaded,
+    # whether or not it can be stored. Gathered here, checked together below.
+    photo_jobs: List[Tuple[Tuple[str, Any], Callable[[], bytes], str]] = [
+        (("inline", id(raw_item)), (lambda data=item["data"]: base64.b64decode(data)), item["media_type"])
+        for raw_item, item in zip(inline, validated) if item["media_type"].startswith("image/")
+    ]
     stored: Dict[int, Dict[str, Any]] = {}
     if MEDIA_STORE is not None and inline:
         try:
@@ -707,19 +708,24 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
                                 text=summary,
                             )
                 if claimed.kind == "images":
-                    note = _check_uploaded_photo(claimed.key, claimed.mime, conversation_id)
-                    if note is not None:
-                        claims[upload_id]["summary"] = note
+                    photo_jobs.append(
+                        (("upload", upload_id), (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)), claimed.mime))
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
+    # The description of a live hazard becomes the attachment's summary,
+    # which the safety gate scans; a photo with none gets no summary.
+    notes = _check_photos(photo_jobs, conversation_id)
+    for (where, key), note in notes.items():
+        if where == "upload":
+            claims[key]["summary"] = note
     attachments = []
     for item in items:
         if item.get("upload_id"):
             attachments.append(claims[item["upload_id"]])
             continue
         base = stored.get(id(item), item)
-        note = photo_notes.get(id(item))
+        note = notes.get(("inline", id(item)))
         # A copy: the customer's own item is never changed.
         attachments.append(dict(base, summary=note) if note else base)
     return attachments
@@ -744,32 +750,45 @@ def _summarise_video(key: str, mime: str) -> Optional[str]:
     return None
 
 
-def _check_photo(data: bytes, mime: str, conversation_id: str) -> Optional[str]:
-    """A photo's safety description (photo_check.py), or None. Never stops the
-    turn: a failure is logged by class and the photo goes on as before."""
-    if PHOTO_CHECKER is None:
-        return None
-    try:
-        note = PHOTO_CHECKER.check(data, mime)
-    except Exception as exc:
-        log.emit("photo_check_skipped", conversation_id, error=type(exc).__name__)
-        return None
-    # Customer content, as a video's description is: only on a staging box
-    # with dev codes on.
-    if DEV_CODES:
-        log.emit("photo_check", conversation_id, chars=len(note), text=note)
-    return note
+def _check_photos(
+    jobs: Sequence[Tuple[Tuple[str, Any], Callable[[], bytes], str]], conversation_id: str
+) -> Dict[Tuple[str, Any], str]:
+    """{job key: description} for the photos showing a live hazard.
+
+    All checked at the same time, under one deadline. Never stops the turn: a
+    check past the deadline, a failure or a store error is logged and the
+    photo goes on as before."""
+    if PHOTO_CHECKER is None or not jobs:
+        return {}
+    pool = ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="photo-check")
+    futures = {pool.submit(_one_photo, load, mime): key for key, load, mime in jobs}
+    done, pending = wait(futures, timeout=PHOTO_CHECK_DEADLINE_SECONDS)
+    # A check still running is abandoned, not waited for.
+    pool.shutdown(wait=False, cancel_futures=True)
+    for _ in pending:
+        log.emit("photo_check_skipped", conversation_id, error="timeout")
+    notes: Dict[Tuple[str, Any], str] = {}
+    for future in done:
+        try:
+            hazards = future.result()
+        except photo_check.PhotoCheckError as exc:
+            log.emit("photo_check_skipped", conversation_id, error=str(exc))
+            continue
+        except Exception as exc:
+            log.emit("photo_check_skipped", conversation_id, error=type(exc).__name__)
+            continue
+        # Customer content, as a video's description is: only on a staging
+        # box with dev codes on.
+        if DEV_CODES:
+            log.emit("photo_check", conversation_id, hazards=list(hazards))
+        note = photo_check.describe(hazards)
+        if note:
+            notes[futures[future]] = note
+    return notes
 
 
-def _check_uploaded_photo(key: str, mime: str, conversation_id: str) -> Optional[str]:
-    if PHOTO_CHECKER is None:
-        return None
-    try:
-        data = MEDIA_STORE.get_bytes(key)
-    except StorageError as exc:
-        log.emit("photo_check_skipped", conversation_id, error=type(exc).__name__)
-        return None
-    return _check_photo(data, mime, conversation_id)
+def _one_photo(load: Callable[[], bytes], mime: str) -> List[str]:
+    return PHOTO_CHECKER.check(load(), mime)
 
 
 @app.post("/message", response_model=MessageOut)

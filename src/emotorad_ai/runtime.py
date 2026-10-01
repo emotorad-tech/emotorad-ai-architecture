@@ -83,7 +83,6 @@ from .guardrails import (
     check_order_claim,
     check_safety,
     claims_ticket,
-    gives_safety_stop,
     check_safety_in_description,
 )
 from .errorcodes import load_table
@@ -191,6 +190,32 @@ def _hazard_sentences(summary: str) -> List[str]:
     description and a prose one both come out as short quotes."""
     pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", summary) if p.strip()]
     return [p for p in pieces if check_safety_in_description(p).triggered]
+
+
+_REFERENCE = re.compile(r"\b[A-Z]{2,4}-\d{3,}\b")
+
+
+def _ticket_raised(turn: Any) -> bool:
+    """Whether any tool this turn returned a ticket (create_support_ticket,
+    raise_intake_ticket)."""
+    for call in turn.tool_calls:
+        result = call.get("result") or {}
+        if isinstance(result, dict) and not is_error(result) and (result.get("data") or {}).get("ticket_id"):
+            return True
+    return False
+
+
+def _ticket_known(text: str, state: ConversationState) -> bool:
+    """Whether a claim may be about a ticket that exists: the conversation
+    holds one, or the reply names a reference its context lists (earlier
+    conversations' tickets)."""
+    if state.ticket_id:
+        return True
+    return any(ref in (state.context_block or "") for ref in _REFERENCE.findall(text or ""))
+
+
+def _is_image(attachment: Any) -> bool:
+    return attachment.kind == "image" or (attachment.mime_type or "").startswith("image/")
 
 
 class Runtime:
@@ -1180,16 +1205,17 @@ class Runtime:
                 already_in_history=True,
             )
 
-        # The backstop (spec 2026-10-01): a reply that gives safety stop
-        # instructions must come with the safety ticket, and a reply that says
-        # a ticket exists must have one.
-        raised = any(call.get("tool") == CREATE_SUPPORT_TICKET and not is_error(call.get("result") or {})
-                     for call in turn.tool_calls)
-        if not raised:
-            hazards = gives_safety_stop(turn.text)
-            if hazards:
-                turn = self._safety_backstop(message, resolved, state, turn, hazards)
-            elif state.ticket_id is None and claims_ticket(turn.text):
+        # The backstop (spec 2026-10-01, revised): a reply that says a ticket
+        # exists must have one. Advice is never acted on. About a live hazard,
+        # the safety ticket is raised here; otherwise, or when it cannot be,
+        # a person takes over, so the claim is never sent with nothing behind it.
+        if (claims_ticket(turn.text) and not _ticket_raised(turn)
+                and not _ticket_known(turn.text, state)):
+            hazards = check_safety_in_description(turn.text).matched
+            backed = self._safety_backstop(message, resolved, state, turn, hazards) if hazards else None
+            if backed is not None:
+                turn = backed
+            else:
                 self.log.guardrail(message.conversation_id, "ticket_promise_unbacked",
                                    {"suppressed_text": turn.text})
                 self.log.escalation(message.conversation_id, "ticket_promise_unbacked", turn.ticket_id)
@@ -1310,15 +1336,16 @@ class Runtime:
         self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState, turn: Any,
         hazards: List[str],
     ) -> Any:
-        """A reply gave safety stop instructions about a hazard and no ticket
-        was raised: raise the safety ticket here and add its reference. The
-        model wrote "I'm raising an urgent support ticket" about a smoking
-        battery and raised nothing (staging, 2026-10-01). Never stops the
-        reply: a failure is logged and the reply goes as written."""
+        """A reply claimed a ticket about a live hazard and none exists: raise
+        the safety ticket here and add its reference. The model wrote "I'm
+        raising an urgent support ticket" about a smoking battery and raised
+        nothing (staging, 2026-10-01). None when it cannot be backed (no known
+        customer, or the ticket failed): the caller then hands over."""
         if not resolved.identity.phone:
-            return turn
+            return None
         description = (
-            "Automatic safety escalation: the assistant gave safety instructions without raising a ticket. "
+            "Automatic safety escalation: the assistant said a ticket was raised about a safety hazard, "
+            "and none was. "
             "Customer wrote: %s. Assistant replied: %s. Matched safety indicators: %s."
             % (message.message_text or "(a photo or video, no text)", turn.text, ", ".join(hazards))
         )
@@ -1326,10 +1353,10 @@ class Runtime:
             ticket_id = self._raise_safety_ticket(message, state, resolved, description)
         except Exception as exc:
             self.log.emit("safety_backstop_failed", message.conversation_id, error=type(exc).__name__)
-            return turn
+            return None
         if not ticket_id:
             self.log.emit("safety_backstop_failed", message.conversation_id, error="no_ticket")
-            return turn
+            return None
         self.log.guardrail(message.conversation_id, "safety_backstop", hazards)
         self.log.escalation(message.conversation_id, "safety_backstop", ticket_id)
         text = turn.text or ""
@@ -1375,8 +1402,11 @@ class Runtime:
             # same rule for the typed text: a clip sent with no caption must
             # not leave an empty text block behind, because the API rejects it
             # on every later turn of the conversation (staging, 2026-09-22).
-            described = replace(message, attachments=[a for a in message.attachments if a.summary])
-            content = user_content(described)
+            # Every photo, fetched, so it stays in history as a photo (the
+            # final review: unfetched, a stored photo read "could not be
+            # retrieved" on every later turn); a video only by its text.
+            kept = [a for a in message.attachments if a.summary or _is_image(a)]
+            content = user_content(replace(message, attachments=kept), self.fetch)
             state.history.append({"role": "user", "content": content})
             self._note_customer_turn(message, state, content)
         return self._finish(
