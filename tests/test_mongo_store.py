@@ -102,7 +102,8 @@ class IndexTests(unittest.TestCase):
     def test_every_collection_gets_exactly_its_indexes_and_only_two_expire(self):
         db = fresh_db()
         report = ensure_indexes(db)
-        self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media"})
+        self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media",
+                                       "conversation_origins"})
         ttl = {}
         for collection in report:
             for index, info in db[collection].index_information().items():
@@ -117,7 +118,7 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(ensure_indexes(db), ensure_indexes(db))
 
     def test_the_index_table_has_no_ttl_on_the_permanent_record(self):
-        for collection in ("transcript_turns", "conversation_summaries"):
+        for collection in ("transcript_turns", "conversation_summaries", "conversation_origins"):
             for _, options in INDEXES[collection]:
                 self.assertNotIn("expireAfterSeconds", options)
 

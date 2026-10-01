@@ -49,6 +49,9 @@ TRANSCRIPT_TURNS = "transcript_turns"
 CONVERSATION_SUMMARIES = "conversation_summaries"
 IDEMPOTENCY_KEYS = "idempotency_keys"
 MEDIA = "media"
+# Where each run of a conversation came from (origin.py). Permanent, like the
+# transcript, and erased with the person or the conversation.
+CONVERSATION_ORIGINS = "conversation_origins"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
 INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
@@ -70,6 +73,12 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     # transcript: no TTL index, and removed only through delete_conversation.
     MEDIA: [
         ([("conversation_id", 1)], {"name": "conversation"}),
+    ],
+    CONVERSATION_ORIGINS: [
+        ([("conversation_id", 1)], {"name": "conversation"}),
+        ([("user_key", 1)], {"name": "user_key"}),
+        ([("started_at", 1)], {"name": "started_at"}),
+        ([("country", 1), ("region", 1)], {"name": "place"}),
     ],
 }
 
@@ -276,6 +285,18 @@ class MongoConversationStore:
         media = self._collection(MEDIA)
         self._guard("replace_one", lambda: media.replace_one({"_id": record["_id"]}, record, upsert=True))
 
+    def record_origin(self, record: Dict[str, Any]) -> None:
+        """Upsert by `_id` (one per run)."""
+        origins = self._collection(CONVERSATION_ORIGINS)
+        self._guard("replace_one", lambda: origins.replace_one({"_id": record["_id"]}, record, upsert=True))
+
+    def origins_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        return self._guard(
+            "find",
+            lambda: list(self._collection(CONVERSATION_ORIGINS).find({"conversation_id": conversation_id})
+                         .sort("started_at", 1)),
+        )
+
     def media_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self._guard(
             "find",
@@ -299,7 +320,7 @@ class MongoConversationStore:
         """Every conversation id tied to one person, in any collection."""
         found = set()
         for name, field in ((CONVERSATIONS, "_id"), (TRANSCRIPT_TURNS, "conversation_id"),
-                            (CONVERSATION_SUMMARIES, "conversation_id")):
+                            (CONVERSATION_SUMMARIES, "conversation_id"), (CONVERSATION_ORIGINS, "conversation_id")):
             collection = self._collection(name)
             found.update(self._guard("distinct", lambda: collection.distinct(field, {"user_key": user_key})))
         return sorted(found)
@@ -312,7 +333,8 @@ class MongoConversationStore:
         that does, then removed by id. Their idempotency receipts go too.
         With `dry_run`, counts what would go and deletes nothing.
         """
-        counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA)}
+        counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA,
+                                       CONVERSATION_ORIGINS)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -327,6 +349,7 @@ class MongoConversationStore:
             CONVERSATION_SUMMARIES: self._remove(CONVERSATION_SUMMARIES, {"conversation_id": conversation_id}, dry_run),
             IDEMPOTENCY_KEYS: self._remove(IDEMPOTENCY_KEYS, _receipts_of(conversation_id), dry_run),
             MEDIA: self._remove(MEDIA, {"conversation_id": conversation_id}, dry_run),
+            CONVERSATION_ORIGINS: self._remove(CONVERSATION_ORIGINS, {"conversation_id": conversation_id}, dry_run),
         }
 
     def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:

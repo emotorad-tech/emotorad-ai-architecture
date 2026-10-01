@@ -410,6 +410,8 @@ class InMemoryConversationStore:
         self._summaries: Dict[str, Dict[str, ConversationSummaryItem]] = {}
         # Media records, permanent like the transcript: conversation id -> S3 key -> record.
         self._media: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Where each run came from (origin.py), permanent: conversation id -> run key -> record.
+        self._origins: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def get(self, conversation_id: str) -> ConversationState:
         state = self._states.get(conversation_id)
@@ -459,6 +461,14 @@ class InMemoryConversationStore:
         records = self._media.get(conversation_id, {}).values()
         return sorted(records, key=lambda r: r["stored_at"])
 
+    def record_origin(self, record: Dict[str, Any]) -> None:
+        """Upsert by `_id` (one per run): filling in a run's country or person
+        replaces its record."""
+        self._origins.setdefault(record["conversation_id"], {})[record["_id"]] = dict(record)
+
+    def origins_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        return sorted(self._origins.get(conversation_id, {}).values(), key=lambda r: r["started_at"])
+
     def recent_summaries(
         self, user_key: str, limit: int = 3, exclude: Optional[str] = None
     ) -> List[ConversationSummaryItem]:
@@ -475,7 +485,9 @@ class InMemoryConversationStore:
         """
         mine = {cid for cid, state in self._states.items() if state.user_key == user_key}
         mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
-        counts = {"conversations": 0, "transcript_turns": 0, "media": 0,
+        mine |= {cid for cid, runs in self._origins.items()
+                 if any(r.get("user_key") == user_key for r in runs.values())}
+        counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
                   "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
             for name, count in self.delete_conversation(cid).items():
@@ -495,6 +507,7 @@ class InMemoryConversationStore:
             "transcript_turns": len(self._turns.pop(conversation_id, {})),
             "conversation_summaries": summaries,
             "media": len(self._media.pop(conversation_id, {})),
+            "conversation_origins": len(self._origins.pop(conversation_id, {})),
         }
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:

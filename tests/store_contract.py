@@ -107,3 +107,43 @@ class StoreContract:
         state.turns = 1
         store.record_turn(state, inbound("x", "a"), reply("y", "a"), summary("a", user_key="PHONE#+919876543210"))
         self.assertEqual(store.recent_summaries("PHONE#+919876543210"), [])
+
+    def origin(self, cid, started_at="2026-10-01T09:00:00+00:00", user_key=None, **place):
+        record = {"_id": "%s#%s" % (cid, started_at), "conversation_id": cid, "started_at": started_at,
+                  "channel": "amiigo_app", "country": "IN", "region": "Maharashtra", "city": "Pune",
+                  "source": "ip", "db": "dbip-city-lite-2026-10", "user_key": user_key}
+        record.update(place)
+        return record
+
+    def test_an_origin_is_upserted_per_run(self):
+        store = self.make_store()
+        store.record_origin(self.origin("c1"))
+        store.record_origin(self.origin("c1", user_key="PHONE#+919700000031"))
+        store.record_origin(self.origin("c1", started_at="2026-10-03T09:00:00+00:00", city="Mumbai"))
+        records = store.origins_of("c1")
+        self.assertEqual([r["city"] for r in records], ["Pune", "Mumbai"])
+        self.assertEqual(records[0]["user_key"], "PHONE#+919700000031")
+
+    def test_an_erasure_by_person_takes_their_origins(self):
+        store = self.make_store()
+        state = store.get("mine")
+        state.user_key, state.turns = "PHONE#+919700000031", 1
+        store.save(state)
+        store.record_origin(self.origin("mine", user_key="PHONE#+919700000031"))
+        store.record_origin(self.origin("theirs", user_key="PHONE#+919812345678"))
+        counts = store.delete_person("PHONE#+919700000031")
+        self.assertEqual(counts["conversation_origins"], 1)
+        self.assertEqual(store.origins_of("mine"), [])
+        self.assertEqual(len(store.origins_of("theirs")), 1)
+
+    def test_an_origin_alone_ties_a_conversation_to_its_person(self):
+        # A run that began anonymous and verified: only its origin may carry the key.
+        store = self.make_store()
+        store.record_origin(self.origin("web-1", user_key="PHONE#+919700000031"))
+        self.assertEqual(store.delete_person("PHONE#+919700000031")["conversation_origins"], 1)
+
+    def test_an_erasure_by_conversation_takes_an_anonymous_origin(self):
+        store = self.make_store()
+        store.record_origin(self.origin("anon"))
+        self.assertEqual(store.delete_conversation("anon")["conversation_origins"], 1)
+        self.assertEqual(store.origins_of("anon"), [])
