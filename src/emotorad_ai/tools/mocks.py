@@ -325,7 +325,8 @@ def _unlisted_ticket_bike(
     frame = unlisted_bike.get("frame_number")
     if frame_number and re.sub(r"\s+", "", frame_number).upper() != (frame or ""):
         return None
-    return {"frame_number": frame, "product_name": unlisted_bike.get("model"), "frame_number_source": UNLISTED_SOURCE}
+    return {"frame_number": frame, "product_name": unlisted_bike.get("model"),
+            "frame_number_source": UNLISTED_SOURCE if frame else None}
 
 
 def _owned_bike(
@@ -1317,6 +1318,7 @@ def build_registry(
             },
             required=("part", "idempotency_key"),
             injects=("phone", "conversation_id", "evidence_seen", "coverage_result", "customer_messages"),
+            optional_injects=("unlisted_bike",),
             write=True,
         )
         def place_replacement_order(
@@ -1330,7 +1332,18 @@ def build_registry(
             frame_number: Optional[str] = None,
             use_record_address: bool = False,
             address: Optional[Dict[str, Any]] = None,
+            unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
         ) -> Dict[str, Any]:
+            if unlisted_bike:
+                # The customer's bike is not registered on this number (the
+                # final review, 2026-10-01): nothing is ordered for a bike with
+                # no record, nor against the listed bike they said is not theirs.
+                raise ToolError(
+                    "unlisted_bike",
+                    "The customer's bike is not registered on this number, so a replacement cannot be "
+                    "ordered from this chat. Hand the conversation to a person.",
+                    remedy="human_handoff",
+                )
             rule = parts_table.get(part)
             if rule is None:
                 raise ToolError("part_not_identified", "%r is not a part this flow can order." % part)

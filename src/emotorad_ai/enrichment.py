@@ -21,6 +21,8 @@ shape the whole file:
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
@@ -47,6 +49,17 @@ class EnrichedContext:
     def render(self) -> str:
         ordered = [self.sections[name] for name in SECTION_PRIORITY if name in self.sections]
         return "\n".join(ordered)
+
+
+# The bike list as ContextEnricher._bikes_block writes it: "Owns N bikes:",
+# then one "- " line per bike.
+_BIKES_SECTION = re.compile(r"^Owns \d+ bikes?:\n(?:- .*(?:\n|$))*", re.MULTILINE)
+
+
+def without_bikes(block: str) -> str:
+    """The context block without its bike list, for a conversation whose bike
+    is none of them (spec 2026-10-01, unlisted bike; the final review)."""
+    return _BIKES_SECTION.sub("", block or "").strip("\n")
 
 
 def _tokens(text: str) -> int:

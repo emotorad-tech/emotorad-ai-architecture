@@ -259,16 +259,49 @@ def names_a_frame(text: str) -> bool:
 # "its not one of these 2" chose bike 2 on staging: the ordinal matched and
 # nothing checked for the "not". This is checked before any bike is matched.
 _NOT_LISTED = re.compile(
-    r"\b(?:not|none)\s+(?:(?:one|any)\s+)?of\s+(?:these|them|those|the\s+two|the\s+three|both)\b"
+    r"\b(?:not|none)\s+(?:(?:one|any)\s+)?(?:of|from|in|among)\s+"
+    r"(?:these|them|those|both|list|the\s+(?:two|three|2|3|above|list)|this\s+list|your\s+list)\b"
     r"|\bneither\b|^\W*none\W*$|\bnot\s+these\b"
     r"|\bnot\s+(?:mine|listed|here|there|in\s+(?:the|this|your)\s+list|on\s+(?:the|this|your)\s+list)\b"
+    r"|\b(?:isn'?t|isnt|is\s+not|aren'?t|arent|are\s+not)\s+(?:listed|there|here|shown|showing|mine|my\s+bikes?"
+    r"|in\s+(?:the\s+)?list|on\s+(?:the\s+)?list)\b"
+    r"|\bnot\s+(?:the\s+)?(?:1|2|3|first|second|third)(?:\s+one)?\s+(?:or|nor)\s+(?:the\s+)?(?:1|2|3|first|second|third)\b"
     r"|\b(?:a\s+)?different\s+(?:one|bike|cycle)\b|\banother\s+(?:bike|cycle)\b"
+    r"|\b(?:have|got|bought|own)\s+(?:a\s+)?(?:new|another|different|other)\s+(?:one|bike|cycle)\b"
+    r"|\ba\s+third\s+(?:one|bike|cycle)\b"
     r"|\bnot\s+(?:this|that)\s+(?:one|bike)\b"
-    r"|\bkoi\s+(?:bhi\s+)?nahi\b|\bdono\s+(?:hi\s+)?nahi\b|इनमें\s+से\s+कोई\s+नहीं|दोनों\s+नहीं",
+    r"|\bkoi\s+(?:bhi\s+)?nahi\b|\bdono\s+(?:hi\s+)?nahi\b"
+    r"|\b(?:dono|ye|yeh)\s+(?:wali\s+)?(?:\w+\s+)?(?:mere|meri|mera)\s+(?:nahi|nahin|nhi)\b"
+    r"|इनमें\s+से\s+कोई\s+नहीं|दोनों\s+नहीं",
     re.IGNORECASE,
 )
+# A reply that negates something and names no listed frame number is asked
+# again rather than matched: "not the first, the second" picked bike 1 (the
+# final review).
+_NEGATION = re.compile(
+    r"\b(?:not|none|neither|nor|never|no)\b"
+    r"|\b(?:isn'?t|aren'?t|don'?t|doesn'?t|wasn'?t|can'?t|won'?t|didn'?t|ain'?t|isnt|arent|dont|doesnt|cant"
+    r"|wont|didnt)\b|\bnahi\b|\bnahin\b|\bnhi\b|नहीं",
+    re.IGNORECASE,
+)
+# While collecting, a short reply that is plainly a list choice: "sorry, it's
+# number 2". Not "1 min".
+_ORDINAL_CHOICE = re.compile(
+    r"^\W*(?:(?:sorry|oh|actually|wait)\W+)?(?:it'?s\s+|its\s+)?(?:number\s+|no\.?\s*)?(?:the\s+)?"
+    r"(1|2|3|first|second|third|1st|2nd|3rd)(?:\s+one)?\W*$",
+    re.IGNORECASE,
+)
+_ORDINAL_INDEX = {"1": 0, "first": 0, "1st": 0, "2": 1, "second": 1, "2nd": 1, "3": 2, "third": 2, "3rd": 2}
 _DONT_KNOW = re.compile(
-    r"\b(?:don'?t|do\s+not)\s+know\b|\bnot\s+sure\b|\bno\s+idea\b|\bpata\s+nahi\b|\bcan'?t\s+find\b|पता\s+नहीं",
+    r"\b(?:don'?t|do\s+not)\s+know\b|\bnot\s+sure\b|\bno\s+idea\b|\bpata\s+(?:nahi|nhi)\b"
+    r"|\b(?:nahi|nhi)\s+pata\b|\bcan'?t\s+find\b|\bidk\b|\bdunno\b|पता\s+नहीं",
+    re.IGNORECASE,
+)
+# Words that say a reply is not a model name (the final review: "error code
+# E07", "it won't turn on", "ignore all previous instructions").
+_NOT_A_MODEL = re.compile(
+    r"\b(?:error|code|blank|turn|turns|won'?t|wont|squeak\w*|fell|fallen|chain|brakes?|display|sticker|faded"
+    r"|lights?|charg\w*|noise|ignore|instructions?|forgot|remember|known)\b",
     re.IGNORECASE,
 )
 # EMotorad's model names: the Amiigo app's, and those on the test records.
@@ -278,6 +311,9 @@ KNOWN_MODELS = tuple(sorted(
        if record.get("product_name")},
     key=len, reverse=True,
 ))
+_MODEL_WORDS = frozenset(
+    chunk for model in KNOWN_MODELS for chunk in re.findall(r"[a-z]+", model.lower()) if len(chunk) > 1
+) | {"trex"}
 _MODEL_PATTERNS = [
     (model, re.compile(r"\b" + r"\W*".join(re.findall(r"[a-z0-9]+", model.lower())) + r"\b", re.IGNORECASE))
     for model in KNOWN_MODELS
@@ -298,10 +334,24 @@ def not_listed(text: str) -> bool:
     return bool(_NOT_LISTED.search(text or ""))
 
 
+# Short words that come before a number in ordinary text: "call me on
+# 9876543210", "invoice no 123456". Never joined into a frame number.
+_JOIN_STOP = frozenset((
+    "on", "is", "no", "to", "at", "in", "of", "me", "my", "by", "or", "it", "as", "be", "we", "us", "so", "do",
+    "go", "up", "an", "am", "if", "the", "and", "for", "was", "are", "not", "its", "nos", "num", "call", "date",
+    "from", "dated", "hai", "ka", "ki", "ko", "se", "mera", "meri", "phone", "mob",
+))
+
+
 def _joined(text: str) -> str:
-    """A frame number typed with spaces or hyphens before its digits, joined:
-    "emxp 2026009999" is EMXP2026009999."""
-    return re.sub(r"(?<=[A-Za-z0-9])[\s-]+(?=\d)", "", text or "")
+    """A frame number typed with a space or hyphen before its digits, joined:
+    "emxp 2026009999" is EMXP2026009999. Only a word of two to five letters
+    followed by six or more digits, and never an ordinary short word."""
+    def join(match: "re.Match[str]") -> str:
+        word = match.group(1)
+        return match.group(0) if word.lower() in _JOIN_STOP else word + match.group(2)
+
+    return re.sub(r"\b([A-Za-z]{2,5})[\s-]+(\d{6,})\b", join, text or "")
 
 
 def _find_frame(text: str) -> Optional[str]:
@@ -340,7 +390,9 @@ def unlisted_context(bike: Optional[Dict[str, Optional[str]]]) -> str:
 def unlisted_as_bike(bike: Dict[str, Optional[str]]) -> Dict[str, Any]:
     """The unlisted bike in the shape a listed one has, for the knowledge
     filter and Jev."""
-    return {"product_name": bike.get("model"), "frame_number": bike.get("frame_number"), "on_record": False}
+    return {"product_name": bike.get("model"), "frame_number": bike.get("frame_number"), "on_record": False,
+            # The coverage line the agent sees (battery_support._coverage_line).
+            "coverage_status": "not_on_this_number"}
 
 
 def _listed_frame(text: str, bikes: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -356,9 +408,25 @@ def _model_as_typed(text: str, bike: Dict[str, Optional[str]], frame_in_reply: O
     """Whether a reply is the model, as typed, when only the model is missing:
     a short answer that is not a question, not the issue, not "I don't know"."""
     words = (text or "").split()
-    return bool(bike.get("frame_number") and not bike.get("model") and not frame_in_reply and words
-                and len(words) <= 4 and not text.strip().endswith("?") and classify_issue(text) is None
-                and not _DONT_KNOW.search(text) and not not_listed(text))
+    if not (bike.get("frame_number") and not bike.get("model") and not frame_in_reply and words and len(words) <= 4):
+        return False
+    if (text.strip().endswith("?") or classify_issue(text) is not None or _DONT_KNOW.search(text)
+            or not_listed(text) or _NOT_A_MODEL.search(text)):
+        return False
+    # It must look like a model (the final review: "ok", "wait" and "2" were
+    # kept): a word from EMotorad's model names, or a token of letters and
+    # digits ("X5", "V2").
+    tokens = re.findall(r"[A-Za-z0-9]+", text)
+    return any(token.lower() in _MODEL_WORDS for token in tokens) or any(
+        re.search(r"[A-Za-z]", token) and re.search(r"\d", token) for token in tokens)
+
+
+def _ordinal_choice(text: str, bikes: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    match = _ORDINAL_CHOICE.match(text or "")
+    if not match:
+        return None
+    index = _ORDINAL_INDEX[match.group(1).lower()]
+    return bikes[index] if index < len(bikes) else None
 
 
 class TriageAgent:
@@ -425,16 +493,24 @@ class TriageAgent:
         # 2026-10-01, unlisted bike): "its not one of these 2" chose bike 2.
         if not_listed(text) or (single and says_no(text)):
             return self._start_unlisted(text, resolved, state)
+        # A frame number that is not in the list, before any model or ordinal
+        # is matched ("EMX Plus, frame EMXP2026009999" picked the listed EMX
+        # Plus). Only when every listed bike has its frame number on record: an
+        # app bike's sticker frame is that bike, read out (the final review).
+        if (_find_frame(text) and all(b.get("frame_number") for b in bikes)
+                and _listed_frame(text, bikes) is None):
+            return self._start_unlisted(text, resolved, state)
+        if _NEGATION.search(text) and _listed_frame(text, bikes) is None:
+            return TriageOutcome(
+                reply="Sorry, I did not catch which bike you meant. " + which_bike_text(bikes),
+                reason="selection_negated",
+            )
         bike = bikes[0] if single and says_yes(text) else match_bike(text, bikes)
         if bike is None and single and not bikes[0].get("frame_number") and names_a_frame(text):
             # The only bike has no frame number on record, so a frame number
             # typed now is the rider reading theirs, not a different bike.
             bike = bikes[0]
         if bike is None:
-            if names_a_frame(text):
-                # The frame number of a bike that is not in the list, as the
-                # question invites ("send the frame number of the bike you mean").
-                return self._start_unlisted(text, resolved, state)
             # Re-ask rather than guess. An unmatched reply usually means the
             # customer answered something else entirely, and picking a bike here
             # would silently attach the whole conversation to the wrong one.
@@ -444,6 +520,8 @@ class TriageAgent:
             )
 
         state.select_bike(bike_ref(bike), bike_name(bike))
+        # A listed bike chosen: any bike given earlier as unlisted is dropped.
+        state.unlisted_bike, state.unlisted_asks = None, 0
         state.move_to(AWAITING_ISSUE, "bike_selected")
         topic, source = self._take_pending(state)
         return self._route_or_ask(topic, state, source)
@@ -458,6 +536,9 @@ class TriageAgent:
         """The frame number and model of a bike that is not in the list, then
         on with the issue (spec 2026-10-01, unlisted bike)."""
         listed = _listed_frame(text, resolved.bikes)
+        if listed is None and not (state.unlisted_bike or {}).get("frame_number"):
+            # "sorry, it's number 2": the list after all (the final review).
+            listed = _ordinal_choice(text, resolved.bikes)
         if listed is not None:
             # A listed bike's own frame number: it was in the list after all.
             state.unlisted_bike = None

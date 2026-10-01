@@ -66,7 +66,7 @@ from .decisions import (
     route,
 )
 from .disclosure import apply_disclosure
-from .enrichment import ContextEnricher, summarise_past
+from .enrichment import ContextEnricher, summarise_past, without_bikes
 from .graph import TurnNodes, build_turn_graph
 from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
@@ -172,6 +172,7 @@ SIDE_EFFECT_TOOLS = (SEND_GUIDE_MEDIA, REQUEST_IDENTITY_VERIFICATION, VERIFY_IDE
 # (Runtime._merge_onto_fresh).
 VERIFY_FIRST_FIELDS = (
     "verify_step", "verify_masked", "verify_sends", "phase", "agent", "selected_frame",
+    "unlisted_bike", "unlisted_asks",
     # started_at: a new person's run keeps its own summary even after a clash.
     # The turn numbering stays the other server's, which already counts both.
     "pending_topic", "pending_topic_source", "context_block", "user_key", "started_at",
@@ -870,7 +871,7 @@ class Runtime:
         else:
             jev_state = build_state(
                 message.message_text, state.history, message.channel, bike=bike,
-                current_sub_category=state.sub_category, redact=self._redaction_terms(resolved),
+                current_sub_category=state.sub_category, redact=self._redaction_terms(resolved, state),
             )
             try:
                 decision = self.jev.decide(jev_state, self.jev_questions)
@@ -1071,7 +1072,7 @@ class Runtime:
         return resolved.single_bike
 
     @staticmethod
-    def _redaction_terms(resolved: ResolvedIdentity) -> List[str]:
+    def _redaction_terms(resolved: ResolvedIdentity, state: Optional[ConversationState] = None) -> List[str]:
         """Names and frame numbers that must not reach Jev, even inside recent turns."""
         terms: List[str] = []
         name = (resolved.profile or {}).get("name") or ""
@@ -1079,6 +1080,9 @@ class Runtime:
             terms.append(name)
             terms.extend(part for part in name.split() if len(part) > 2)
         terms.extend(term for bike in resolved.bikes for term in (bike.get("frame_number") or "", bike_ref(bike) or ""))
+        if state is not None and state.unlisted_bike:
+            # The frame number the customer typed for a bike not in the list.
+            terms.append(state.unlisted_bike.get("frame_number") or "")
         return [term for term in terms if term]
 
     # -- steps ---------------------------------------------------------------
@@ -1105,8 +1109,14 @@ class Runtime:
 
         One place, so the narrow agent cannot skip a check the full agents get.
         """
+        # The unlisted bike stands in for the listed ones in what the agent is
+        # told: never "owns 2 bikes, ask which", nor the rejected bikes' cover
+        # (the final review, 2026-10-01).
+        agent_view = replace(resolved, bikes=[unlisted_as_bike(state.unlisted_bike)]) if state.unlisted_bike else resolved
         turn = agent.run(
-            message, resolved, state.history, (state.context_block or "") + unlisted_context(state.unlisted_bike),
+            message, agent_view, state.history,
+            (without_bikes(state.context_block or "") if state.unlisted_bike else (state.context_block or ""))
+            + unlisted_context(state.unlisted_bike),
             # Conversation facts the order tool decides on. Lambdas, because
             # evidence_seen can flip during this very turn when a photo arrives
             # with the message that triggers the order.
@@ -1385,7 +1395,8 @@ class Runtime:
             late["selected_bike"] = lambda: state.selected_frame
             if state.selected_bike_label:
                 arguments["description"] += " The rider's bike: %s." % state.selected_bike_label
-        elif resolved.single_bike:
+        elif resolved.single_bike and not state.unlisted_bike:
+            # Never the one listed bike when the customer said theirs is not it.
             arguments["frame_number"] = bike_ref(resolved.single_bike)
 
         # Raised even if the receipt store is down: a duplicate safety

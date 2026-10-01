@@ -75,3 +75,59 @@ class TicketTests(unittest.TestCase):
         self.assertEqual(reply.handled_by, "guardrail:battery_safety")
         ticket = chat.registry.tickets.tickets[reply.ticket_id]
         self.assertEqual((ticket["frame_number"], ticket["frame_number_source"]), ("EMXP2026009999", UNLISTED_SOURCE))
+
+
+class FinalReviewRuntimeTests(unittest.TestCase):
+    """The final review (2026-10-01)."""
+
+    def test_no_replacement_is_ordered_for_the_unlisted_bike(self):
+        from emotorad_ai.fulfilment import ItemCodes, ReplacementOrders, load_parts_table
+        from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER
+
+        registry = build_registry(today=date(2026, 10, 1), replacement_orders=ReplacementOrders(),
+                                  item_codes=ItemCodes(), approval_mode="reasonable")
+        part = next(p for p, r in load_parts_table().items() if not r.technician and not r.ask)
+        envelope = registry.call(
+            PLACE_REPLACEMENT_ORDER, {"part": part, "use_record_address": True, "idempotency_key": "o1"},
+            ToolContext(conversation_id="c1", phone=ONE_BIKE, late={
+                "evidence_seen": lambda: True, "coverage_result": lambda: {}, "customer_messages": lambda: [],
+                "unlisted_bike": lambda: dict(BIKE)}))
+        self.assertEqual(envelope["error"]["code"], "unlisted_bike")
+        self.assertEqual(envelope["error"]["remedy"], "human_handoff")
+
+    def test_the_agent_is_told_the_bike_is_none_of_the_listed_ones(self):
+        chat = Chat(replies=[say("Let's check the charger. Is its light on?")])
+        unlisted(chat)
+        chat.say("battery isnt charging")
+        system = chat.llm.requests[-1]["system"]
+        self.assertNotIn("Do NOT assume which one", system)
+        self.assertNotIn("EMXP2026001234", system)
+        self.assertIn("T-Rex Air frame EMXP2026009999", system)
+        self.assertIn("Coverage: NO RECORD ON THIS NUMBER", system)
+
+    def test_verifying_again_and_choosing_a_listed_bike_drops_the_unlisted_one(self):
+        now = [0.0]
+        chat = Chat(replies=[say("Is the charger light on?")] * 4, clock=lambda: now[0])
+        unlisted(chat)
+        now[0] += 13 * 60 * 60  # the verification lapses; the conversation does not
+        chat.verify(RIDER, first="my battery isn't charging")
+        chat.say("1")
+        self.assertIsNone(chat.state().unlisted_bike)
+        self.assertEqual(chat.state().selected_frame, "EMXP2026001234")
+
+    def test_the_unlisted_frame_never_reaches_jev(self):
+        from emotorad_ai.conversation import ConversationState
+        from emotorad_ai.runtime import Runtime
+        from tests.test_triage import BIKES, resolved
+
+        state = ConversationState("c1")
+        state.unlisted_bike = dict(BIKE)
+        self.assertIn("EMXP2026009999", Runtime._redaction_terms(resolved(BIKES), state))
+
+    def test_a_safety_report_while_collecting_is_not_put_on_the_rejected_bike(self):
+        chat = Chat(replies=[say("Let's check the charger. Is its light on?")])
+        chat.verify(ONE_BIKE, first="hi")
+        chat.say("no")
+        reply = chat.say("my battery is smoking")
+        ticket = chat.registry.tickets.tickets[reply.ticket_id]
+        self.assertEqual((ticket["frame_number"], ticket["frame_number_source"]), (None, None))

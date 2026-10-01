@@ -302,6 +302,9 @@ class VerifyFirst:
         state.context_block = None
         state.agent = None
         state.selected_frame = None
+        # A bike given earlier as not in the list goes too: the list is asked
+        # again (the final review, 2026-10-01).
+        state.unlisted_bike, state.unlisted_asks = None, 0
         if resolved.bikes:
             state.move_to(AWAITING_BIKE_SELECTION, "verified")
             text, outcome = CONFIRMED + " " + which_bike_text(resolved.bikes), "verified"

@@ -119,6 +119,11 @@ def _coverage_line(bike: Dict[str, Any]) -> str:
             "this chat: if warranty matters to what they need, say the support team will help "
             "register it, and raise a support ticket that says so."
         )
+    if bike.get("coverage_status") == "not_on_this_number":
+        return (
+            "  Coverage: NO RECORD ON THIS NUMBER. The customer says this bike is not one registered on "
+            "their number, so there is no warranty record for it. Do not state or estimate coverage."
+        )
     if bike.get("coverage_status") == "warranty_unknown":
         return (
             "  Coverage: CANNOT BE MATCHED. The bike is in the app with no frame number on record, "
