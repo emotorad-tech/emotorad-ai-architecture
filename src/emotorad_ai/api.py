@@ -55,6 +55,7 @@ from starlette.background import BackgroundTask
 from .adapters import WebsiteChatAdapter
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
+from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
@@ -803,6 +804,75 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         ],
         actions=list(reply.actions),
     )
+
+
+class ErasureIn(BaseModel):
+    session_token: str = ""
+    confirm: bool = False
+    conversation_id: Optional[str] = None
+
+
+def _erasure_person(request: Request, session_token: str) -> str:
+    """The signed-in rider behind the session, or 403. Never from the URL."""
+    if not message_limiter.allow(client_ip(request, TRUSTED_PROXIES)):
+        raise HTTPException(status_code=429, detail="Too many requests. Wait a moment and try again.")
+    persona, identity = resolver.resolve_website(None, session_token or None)
+    if persona != "customer" or not identity.may_disclose or not identity.phone:
+        raise HTTPException(status_code=403, detail=erasure_rules.ERASURE_SIGN_IN)
+    return "PHONE#" + identity.phone
+
+
+def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPException:
+    log.emit("erasure_request_failed", conversation_id or "erasure", error=type(exc).__name__)
+    return HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED)
+
+
+@app.post("/erasure-requests", status_code=201)
+def post_erasure_request(body: ErasureIn, request: Request, response: Response) -> Dict[str, Any]:
+    """The Amiigo app's "Delete my conversation data" button, after its own
+    confirmation dialog. Records a request; the nightly job deletes."""
+    user_key = _erasure_person(request, body.session_token)
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Send confirm: true once the rider has confirmed.")
+    try:
+        pending = stores.conversations.pending_erasure_of(user_key)
+        reference = pending["_id"] if pending else stores.conversations.request_erasure(
+            user_key, "amiigo_app", body.conversation_id, utc_now_iso())
+    except Exception as exc:
+        raise _erasure_store_down(exc, body.conversation_id) from None
+    if pending:
+        response.status_code = 200
+        return {"reference": reference, "status": "pending",
+                "text": erasure_rules.ERASURE_EXISTING.format(reference=reference)}
+    log.emit("erasure_requested", body.conversation_id or "erasure", reference=reference)
+    return {"reference": reference, "status": "pending",
+            "text": erasure_rules.ERASURE_REQUESTED.format(reference=reference)}
+
+
+@app.post("/erasure-requests/status")
+def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
+    user_key = _erasure_person(request, body.session_token)
+    try:
+        pending = stores.conversations.pending_erasure_of(user_key)
+    except Exception as exc:
+        raise _erasure_store_down(exc, body.conversation_id) from None
+    if pending is None:
+        return {"reference": None, "status": "none"}
+    return {"reference": pending["_id"], "status": "pending", "requested_at": pending["requested_at"]}
+
+
+@app.post("/erasure-requests/cancel")
+def post_erasure_cancel(body: ErasureIn, request: Request) -> Dict[str, Any]:
+    user_key = _erasure_person(request, body.session_token)
+    try:
+        reference = stores.conversations.cancel_erasure(user_key, utc_now_iso())
+    except Exception as exc:
+        raise _erasure_store_down(exc, body.conversation_id) from None
+    if reference is None:
+        raise HTTPException(status_code=404, detail=erasure_rules.ERASURE_NOTHING_TO_CANCEL)
+    log.emit("erasure_cancelled", body.conversation_id or "erasure", reference=reference)
+    return {"reference": reference, "status": "cancelled",
+            "text": erasure_rules.ERASURE_CANCELLED.format(reference=reference)}
 
 
 # The playground has no auth of its own and takes an Anthropic API key as
