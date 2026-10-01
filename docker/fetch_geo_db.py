@@ -16,6 +16,9 @@ from typing import Any, Callable, List, Optional
 
 URL = "https://download.db-ip.com/free/dbip-city-lite-%s.mmdb.gz"
 NAME = "dbip-city-lite.mmdb"
+# db-ip.com answers 403 to Python's default User-Agent, which left every
+# image without the file (staging, 2026-10-01). A named one is let through.
+USER_AGENT = "emotorad-ai-build/1.0 (+https://emotorad.com)"
 
 
 def months(today: date) -> List[str]:
@@ -29,7 +32,8 @@ def fetch(dest_dir: str, today: date, opener: Callable[..., Any] = urllib.reques
     for month in months(today):
         partial = target + ".part"
         try:
-            with opener(URL % month, timeout=300) as response, gzip.GzipFile(fileobj=response) as unpacked, \
+            request = urllib.request.Request(URL % month, headers={"User-Agent": USER_AGENT})
+            with opener(request, timeout=300) as response, gzip.GzipFile(fileobj=response) as unpacked, \
                     open(partial, "wb") as out:
                 shutil.copyfileobj(unpacked, out)
             os.replace(partial, target)

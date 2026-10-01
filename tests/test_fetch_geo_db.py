@@ -15,7 +15,10 @@ class FetchTests(unittest.TestCase):
     def opener(self, available):
         asked = []
 
-        def open_(url, timeout):
+        def open_(request, timeout):
+            # db-ip.com answers 403 to Python's default User-Agent (staging, 2026-10-01).
+            self.assertTrue(request.get_header("User-agent", "").startswith("emotorad-ai-build"))
+            url = request.full_url
             asked.append(url)
             for month, body in available.items():
                 if url.endswith("dbip-city-lite-%s.mmdb.gz" % month):

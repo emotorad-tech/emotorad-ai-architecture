@@ -23,15 +23,20 @@ CANCEL_WANTED = "cancel_wanted"
 CONFIRMING = "confirming"
 
 # No \b around the Hindi: Devanagari vowel signs are not word characters.
+# "delete my chat" and its kind were missing (staging, 2026-10-01): the
+# request reached the model, which said nothing could be deleted.
 _DELETE = re.compile(
-    r"\b(?:delete|erase|remove)\s+my\s+(?:data|account|details|conversation\s+data|chat\s+data)\b"
+    r"\b(?:delete|erase|remove|clear|wipe)\s+(?:all\s+(?:of\s+)?)?(?:my|this|our|the)\s+"
+    r"(?:data|account|details|chats?|conversations?|chat\s+history|history|messages"
+    r"|conversation\s+data|chat\s+data)\b"
     r"|\bforget\s+me\b"
-    r"|मेरा\s+डेटा\s+(?:हटाओ|हटा\s+दो|डिलीट)"
-    r"|\b(?:borrar|eliminar)\s+mis\s+datos\b|\beliminar\s+mi\s+cuenta\b",
+    r"|मेरा\s+डेटा\s+(?:हटाओ|हटा\s+दो|डिलीट)|मेरी\s+चैट\s+(?:हटाओ|हटा\s+दो|डिलीट)"
+    r"|\b(?:borrar|eliminar)\s+(?:mis\s+datos|mi\s+cuenta|mi\s+chat|mis\s+chats|mis\s+conversaciones"
+    r"|mi\s+historial)\b",
     re.IGNORECASE,
 )
 _CANCEL = re.compile(
-    r"\bcancel\s+(?:my|the)\s+deletion\b|\b(?:don'?t|do\s+not)\s+delete\s+my\s+data\b",
+    r"\bcancel\s+(?:my\s+|the\s+)?deletion\b|\b(?:don'?t|do\s+not)\s+delete\s+my\s+data\b",
     re.IGNORECASE,
 )
 

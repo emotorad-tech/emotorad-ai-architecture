@@ -13,18 +13,25 @@ class PhraseTests(unittest.TestCase):
         for text in ("delete my data", "Please DELETE my account", "erase my data", "remove my data",
                      "delete my details", "Delete my conversation data", "forget me",
                      "मेरा डेटा हटाओ", "मेरा डेटा डिलीट कर दो", "quiero borrar mis datos",
-                     "eliminar mis datos", "eliminar mi cuenta", "delete   my    data"):
+                     "eliminar mis datos", "eliminar mi cuenta", "delete   my    data",
+                     # Staging, 2026-10-01: "delete my chat" reached the model, which
+                     # said it could not delete anything.
+                     "delete my chat", "delete my chats", "please delete this chat", "delete our conversation",
+                     "delete my conversations", "delete my chat history", "clear my chat", "wipe my history",
+                     "delete all my data", "delete all of my chats", "remove my messages",
+                     "मेरी चैट डिलीट करो", "borrar mi chat", "eliminar mis conversaciones", "borrar mi historial"):
             self.assertTrue(erasure.wants_deletion(text), text)
 
     def test_cancel_phrases_win_over_deletion(self):
         for text in ("cancel my deletion", "please cancel the deletion", "don't delete my data",
-                     "do not delete my data"):
+                     "do not delete my data", "cancel deletion"):
             self.assertTrue(erasure.wants_cancel(text), text)
             self.assertFalse(erasure.wants_deletion(text), text)
 
     def test_ordinary_sentences_are_not_requests(self):
         for text in ("how do I delete a ride?", "my battery data looks wrong", "remove the battery",
-                     "I deleted the app", "", None):
+                     "I deleted the app", "delete the photo", "clear the error on the display",
+                     "the chat history shows my order", "", None):
             self.assertFalse(erasure.wants_deletion(text), text)
             self.assertFalse(erasure.wants_cancel(text), text)
 
