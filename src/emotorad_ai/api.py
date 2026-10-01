@@ -55,6 +55,7 @@ from starlette.background import BackgroundTask
 from .adapters import WebsiteChatAdapter
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
+from . import photo_check
 from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
@@ -122,6 +123,9 @@ UPLOADS = UploadRegistry(MEDIA_STORE) if MEDIA_STORE is not None else None
 # only GEMINI_API_KEY is set; with neither, a claimed clip reaches the model as
 # sampled frames as before.
 VIDEO_SUMMARISER = summariser_from_env()
+# The safety look at every photo (photo_check.py), or None without the
+# OpenRouter key: photos then go on as before.
+PHOTO_CHECKER = photo_check.photo_checker_from_env()
 
 _logger = logging.getLogger(__name__)
 
@@ -442,6 +446,7 @@ def health() -> dict:
         "guide_media": "%d of %d sendable" % (len(SENDABLE_MEDIA), len(GUIDE_MEDIA)),
         # A summariser without a provider label predates the OpenRouter one: Gemini.
         "video_summary": getattr(VIDEO_SUMMARISER, "provider", "gemini") if VIDEO_SUMMARISER is not None else "frames",
+        "photo_check": PHOTO_CHECKER.provider if PHOTO_CHECKER is not None else "off",
         "tracing": "on" if TRACING is not None else "off",
         "amigo": "configured" if AMIGO is not None else "not configured",
         "build": BUILD,
@@ -597,6 +602,15 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
     # identity rather than mutated in place: a bucket-less deployment, a
     # missing cluster or a store failure must leave `items` exactly as the
     # customer sent it, and nothing else touches these dicts to tell apart.
+    # Every inline photo gets its safety look first (photo_check.py), whether
+    # or not it can be stored: the description becomes the attachment's
+    # summary, which the safety gate scans.
+    photo_notes: Dict[int, str] = {}
+    for raw_item, item in zip(inline, validated):
+        if item["media_type"].startswith("image/"):
+            note = _check_photo(base64.b64decode(item["data"]), item["media_type"], conversation_id)
+            if note:
+                photo_notes[id(raw_item)] = note
     stored: Dict[int, Dict[str, Any]] = {}
     if MEDIA_STORE is not None and inline:
         try:
@@ -692,13 +706,23 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> List[Dict[str
                                 chars=len(summary),
                                 text=summary,
                             )
+                if claimed.kind == "images":
+                    note = _check_uploaded_photo(claimed.key, claimed.mime, conversation_id)
+                    if note is not None:
+                        claims[upload_id]["summary"] = note
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
-    return [
-        claims[item["upload_id"]] if item.get("upload_id") else stored.get(id(item), item)
-        for item in items
-    ]
+    attachments = []
+    for item in items:
+        if item.get("upload_id"):
+            attachments.append(claims[item["upload_id"]])
+            continue
+        base = stored.get(id(item), item)
+        note = photo_notes.get(id(item))
+        # A copy: the customer's own item is never changed.
+        attachments.append(dict(base, summary=note) if note else base)
+    return attachments
 
 
 def _summarise_video(key: str, mime: str) -> Optional[str]:
@@ -718,6 +742,34 @@ def _summarise_video(key: str, mime: str) -> Optional[str]:
     except VideoSummaryError as exc:
         _logger.warning("video summary skipped: %s", exc)
     return None
+
+
+def _check_photo(data: bytes, mime: str, conversation_id: str) -> Optional[str]:
+    """A photo's safety description (photo_check.py), or None. Never stops the
+    turn: a failure is logged by class and the photo goes on as before."""
+    if PHOTO_CHECKER is None:
+        return None
+    try:
+        note = PHOTO_CHECKER.check(data, mime)
+    except Exception as exc:
+        log.emit("photo_check_skipped", conversation_id, error=type(exc).__name__)
+        return None
+    # Customer content, as a video's description is: only on a staging box
+    # with dev codes on.
+    if DEV_CODES:
+        log.emit("photo_check", conversation_id, chars=len(note), text=note)
+    return note
+
+
+def _check_uploaded_photo(key: str, mime: str, conversation_id: str) -> Optional[str]:
+    if PHOTO_CHECKER is None:
+        return None
+    try:
+        data = MEDIA_STORE.get_bytes(key)
+    except StorageError as exc:
+        log.emit("photo_check_skipped", conversation_id, error=type(exc).__name__)
+        return None
+    return _check_photo(data, mime, conversation_id)
 
 
 @app.post("/message", response_model=MessageOut)

@@ -27,7 +27,8 @@ class HealthTests(unittest.TestCase):
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
-             "amigo": "not configured", "build": "unknown", "ip_location": "not configured"},
+             "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
+             "photo_check": "off"},
         )
 
     def test_health_names_the_commit_it_was_built_from(self):
