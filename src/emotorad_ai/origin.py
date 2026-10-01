@@ -79,16 +79,17 @@ class IpLocator:
             return None
         try:
             record = self._reader.get(str(address))
+            country = ((record or {}).get("country") or {}).get("iso_code")
+            if not country:
+                return None
+            subdivisions = record.get("subdivisions") or [{}]
+            region = (subdivisions[0].get("names") or {}).get("en")
+            city = ((record.get("city") or {}).get("names") or {}).get("en")
         except Exception as exc:
-            # The class only: never the address.
+            # A read error or a record of an unexpected shape: never the
+            # reply's problem. The class only, never the address.
             _logger.warning("origin_lookup_failed (%s)", type(exc).__name__)
             return None
-        country = ((record or {}).get("country") or {}).get("iso_code")
-        if not country:
-            return None
-        subdivisions = record.get("subdivisions") or [{}]
-        region = (subdivisions[0].get("names") or {}).get("en")
-        city = ((record.get("city") or {}).get("names") or {}).get("en")
         return Place(country, region, city, "ip", self.db)
 
 

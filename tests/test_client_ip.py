@@ -25,8 +25,13 @@ class ClientIpTests(unittest.TestCase):
     def test_the_header_is_ignored_from_anyone_else(self):
         self.assertEqual(client_ip(request("203.0.113.9", "49.36.1.1"), TRUSTED), "203.0.113.9")
 
-    def test_a_malformed_header_falls_back_to_the_peer(self):
-        self.assertEqual(client_ip(request("172.17.0.1", "not-an-ip"), TRUSTED), "172.17.0.1")
+    def test_a_malformed_header_falls_back_to_the_peer_and_is_logged(self):
+        # An unreadable X-Real-IP from nginx means nginx is misconfigured: say
+        # so, without the value (the final review, 2026-10-01).
+        with self.assertLogs("emotorad_ai.client_ip", level="WARNING") as logs:
+            self.assertEqual(client_ip(request("172.17.0.1", "not-an-ip"), TRUSTED), "172.17.0.1")
+        self.assertIn("client_ip_header_invalid", logs.output[0])
+        self.assertNotIn("not-an-ip", logs.output[0])
 
     def test_no_peer_and_no_header_is_none(self):
         self.assertIsNone(client_ip(request(None), TRUSTED))

@@ -169,6 +169,8 @@ VERIFY_FIRST_FIELDS = (
     # started_at: a new person's run keeps its own summary even after a clash.
     # The turn numbering stays the other server's, which already counts both.
     "pending_topic", "pending_topic_source", "context_block", "user_key", "started_at",
+    # origin goes with started_at: it belongs to one run, never another.
+    "origin",
 )
 
 # Said when a guide picture failed and the reply does not already say so
@@ -454,7 +456,8 @@ class Runtime:
         fresh.escalated = fresh.escalated or ours.escalated
         fresh.ticket_id = reply.ticket_id or fresh.ticket_id
         fresh.evidence_seen = fresh.evidence_seen or ours.evidence_seen
-        fresh.origin = fresh.origin or ours.origin
+        if fresh.started_at == ours.started_at:  # an origin belongs to its run
+            fresh.origin = fresh.origin or ours.origin
         fresh.disclosed = fresh.disclosed or ours.disclosed
         # What this turn learnt stands: its lookup, if it made one, is the
         # newer one (otherwise the other server's stands: ours is only what we

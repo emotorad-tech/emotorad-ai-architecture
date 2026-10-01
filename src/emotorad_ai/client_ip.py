@@ -11,8 +11,11 @@ place recorded for its conversation).
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 from typing import Any, Mapping, Optional
+
+_logger = logging.getLogger(__name__)
 
 TRUSTED_PROXIES_ENV = "EMOTORAD_TRUSTED_PROXIES"
 DEFAULT_TRUSTED_PROXIES = "127.0.0.1,::1,172.17.0.1"
@@ -31,5 +34,8 @@ def client_ip(request: Any, trusted: frozenset) -> Optional[str]:
         try:
             return str(ipaddress.ip_address(forwarded))
         except ValueError:
-            pass
+            if forwarded:
+                # nginx sends one address or nothing: anything else means it
+                # is misconfigured. Never the value, which the client may set.
+                _logger.warning("client_ip_header_invalid: X-Real-IP from a trusted proxy is not an address")
     return peer

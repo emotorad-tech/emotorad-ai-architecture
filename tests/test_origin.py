@@ -53,6 +53,15 @@ class IpTests(unittest.TestCase):
             self.assertIsNone(locator.place("49.36.1.1"))
         self.assertIn("origin_lookup_failed (OSError)", logs.output[0])
         self.assertNotIn("49.36.1.1", " ".join(logs.output))
+    def test_an_unexpected_record_shape_is_logged_and_gives_none(self):
+        # The final review (2026-10-01): parsing sat outside the try, so an odd
+        # record raised out of place() and failed the whole message.
+        for record in ("not a dict", {"country": {"iso_code": "IN"}, "subdivisions": [None]}):
+            locator = self.locator(records={"49.36.1.1": record})
+            with self.assertLogs("emotorad_ai.origin", level="WARNING") as logs:
+                self.assertIsNone(locator.place("49.36.1.1"))
+            self.assertIn("origin_lookup_failed", logs.output[0])
+
 
 
 class PhoneTests(unittest.TestCase):

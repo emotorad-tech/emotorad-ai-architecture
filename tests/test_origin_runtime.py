@@ -5,9 +5,12 @@ import unittest
 from unittest import mock
 
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Identity, InboundMessage
-from emotorad_ai.conversation import InMemoryConversationStore, StoreUnavailable
+from emotorad_ai.conversation import (ConversationConflict, ConversationState, InMemoryConversationStore,
+                                      StoreUnavailable)
 from emotorad_ai.llm import say
 from tests.test_amigo_flow import Chat
+from tests.test_verify_first import ONE_BIKE, RIDER
+from tests.test_verify_first import Chat as VerifyChat
 
 PUNE = {"country": "IN", "region": "Maharashtra", "city": "Pune", "source": "ip", "db": "dbip-city-lite-2026-10"}
 DELHI = dict(PUNE, region="Delhi", city="New Delhi")
@@ -94,3 +97,53 @@ class OriginRuntimeTests(unittest.TestCase):
         self.assertEqual(event["error"], "StoreUnavailable")
         chat.send("still there?", DELHI)  # the next turn tries again
         self.assertEqual(len(chat.conversations.origins_of("c1")), 1)
+
+
+class RacingStore(InMemoryConversationStore):
+    """A fresh copy on every load, and refuses the next `conflicts` saves, as
+    a durable store does when another server saved first."""
+
+    def __init__(self, clock):
+        super().__init__(clock=clock)
+        self.conflicts = 0
+
+    def get(self, cid):
+        return ConversationState.from_json(super().get(cid).to_json())
+
+    def save(self, state):
+        if self.conflicts:
+            self.conflicts -= 1
+            raise ConversationConflict("another server saved first")
+        super().save(state)
+
+
+class SaveRaceTests(unittest.TestCase):
+    def send(self, chat, text, origin):
+        return chat.runtime.handle(InboundMessage(
+            conversation_id="c1", persona="customer", channel="website_chat", message_text=text,
+            identity=Identity(strength=ANONYMOUS, em_aid="aid-1"), entry_metadata={"origin": origin}))
+
+    def test_a_new_persons_run_never_takes_the_first_persons_origin(self):
+        # The final review (2026-10-01): when the turn where a different person
+        # verifies on an expired conversation loses the save race, the merge
+        # kept the first run's origin, with the first person's key, for the
+        # second run, and the second run was never recorded.
+        now = [0.0]
+        ticks = ("2026-10-01T%02d:%02d:00+00:00" % divmod(n, 60) for n in itertools.count())
+        store = RacingStore(clock=lambda: next(ticks))
+        chat = VerifyChat(replies=[say("ok")] * 8, clock=lambda: now[0], conversations=store)
+        for text in ("my battery isn't charging", RIDER[3:]):
+            self.send(chat, text, PUNE)
+        self.send(chat, chat.code(), PUNE)
+        self.send(chat, "2", PUNE)
+        now[0] += 12 * 60 * 60 + 1  # the first person's verification expires
+        self.send(chat, "hello again", DELHI)
+        self.send(chat, ONE_BIKE[3:], DELHI)
+        store.conflicts = 1
+        self.send(chat, chat.code(), DELHI)  # the restart turn loses the race
+        state = store.peek("c1")
+        self.assertNotEqual((state.origin or {}).get("user_key"), "PHONE#" + RIDER)
+        self.send(chat, "yes", DELHI)
+        records = store.origins_of("c1")
+        self.assertEqual([r["city"] for r in records], ["Pune", "New Delhi"])
+        self.assertEqual([r["user_key"] for r in records], ["PHONE#" + RIDER, "PHONE#" + ONE_BIKE])
