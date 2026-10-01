@@ -605,8 +605,9 @@ class TriageAgent:
     def _collect_unlisted(
         self, text: str, resolved: ResolvedIdentity, state: ConversationState, opening: bool = False
     ) -> TriageOutcome:
-        """The frame number and model of a bike that is not in the list, then
-        on with the issue (spec 2026-10-01, unlisted bike)."""
+        """The frame number and model of a bike that is not in the list,
+        confirmed once (spec 2026-10-02), then on with the issue (spec
+        2026-10-01, unlisted bike)."""
         listed = _listed_frame(text, resolved.bikes)
         if listed is not None:
             # A listed bike's own frame number: confirmed once before it is
