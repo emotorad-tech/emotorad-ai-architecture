@@ -5,9 +5,10 @@
 Every pending self-service request, oldest first: the person's files hidden in
 S3 (the lifecycle erases them within 30 days), then their records deleted, an
 erasure_log audit record written and the request closed. A request whose files
-could not all be hidden keeps its records, counts an attempt and is tried again
-next night; at MAX_ATTEMPTS it is closed as failed. Exits 1 when any request
-did not finish, so the GitHub run turns red.
+could not all be hidden keeps its records, counts an attempt and stays pending:
+it is tried again every night until the cause is fixed, never given up on (the
+person's decision, 2026-10-01). Exits 1 when any request did not finish, so
+the GitHub run turns red and GitHub emails the workflow's owner.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ RUN_BY = "nightly erasure job"
 @dataclass(frozen=True)
 class Outcome:
     reference: str
-    status: str  # "done" | "retry" | "failed"
+    status: str  # "done" | "retry"
     counts: Optional[Dict[str, int]]
     s3_objects: int
     error: Optional[str]
@@ -50,11 +51,8 @@ def process(store: Any, media_store: Any, now: Callable[[], datetime]) -> List[O
             outcomes.append(Outcome(reference, "done", counts, len(keys), None))
         except Exception as exc:
             error = type(exc).__name__
-            attempts = store.record_erasure_failure(reference, error)
-            status = "failed" if attempts >= erasure.MAX_ATTEMPTS else "retry"
-            if status == "failed":
-                store.close_erasure(reference, "failed", None, error, now().isoformat())
-            outcomes.append(Outcome(reference, status, None, 0, error))
+            store.record_erasure_failure(reference, error)
+            outcomes.append(Outcome(reference, "retry", None, 0, error))
     return outcomes
 
 

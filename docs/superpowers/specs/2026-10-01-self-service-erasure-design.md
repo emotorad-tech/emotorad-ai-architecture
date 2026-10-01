@@ -148,7 +148,9 @@ inside the image (PYTHONPATH is already `/app/src`). It:
       ("nightly erasure job"), `at`, the counts and `s3_objects`.
    5. Closes the request as `done`.
 4. A request that fails gets `attempts + 1` and `last_error` (the exception
-   class only) and stays `pending`; at 3 attempts it is closed as `failed`.
+   class only) and stays `pending`. It is retried every night until the cause
+   is fixed, never given up on (the person's decision after the final review,
+   1 October 2026); each red run alerts the workflow's owner.
 5. Prints one line per request (reference, outcome, counts) and exits 1 if any
    request failed this run, so the GitHub run turns red.
 

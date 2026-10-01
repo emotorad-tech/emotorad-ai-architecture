@@ -64,13 +64,17 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.store.erasure_record(self.reference)["attempts"], 1)
         self.assertEqual(self.store.erasure_log, [])
 
-    def test_the_third_failure_closes_it_failed(self):
+    def test_it_keeps_retrying_until_the_cause_is_fixed(self):
+        # The person's decision (2026-10-01): a request is never given up on.
+        # It stays pending, with the person, and every night's run is red.
         media = FakeMedia(fail_on="customers/a/mine/images/1.jpg")
-        for _ in range(erasure.MAX_ATTEMPTS):
+        for night in range(1, 5):
             (outcome,) = process(self.store, media, lambda: NOW)
-        self.assertEqual(outcome.status, "failed")
-        self.assertEqual(self.store.erasure_record(self.reference)["status"], "failed")
-        self.assertEqual(process(self.store, media, lambda: NOW), [])
+            self.assertEqual((outcome.status, self.store.erasure_record(self.reference)["attempts"]), ("retry", night))
+        self.assertEqual(self.store.pending_erasure_of(ME)["_id"], self.reference)
+        media.fail_on = None
+        (outcome,) = process(self.store, media, lambda: NOW)
+        self.assertEqual(outcome.status, "done")
 
     def test_a_cancelled_request_is_left_alone(self):
         self.store.cancel_erasure(ME, "2026-10-01T11:00:00+00:00")

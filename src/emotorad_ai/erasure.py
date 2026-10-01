@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, Optional
 
 # No 0/O, 1/I/L or U: a reference is read aloud and typed back.
 REFERENCE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
-MAX_ATTEMPTS = 3
 
 # ConversationState.erasure_step
 WANTED = "wanted"
