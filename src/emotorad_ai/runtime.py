@@ -220,6 +220,10 @@ def _is_image(attachment: Any) -> bool:
     return attachment.kind == "image" or (attachment.mime_type or "").startswith("image/")
 
 
+# The agents whose asks to see something are fault evidence (video first).
+_FAULT_AGENTS = (BATTERY_SUPPORT, MOTOR_SUPPORT, NARROW_SUPPORT)
+
+
 class Runtime:
     def __init__(
         self,
@@ -1206,6 +1210,7 @@ class Runtime:
             # The reply is replaced, but a ticket the turn already raised still
             # exists: keep its id so it is tracked and gets the transcript.
             if state.evidence_asks >= MAX_EVIDENCE_ASKS:
+                state.evidence_asks = 0  # a fresh count after the hand-over
                 # Asked three times already, and the reply still concludes
                 # with nothing seen: a person takes it from here, rather than the
                 # customer being asked the same thing again.
@@ -1257,9 +1262,19 @@ class Runtime:
         # Video first (spec 2026-10-01-video-first-evidence-design.md): the
         # model decides when to ask to see something; every ask is a video
         # first, and three asks with nothing back hand the chat to a person.
-        asked = asks_for_media(turn.text)
+        # Only the fault agents' asks (an invoice for late registration is not
+        # fault evidence), and never a reply that tells the customer to stop:
+        # nobody is asked to film a hazard, and a stop instruction is never
+        # replaced by a hand-over (the final review, 2026-10-01).
+        asked = asks_for_media(turn.text) if turn.agent in _FAULT_AGENTS else None
+        if asked is not None and (evidence.reason == "safety_exempt"
+                                  or check_safety_in_description(turn.text).triggered):
+            asked = None
         if asked is not None:
             if state.evidence_asks >= MAX_EVIDENCE_ASKS:
+                # A fresh count after the hand-over: the next message is not
+                # handed over again for the same asks.
+                state.evidence_asks = 0
                 self.log.guardrail(message.conversation_id, "evidence_not_forthcoming",
                                    {"suppressed_text": turn.text})
                 self.log.escalation(message.conversation_id, "evidence_not_forthcoming", turn.ticket_id)

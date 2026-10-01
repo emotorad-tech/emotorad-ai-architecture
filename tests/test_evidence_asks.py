@@ -91,3 +91,56 @@ class AddedLineTests(unittest.TestCase):
 
     def test_three_asks(self):
         self.assertEqual(ev.MAX_EVIDENCE_ASKS, 3)
+
+
+class FinalReviewDetectionTests(unittest.TestCase):
+    """The final review (2026-10-01): an ask is a request whose object is the
+    photo or video; a media word somewhere in the sentence is not enough."""
+
+    def test_more_video_asks(self):
+        for reply in ("Please record a short video so we can hear the hum from the motor.",
+                      "Hum aapse request karte hain ki charger ka ek chhota video bhejiye.",
+                      "Kindly share a short video of the issue.",
+                      "Would you be able to send a short video of the charger light?",
+                      "If possible, send a short video of the light.",
+                      "Could you please send:\n- a short video of the charger plugged in\n- a photo of the label",
+                      "Could you send a short video of the main power button being pressed?",
+                      "क्या आप चार्जर का वीडियो भेज सकते हैं?"):
+            self.assertEqual(ev.asks_for_media(reply), "video", reply)
+
+    def test_more_photo_asks(self):
+        for reply in ("Could you send a photo of the main switch?",
+                      "Are you able to send a photo of the port?",
+                      "Aap charger ki photo le sakte hain?"):
+            self.assertEqual(ev.asks_for_media(reply), "photo", reply)
+
+    def test_more_replies_that_ask_for_nothing(self):
+        for reply in ("Please take a look at the picture: the SOC button is on the side of the pack.",
+                      "Can you take a look at the image above and tell me if your switch looks like this?",
+                      "Take the battery off the bike, as the picture shows.",
+                      "Please share a few more details so I can get a clearer picture of what is happening.",
+                      "Could you share when it started, so I have the full picture?",
+                      "Please share your pincode and I will send you a picture of the nearest service centre.",
+                      "Aapke video mein saaf dikha raha hai ki light red hai.",
+                      "Video mein display kuch nahi dikha raha.",
+                      "Aapne jo video bhej diya, usmein light red hai."):
+            self.assertIsNone(ev.asks_for_media(reply), reply)
+
+    def test_a_document_is_not_fault_evidence(self):
+        for reply in ("Thanks. Could you share a photo of your invoice or proof of purchase?",
+                      "Could you send a screenshot of the error in the app?"):
+            self.assertIsNone(ev.asks_for_media(reply), reply)
+
+    def test_more_declines(self):
+        for text in ("the video won't upload, it's too big", "Video is too large to send", "video upload failed",
+                     "I tried but the video isn't sending", "I don't know how to send a video",
+                     "Can I just send a photo?", "video bhejna possible nahi hai", "वीडियो भेजना संभव नहीं है"):
+            self.assertTrue(ev.declines_video(text), text)
+
+    def test_more_that_are_not_declines(self):
+        for text in ("Video mein light nahi dikh rahi", "video bhej diya, light nahi jal rahi"):
+            self.assertFalse(ev.declines_video(text), text)
+
+    def test_no_video_line_when_the_reply_asks_for_a_photo_instead(self):
+        self.assertIsNone(ev.added_line("No problem. Could you send a photo of the charger light instead?",
+                                        "photo", False))

@@ -3,6 +3,7 @@
 import unittest
 
 from emotorad_ai.agents.base import HANDOVER_TEXT
+from emotorad_ai.agents.late_warranty import AGENT_NAME as LATE_WARRANTY
 from emotorad_ai.evidence_asks import PHOTO_FALLBACK_LINE, VIDEO_FIRST_LINE, VIDEO_FIRST_LINE_HI
 from emotorad_ai.guardrails import EVIDENCE_BLOCKED_MESSAGE
 from emotorad_ai.jev import JevDecision
@@ -125,3 +126,43 @@ class BlockedMessageTests(unittest.TestCase):
         self.assertEqual(EVIDENCE_BLOCKED_MESSAGE, (
             "Before I can take this further I need to see it. Please send a short video of what you're "
             "describing. If you can't take a video, a photo will do."))
+
+
+HAZARD = ("Please stop using the bike and stop charging the battery now; a bulge in the casing can be a hazard. "
+          "Could you send a photo of the side of the pack so our team can see it?")
+
+
+class FinalReviewRuntimeTests(unittest.TestCase):
+    """The final review (2026-10-01)."""
+
+    def test_a_stop_instruction_is_never_replaced_by_the_hand_over(self):
+        rt = runtime([say(VIDEO_ASK)] * 3 + [say(HAZARD)], media_store=Store())
+        for text in ("my battery isn't charging", "hmm", "ok"):
+            send(rt, text)
+        reply = send(rt, "the battery case looks a bit uneven on one side")
+        self.assertIn("stop charging", reply.text)
+        self.assertNotIn(HANDOVER_TEXT, reply.text)
+        self.assertNotIn(VIDEO_FIRST_LINE, reply.text)
+
+    def test_a_stop_instruction_gets_no_video_line_and_no_count(self):
+        rt = runtime([say(HAZARD)], media_store=Store())
+        reply = send(rt, "the battery case looks a bit uneven on one side")
+        self.assertNotIn(VIDEO_FIRST_LINE, reply.text)
+        self.assertEqual(state(rt).evidence_asks, 0)
+
+    def test_only_the_fault_agents_ask_for_a_video_first(self):
+        rt = runtime([say("Could you send a photo of the bike?")], media_store=Store())
+        state(rt).route_to(LATE_WARRANTY)
+        reply = send(rt, "I bought it in 2023")
+        self.assertNotIn(VIDEO_FIRST_LINE, reply.text)
+        self.assertEqual(state(rt).evidence_asks, 0)
+
+    def test_after_a_hand_over_the_count_starts_again(self):
+        rt = runtime([say(VIDEO_ASK)] * 5, media_store=Store())
+        for text in ("my battery isn't charging", "hmm", "ok"):
+            send(rt, text)
+        self.assertIn(HANDOVER_TEXT, send(rt, "what now").text)
+        fifth = send(rt, "ok, when will they call?")
+        self.assertNotIn(HANDOVER_TEXT, fifth.text)
+        self.assertIn(VIDEO_ASK, fifth.text)
+        self.assertEqual(state(rt).evidence_asks, 1)
