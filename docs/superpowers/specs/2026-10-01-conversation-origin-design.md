@@ -15,6 +15,7 @@ checks. The person's decisions (1 October 2026):
 - Two sources: the IP address and the verified phone number. No app GPS.
 - IP to place through a database file on our own server (DB-IP Lite). No
   customer IP is sent to a third party.
+- Kept permanently, and deleted whenever the customer asks.
 
 ## What each channel can give
 
@@ -93,6 +94,9 @@ Adding a channel means passing its signals to `choose`; nothing else changes.
   proven later in the same run (website chat verifies after the first
   message), the record is updated once with the country from the phone,
   `source: "phone"`. A known origin is never changed.
+- **The person, once known.** When a run's `user_key` is first set (the
+  customer verifies part-way through), the run's record is updated with it, so
+  a deletion by phone finds a run that began anonymous.
 - **A new run** (a conversation resumed after its working state expired, or
   `restart_for` when a different person verifies) starts with no origin and
   records its own.
@@ -112,16 +116,20 @@ visitors who never verify):
  "started_at": "2026-10-01T09:12:03Z", "channel": "amiigo_app",
  "country": "IN", "region": "Maharashtra", "city": "Pune",
  "source": "ip", "db": "dbip-city-lite-2026-10",
- "user_key": "PHONE#+91...", "expires_at": <13 months on>}
+ "user_key": "PHONE#+91..."}
 ```
 
-- `user_key` is set when known, so `conversations_of` and `delete_person`
-  find and delete these rows like the other collections.
-  `delete_conversation` deletes them by `conversation_id`.
-- Indexes: `started_at`; `(country, region)`; a TTL index on `expires_at`.
-- **Retention: 13 months** (`EMOTORAD_ORIGIN_RETENTION_DAYS`, default 396),
-  enough for a year-on-year comparison. Row-level places are then deleted by
-  MongoDB.
+- **Kept permanently** (the person's decision, 1 October 2026): no TTL index,
+  like the transcript and the summaries.
+- **Deleted on request**, through the existing erasure script,
+  `scripts/delete_person.py`, which a person runs and which writes the
+  `erasure_log` audit record:
+  - `--phone` or `--dealer-id`: `conversations_of` and `delete_person` include
+    `conversation_origins` (by `user_key`), like the other collections;
+  - `--conversation-id`: `delete_conversation` deletes the run records by
+    `conversation_id`, which covers a run that never verified;
+  - the dry run's counts list the new collection.
+- Indexes: `started_at`; `(country, region)`; `user_key`.
 - The in-memory store gets the same method, for tests and local runs.
 - `scripts/mongo_setup.py` creates the collection and its indexes; the person
   runs it against Atlas once.
@@ -157,8 +165,9 @@ against Atlas with their own `EMOTORAD_MONGO_URI`.
 
 - An IP address and a place derived from it are personal data under India's
   DPDP Act and, for Spanish customers, GDPR. This design keeps the minimum for
-  the stated purpose: no raw IP stored or logged, city at most, one per run,
-  13 months, deleted with the person or the conversation.
+  the stated purpose: no raw IP stored or logged, city at most, one per run.
+  It is kept permanently and erased on request with everything else held
+  about the person.
 - The privacy notice must say that an approximate location (city, state and
   country) is derived from the connection for reporting. The wording is for the
   person and Sachin to agree. It is not code and does not block the build.
@@ -183,8 +192,9 @@ lookup error, or a failed write each give `unknown` or a logged
   records the phone's country; a failing store logs `origin_record_failed`
   and the reply still arrives.
 - Stores: `record_origin` on the in-memory store and on MongoDB (mongomock);
-  `conversations_of`, `delete_person` and `delete_conversation` include the
-  new collection.
+  the record gains `user_key` when the person verifies part-way through the
+  run; `conversations_of`, `delete_person` and `delete_conversation` include
+  the new collection; the erasure script's dry run counts it.
 - API: `entry_metadata["origin"]` holds the place and never the IP; `/health`
   reports the file.
 - Report: counts by region and by country over a date range (mongomock).
