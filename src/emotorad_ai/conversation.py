@@ -36,8 +36,12 @@ AWAITING_ISSUE = "awaiting_issue"
 # The customer said their bike is not in the list: collecting its frame number
 # and model (spec 2026-10-01, unlisted bike).
 AWAITING_UNLISTED_BIKE = "awaiting_unlisted_bike"
+# The unlisted bike, or the listed one whose frame number they gave, waiting
+# for the customer's yes (spec 2026-10-02, confirming the bike once).
+AWAITING_BIKE_CONFIRMATION = "awaiting_bike_confirmation"
 ROUTED = "routed"
-PHASES = (GREETING, AWAITING_BIKE_SELECTION, AWAITING_UNLISTED_BIKE, AWAITING_ISSUE, ROUTED)
+PHASES = (GREETING, AWAITING_BIKE_SELECTION, AWAITING_UNLISTED_BIKE, AWAITING_BIKE_CONFIRMATION, AWAITING_ISSUE,
+          ROUTED)
 
 
 @dataclass
@@ -62,6 +66,10 @@ class ConversationState:
     # never did, and the asks made while collecting them.
     unlisted_bike: Optional[Dict[str, Optional[str]]] = None
     unlisted_asks: int = 0
+    # The question waiting for that yes (triage.TriageAgent._resolve_confirmation):
+    # {"kind": "unlisted" or "listed", "ref": the listed bike's reference or None,
+    # "step": "confirm" or "which_wrong", "unclear": answers that were neither}.
+    bike_confirmation: Optional[Dict[str, Any]] = None
     agent: Optional[str] = None
     # Topic understood before we knew which bike it was about. A customer taps
     # "Battery issue" and *then* picks a bike from three; without this the intent
@@ -200,6 +208,23 @@ class ConversationState:
             self.transitions.append("bike_changed:%s->%s" % (self.selected_frame, frame_number))
         self.selected_frame = frame_number
         self.selected_bike_label = label
+
+    def forget_bike(self) -> None:
+        """Back to before a bike was chosen (navigation, spec 2026-10-02). The
+        bike goes, with any unlisted one and its confirmation, the agent, and
+        what was learnt about that bike, which does not hold for another: its
+        warranty lookup, the evidence seen and the asks for it. Orders placed
+        stay: they were placed. The topic is the caller's to keep or clear."""
+        if self.selected_frame:
+            self.transitions.append("bike_forgotten:%s" % self.selected_frame)
+        self.selected_frame = None
+        self.selected_bike_label = None
+        self.unlisted_bike, self.unlisted_asks, self.bike_confirmation = None, 0, None
+        self.agent = None
+        self.sub_category = None
+        self.coverage_result = None
+        self.evidence_seen = False
+        self.evidence_asks, self.video_declined = 0, False
 
     def route_to(self, agent: str) -> None:
         self.agent = agent
