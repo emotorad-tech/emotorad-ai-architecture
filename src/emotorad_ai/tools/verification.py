@@ -36,6 +36,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..contract import VERIFIED, InboundMessage
@@ -80,6 +81,10 @@ CODE_TTL_SECONDS = 600
 VERIFIED_TTL_SECONDS = 12 * 60 * 60
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @dataclass
 class _Pending:
     phone: str
@@ -90,6 +95,9 @@ class _Pending:
     # must not extend a code's life or cut a session short.
     issued_at: float = 0.0
     verified_at: float = 0.0
+    # The time of day of the same moment, for a person to read (an erasure
+    # request's proof). verified_at is monotonic and means nothing to them.
+    verified_on: str = ""
 
     def code_expired(self, now: float) -> bool:
         return now - self.issued_at > CODE_TTL_SECONDS
@@ -133,6 +141,7 @@ class VerificationStore:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     # Injected so expiry can be tested by elapsing time rather than sleeping.
     clock: Callable[[], float] = time.monotonic
+    wall_clock: Callable[[], str] = _utc_now_iso
 
     def __len__(self) -> int:
         with self._lock:
@@ -187,6 +196,7 @@ class VerificationStore:
                 return False
             pending.verified = True
             pending.verified_at = self.clock()
+            pending.verified_on = self.wall_clock()
             return True
 
     def verified_phone(self, conversation_id: str) -> Optional[str]:
@@ -198,6 +208,15 @@ class VerificationStore:
             if pending.session_expired(self.clock()):
                 return None
             return pending.phone
+
+    def verified_on(self, conversation_id: str) -> Optional[str]:
+        """When this conversation proved its number, as an ISO time of day, or
+        None under the same conditions as verified_phone."""
+        with self._lock:
+            pending = self._pending.get(conversation_id)
+            if pending is None or not pending.verified or pending.session_expired(self.clock()):
+                return None
+            return pending.verified_on or None
 
     def pending_code(self, conversation_id: str) -> Optional[str]:
         """The outstanding code — for the harness to display. Never for the model."""

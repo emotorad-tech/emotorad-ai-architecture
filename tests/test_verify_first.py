@@ -50,7 +50,8 @@ class Chat:
         self.runtime = Runtime(
             settings=Settings(log_path="", log_to_stdout=False), registry=self.registry, llm=self.llm,
             log=self.log, resolver=IdentityResolver(self.registry), conversations=self.conversations,
-            self_service_identity=True, phone_resolver=self.store.verified_phone, verify_first=verify_first,
+            self_service_identity=True, phone_resolver=self.store.verified_phone,
+            otp_verified_at=self.store.verified_on, verify_first=verify_first,
         )
 
     def say(self, text, photo=False, identity=None, **metadata):

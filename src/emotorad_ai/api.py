@@ -274,6 +274,7 @@ runtime = Runtime(
     # looks the customer up in the same assistant turn, so a phone snapshotted
     # before the first tool ran is already stale by the second one.
     phone_resolver=verification_store.verified_phone,
+    otp_verified_at=verification_store.verified_on,
     media_store=MEDIA_STORE,
 )
 adapter = WebsiteChatAdapter(resolver)
@@ -885,8 +886,9 @@ class ErasureIn(BaseModel):
     conversation_id: Optional[str] = None
 
 
-def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str]:
-    """Who is asking, and on which channel, or 403. Never from the URL.
+def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str, Dict[str, str]]:
+    """Who is asking, on which channel and how they were proven, or 403. Never
+    from the URL.
 
     The Amiigo app's signed-in rider (session_token), or a website visitor
     whose chat verified a number in the last 12 hours (conversation_id): the
@@ -895,10 +897,11 @@ def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str]:
         raise HTTPException(status_code=429, detail="Too many requests. Wait a moment and try again.")
     persona, identity = resolver.resolve_website(None, body.session_token or None)
     if persona == "customer" and identity.may_disclose and identity.phone:
-        return "PHONE#" + identity.phone, "amiigo_app"
+        return "PHONE#" + identity.phone, "amiigo_app", erasure_rules.proof_of(None)
     phone = verification_store.verified_phone(body.conversation_id) if body.conversation_id else None
     if phone:
-        return "PHONE#" + phone, "website_chat"
+        return ("PHONE#" + phone, "website_chat",
+                erasure_rules.proof_of(verification_store.verified_on(body.conversation_id)))
     detail = erasure_rules.ERASURE_SIGN_IN if body.session_token is not None else erasure_rules.ERASURE_VERIFY_FIRST
     raise HTTPException(status_code=403, detail=detail)
 
@@ -912,13 +915,13 @@ def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPE
 def post_erasure_request(body: ErasureIn, request: Request, response: Response) -> Dict[str, Any]:
     """The Amiigo app's "Delete my conversation data" button, after its own
     confirmation dialog. Records a request; the nightly job deletes."""
-    user_key, channel = _erasure_person(request, body)
+    user_key, channel, proof = _erasure_person(request, body)
     if not body.confirm:
         raise HTTPException(status_code=400, detail="Send confirm: true once the rider has confirmed.")
     try:
         pending = stores.conversations.pending_erasure_of(user_key)
         reference = pending["_id"] if pending else stores.conversations.request_erasure(
-            user_key, channel, body.conversation_id, utc_now_iso())
+            user_key, channel, body.conversation_id, utc_now_iso(), proof=proof)
     except Exception as exc:
         raise _erasure_store_down(exc, body.conversation_id) from None
     if pending:
@@ -932,7 +935,7 @@ def post_erasure_request(body: ErasureIn, request: Request, response: Response) 
 
 @app.post("/erasure-requests/status")
 def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
-    user_key, _ = _erasure_person(request, body)
+    user_key, _, _ = _erasure_person(request, body)
     try:
         pending = stores.conversations.pending_erasure_of(user_key)
     except Exception as exc:
@@ -944,7 +947,7 @@ def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
 
 @app.post("/erasure-requests/cancel")
 def post_erasure_cancel(body: ErasureIn, request: Request) -> Dict[str, Any]:
-    user_key, _ = _erasure_person(request, body)
+    user_key, _, _ = _erasure_person(request, body)
     try:
         reference = stores.conversations.cancel_erasure(user_key, utc_now_iso())
     except Exception as exc:

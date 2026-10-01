@@ -1,6 +1,7 @@
 """Delete my data, in the chat (spec 2026-10-01)."""
 
 import unittest
+from datetime import datetime
 from unittest import mock
 
 from emotorad_ai import erasure
@@ -176,3 +177,21 @@ class DeletionClaimTests(unittest.TestCase):
         self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))
         last = chat.conversations.peek("c1").history[-1]
         self.assertNotIn("I've deleted", str(last["content"]))
+
+
+class RecordedProofTests(unittest.TestCase):
+    def test_a_website_visitor_proved_by_otp(self):
+        chat = new_chat()
+        chat.say("delete my data")
+        chat.say(ONE_BIKE[3:])
+        chat.say(chat.code())
+        self.assertEqual(chat.say("DELETE").handled_by, "erasure:requested")
+        proof = chat.conversations.pending_erasure_of("PHONE#" + ONE_BIKE)["proof"]
+        self.assertEqual(proof["method"], "otp")
+        self.assertIsNotNone(datetime.fromisoformat(proof["verified_at"]))
+
+    def test_an_app_rider_proved_by_signing_in(self):
+        chat = new_chat()
+        chat.ask("delete my data")
+        self.assertEqual(chat.ask("DELETE").handled_by, "erasure:requested")
+        self.assertEqual(chat.conversations.pending_erasure_of("PHONE#" + RIDER)["proof"], {"method": "app_sign_in"})

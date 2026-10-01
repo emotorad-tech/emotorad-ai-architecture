@@ -97,6 +97,14 @@ def is_confirmation(text: Optional[str]) -> bool:
     return (text or "").strip().casefold() == "delete"
 
 
+def proof_of(otp_verified_at: Optional[str]) -> Dict[str, str]:
+    """How the person asking was proven, for the review (manual erasure spec):
+    a code by SMS in this chat, and when, or the app's sign-in."""
+    if otp_verified_at:
+        return {"method": "otp", "verified_at": otp_verified_at}
+    return {"method": "app_sign_in"}
+
+
 def new_reference(choice: Callable[[str], str] = secrets.choice) -> str:
     return "DEL-" + "".join(choice(REFERENCE_ALPHABET) for _ in range(6))
 

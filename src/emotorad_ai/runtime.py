@@ -235,6 +235,7 @@ class Runtime:
         conversations: Any = None,
         self_service_identity: bool = False,
         phone_resolver: Optional[Callable[[str], Optional[str]]] = None,
+        otp_verified_at: Optional[Callable[[str], Optional[str]]] = None,
         media_store: Any = None,
         verify_first: bool = False,
     ) -> None:
@@ -272,6 +273,9 @@ class Runtime:
         self.media_store = media_store
         self.fetch = self.media_store.get_bytes if self.media_store is not None else None
         self.phone_resolver = phone_resolver
+        # When a conversation proved its number by SMS code, for an erasure
+        # request's proof (VerificationStore.verified_on).
+        self.otp_verified_at = otp_verified_at
         self.agents = {
             name: Agent(
                 definition,
@@ -724,12 +728,22 @@ class Runtime:
 
     def _erasure_request(self, message: InboundMessage, state: ConversationState, user_key: str) -> Tuple[str, str]:
         try:
-            reference = self.conversations.request_erasure(user_key, message.channel, message.conversation_id,
-                                                           utc_now_iso())
+            reference = self.conversations.request_erasure(
+                user_key, message.channel, message.conversation_id, utc_now_iso(),
+                proof=erasure_rules.proof_of(self._otp_verified_at(message.conversation_id, user_key)))
         except Exception as exc:
             return self._erasure_failed(message, state, exc)
         self.log.emit("erasure_requested", message.conversation_id, reference=reference)
         return erasure_rules.ERASURE_REQUESTED.format(reference=reference), "erasure:requested"
+
+    def _otp_verified_at(self, conversation_id: str, user_key: str) -> Optional[str]:
+        """When this chat proved the asking number by SMS code, or None: the
+        identity then came from the app's sign-in."""
+        if self.otp_verified_at is None or self.phone_resolver is None:
+            return None
+        if "PHONE#" + (self.phone_resolver(conversation_id) or "") != user_key:
+            return None
+        return self.otp_verified_at(conversation_id)
 
     def _erasure_cancel(self, message: InboundMessage, state: ConversationState, user_key: str) -> Tuple[str, str]:
         try:

@@ -1,6 +1,7 @@
 """The Amiigo app's "Delete my conversation data" button (spec 2026-10-01)."""
 
 import unittest
+from datetime import datetime
 from unittest import mock
 
 from fastapi.testclient import TestClient
@@ -68,6 +69,11 @@ class ErasureEndpointTests(unittest.TestCase):
         self.assertNotIn("sess-amiigo-test", repr(self.api.log.events))
 
 
+    def test_the_request_records_the_app_sign_in(self):
+        reference = self.post("/erasure-requests", confirm=True).json()["reference"]
+        self.assertEqual(self.api.stores.conversations.erasure_record(reference)["proof"], {"method": "app_sign_in"})
+
+
 class WebsiteChatButtonTests(unittest.TestCase):
     """The HTML chat's delete button: the visitor proved their number in the
     chat, so the conversation that verified is the identity (2026-10-01)."""
@@ -100,3 +106,10 @@ class WebsiteChatButtonTests(unittest.TestCase):
                          reference)
         cancelled = self.client.post("/erasure-requests/cancel", json={"conversation_id": "web-3"})
         self.assertEqual(cancelled.json()["status"], "cancelled")
+
+    def test_the_request_records_the_otp_and_when(self):
+        self.verify("web-3")
+        r = self.client.post("/erasure-requests", json={"conversation_id": "web-3", "confirm": True})
+        proof = self.api.stores.conversations.erasure_record(r.json()["reference"])["proof"]
+        self.assertEqual(proof["method"], "otp")
+        self.assertIsNotNone(datetime.fromisoformat(proof["verified_at"]))
