@@ -67,3 +67,7 @@ Pillow>=10
 # when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set. Imported lazily, so
 # a run without keys never loads it.
 langfuse>=3.7,<4
+
+# IP address to country, state and city, from a local DB-IP Lite file
+# (origin.py). Reads MaxMind-format .mmdb files. Apache 2.0.
+maxminddb>=2.6
