@@ -206,6 +206,11 @@
   }
   .sheet-btn:active { background: #F5F5F5; }
   .sheet-cancel { color: var(--muted); font-weight: 500; justify-content: center; }
+  /* "Delete my chat data" (2026-10-01): a dialog in the same sheet. */
+  .sheet-title { font-size: 16px; font-weight: 700; padding: 4px 8px 6px 8px; }
+  .sheet-text { font-size: 13.5px; line-height: 1.45; color: #404040; padding: 0 8px 12px 8px; }
+  .sheet-danger { color: #C0392B; font-weight: 600; justify-content: center; }
+  .header-menu { cursor: pointer; }
   .msg-row.ai { align-self: flex-start; }
   .msg-row.user { align-self: flex-end; }
 
@@ -353,7 +358,7 @@
         <div class="header-title">EMotorad Assistant</div>
         <div class="header-sub"><span class="status-dot"></span><span class="label">AI &middot; Online</span></div>
       </div>
-      <div class="header-menu">
+      <div class="header-menu" id="headerMenu" role="button" tabindex="0" aria-label="Chat options">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="5" cy="12" r="1.6" fill="#171717"/><circle cx="12" cy="12" r="1.6" fill="#171717"/><circle cx="19" cy="12" r="1.6" fill="#171717"/></svg>
       </div>
     </div>
@@ -410,6 +415,25 @@
        camera to record; the same input accepts a clip from the gallery on
        phones that offer the choice. -->
   <input type="file" id="videoInput" accept="video/mp4,video/*" capture="environment" hidden />
+
+  <div class="sheet-backdrop" id="menuSheet" hidden>
+    <div class="sheet" role="dialog" aria-label="Chat options">
+      <div class="sheet-handle"></div>
+      <button class="sheet-btn sheet-danger" id="menuDelete">Delete my chat data</button>
+      <button class="sheet-btn sheet-cancel" id="menuCancel">Cancel</button>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop" id="eraseSheet" hidden>
+    <div class="sheet" role="alertdialog" aria-labelledby="eraseTitle" aria-describedby="eraseText">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title" id="eraseTitle">Delete my conversation data?</div>
+      <div class="sheet-text" id="eraseText">This deletes everything this chat holds about you: your past chats with me, the photos and videos you sent, and the record of where you chatted from. It does not delete your warranty registration, orders, invoices or service tickets, which EMotorad keeps for your warranty and by law. It's done within 30 days.</div>
+      <button class="sheet-btn sheet-danger" id="eraseConfirm">Delete</button>
+      <button class="sheet-btn sheet-danger" id="eraseUndo" hidden>Cancel deletion</button>
+      <button class="sheet-btn sheet-cancel" id="eraseClose">Keep my data</button>
+    </div>
+  </div>
 
   <div class="sheet-backdrop" id="attachSheet" hidden>
     <div class="sheet" role="dialog" aria-label="Attach a photo or video">
@@ -1188,6 +1212,56 @@ document.getElementById("attachSheet").addEventListener("click", function (e) {
   if (e.target.id === "attachSheet") closeAttachSheet();
 });
 document.getElementById("pendingRemove").addEventListener("click", removePendingPhoto);
+
+// -- Delete my chat data (2026-10-01) -----------------------------------------
+// The header menu opens a dialog; "Delete" records a deletion request through
+// /erasure-requests, proven by this chat's verified number. Nothing is sent
+// into the chat. The nightly job does the deleting.
+var ERASE_DIALOG_TEXT = document.getElementById("eraseText").textContent;
+var ERASE_FAILED_TEXT = "I couldn't record your request just now. Please try again in a few minutes.";
+
+function setErase(text, mode) {
+  document.getElementById("eraseText").textContent = text;
+  document.getElementById("eraseConfirm").hidden = mode !== "confirm";
+  document.getElementById("eraseUndo").hidden = mode !== "requested";
+  document.getElementById("eraseClose").textContent = mode === "confirm" ? "Keep my data" : "Close";
+}
+
+function erasureCall(path) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: state.conversationId || null, confirm: true })
+  }).then(function (r) {
+    return r.json().then(function (body) { return { ok: r.ok, body: body || {} }; });
+  });
+}
+
+document.getElementById("headerMenu").addEventListener("click", function () {
+  document.getElementById("menuSheet").hidden = false;
+});
+document.getElementById("menuCancel").addEventListener("click", function () {
+  document.getElementById("menuSheet").hidden = true;
+});
+document.getElementById("menuDelete").addEventListener("click", function () {
+  document.getElementById("menuSheet").hidden = true;
+  setErase(ERASE_DIALOG_TEXT, "confirm");
+  document.getElementById("eraseSheet").hidden = false;
+});
+document.getElementById("eraseConfirm").addEventListener("click", function () {
+  erasureCall("/erasure-requests").then(function (res) {
+    setErase(res.ok ? res.body.text : (res.body.detail || ERASE_FAILED_TEXT), res.ok ? "requested" : "info");
+  }).catch(function () { setErase(ERASE_FAILED_TEXT, "info"); });
+});
+document.getElementById("eraseUndo").addEventListener("click", function () {
+  erasureCall("/erasure-requests/cancel").then(function (res) {
+    setErase(res.ok ? res.body.text : (res.body.detail || ERASE_FAILED_TEXT), "info");
+  }).catch(function () { setErase(ERASE_FAILED_TEXT, "info"); });
+});
+document.getElementById("eraseClose").addEventListener("click", function () {
+  document.getElementById("eraseSheet").hidden = true;
+});
+// -- end delete ----------------------------------------------------------------
 document.getElementById("pendingVideoRemove").addEventListener("click", removePendingVideo);
 document.getElementById("pendingThumb").addEventListener("click", function () {
   openLightbox(state.pendingPhoto);

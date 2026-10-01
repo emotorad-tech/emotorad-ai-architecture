@@ -43,7 +43,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import websockets
@@ -807,19 +807,29 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
 
 
 class ErasureIn(BaseModel):
-    session_token: str = ""
+    # The app always sends it (empty when signed out); the website chat never
+    # does, so its absence picks the right 403 wording.
+    session_token: Optional[str] = None
     confirm: bool = False
     conversation_id: Optional[str] = None
 
 
-def _erasure_person(request: Request, session_token: str) -> str:
-    """The signed-in rider behind the session, or 403. Never from the URL."""
+def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str]:
+    """Who is asking, and on which channel, or 403. Never from the URL.
+
+    The Amiigo app's signed-in rider (session_token), or a website visitor
+    whose chat verified a number in the last 12 hours (conversation_id): the
+    HTML chat's delete button (2026-10-01)."""
     if not message_limiter.allow(client_ip(request, TRUSTED_PROXIES)):
         raise HTTPException(status_code=429, detail="Too many requests. Wait a moment and try again.")
-    persona, identity = resolver.resolve_website(None, session_token or None)
-    if persona != "customer" or not identity.may_disclose or not identity.phone:
-        raise HTTPException(status_code=403, detail=erasure_rules.ERASURE_SIGN_IN)
-    return "PHONE#" + identity.phone
+    persona, identity = resolver.resolve_website(None, body.session_token or None)
+    if persona == "customer" and identity.may_disclose and identity.phone:
+        return "PHONE#" + identity.phone, "amiigo_app"
+    phone = verification_store.verified_phone(body.conversation_id) if body.conversation_id else None
+    if phone:
+        return "PHONE#" + phone, "website_chat"
+    detail = erasure_rules.ERASURE_SIGN_IN if body.session_token is not None else erasure_rules.ERASURE_VERIFY_FIRST
+    raise HTTPException(status_code=403, detail=detail)
 
 
 def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPException:
@@ -831,13 +841,13 @@ def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPE
 def post_erasure_request(body: ErasureIn, request: Request, response: Response) -> Dict[str, Any]:
     """The Amiigo app's "Delete my conversation data" button, after its own
     confirmation dialog. Records a request; the nightly job deletes."""
-    user_key = _erasure_person(request, body.session_token)
+    user_key, channel = _erasure_person(request, body)
     if not body.confirm:
         raise HTTPException(status_code=400, detail="Send confirm: true once the rider has confirmed.")
     try:
         pending = stores.conversations.pending_erasure_of(user_key)
         reference = pending["_id"] if pending else stores.conversations.request_erasure(
-            user_key, "amiigo_app", body.conversation_id, utc_now_iso())
+            user_key, channel, body.conversation_id, utc_now_iso())
     except Exception as exc:
         raise _erasure_store_down(exc, body.conversation_id) from None
     if pending:
@@ -851,7 +861,7 @@ def post_erasure_request(body: ErasureIn, request: Request, response: Response) 
 
 @app.post("/erasure-requests/status")
 def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
-    user_key = _erasure_person(request, body.session_token)
+    user_key, _ = _erasure_person(request, body)
     try:
         pending = stores.conversations.pending_erasure_of(user_key)
     except Exception as exc:
@@ -863,7 +873,7 @@ def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
 
 @app.post("/erasure-requests/cancel")
 def post_erasure_cancel(body: ErasureIn, request: Request) -> Dict[str, Any]:
-    user_key = _erasure_person(request, body.session_token)
+    user_key, _ = _erasure_person(request, body)
     try:
         reference = stores.conversations.cancel_erasure(user_key, utc_now_iso())
     except Exception as exc:

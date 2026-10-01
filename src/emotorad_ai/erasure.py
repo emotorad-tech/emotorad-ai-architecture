@@ -62,6 +62,7 @@ ERASURE_CANCELLED = "Your deletion request {reference} is cancelled. Nothing has
 ERASURE_NOTHING_TO_CANCEL = "There's no deletion request to cancel."
 ERASURE_FAILED = "I couldn't record your request just now. Please try again in a few minutes."
 ERASURE_SIGN_IN = "Sign in to the app to delete your data."
+ERASURE_VERIFY_FIRST = "Verify your number in the chat first, then try again."
 
 
 def wants_cancel(text: Optional[str]) -> bool:

@@ -66,3 +66,37 @@ class ErasureEndpointTests(unittest.TestCase):
         (event,) = [e for e in self.api.log.events if e["event"] == "erasure_request_failed"]
         self.assertEqual(event["error"], "StoreUnavailable")
         self.assertNotIn("sess-amiigo-test", repr(self.api.log.events))
+
+
+class WebsiteChatButtonTests(unittest.TestCase):
+    """The HTML chat's delete button: the visitor proved their number in the
+    chat, so the conversation that verified is the identity (2026-10-01)."""
+
+    def setUp(self):
+        self.api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"})
+        self.client = TestClient(self.api.app)
+
+    def verify(self, conversation_id, phone="+919700000033"):
+        self.api.verification_store.issue(conversation_id, phone, "123456")
+        self.assertTrue(self.api.verification_store.check(conversation_id, "123456"))
+
+    def test_a_verified_chat_records_a_website_request(self):
+        self.verify("web-1")
+        r = self.client.post("/erasure-requests", json={"conversation_id": "web-1", "confirm": True})
+        self.assertEqual(r.status_code, 201, r.text)
+        record = self.api.stores.conversations.pending_erasure_of("PHONE#+919700000033")
+        self.assertEqual((record["_id"], record["channel"]), (r.json()["reference"], "website_chat"))
+
+    def test_an_unverified_chat_is_told_to_verify_first(self):
+        r = self.client.post("/erasure-requests", json={"conversation_id": "web-2", "confirm": True})
+        self.assertEqual((r.status_code, r.json()["detail"]), (403, erasure.ERASURE_VERIFY_FIRST))
+        r = self.client.post("/erasure-requests", json={"confirm": True})
+        self.assertEqual(r.status_code, 403)
+
+    def test_status_and_cancel_by_the_verified_chat(self):
+        self.verify("web-3")
+        reference = self.client.post("/erasure-requests", json={"conversation_id": "web-3", "confirm": True}).json()["reference"]
+        self.assertEqual(self.client.post("/erasure-requests/status", json={"conversation_id": "web-3"}).json()["reference"],
+                         reference)
+        cancelled = self.client.post("/erasure-requests/cancel", json={"conversation_id": "web-3"})
+        self.assertEqual(cancelled.json()["status"], "cancelled")
