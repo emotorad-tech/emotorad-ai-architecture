@@ -16,7 +16,9 @@ BIKE = {"frame_number": "EMXP2026009999", "model": "T-Rex Air"}
 def unlisted(chat, phone=RIDER, not_mine="its not one of these 2"):
     chat.verify(phone, first="hi")
     assert ASK_FOR_UNLISTED_BIKE in chat.say(not_mine).text
-    return chat.say("EMXP2026009999, T-Rex Air")
+    asked = chat.say("EMXP2026009999, T-Rex Air").text
+    assert "Just to confirm: your bike is the T-Rex Air, frame EMXP2026009999. Is that right?" in asked, asked
+    return chat.say("yes")
 
 
 class StagingReplayTests(unittest.TestCase):

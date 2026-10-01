@@ -85,7 +85,8 @@ class CollectingTests(unittest.TestCase):
     def test_frame_and_model_in_one_reply_carry_on_to_the_kept_issue(self):
         state = choosing()
         self.say(state, "none of these")
-        outcome = self.say(state, "EMXP2026009999, T-Rex Air")
+        self.say(state, "EMXP2026009999, T-Rex Air")
+        outcome = self.say(state, "yes")
         self.assertEqual(outcome.agent, "battery_support")
         self.assertEqual(state.unlisted_bike, {"frame_number": "EMXP2026009999", "model": "T-Rex Air"})
         self.assertEqual(state.selected_frame, "EMXP2026009999")
@@ -94,7 +95,8 @@ class CollectingTests(unittest.TestCase):
         state = choosing()
         self.say(state, "neither")
         self.assertEqual(self.say(state, "EMXP2026009999").reply, ASK_FOR_MODEL)
-        outcome = self.say(state, "trex air")
+        self.say(state, "trex air")
+        outcome = self.say(state, "yes")
         self.assertEqual(outcome.agent, "battery_support")
         self.assertEqual(state.unlisted_bike["model"], "T-Rex Air")
 
@@ -102,11 +104,13 @@ class CollectingTests(unittest.TestCase):
         state = choosing()
         self.say(state, "not one of these")
         self.assertEqual(self.say(state, "It's a T-Rex Air").reply, ASK_FOR_FRAME)
-        self.assertEqual(self.say(state, "EMXP2026009999").agent, "battery_support")
+        self.say(state, "EMXP2026009999")
+        self.assertEqual(self.say(state, "yes").agent, "battery_support")
 
     def test_the_whole_answer_in_the_first_reply(self):
         state = choosing()
-        outcome = self.say(state, "not these, mine is a T-Rex Air EMXP2026009999")
+        self.say(state, "not these, mine is a T-Rex Air EMXP2026009999")
+        outcome = self.say(state, "yes")
         self.assertEqual(outcome.agent, "battery_support")
         self.assertEqual(state.unlisted_bike, {"frame_number": "EMXP2026009999", "model": "T-Rex Air"})
 
@@ -120,7 +124,8 @@ class CollectingTests(unittest.TestCase):
         state = choosing()
         self.say(state, "none of these")          # ask 1: both
         self.say(state, "T-Rex Air")              # ask 2: the frame
-        outcome = self.say(state, "I can't find it")
+        self.say(state, "I can't find it")
+        outcome = self.say(state, "yes")
         self.assertEqual(outcome.agent, "battery_support")
         self.assertEqual(state.unlisted_bike, {"frame_number": None, "model": "T-Rex Air"})
         self.assertEqual(state.selected_frame, "unlisted")
@@ -128,7 +133,8 @@ class CollectingTests(unittest.TestCase):
     def test_with_no_issue_yet_it_confirms_and_asks_for_it(self):
         state = choosing(topic=None)
         self.say(state, "none of these")
-        outcome = self.say(state, "EMXP2026009999 T-Rex Air")
+        self.say(state, "EMXP2026009999 T-Rex Air")
+        outcome = self.say(state, "yes")
         self.assertEqual(outcome.reply, "Thanks: T-Rex Air, frame EMXP2026009999. What is happening with the bike? "
                                         "A short description is enough.")
         self.assertEqual(state.phase, AWAITING_ISSUE)
@@ -152,7 +158,8 @@ class CollectingTests(unittest.TestCase):
     def test_a_listed_frame_while_collecting_chooses_that_bike(self):
         state = choosing()
         self.say(state, "none of these")
-        outcome = self.say(state, "oh, it's EMXP2025004990 after all")
+        self.say(state, "oh, it's EMXP2025004990 after all")
+        outcome = self.say(state, "yes")
         self.assertEqual(outcome.agent, "battery_support")
         self.assertEqual(state.selected_frame, "EMXP2025004990")
         self.assertIsNone(state.unlisted_bike)
@@ -280,13 +287,16 @@ class StagingFrameTests(unittest.TestCase):
     def test_frame_and_model_together(self):
         state = choosing(topic=None)
         self.say(state, "its none of these")
-        outcome = self.say(state, "TESTEMXP0000069 and model is Doodle Pro")
+        self.say(state, "TESTEMXP0000069 and model is Doodle Pro")
+        outcome = self.say(state, "yes")
         self.assertTrue(outcome.reply.startswith("Thanks: Doodle Pro, frame TESTEMXP0000069."), outcome.reply)
 
     def test_a_listed_frame_while_collecting_is_that_bike_and_says_so(self):
         state = choosing(topic=None)
         self.say(state, "none of these")
-        outcome = self.say(state, "TESTEMXP0000001 and model is EMX Plus (Aqua)")
+        self.assertEqual(self.say(state, "TESTEMXP0000001 and model is EMX Plus (Aqua)").reply,
+                         "That frame number is the EMX Plus (Aqua) in your list. Is that the bike?")
+        outcome = self.say(state, "yes")
         self.assertEqual(state.selected_frame, "TESTEMXP0000001")
         self.assertIsNone(state.unlisted_bike)
         self.assertTrue(outcome.reply.startswith(

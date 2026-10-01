@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .conversation import (
+    AWAITING_BIKE_CONFIRMATION,
     AWAITING_BIKE_SELECTION,
     AWAITING_ISSUE,
     AWAITING_UNLISTED_BIKE,
@@ -344,6 +345,43 @@ UNLISTED_MAX_ASKS = 2
 # The conversation's bike reference when the customer never gave a frame number.
 UNLISTED_REF = "unlisted"
 
+# --- confirming the bike once (spec 2026-10-02) ------------------------------
+# After the customer said their bike is not in the list, the bike is confirmed
+# once before it is the conversation's: their own details, or the listed bike
+# whose frame number they gave.
+CONFIRM_LISTED = "That frame number is the {name} in your list. Is that the bike?"
+ASK_WHICH_WRONG = "Which is wrong, the frame number or the model?"
+ASK_WHICH_WRONG_AGAIN = "Sorry, which part is wrong: the frame number, the model, or both?"
+ASK_RIGHT_FRAME = "No problem. What's the right frame number? It's printed on the sticker on the frame."
+ASK_RIGHT_MODEL = "No problem. Which model is it?"
+CONFIRM_AGAIN = "Sorry, I didn't catch that. {question} Please reply yes or no."
+# An answer that is neither yes nor no is asked again this many times, then
+# taken as no.
+CONFIRM_MAX_UNCLEAR = 1
+# A no to "is that right?", in more words than a no to the bike list allows:
+# here "no power at all" cannot be the answer.
+_CONFIRM_NO = re.compile(
+    r"^\W*(?:no|nope|nah|nahi|nahin|nhi|galat|wrong|incorrect|not\s+(?:right|correct|quite))\b"
+    r"|^\W*(?:that'?s|it'?s|this\s+is)\s+(?:wrong|incorrect|not\s+(?:right|correct))\b|^\W*नहीं",
+    re.IGNORECASE,
+)
+_WRONG_BOTH = re.compile(r"\b(?:both|dono|donon|everything)\b|दोनों", re.IGNORECASE)
+_WRONG_FRAME = re.compile(r"\b(?:frame|chassis|sticker|number)\b|फ्रेम", re.IGNORECASE)
+_WRONG_MODEL = re.compile(r"\b(?:model|name)\b|मॉडल", re.IGNORECASE)
+
+
+def confirm_text(bike: Optional[Dict[str, Optional[str]]]) -> str:
+    """The question for the customer's own details, saying what is missing."""
+    bike = bike or {}
+    model, frame = bike.get("model"), bike.get("frame_number")
+    if model and frame:
+        details = "your bike is the %s, frame %s" % (model, frame)
+    elif model:
+        details = "your bike is the %s, frame number not given" % model
+    else:
+        details = "your bike's frame number is %s, model not given" % frame
+    return "Just to confirm: %s. Is that right?" % details
+
 
 def not_listed(text: str) -> bool:
     return bool(_NOT_LISTED.search(text or ""))
@@ -467,6 +505,9 @@ class TriageAgent:
     ) -> TriageOutcome:
         text = message.message_text.strip()
 
+        if state.phase == AWAITING_BIKE_CONFIRMATION:
+            return self._resolve_confirmation(text, resolved, state)
+
         if state.phase == AWAITING_UNLISTED_BIKE:
             return self._collect_unlisted(text, resolved, state)
 
@@ -550,7 +591,7 @@ class TriageAgent:
 
         state.select_bike(bike_ref(bike), bike_name(bike))
         # A listed bike chosen: any bike given earlier as unlisted is dropped.
-        state.unlisted_bike, state.unlisted_asks = None, 0
+        state.unlisted_bike, state.unlisted_asks, state.bike_confirmation = None, 0, None
         state.move_to(AWAITING_ISSUE, "bike_selected")
         topic, source = self._take_pending(state)
         return self._route_or_ask(topic, state, source)
@@ -567,23 +608,16 @@ class TriageAgent:
         """The frame number and model of a bike that is not in the list, then
         on with the issue (spec 2026-10-01, unlisted bike)."""
         listed = _listed_frame(text, resolved.bikes)
-        if listed is None and not (state.unlisted_bike or {}).get("frame_number"):
-            # "sorry, it's number 2": the list after all (the final review).
-            listed = _ordinal_choice(text, resolved.bikes)
         if listed is not None:
-            # A listed bike's own frame number: it was in the list after all.
-            state.unlisted_bike = None
-            state.select_bike(bike_ref(listed), bike_name(listed))
-            state.move_to(AWAITING_ISSUE, "bike_selected")
-            topic, source = self._take_pending(state)
-            outcome = self._route_or_ask(topic, state, source)
-            if outcome.reason == "issue_unknown":
-                # Say it was in the list, so the customer knows which bike the
-                # rest of the chat is about.
-                frame = " frame %s," % listed["frame_number"] if listed.get("frame_number") else ""
-                return TriageOutcome(reply="Thanks: that's the %s in the list,%s. %s" % (
-                    bike_name(listed), frame.rstrip(","), outcome.reply), reason=outcome.reason)
-            return outcome
+            # A listed bike's own frame number: confirmed once before it is
+            # chosen (spec 2026-10-02).
+            return self._confirm_listed(listed, state)
+        if not (state.unlisted_bike or {}).get("frame_number"):
+            chosen = _ordinal_choice(text, resolved.bikes)
+            if chosen is not None:
+                # "sorry, it's number 2": a choice from the list the bot showed,
+                # which needs no confirming.
+                return self._choose_listed(chosen, state)
         before = dict(state.unlisted_bike or {"frame_number": None, "model": None})
         bike = dict(before)
         frame = _find_frame(text)
@@ -612,9 +646,127 @@ class TriageAgent:
             else:
                 reply = ASK_AGAIN_FOR_FRAME if again else ASK_FOR_FRAME
             return TriageOutcome(reply=reply, reason="unlisted_bike:ask:%s" % "+".join(missing))
-        return self._unlisted_done(state)
+        if missing == ["frame_number", "model"]:
+            # Nothing was given to confirm: on with the issue, as before.
+            return self._unlisted_done(state)
+        return self._confirm_unlisted(state)
+
+    def _choose_listed(self, listed: Dict[str, Any], state: ConversationState) -> TriageOutcome:
+        """A listed bike after all: chosen, and said, so the customer knows
+        which bike the rest of the chat is about."""
+        state.unlisted_bike, state.unlisted_asks, state.bike_confirmation = None, 0, None
+        state.select_bike(bike_ref(listed), bike_name(listed))
+        state.move_to(AWAITING_ISSUE, "bike_selected")
+        topic, source = self._take_pending(state)
+        outcome = self._route_or_ask(topic, state, source)
+        if outcome.reason == "issue_unknown":
+            frame = " frame %s," % listed["frame_number"] if listed.get("frame_number") else ""
+            return TriageOutcome(reply="Thanks: that's the %s in the list,%s. %s" % (
+                bike_name(listed), frame.rstrip(","), outcome.reply), reason=outcome.reason)
+        return outcome
+
+    def _confirm_listed(self, listed: Dict[str, Any], state: ConversationState) -> TriageOutcome:
+        state.bike_confirmation = {"kind": "listed", "ref": bike_ref(listed), "step": "confirm", "unclear": 0}
+        state.move_to(AWAITING_BIKE_CONFIRMATION, "confirm_listed")
+        return TriageOutcome(reply=CONFIRM_LISTED.format(name=bike_name(listed)), reason="confirm_bike:listed")
+
+    def _confirm_unlisted(self, state: ConversationState) -> TriageOutcome:
+        state.bike_confirmation = {"kind": "unlisted", "ref": None, "step": "confirm", "unclear": 0}
+        state.move_to(AWAITING_BIKE_CONFIRMATION, "confirm_unlisted")
+        return TriageOutcome(reply=confirm_text(state.unlisted_bike), reason="confirm_bike:unlisted")
+
+    def _resolve_confirmation(
+        self, text: str, resolved: ResolvedIdentity, state: ConversationState
+    ) -> TriageOutcome:
+        """The answer to "is that right?" (spec 2026-10-02): a yes makes the
+        bike the conversation's; a correction is taken and confirmed; a no asks
+        what is wrong, or, for a listed bike, goes back to asking for the
+        details; anything else is asked again once, then taken as a no."""
+        topic = classify_issue(text)
+        if topic and not state.pending_topic:
+            state.pending_topic, state.pending_topic_source = topic, "text"
+        asked = dict(state.bike_confirmation or {"kind": "unlisted", "ref": None, "step": "confirm", "unclear": 0})
+        if asked.get("step") == "which_wrong":
+            return self._which_wrong(text, resolved, state, asked)
+        listed = None
+        if asked.get("kind") == "listed":
+            listed = next((bike for bike in resolved.bikes if bike_ref(bike) == asked.get("ref")), None)
+            if listed is None:
+                # That bike has left the list since: ask for the details again.
+                state.bike_confirmation = None
+                return self._start_unlisted("", resolved, state)
+        if says_yes(text):
+            return self._choose_listed(listed, state) if listed is not None else self._unlisted_done(state)
+        corrected = self._correction(text, resolved, state)
+        if corrected is not None:
+            return corrected
+        refused = says_no(text) or bool(_CONFIRM_NO.match(text or ""))
+        if not refused and asked.get("unclear", 0) < CONFIRM_MAX_UNCLEAR:
+            state.bike_confirmation = dict(asked, unclear=asked.get("unclear", 0) + 1)
+            question = (CONFIRM_LISTED.format(name=bike_name(listed)) if listed is not None
+                        else confirm_text(state.unlisted_bike))
+            return TriageOutcome(reply=CONFIRM_AGAIN.format(question=question), reason="confirm_bike:unclear")
+        if listed is not None:
+            # Not that bike: its details again, from the start.
+            state.bike_confirmation = None
+            return self._start_unlisted("", resolved, state)
+        state.bike_confirmation = dict(asked, step="which_wrong", unclear=0)
+        return TriageOutcome(reply=ASK_WHICH_WRONG, reason="confirm_bike:no")
+
+    def _correction(
+        self, text: str, resolved: ResolvedIdentity, state: ConversationState
+    ) -> Optional[TriageOutcome]:
+        """A frame number or a model in the answer itself ("no, it's a Doodle
+        V3"): taken, and the bike confirmed again. A listed bike's frame number
+        is that bike, confirmed as such. None when the answer gives neither."""
+        listed = _listed_frame(text, resolved.bikes)
+        if listed is not None and (state.bike_confirmation or {}).get("ref") != bike_ref(listed):
+            return self._confirm_listed(listed, state)
+        frame, model = _find_frame(text), known_model(text)
+        if not (frame or model) or listed is not None:
+            return None
+        bike = dict(state.unlisted_bike or {"frame_number": None, "model": None})
+        if frame:
+            bike["frame_number"] = frame
+        if model:
+            bike["model"] = model
+        state.unlisted_bike = bike
+        return self._confirm_unlisted(state)
+
+    def _which_wrong(
+        self, text: str, resolved: ResolvedIdentity, state: ConversationState, asked: Dict[str, Any]
+    ) -> TriageOutcome:
+        """The answer to "which is wrong?": that part is asked for again."""
+        corrected = self._correction(text, resolved, state)
+        if corrected is not None:
+            return corrected
+        both = bool(_WRONG_BOTH.search(text or ""))
+        frame_wrong = both or bool(_WRONG_FRAME.search(text or ""))
+        model_wrong = both or bool(_WRONG_MODEL.search(text or ""))
+        if not (frame_wrong or model_wrong):
+            if asked.get("unclear", 0) < CONFIRM_MAX_UNCLEAR:
+                state.bike_confirmation = dict(asked, unclear=asked.get("unclear", 0) + 1)
+                return TriageOutcome(reply=ASK_WHICH_WRONG_AGAIN, reason="confirm_bike:which_unclear")
+            frame_wrong = model_wrong = True
+        bike = dict(state.unlisted_bike or {"frame_number": None, "model": None})
+        if frame_wrong:
+            bike["frame_number"] = None
+        if model_wrong:
+            bike["model"] = None
+        state.unlisted_bike, state.bike_confirmation = bike, None
+        # This ask counts: one more is allowed before carrying on with what it has.
+        state.unlisted_asks = 1
+        state.move_to(AWAITING_UNLISTED_BIKE, "correcting")
+        if frame_wrong and model_wrong:
+            reply = ASK_FOR_UNLISTED_BIKE
+        elif frame_wrong:
+            reply = ASK_RIGHT_FRAME
+        else:
+            reply = ASK_RIGHT_MODEL
+        return TriageOutcome(reply=reply, reason="unlisted_bike:correct")
 
     def _unlisted_done(self, state: ConversationState) -> TriageOutcome:
+        state.bike_confirmation = None
         bike = state.unlisted_bike or {}
         state.select_bike(bike.get("frame_number") or UNLISTED_REF, unlisted_label(bike))
         state.move_to(AWAITING_ISSUE, "unlisted_bike")
