@@ -129,8 +129,8 @@ class S3Store:
     def hide(self, key: str) -> None:
         """A plain delete: the object disappears now, and the bucket's
         lifecycle erases its versions for good within 30 days
-        (infra/media.yaml). Needs only s3:DeleteObject. Called by the nightly
-        erasure job (erasure_job.py), never by the chat."""
+        (infra/media.yaml). Needs only s3:DeleteObject. Called by
+        erasure_admin delete, never by the chat."""
         try:
             self._client.delete_object(Bucket=self.bucket, Key=key)
         except Exception as exc:

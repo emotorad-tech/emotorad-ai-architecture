@@ -1,12 +1,14 @@
-name: Nightly erasure (staging)
+name: Erasure check (staging)
 
-# Self-service "delete my data" requests, carried out each night
-# (docs/superpowers/specs/2026-10-01-self-service-erasure-design.md).
+# Manual erasure (docs/superpowers/specs/2026-10-01-manual-erasure-design.md):
+# a person reviews and deletes each request with erasure_admin. This run deletes
+# nothing. It lists open requests by reference and age only, and is red when one
+# is 25 days old or more, so GitHub emails the workflow's owner.
 # GitHub runs a schedule only from the default branch: until this file is on
 # main, start it by hand (Actions -> this workflow -> Run workflow).
 on:
   schedule:
-    - cron: "30 20 * * *"  # 02:00 India time
+    - cron: "30 3 * * *"  # 09:00 India time
   workflow_dispatch: {}
 
 env:
@@ -18,7 +20,7 @@ permissions:
   contents: read
 
 jobs:
-  erase:
+  check:
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -30,17 +32,17 @@ jobs:
 
       # A one-off container from the deployed image. No secret is in this
       # command: the job reads the config store through the instance role.
-      # Its output comes back here (default log driver), so the run shows
-      # each request's outcome.
-      - name: Run the erasure job on the instance (via SSM)
+      # Its output comes back here (default log driver): references and ages
+      # only.
+      - name: Run the erasure check on the instance (via SSM)
         run: |
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "nightly erasure" \
+            --comment "erasure check" \
             --parameters commands="[
               \"set -e\",
-              \"docker run --rm -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage python -m emotorad_ai.erasure_job\"
+              \"docker run --rm -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media emotorad-ai:stage python -m emotorad_ai.erasure_admin check\"
             ]" \
             --query 'Command.CommandId' --output text)
 

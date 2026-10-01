@@ -1,5 +1,6 @@
 """Manual erasure: the admin command (spec 2026-10-01-manual-erasure-design.md)."""
 
+import importlib.util
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -210,3 +211,190 @@ class RunTests(unittest.TestCase):
         with mock.patch.object(desk.store, "pending_erasures",
                                side_effect=StoreUnavailable("mongodb://user:secret@host")):
             self.assertEqual(desk.run("list"), (1, "Stopped on an error (StoreUnavailable)."))
+
+
+class DeleteTests(unittest.TestCase):
+    REASON = "asked in the chat; no open case"
+
+    def setUp(self):
+        self.desk = Desk()
+        self.reference = self.desk.seed()
+
+    def reviewed(self, name="Asha"):
+        self.assertEqual(self.desk.run("show", self.reference, answers=[name])[0], 0)
+
+    def delete(self, name="Asha", reason=None, typed=None):
+        return self.desk.run("delete", self.reference,
+                             answers=[name, self.REASON if reason is None else reason, typed or self.reference])
+
+    def assert_nothing_deleted(self):
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+        self.assertEqual(self.desk.media.hidden, [])
+        self.assertEqual(self.desk.store.erasure_log, [])
+        self.assertEqual(self.desk.store.erasure_record(self.reference)["status"], "pending")
+
+    def test_after_a_review_everything_goes_files_first(self):
+        self.desk.media = FakeMedia(store=self.desk.store)
+        self.reviewed()
+        code, text = self.delete()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.desk.media.hidden, [PHOTO])
+        self.assertEqual(self.desk.media.records_left_when_hiding, [2])  # files first, records after
+        self.assertEqual(self.desk.store.conversations_of(ME), [])
+        self.assertEqual(self.desk.store.conversations_of(THEM), ["theirs"])
+        record = self.desk.store.erasure_record(self.reference)
+        self.assertEqual((record["status"], record["by"]), ("done", "Asha"))
+        self.assertNotIn("user_key", record)
+        (audit,) = self.desk.store.erasure_log
+        self.assertEqual(audit, erasure.audit_record(
+            ME, "self-service request %s: %s" % (self.reference, self.REASON), "Asha", NOW,
+            deleted=record["counts"], s3_objects=1))
+
+    def test_a_held_request_can_still_be_deleted(self):
+        self.desk.run("hold", self.reference, answers=["Asha", "safety case EM-00001 open"])
+        self.reviewed()
+        self.assertEqual(self.delete()[0], 0)
+
+    def test_refused_without_a_review(self):
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("Run show %s first" % self.reference, text)
+        self.assert_nothing_deleted()
+
+    def test_refused_when_someone_else_reviewed(self):
+        self.reviewed("Ravi")
+        code, text = self.delete("Asha")
+        self.assertEqual(code, 1)
+        self.assertIn("No review of %s by Asha" % self.reference, text)
+        self.assert_nothing_deleted()
+
+    def test_the_same_name_in_another_case_counts(self):
+        self.reviewed("Asha")
+        self.assertEqual(self.delete(" asha ")[0], 0)
+
+    def test_refused_when_the_review_is_over_24_hours_old(self):
+        self.reviewed()
+        self.desk.now = NOW + timedelta(hours=24, minutes=1)
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("more than 24 hours old", text)
+        self.assert_nothing_deleted()
+
+    def test_refused_when_something_new_arrived_after_the_review(self):
+        self.reviewed()
+        mine = self.desk.store.get("mine")
+        mine.turns = 2
+        self.desk.store.record_turn(mine, inbound("one more thing", cid="mine"), reply("Thanks.", cid="mine"))
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("has changed since your review", text)
+        self.assertEqual(self.desk.media.hidden, [])
+        self.assertEqual(len(self.desk.store.transcript("mine")), 4)
+
+    def test_refused_when_the_wrong_reference_is_typed(self):
+        self.reviewed()
+        code, text = self.delete(typed="DEL-AAAAAA")
+        self.assertEqual(code, 1)
+        self.assertIn("Stopped. Nothing was deleted.", text)
+        self.assert_nothing_deleted()
+
+    def test_the_reference_in_lower_case_is_accepted(self):
+        self.reviewed()
+        code, text = self.desk.run("delete", self.reference.lower(),
+                                   answers=["Asha", self.REASON, self.reference.lower()])
+        self.assertEqual(code, 0, text)
+
+    def test_refused_without_a_reason(self):
+        self.reviewed()
+        code, text = self.delete(reason=" ")
+        self.assertEqual(code, 1)
+        self.assertIn("A reason is needed", text)
+        self.assert_nothing_deleted()
+
+    def test_refused_once_the_customer_cancelled(self):
+        self.reviewed()
+        self.desk.store.cancel_erasure(ME, "2026-10-03T08:30:00+00:00")
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("is cancelled, not pending", text)
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+        self.assertEqual(self.desk.media.hidden, [])
+
+    def test_a_cancel_while_the_person_types_stops_it(self):
+        self.reviewed()
+        answers = ["Asha", self.REASON]
+
+        def ask(prompt):
+            if prompt.startswith("Type "):
+                self.desk.store.cancel_erasure(ME, "2026-10-03T09:00:00+00:00")
+                return self.reference
+            return answers.pop(0)
+
+        lines = []
+        code = run(["delete", self.reference], Admin(self.desk.store, self.desk.media, lambda: NOW, ask, lines.append))
+        self.assertEqual(code, 1)
+        self.assertIn("is cancelled, not pending", "\n".join(lines))
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+        self.assertEqual(self.desk.media.hidden, [])
+
+    def test_a_file_that_cannot_be_hidden_keeps_every_record(self):
+        self.desk.media = FakeMedia(fail_on=PHOTO)
+        self.reviewed()
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("Could not hide the files (StorageError). Nothing in the database was deleted.", text)
+        record = self.desk.store.erasure_record(self.reference)
+        self.assertEqual((record["status"], record["attempts"], record["last_error"]), ("pending", 1, "StorageError"))
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+        self.assertEqual(self.desk.store.erasure_log, [])
+        self.desk.media.fail_on = None
+        self.assertEqual(self.delete()[0], 0)
+
+    def test_files_and_no_bucket_is_a_hide_failure(self):
+        self.desk.media = None
+        self.reviewed()
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("Could not hide the files (StorageError)", text)
+        self.assertEqual(self.desk.store.conversations_of(ME), ["mine"])
+
+    def test_a_person_with_no_files_needs_no_bucket(self):
+        desk = Desk()
+        reference = desk.quiet_person()
+        desk.media = None
+        self.assertEqual(desk.run("show", reference, answers=["Asha"])[0], 0)
+        code, text = desk.run("delete", reference, answers=["Asha", self.REASON, reference])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(desk.store.conversations_of(ME), [])
+
+
+class CheckTests(unittest.TestCase):
+    def test_quiet_below_25_days(self):
+        desk = Desk()
+        reference = desk.seed()
+        code, text = desk.run("check")
+        self.assertEqual(code, 0, text)
+        self.assertRegex(text, reference + r"\s+2 days\s+pending")
+        self.assertIn("open erasure requests: 1", text)
+
+    def test_red_at_25_days_held_included(self):
+        desk = Desk()
+        reference = desk.seed()
+        desk.run("hold", reference, answers=["Asha", "safety case EM-00001 open"])
+        desk.now = datetime(2026, 10, 26, 9, 0, tzinfo=timezone.utc)
+        code, text = desk.run("check")
+        self.assertEqual(code, 1)
+        self.assertRegex(text, reference + r"\s+25 days\s+held")
+        self.assertIn("25 days old or more", text)
+        for private in ("+919700000031", "safety case", "smoking", PHOTO, "chats="):
+            self.assertNotIn(private, text)
+
+    def test_red_when_the_store_cannot_be_read(self):
+        desk = Desk()
+        with mock.patch.object(desk.store, "pending_erasures", side_effect=StoreUnavailable("down")):
+            self.assertEqual(desk.run("check"), (1, "Stopped on an error (StoreUnavailable)."))
+
+
+class NothingDeletesOnItsOwnTests(unittest.TestCase):
+    def test_the_nightly_job_is_gone(self):
+        self.assertIsNone(importlib.util.find_spec("emotorad_ai.erasure_job"))

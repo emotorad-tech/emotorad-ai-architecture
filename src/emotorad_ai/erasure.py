@@ -1,9 +1,10 @@
 """Self-service "delete my data" (spec 2026-10-01).
 
 The chat (runtime erasure_gate) and the Amiigo app (POST /erasure-requests)
-only record a request. The nightly job (erasure_job.py) is the only thing that
-deletes. This module holds what they share: the phrases, the fixed replies,
-the reference and the shape of the erasure_log audit record.
+only record a request. A person deletes, with erasure_admin.py, after reading
+the request (manual erasure spec). This module holds what they share: the
+phrases, the fixed replies, the reference and the shape of the erasure_log
+audit record.
 """
 
 from __future__ import annotations

@@ -7,6 +7,10 @@ in the live container through an SSM session:
     sudo docker exec -it emotorad-ai python -m emotorad_ai.erasure_admin list
     sudo docker exec -it emotorad-ai python -m emotorad_ai.erasure_admin show DEL-XXXXXX
     sudo docker exec -it emotorad-ai python -m emotorad_ai.erasure_admin hold DEL-XXXXXX
+    sudo docker exec -it emotorad-ai python -m emotorad_ai.erasure_admin delete DEL-XXXXXX
+
+`check` is the daily workflow's (.github/workflows/erasure-check.yml): open
+requests by reference and age only.
 
 `show` prints the customer's phone number, chats and photo links: it is for
 the person deciding, never for a Claude session or a CI log. The review it
@@ -44,6 +48,15 @@ def _proof(proof: Optional[Dict[str, Any]]) -> str:
     if proof.get("method") == "app_sign_in":
         return "app sign-in"
     return str(proof.get("method"))
+
+
+def _latest_review(record: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    mine = [r for r in record.get("reviews") or [] if r["by"].strip().casefold() == name.casefold()]
+    return max(mine, key=lambda r: _when(r["at"])) if mine else None
+
+
+def _counts(counts: Dict[str, int]) -> str:
+    return ", ".join("%s %d" % (key, counts[key]) for key in sorted(counts))
 
 
 class Admin:
@@ -160,6 +173,63 @@ class Admin:
         self.out("%s is held: %s" % (reference, note))
         return 0
 
+    def delete(self, reference: str) -> int:
+        record = self._request(reference)
+        name = self._answer("Your name: ", "Your name")
+        reason = self._answer("Reason (who asked, and why it can go): ", "A reason")
+        user_key = record["user_key"]
+        review = _latest_review(record, name)
+        if review is None:
+            raise Refused("No review of %s by %s. Run show %s first. Nothing was deleted." % (reference, name, reference))
+        if self.now() - _when(review["at"]) > REVIEW_VALID:
+            raise Refused("Your review of %s is more than 24 hours old. Run show %s again. Nothing was deleted."
+                          % (reference, reference))
+        totals = self.totals(user_key)
+        if totals != review["totals"]:
+            raise Refused("What %s holds has changed since your review. Run show %s again. Nothing was deleted."
+                          % (reference, reference))
+        self._print_totals(totals)
+        typed = (self.ask("Type %s to delete it, or anything else to stop: " % reference) or "").strip().upper()
+        if typed != reference:
+            raise Refused("Stopped. Nothing was deleted.")
+        # The customer may have cancelled while the person read and typed.
+        self._request(reference)
+        keys = [f["key"] for f in self._files(user_key)]
+        try:
+            if keys and self.media_store is None:
+                raise StorageError("no media bucket configured")
+            for key in keys:
+                self.media_store.hide(key)
+        except Exception as exc:
+            error = type(exc).__name__
+            self.store.record_erasure_failure(reference, error)
+            self.out("Could not hide the files (%s). Nothing in the database was deleted. "
+                     "Fix the cause and run delete %s again." % (error, reference))
+            return 1
+        now = self.now()
+        counts = self.store.delete_person(user_key)
+        self.store.log_erasure(erasure.audit_record(
+            user_key, "self-service request %s: %s" % (reference, reason), name, now,
+            deleted=counts, s3_objects=len(keys)))
+        self.store.close_erasure(reference, "done", counts, None, now.isoformat(), by=name)
+        self.out("Deleted %s: %d files hidden; records: %s. The audit record is written."
+                 % (reference, len(keys), _counts(counts)))
+        return 0
+
+    def check(self) -> int:
+        """References and ages only: red at 25 days, held ones included."""
+        requests = self.store.pending_erasures()
+        late = 0
+        for record in requests:
+            age = self._age(record)
+            late += age >= REMIND_AFTER_DAYS
+            self.out("%s  %3d days  %s" % (record["_id"], age, "held" if record.get("held") else "pending"))
+        self.out("open erasure requests: %d" % len(requests))
+        if late:
+            self.out("%d request(s) are %d days old or more: deal with them before 30 days."
+                     % (late, REMIND_AFTER_DAYS))
+        return 1 if late else 0
+
     # -- show's parts ---------------------------------------------------------
 
     @staticmethod
@@ -211,7 +281,8 @@ class Admin:
 
 
 # step -> (Admin method, how many arguments: a reference, or none)
-STEPS: Dict[str, Tuple[str, int]] = {"list": ("list_open", 0), "show": ("show", 1), "hold": ("hold", 1)}
+STEPS: Dict[str, Tuple[str, int]] = {"list": ("list_open", 0), "show": ("show", 1), "hold": ("hold", 1),
+                                     "delete": ("delete", 1), "check": ("check", 0)}
 USAGE = "usage: python -m emotorad_ai.erasure_admin %s" % " | ".join(
     name + (" DEL-XXXXXX" if nargs else "") for name, (_, nargs) in STEPS.items())
 
