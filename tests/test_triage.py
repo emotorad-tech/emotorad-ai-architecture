@@ -150,7 +150,7 @@ class TriageFlowTests(unittest.TestCase):
 
     def test_a_vague_opener_asks_what_is_wrong(self):
         state = ConversationState("c1")
-        outcome = self.triage.handle(message("hi"), resolved(BIKES[:1]), state)
+        outcome = self.triage.handle(message("can you help?"), resolved(BIKES[:1]), state)
         self.assertFalse(outcome.is_handoff)
         self.assertIn("What is happening", outcome.reply)
         self.assertEqual(state.phase, AWAITING_ISSUE)

@@ -83,7 +83,7 @@ def run_smoke(client: Any = None, db_name: Optional[str] = None, out: Callable[[
     try:
         rt, ad, stores = new_runtime()
         stores_for_cleanup = stores
-        first = send(rt, ad, a, "hi")
+        first = send(rt, ad, a, "can you help?")
         check("1. a new chat is answered (the rider has two bikes, so it asks which)",
               lambda: "Which one" in first.text, lambda: first.text[:80])
         send(rt, ad, a, "1")
@@ -104,7 +104,7 @@ def run_smoke(client: Any = None, db_name: Optional[str] = None, out: Callable[[
         check("6. a summary is kept for the person",
               lambda: summary[0].title == "Battery issue" and summary[0].product_name == "EMX Plus", lambda: summary[:1])
 
-        send(rt2, ad2, b, "hi")
+        send(rt2, ad2, b, "can you help?")
         memory = stores2.conversations.get(b).context_block or ""
         check("7. a new chat remembers the last one", lambda: "Last contact:" in memory and "Battery issue" in memory)
 

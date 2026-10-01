@@ -261,17 +261,17 @@ class OrderNumberTests(unittest.TestCase):
 
     def test_without_the_order_lookup_it_offers_a_person(self):
         chat = Chat(account_finder=None)
-        chat.say("hi")
+        chat.say("my battery isn't charging")
         self.assertIn("talk to a person", chat.say("I don't remember it").text)
 
     def test_a_number_that_is_not_a_mobile_is_refused(self):
         chat = Chat()
-        chat.say("hi")
+        chat.say("my battery isn't charging")
         self.assertEqual(chat.say("1234567890").handled_by, "verify_first:invalid_number")
 
     def test_a_stale_code_while_waiting_for_the_number_asks_for_the_number(self):
         chat = Chat()
-        chat.say("hi")
+        chat.say("my battery isn't charging")
         self.assertEqual(chat.say("482913").handled_by, "verify_first:ask_number_again")
 
 

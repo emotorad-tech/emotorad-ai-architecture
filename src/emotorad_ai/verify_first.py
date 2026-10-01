@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional, Tuple
 from .contract import InboundMessage
 from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState, utc_now_iso
 from .identity import IdentityResolver, ResolvedIdentity
+from .navigation import GREETING_TEXT, is_greeting_only, wants_change_number
 from .observability import LOOSE_PHONE
 from .tools.oms import OMSConfigError, normalise_mobile
 from .tools.registry import ToolContext, ToolRegistry, is_error
@@ -108,7 +109,13 @@ def redact(text: str, span: Tuple[int, int], placeholder: str) -> str:
 
 # -- the step's replies (fixed English text, like triage's) ------------------
 
-ASK_NUMBER = "Before I look into this, I need to confirm it's you. What's the mobile number your bike is registered on?"
+# Warmer than "before I look into this" (the person, 2026-10-01): help first,
+# then why the number is needed.
+ASK_NUMBER = ("Happy to help with that. First I need to confirm it's you: what's the mobile number your bike is "
+              "registered on?")
+# Another number, at the number or the code step, or after verifying (spec
+# 2026-10-02, going back).
+CHANGE_NUMBER = "No problem. What's the right mobile number?"
 # Added when the first message carries a photo or video: a hazard shown only
 # in a picture is not caught by the keyword gate, and saying it is.
 PHOTO_SAFETY = "If you can see smoke, heat or swelling, stop using the bike and tell me now."
@@ -207,6 +214,8 @@ class VerifyFirst:
                 return self._send_code(message, state, phone)
             if asks_resend(text):
                 return self._resend(message, state, text)
+            if wants_change_number(text):
+                return self._change_number(message, state, text)
             code = find_code(text)
             if code:
                 return self._check_code(message, state, code)
@@ -215,9 +224,15 @@ class VerifyFirst:
         if phone:
             return self._send_code(message, state, phone)
         if state.verify_step is None:
+            if is_greeting_only(text) and state.turns <= 1 and not message.attachments:
+                # Greeted back; the number waits until they say what is wrong
+                # (the person, 2026-10-01). The step has not started.
+                return self._reply(message, state, GREETING_TEXT, "greeting", text)
             # First contact: the number, and only the number (phone first).
             state.verify_step = NUMBER
             return self._reply(message, state, ASK_NUMBER, "ask_number", text)
+        if wants_change_number(text):
+            return self._change_number(message, state, text)
 
         order = find_order_code(text) if FIND_ACCOUNT_BY_CODE in self.registry.specs else None
         if order:
@@ -304,7 +319,7 @@ class VerifyFirst:
         state.selected_frame = None
         # A bike given earlier as not in the list goes too: the list is asked
         # again (the final review, 2026-10-01).
-        state.unlisted_bike, state.unlisted_asks = None, 0
+        state.unlisted_bike, state.unlisted_asks, state.bike_confirmation = None, 0, None
         if resolved.bikes:
             state.move_to(AWAITING_BIKE_SELECTION, "verified")
             text, outcome = CONFIRMED + " " + which_bike_text(resolved.bikes), "verified"
@@ -326,6 +341,15 @@ class VerifyFirst:
         state.verify_masked = None
         fallback = FALLBACK_ORDER if FIND_ACCOUNT_BY_CODE in self.registry.specs else FALLBACK_PERSON
         return self._reply(message, state, ASK_NUMBER_AGAIN + " " + fallback, "ask_number_again", text)
+
+    def _change_number(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
+        """Another number, at the number or the code step: a code waiting for
+        the old one is cancelled (spec 2026-10-02). The lock is checked first
+        in handle(), so a locked step stays locked."""
+        self.store.reset(message.conversation_id)
+        state.verify_step = NUMBER
+        state.verify_masked = None
+        return self._reply(message, state, CHANGE_NUMBER, "change_number", text)
 
     # -- helpers -------------------------------------------------------------
 

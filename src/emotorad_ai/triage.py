@@ -23,11 +23,13 @@ from .conversation import (
     AWAITING_BIKE_SELECTION,
     AWAITING_ISSUE,
     AWAITING_UNLISTED_BIKE,
+    GREETING,
     ROUTED,
     ConversationState,
 )
 from .contract import InboundMessage
 from .identity import ResolvedIdentity
+from .navigation import GREETING_TEXT, is_greeting_only
 from .tools import fixtures
 from .tools.amigo import MODEL_NAMES
 
@@ -470,6 +472,12 @@ class TriageAgent:
 
         if state.phase == AWAITING_BIKE_SELECTION:
             return self._resolve_selection(text, resolved, state)
+
+        if (state.phase == GREETING and state.turns <= 1 and state.selected_frame is None
+                and not message.pill_clicked and not message.attachments and is_greeting_only(text)):
+            # A signed-in rider who only greets (spec 2026-10-02): greeted back,
+            # with the AI line the first reply has to carry (disclosure.py).
+            return TriageOutcome(reply=GREETING_TEXT, reason="greeting")
 
         # A tapped pill is the intent, already stated. It still has to pass
         # through bike selection — knowing they tapped "Battery issue" does not

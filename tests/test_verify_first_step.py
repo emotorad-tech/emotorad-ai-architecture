@@ -10,7 +10,8 @@ from emotorad_ai.observability import EventLog
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import build_registry
 from emotorad_ai.tools.verification import VerificationStore
-from emotorad_ai.verify_first import ASK_NUMBER, PHOTO_SAFETY, VerifyFirst
+from emotorad_ai.navigation import GREETING_TEXT
+from emotorad_ai.verify_first import ASK_NUMBER, CHANGE_NUMBER, PHOTO_SAFETY, VerifyFirst
 
 TODAY = date(2026, 9, 30)
 
@@ -36,6 +37,28 @@ class StepTests(unittest.TestCase):
         self.assertEqual(reply.text, ASK_NUMBER)
         self.assertEqual(self.state.verify_step, "number")
         self.assertEqual(self.state.pending_topic, "battery")
+
+    def test_a_greeting_is_greeted_back_and_the_step_waits(self):
+        reply = self.step.handle(message("hi"), self.state)
+        self.assertEqual((reply.outcome, reply.text), ("greeting", GREETING_TEXT))
+        self.assertIsNone(self.state.verify_step)
+
+    def test_change_number_at_the_code_step_cancels_the_code(self):
+        self.step.handle(message("my battery isn't charging"), self.state)
+        self.step.handle(message("9700000010"), self.state)
+        reply = self.step.handle(message("wrong number"), self.state)
+        self.assertEqual((reply.outcome, reply.text), ("change_number", CHANGE_NUMBER))
+        self.assertIsNone(self.store.pending_code("c1"))
+        self.assertEqual(self.state.verify_step, "number")
+
+    def test_change_number_at_the_number_step(self):
+        self.step.handle(message("my battery isn't charging"), self.state)
+        self.assertEqual(self.step.handle(message("change number"), self.state).outcome, "change_number")
+
+    def test_resend_is_not_change_number(self):
+        self.step.handle(message("my battery isn't charging"), self.state)
+        self.step.handle(message("9700000010"), self.state)
+        self.assertEqual(self.step.handle(message("please resend"), self.state).outcome, "code_resent")
 
     def test_a_photo_adds_the_safety_line(self):
         reply = self.step.handle(message("is this normal?", photo=True), self.state)
@@ -64,7 +87,7 @@ class StepTests(unittest.TestCase):
         self.assertIsNone(self.state.context_block)
 
     def test_each_outcome_is_logged_without_the_number_or_the_code(self):
-        self.step.handle(message("hi"), self.state)
+        self.step.handle(message("my battery isn't charging"), self.state)
         self.step.handle(message("9700000010"), self.state)
         code = self.store.pending_code("c1")
         self.step.handle(message(code), self.state)
