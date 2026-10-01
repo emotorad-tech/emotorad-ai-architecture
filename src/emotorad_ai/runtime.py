@@ -41,9 +41,13 @@ from .attachments import shows_media, user_content
 from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import (
+    AWAITING_BIKE_CONFIRMATION,
     AWAITING_BIKE_SELECTION,
+    AWAITING_ISSUE,
     AWAITING_UNLISTED_BIKE,
+    GREETING,
     HISTORY_TURNS,
+    ROUTED,
     ConversationConflict,
     ConversationState,
     ConversationSummaryItem,
@@ -94,6 +98,18 @@ from . import origin as origin_place
 from .jev import JevError
 from .knowledge import KnowledgeBase
 from .llm import BedrockClaude
+from .navigation import (
+    APP_SIGN_IN_CHANNELS,
+    BACK_TO_LIST,
+    NUMBER_FIXED,
+    NUMBER_FIXED_APP,
+    START_AGAIN,
+    names_the_mobile,
+    wants_change_bike,
+    wants_change_number,
+    wants_list,
+    wants_start_over,
+)
 from .observability import EventLog
 from .evidence_asks import MAX_EVIDENCE_ASKS, added_line, asks_for_media, declines_video
 from .one_step import is_too_long, replace_turn_text
@@ -119,8 +135,8 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
-from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context
-from .verify_first import CONFIRMED, VerifyFirst
+from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
+from .verify_first import CONFIRMED, NUMBER, VerifyFirst
 from . import erasure as erasure_rules
 
 UNSUPPORTED_MESSAGE = (
@@ -143,6 +159,8 @@ AGENT_TITLES = {
 # a dealer and a customer asking the same words mean different things, and a
 # shared agent set is how a dealer reaches a customer-only tool.
 TOPIC_AGENTS = {"battery": BATTERY_SUPPORT, "motor": MOTOR_SUPPORT}
+# The topic an agent works on, kept when the customer changes bike mid-chat.
+_TOPIC_OF_AGENT = {agent: topic for topic, agent in TOPIC_AGENTS.items()}
 DEALER_AGENTS = {"order": DEALER_ORDERS}
 
 # What a surface needs to establish identity inside the conversation, when the
@@ -172,7 +190,7 @@ SIDE_EFFECT_TOOLS = (SEND_GUIDE_MEDIA, REQUEST_IDENTITY_VERIFICATION, VERIFY_IDE
 # (Runtime._merge_onto_fresh).
 VERIFY_FIRST_FIELDS = (
     "verify_step", "verify_masked", "verify_sends", "phase", "agent", "selected_frame",
-    "unlisted_bike", "unlisted_asks",
+    "unlisted_bike", "unlisted_asks", "bike_confirmation",
     # started_at: a new person's run keeps its own summary even after a clash.
     # The turn numbering stays the other server's, which already counts both.
     "pending_topic", "pending_topic_source", "context_block", "user_key", "started_at",
@@ -317,6 +335,7 @@ class Runtime:
             TurnNodes(
                 prepare=self._node_prepare,
                 safety_gate=self._node_safety,
+                navigation_gate=self._node_navigation,
                 handoff_gate=self._node_handoff,
                 erasure_gate=self._node_erasure,
                 verify_gate=self._node_verify,
@@ -576,7 +595,8 @@ class Runtime:
         meta = message.entry_metadata
         if state.cluster_id is None and meta.get("cluster_id"):
             state.cluster_id = meta["cluster_id"]
-        choosing = self.verify_gate is not None and state.phase in (AWAITING_BIKE_SELECTION, AWAITING_UNLISTED_BIKE)
+        choosing = self.verify_gate is not None and state.phase in (
+            AWAITING_BIKE_SELECTION, AWAITING_UNLISTED_BIKE, AWAITING_BIKE_CONFIRMATION)
         if meta.get("pinned_agent") and not choosing:
             # A pin waits while the bike is being chosen (verify first).
             state.route_to(meta["pinned_agent"])
@@ -678,6 +698,78 @@ class Runtime:
         if matched:
             return {"reply": self._handle_safety(message, resolved, state, matched, evidence)}
         return {}
+
+    def _node_navigation(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 1b. Going back (navigation.py, spec 2026-10-02): another number,
+        #     another bike, the list again or a fresh start, from any step.
+        #     Fixed replies, no model. Never while a deletion waits for DELETE:
+        #     that answer has to be the very next message.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        if resolved.persona != "customer" or state.erasure_step == erasure_rules.CONFIRMING:
+            return {}
+        text = message.message_text or ""
+        if wants_change_number(text) and (state.phase != AWAITING_BIKE_CONFIRMATION or names_the_mobile(text)):
+            # While a bike is confirmed, "wrong number" is its frame number.
+            return self._navigate_number(message, state, resolved)
+        bikes = resolved.bikes
+        if not bikes or not resolved.may_disclose:
+            # Not verified yet (the verify step answers), or no list to go back to.
+            return {}
+        if wants_start_over(text):
+            return self._back_to_list(message, state, bikes, keep_topic=False, why="start_over")
+        if state.phase in (AWAITING_UNLISTED_BIKE, AWAITING_BIKE_CONFIRMATION) and wants_list(text):
+            return self._back_to_list(message, state, bikes, keep_topic=True, why="list")
+        chosen = state.selected_frame is not None and state.phase in (AWAITING_ISSUE, ROUTED)
+        if chosen and wants_change_bike(text):
+            return self._back_to_list(message, state, bikes, keep_topic=True, why="change_bike")
+        return {}
+
+    def _navigate_number(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity
+    ) -> Dict[str, Any]:
+        cid = message.conversation_id
+        proven = self.verify_gate is not None and self.phone_resolver is not None and bool(self.phone_resolver(cid))
+        if proven:
+            # Forget who they proved to be; the verify step starts again.
+            self.verify_gate.store.reset(cid)
+            state.forget_bike()
+            state.pending_topic = state.pending_topic_source = None
+            state.context_block = None
+            state.verify_step, state.verify_masked = NUMBER, None
+            state.move_to(GREETING, "change_number")
+            self.log.emit("navigation", cid, to="number")
+            # The verify step answers: a number in this message gets its code now.
+            gate = self.verify_gate.handle(message, state)
+            if gate.escalated:
+                self.log.escalation(cid, "verification_locked", None)
+            shown = replace(message, message_text=gate.model_text)
+            return {"reply": self._finish(
+                shown, state, gate.text, "verify_first:" + gate.outcome, escalated=gate.escalated,
+                metadata={"transcript_text": gate.model_text},
+            )}
+        if resolved.may_disclose:
+            # Signed in: the number is the sign-in's, with no code step to redo.
+            self.log.emit("navigation", cid, to="number_fixed")
+            fixed = NUMBER_FIXED_APP if message.channel in APP_SIGN_IN_CHANNELS else NUMBER_FIXED
+            return {"reply": self._finish(message, state, fixed, "navigation:number_fixed")}
+        # Not verified: the verify step answers (verify_first.VerifyFirst.handle).
+        return {}
+
+    def _back_to_list(
+        self, message: InboundMessage, state: ConversationState, bikes: Sequence[Dict[str, Any]],
+        keep_topic: bool, why: str,
+    ) -> Dict[str, Any]:
+        """Back to the bike list (spec 2026-10-02). The bike and what was
+        learnt about it go; the problem stays unless they start over, so
+        troubleshooting starts again for the bike they choose."""
+        topic = (state.pending_topic or _TOPIC_OF_AGENT.get(state.agent or "")) if keep_topic else None
+        source = (state.pending_topic_source or "text") if topic else None
+        state.forget_bike()
+        state.pending_topic, state.pending_topic_source = topic, source
+        state.move_to(AWAITING_BIKE_SELECTION, why)
+        self.log.emit("navigation", message.conversation_id, to="bike_list", why=why)
+        lead = START_AGAIN if why == "start_over" else BACK_TO_LIST
+        return {"reply": self._finish(message, state, lead + " " + which_bike_text(bikes), "navigation:" + why)}
 
     def _node_handoff(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 2. Human handoff, reachable at any point, no friction.
