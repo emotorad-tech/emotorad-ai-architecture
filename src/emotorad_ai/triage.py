@@ -239,8 +239,15 @@ _NO = re.compile(
     r"a different one|different bike|another one|another bike|other bike)\s*[.!]*\s*$",
     re.IGNORECASE,
 )
-# A frame number: a few letters, then six or more digits (EMXP2026001234).
-_FRAME = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{2,5}\d{6,}(?![A-Za-z0-9])")
+# A frame number: one token of 7 to 24 letters and digits that starts with a
+# letter and has at least two letters and five digits in a row
+# (EMXP2026001234, DDL32023045678, the staging bikes' TESTEMXP0000001). Two to
+# five letters then digits was too narrow: no staging frame number was read
+# (staging, 2026-10-01). Ticket references (EM-00001), upload ids
+# (upl_...), phone numbers and pincodes are not tokens of this shape.
+_FRAME = re.compile(
+    r"(?<![A-Za-z0-9_])(?=(?:[0-9]*[A-Za-z]){2})(?=[A-Za-z0-9]*\d{5})[A-Za-z][A-Za-z0-9]{6,23}(?![A-Za-z0-9_])"
+)
 
 
 def says_no(text: str) -> bool:
@@ -323,6 +330,12 @@ ASK_FOR_UNLISTED_BIKE = ("No problem. Please send your bike's frame number and m
                          "The frame number is printed on the sticker on the frame.")
 ASK_FOR_MODEL = "Thanks. Which model is it?"
 ASK_FOR_FRAME = "Thanks. What's its frame number? It's printed on the sticker on the frame."
+# When a reply gave nothing new: not the same question again, word for word
+# (staging, 2026-10-01).
+ASK_AGAIN_FOR_UNLISTED_BIKE = ("Sorry, I didn't catch that. Please send the frame number printed on the sticker "
+                               "on the frame, and the model, for example EMX Plus or T-Rex Air.")
+ASK_AGAIN_FOR_MODEL = "Sorry, I didn't catch the model. Which model is it, for example EMX Plus or T-Rex Air?"
+ASK_AGAIN_FOR_FRAME = "Sorry, I didn't catch the frame number. It's printed on the sticker on the frame."
 # Two asks while collecting, the opening one included: each missing part is
 # asked for at most twice, then the bot carries on with what it has.
 UNLISTED_MAX_ASKS = 2
@@ -340,6 +353,10 @@ _JOIN_STOP = frozenset((
     "on", "is", "no", "to", "at", "in", "of", "me", "my", "by", "or", "it", "as", "be", "we", "us", "so", "do",
     "go", "up", "an", "am", "if", "the", "and", "for", "was", "are", "not", "its", "nos", "num", "call", "date",
     "from", "dated", "hai", "ka", "ki", "ko", "se", "mera", "meri", "phone", "mob",
+    # Words before a number that is not a frame number, now that a frame's
+    # letters can be up to ten long (staging, 2026-10-01).
+    "pincode", "pin", "zip", "code", "otp", "mobile", "number", "order", "invoice", "bill", "ticket", "ref",
+    "reference", "id", "whatsapp", "contact", "amount", "rs", "inr", "price", "year", "km", "kms",
 ))
 
 
@@ -351,7 +368,7 @@ def _joined(text: str) -> str:
         word = match.group(1)
         return match.group(0) if word.lower() in _JOIN_STOP else word + match.group(2)
 
-    return re.sub(r"\b([A-Za-z]{2,5})[\s-]+(\d{6,})\b", join, text or "")
+    return re.sub(r"\b([A-Za-z]{2,10})[\s-]+(\d{6,})\b", join, text or "")
 
 
 def _find_frame(text: str) -> Optional[str]:
@@ -396,10 +413,14 @@ def unlisted_as_bike(bike: Dict[str, Optional[str]]) -> Dict[str, Any]:
 
 
 def _listed_frame(text: str, bikes: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """A listed bike whose frame number the text gives exactly."""
-    frame = _find_frame(text)
+    """A listed bike whose own frame number the text gives, as a whole token,
+    in any case or spacing. Against the list itself, not a frame-number shape:
+    a listed frame the shape missed was taken for a new bike (staging,
+    2026-10-01)."""
+    tokens = {token.upper() for token in re.findall(r"[A-Za-z0-9]+", _joined(text))}
     for bike in bikes:
-        if frame and frame == (bike.get("frame_number") or "").upper():
+        frame = re.sub(r"[\s-]+", "", bike.get("frame_number") or "").upper()
+        if frame and frame in tokens:
             return bike
     return None
 
@@ -530,9 +551,11 @@ class TriageAgent:
         state.move_to(AWAITING_UNLISTED_BIKE, "bike_not_listed")
         state.unlisted_bike = {"frame_number": None, "model": None}
         state.unlisted_asks = 0
-        return self._collect_unlisted(text, resolved, state)
+        return self._collect_unlisted(text, resolved, state, opening=True)
 
-    def _collect_unlisted(self, text: str, resolved: ResolvedIdentity, state: ConversationState) -> TriageOutcome:
+    def _collect_unlisted(
+        self, text: str, resolved: ResolvedIdentity, state: ConversationState, opening: bool = False
+    ) -> TriageOutcome:
         """The frame number and model of a bike that is not in the list, then
         on with the issue (spec 2026-10-01, unlisted bike)."""
         listed = _listed_frame(text, resolved.bikes)
@@ -545,8 +568,16 @@ class TriageAgent:
             state.select_bike(bike_ref(listed), bike_name(listed))
             state.move_to(AWAITING_ISSUE, "bike_selected")
             topic, source = self._take_pending(state)
-            return self._route_or_ask(topic, state, source)
-        bike = dict(state.unlisted_bike or {"frame_number": None, "model": None})
+            outcome = self._route_or_ask(topic, state, source)
+            if outcome.reason == "issue_unknown":
+                # Say it was in the list, so the customer knows which bike the
+                # rest of the chat is about.
+                frame = " frame %s," % listed["frame_number"] if listed.get("frame_number") else ""
+                return TriageOutcome(reply="Thanks: that's the %s in the list,%s. %s" % (
+                    bike_name(listed), frame.rstrip(","), outcome.reply), reason=outcome.reason)
+            return outcome
+        before = dict(state.unlisted_bike or {"frame_number": None, "model": None})
+        bike = dict(before)
         frame = _find_frame(text)
         if frame and not bike.get("frame_number"):
             bike["frame_number"] = frame
@@ -560,10 +591,18 @@ class TriageAgent:
         if topic and not state.pending_topic:
             state.pending_topic, state.pending_topic_source = topic, "text"
         state.unlisted_bike = bike
+        # Something new this reply: a part of the bike, or the issue.
+        learnt = bike != before or bool(topic)
         missing = [part for part in ("frame_number", "model") if not bike.get(part)]
         if missing and state.unlisted_asks < UNLISTED_MAX_ASKS:
             state.unlisted_asks += 1
-            reply = ASK_FOR_UNLISTED_BIKE if len(missing) == 2 else ASK_FOR_MODEL if missing == ["model"] else ASK_FOR_FRAME
+            again = not opening and not learnt
+            if len(missing) == 2:
+                reply = ASK_AGAIN_FOR_UNLISTED_BIKE if again else ASK_FOR_UNLISTED_BIKE
+            elif missing == ["model"]:
+                reply = ASK_AGAIN_FOR_MODEL if again else ASK_FOR_MODEL
+            else:
+                reply = ASK_AGAIN_FOR_FRAME if again else ASK_FOR_FRAME
             return TriageOutcome(reply=reply, reason="unlisted_bike:ask:%s" % "+".join(missing))
         return self._unlisted_done(state)
 

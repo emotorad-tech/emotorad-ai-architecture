@@ -4,6 +4,7 @@ import unittest
 
 from emotorad_ai.conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, AWAITING_UNLISTED_BIKE, ConversationState
 from emotorad_ai.triage import (
+    ASK_AGAIN_FOR_UNLISTED_BIKE,
     ASK_FOR_FRAME,
     ASK_FOR_MODEL,
     ASK_FOR_UNLISTED_BIKE,
@@ -254,3 +255,59 @@ class FinalReviewTriageTests(unittest.TestCase):
             self.say(state, text)
             self.assertIsNone(state.unlisted_bike["model"], text)
             self.assertNotIn(state.selected_frame, [bike["frame_number"] for bike in TWO], text)
+
+
+STAGING = [{"frame_number": "TESTEMXP0000001", "product_name": "EMX Plus", "product_color": "Aqua"},
+           {"frame_number": "TESTDDLP0000002", "product_name": "Doodle Pro", "product_color": "Nativepop"}]
+
+
+class StagingFrameTests(unittest.TestCase):
+    """Staging, 2026-10-01: the staging bikes' frame numbers have eight
+    letters ("TESTEMXP0000001"), and none was read as a frame number."""
+
+    def setUp(self):
+        self.triage = TriageAgent(TOPIC_AGENTS)
+
+    def say(self, state, text, bikes=STAGING):
+        return self.triage.handle(message(text), resolved(bikes), state)
+
+    def test_an_eight_letter_frame_number_is_read(self):
+        state = choosing()
+        self.say(state, "its none of these")
+        self.assertEqual(self.say(state, "TESTEMXP0000069").reply, ASK_FOR_MODEL)
+        self.assertEqual(state.unlisted_bike["frame_number"], "TESTEMXP0000069")
+
+    def test_frame_and_model_together(self):
+        state = choosing(topic=None)
+        self.say(state, "its none of these")
+        outcome = self.say(state, "TESTEMXP0000069 and model is Doodle Pro")
+        self.assertTrue(outcome.reply.startswith("Thanks: Doodle Pro, frame TESTEMXP0000069."), outcome.reply)
+
+    def test_a_listed_frame_while_collecting_is_that_bike_and_says_so(self):
+        state = choosing(topic=None)
+        self.say(state, "none of these")
+        outcome = self.say(state, "TESTEMXP0000001 and model is EMX Plus (Aqua)")
+        self.assertEqual(state.selected_frame, "TESTEMXP0000001")
+        self.assertIsNone(state.unlisted_bike)
+        self.assertTrue(outcome.reply.startswith(
+            "Thanks: that's the EMX Plus (Aqua) in the list, frame TESTEMXP0000001."), outcome.reply)
+
+    def test_a_frame_not_in_the_list_at_the_choice(self):
+        state = choosing()
+        self.assertEqual(self.say(state, "TESTEMXP0000069").reply, ASK_FOR_MODEL)
+
+    def test_a_reply_with_nothing_new_is_asked_differently(self):
+        state = choosing()
+        self.say(state, "none of these")
+        outcome = self.say(state, "hmm")
+        self.assertEqual(outcome.reply, ASK_AGAIN_FOR_UNLISTED_BIKE)
+        self.say(state, "TESTEMXP0000069")
+        self.assertEqual(state.unlisted_bike["frame_number"], "TESTEMXP0000069")
+
+    def test_what_is_not_a_frame_number(self):
+        for text in ("call me on 9876543210", "my ticket is EM-00001", "upload upl_00mupai7oc8aba2mgs",
+                     "it's a T-Rex Plus V2", "pincode 122001"):
+            state = choosing()
+            self.say(state, "none of these")
+            self.say(state, text)
+            self.assertIsNone(state.unlisted_bike["frame_number"], text)
