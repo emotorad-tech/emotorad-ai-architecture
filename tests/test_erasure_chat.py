@@ -50,9 +50,20 @@ class VerifiedRiderTests(unittest.TestCase):
         self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))
         self.assertNotEqual(chat.ask("DELETE").handled_by, "erasure:requested")
 
-    def test_delete_without_being_asked_is_an_ordinary_message(self):
+    def test_delete_without_being_asked_asks_for_confirmation_and_deletes_nothing(self):
         chat = new_chat()
-        self.assertFalse(chat.ask("DELETE").handled_by.startswith("erasure:"))
+        self.assertEqual(chat.ask("DELETE").handled_by, "erasure:confirm")
+        self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))
+
+    def test_delete_after_a_hand_over_still_asks_first(self):
+        # Staging, 2026-10-01: "talk to a person", then "delete", and the model
+        # replied "OK, I've deleted this chat".
+        chat = new_chat()
+        chat.ask("delete my data")
+        chat.ask("no")
+        chat.ask("talk to a person")
+        self.assertEqual(chat.ask("delete").handled_by, "erasure:confirm")
+        self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))
 
     def test_asking_again_gives_the_same_reference(self):
         chat = new_chat()
@@ -149,3 +160,19 @@ class ProofTests(unittest.TestCase):
         self.assertEqual(chat.ask("talk to a person").handled_by, "guardrail:human_handoff")
         self.assertNotEqual(chat.ask("delete").handled_by, "erasure:requested")
         self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))
+
+
+class DeletionClaimTests(unittest.TestCase):
+    def test_the_model_cannot_claim_a_deletion(self):
+        # Triage's replies are fixed texts: the claim can only come from an agent.
+        chat = AppChat(replies=[say("Is the charger light on?"),
+                                say("OK, I've deleted this chat and all the data it held.")])
+        chat.ask("my battery isn't charging")
+        self.assertEqual(chat.ask("1").handled_by, "battery_support")
+        reply = chat.ask("can you get rid of it all")
+        self.assertEqual(reply.handled_by, "guardrail:deletion_claim")
+        self.assertIn(erasure.ERASURE_NOT_BY_MODEL, reply.text)
+        self.assertNotIn("I've deleted", reply.text)
+        self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))
+        last = chat.conversations.peek("c1").history[-1]
+        self.assertNotIn("I've deleted", str(last["content"]))

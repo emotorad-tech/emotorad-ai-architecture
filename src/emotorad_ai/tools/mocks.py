@@ -823,8 +823,9 @@ def build_registry(
             GET_SERVICE_STATUS,
             "The customer's service stages from the EMotorad app (250 km / 1 month, 1000 km / 6 months, "
             "2000 km / 12 months): done, due or upcoming, and the odometer. Use it when a motor, brake or "
-            "noise problem might come from a missed service. It is the app's record, not a booking: never "
-            "book or promise a service from it.",
+            "noise problem might come from a missed service. When the customer asks when a service is due "
+            "or what has been done, call it and answer from it first, then go back to their issue. It is the "
+            "app's record, not a booking: never book or promise a service from it.",
             parameters={},
             injects=("phone",),
         )
@@ -838,7 +839,8 @@ def build_registry(
             GET_RECENT_TRIPS,
             "The customer's last five rides from the EMotorad app, newest first: when, which bike, distance "
             "in km, duration in minutes and average speed. Use it to check a range or power complaint "
-            "against real rides. It holds no locations.",
+            "against real rides. When the customer asks to see their rides, call it and list them from it "
+            "first, then go back to their issue. It holds no locations.",
             parameters={},
             injects=("phone",),
         )

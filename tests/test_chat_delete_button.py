@@ -33,3 +33,18 @@ class DeleteButtonTests(unittest.TestCase):
         self.assertIn("conversation_id: state.conversationId", handlers)
         self.assertNotRegex(handlers, r"send\(")
         self.assertNotIn('"/message"', handlers)
+
+
+class DialogStateTests(unittest.TestCase):
+    """Staging, 2026-10-01: "Delete" and "Cancel deletion" showed together:
+    .sheet-btn's display overrode the hidden attribute."""
+
+    def setUp(self):
+        self.page = PAGE.read_text(encoding="utf-8")
+
+    def test_a_hidden_sheet_button_is_not_shown(self):
+        self.assertRegex(self.page, r"\.sheet-btn\[hidden\]\s*\{\s*display:\s*none")
+
+    def test_opening_the_dialog_checks_for_a_pending_request(self):
+        handlers = self.page[self.page.index("// -- Delete my chat data"):self.page.index("// -- end delete")]
+        self.assertIn('erasureCall("/erasure-requests/status")', handlers)

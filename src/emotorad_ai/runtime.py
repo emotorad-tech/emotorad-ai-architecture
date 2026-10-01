@@ -82,6 +82,7 @@ from .guardrails import (
     check_human_handoff,
     check_order_claim,
     check_safety,
+    claims_deletion,
     claims_ticket,
     check_safety_in_description,
 )
@@ -1224,6 +1225,16 @@ class Runtime:
                     escalated=True, ticket_id=turn.ticket_id,
                     metadata={"suppressed_text": turn.text}, already_in_history=True,
                 )
+
+        # Only the erasure gate records a deletion and only the nightly job
+        # makes one: a reply that says data was deleted is never sent.
+        if claims_deletion(turn.text):
+            self.log.guardrail(message.conversation_id, "deletion_claim", {"suppressed_text": turn.text})
+            return self._finish(
+                message, state, erasure_rules.ERASURE_NOT_BY_MODEL + self._already_done(turn),
+                "guardrail:deletion_claim", ticket_id=turn.ticket_id,
+                metadata={"suppressed_text": turn.text}, already_in_history=True,
+            )
 
         return Reply(
             conversation_id=message.conversation_id,

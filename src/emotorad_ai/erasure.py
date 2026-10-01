@@ -35,6 +35,18 @@ _DELETE = re.compile(
     r"|mi\s+historial)\b",
     re.IGNORECASE,
 )
+# The whole message, nothing else: "delete", "delete it", "erase it all".
+# After a hand-over, "delete" reached the model, which said it had deleted
+# the chat (staging, 2026-10-01). Only an offer follows: DELETE still has to
+# come back as the next message. "clear" and "remove" are left out: "Clear."
+# is an answer, and "remove it" is usually about a part.
+_BARE_DELETE = re.compile(
+    r"^\W*(?:please\s+)?(?:delete|erase|wipe)(?:\s+(?:it|this|that|everything|all|it\s+all|all\s+of\s+it))?"
+    r"(?:\s+please)?\W*$"
+    r"|^\W*(?:डिलीट|हटाओ)(?:\s+(?:करो|कर\s+दो))?\W*$"
+    r"|^\W*(?:borrar|b[oó]rralo|eliminar|elim[ií]nalo)\W*$",
+    re.IGNORECASE,
+)
 _CANCEL = re.compile(
     r"\bcancel\s+(?:my\s+|the\s+)?deletion\b|\b(?:don'?t|do\s+not)\s+delete\s+my\s+data\b",
     re.IGNORECASE,
@@ -61,6 +73,12 @@ ERASURE_EXISTING = (
 ERASURE_CANCELLED = "Your deletion request {reference} is cancelled. Nothing has been deleted."
 ERASURE_NOTHING_TO_CANCEL = "There's no deletion request to cancel."
 ERASURE_FAILED = "I couldn't record your request just now. Please try again in a few minutes."
+# A model reply that said something was deleted is replaced by this (the
+# erasure gate and the nightly job are the only things that delete).
+ERASURE_NOT_BY_MODEL = (
+    "I can't delete anything myself. To delete what this chat holds about you, "
+    "say 'delete my data' and I'll ask you to confirm."
+)
 ERASURE_SIGN_IN = "Sign in to the app to delete your data."
 ERASURE_VERIFY_FIRST = "Verify your number in the chat first, then try again."
 
@@ -71,7 +89,8 @@ def wants_cancel(text: Optional[str]) -> bool:
 
 def wants_deletion(text: Optional[str]) -> bool:
     # "don't delete my data" holds "delete my data": a cancel is never a request.
-    return bool(_DELETE.search(text or "")) and not wants_cancel(text)
+    text = text or ""
+    return bool(_DELETE.search(text) or _BARE_DELETE.match(text.strip())) and not wants_cancel(text)
 
 
 def is_confirmation(text: Optional[str]) -> bool:

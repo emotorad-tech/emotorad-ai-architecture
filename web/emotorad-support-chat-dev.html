@@ -205,6 +205,9 @@
     font-family: inherit; font-size: 15px; font-weight: 600; color: var(--ink); text-align: left; cursor: pointer;
   }
   .sheet-btn:active { background: #F5F5F5; }
+  /* display: flex above beats the hidden attribute: Delete and Cancel
+     deletion showed together (staging, 2026-10-01). */
+  .sheet-btn[hidden] { display: none; }
   .sheet-cancel { color: var(--muted); font-weight: 500; justify-content: center; }
   /* "Delete my chat data" (2026-10-01): a dialog in the same sheet. */
   .sheet-title { font-size: 16px; font-weight: 700; padding: 4px 8px 6px 8px; }
@@ -1243,10 +1246,20 @@ document.getElementById("headerMenu").addEventListener("click", function () {
 document.getElementById("menuCancel").addEventListener("click", function () {
   document.getElementById("menuSheet").hidden = true;
 });
+// The dialog opens on what is true now: a request already made shows its
+// reference and Cancel deletion, not a second Delete.
 document.getElementById("menuDelete").addEventListener("click", function () {
   document.getElementById("menuSheet").hidden = true;
-  setErase(ERASE_DIALOG_TEXT, "confirm");
+  setErase("Checking…", "info");
   document.getElementById("eraseSheet").hidden = false;
+  erasureCall("/erasure-requests/status").then(function (res) {
+    if (!res.ok) { setErase(res.body.detail || ERASE_FAILED_TEXT, "info"); return; }
+    if (res.body.status === "pending") {
+      setErase("You've already asked for this. Your request is " + res.body.reference + ".", "requested");
+      return;
+    }
+    setErase(ERASE_DIALOG_TEXT, "confirm");
+  }).catch(function () { setErase(ERASE_FAILED_TEXT, "info"); });
 });
 document.getElementById("eraseConfirm").addEventListener("click", function () {
   erasureCall("/erasure-requests").then(function (res) {

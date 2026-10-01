@@ -14,6 +14,8 @@ from emotorad_ai.tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
     FIND_SERVICE_SLOTS,
+    GET_RECENT_TRIPS,
+    GET_SERVICE_STATUS,
     LOOKUP_WARRANTY_RECORD,
     SEND_GUIDE_MEDIA,
     build_registry,
@@ -66,7 +68,10 @@ class NarrowDefinitionTests(NarrowFixture, unittest.TestCase):
     def test_the_tool_slice_has_no_lookups_and_the_writes_the_flow_needs(self):
         definition = build_narrow_definition(self.record, ())
         self.assertEqual(definition.name, AGENT_NAME)
-        self.assertEqual(set(definition.tool_names), {SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS, BOOK_SERVICE_SLOT})
+        # No diagnostic lookups. The app's two reads answer the customer's own
+        # questions ("when is my next service due?", staging 2026-10-01).
+        self.assertEqual(set(definition.tool_names), {SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS,
+                                                      BOOK_SERVICE_SLOT, GET_SERVICE_STATUS, GET_RECENT_TRIPS})
         self.assertEqual(tuple(definition.tool_names), TOOL_NAMES)
 
 

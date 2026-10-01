@@ -593,3 +593,29 @@ def claims_ticket(reply: str) -> bool:
         if _TICKET_CLAIM.search(sentence) and not _NOT_A_CLAIM.search(sentence):
             return True
     return False
+
+
+# --- a deletion the model cannot make (staging, 2026-10-01) -------------------
+# After a hand-over, "delete" reached the model, which replied "OK, I've
+# deleted this chat and all the data it held". Nothing was deleted, and the
+# model has no tool that deletes. A reply that says otherwise is replaced.
+_DELETION_CLAIM = re.compile(
+    r"\bI(?:'ve|\s+have)\s+(?:now\s+|just\s+)?(?:deleted|removed|erased|cleared|wiped)\b"
+    r"|\b(?:chats?|data|conversations?|history|messages|details|account)\b.{0,40}?"
+    r"\b(?:has|have)\s+(?:now\s+)?been\s+(?:deleted|removed|erased|cleared|wiped)\b"
+    r"|\b(?:chats?|data|conversations?|history|messages|details|account)\b.{0,40}?"
+    r"\b(?:is|are)\s+now\s+(?:deleted|removed|erased|gone)\b",
+    re.IGNORECASE,
+)
+
+
+def claims_deletion(reply: str) -> bool:
+    """Whether a sentence of `reply` says the customer's data was deleted. A
+    question, a negation or a condition is not a claim."""
+    for sentence in _SENTENCE.findall(reply or ""):
+        sentence = sentence.strip()
+        if not sentence or sentence.endswith("?"):
+            continue
+        if _DELETION_CLAIM.search(sentence) and not _NOT_A_CLAIM.search(sentence):
+            return True
+    return False

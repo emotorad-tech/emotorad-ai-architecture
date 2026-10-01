@@ -79,3 +79,17 @@ class TextTests(unittest.TestCase):
             self.assertIn("DEL-222222", getattr(erasure, name).format(reference="DEL-222222"))
         self.assertTrue(erasure.ERASURE_CONFIRM.startswith(erasure.ERASURE_DIALOG))
         self.assertTrue(re.search(r"Reply DELETE to confirm", erasure.ERASURE_CONFIRM))
+
+
+class BareDeleteTests(unittest.TestCase):
+    """Staging, 2026-10-01: "delete" on its own went to the model, which said
+    it had deleted the chat. Nothing was deleted, and nothing should be without
+    the confirmation."""
+
+    def test_delete_on_its_own_is_a_request(self):
+        for text in ("delete", "Delete it", "delete this", "please delete everything", "erase it all", "DELETE!"):
+            self.assertTrue(erasure.wants_deletion(text), text)
+
+    def test_other_deletes_still_are_not(self):
+        for text in ("delete the photo", "how do I delete a ride?", "can I delete the app"):
+            self.assertFalse(erasure.wants_deletion(text), text)

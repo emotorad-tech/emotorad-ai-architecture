@@ -17,7 +17,14 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..knowledge import KnowledgeRecord
-from ..tools.mocks import BOOK_SERVICE_SLOT, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS, SEND_GUIDE_MEDIA
+from ..tools.mocks import (
+    BOOK_SERVICE_SLOT,
+    CREATE_SUPPORT_TICKET,
+    FIND_SERVICE_SLOTS,
+    GET_RECENT_TRIPS,
+    GET_SERVICE_STATUS,
+    SEND_GUIDE_MEDIA,
+)
 from .base import AgentDefinition
 from .battery_support import _context_block, _entry_block, _facts_block
 
@@ -25,8 +32,12 @@ AGENT_NAME = "narrow_support"
 
 # No lookups: the record is given and the reads were prefetched. The writes a
 # troubleshooting flow ends in stay, requested by the model and enforced by
-# the registry exactly as in the full agents.
-TOOL_NAMES = (SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS, BOOK_SERVICE_SLOT)
+# the registry exactly as in the full agents. The app's two reads stay too:
+# "when is my next service due?" mid-flow got "I don't have your service
+# schedule" (staging, 2026-10-01). Without Amigo they are not registered,
+# and the agent drops them.
+TOOL_NAMES = (SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS, BOOK_SERVICE_SLOT,
+              GET_SERVICE_STATUS, GET_RECENT_TRIPS)
 
 _RULES = """\
 You are EMotorad's support assistant. The customer's issue has already been identified, \

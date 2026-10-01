@@ -71,3 +71,26 @@ class RegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnsweringTheQuestionTests(unittest.TestCase):
+    """Staging, 2026-10-01: "when is my next service due?" reached the narrow
+    agent, which had no Amigo tools, and "show my last rides" got a charging
+    question back although the trips had been read."""
+
+    def test_the_narrow_agent_has_them(self):
+        from emotorad_ai.agents import narrow_support
+        from emotorad_ai.tools.mocks import GET_RECENT_TRIPS, GET_SERVICE_STATUS
+
+        self.assertIn(GET_SERVICE_STATUS, narrow_support.TOOL_NAMES)
+        self.assertIn(GET_RECENT_TRIPS, narrow_support.TOOL_NAMES)
+
+    def test_each_says_to_answer_the_customer_first(self):
+        from datetime import date
+
+        from emotorad_ai.tools.mocks import GET_RECENT_TRIPS, GET_SERVICE_STATUS, build_registry
+        from tests.amigo_fake import FakeAmigo
+
+        registry = build_registry(today=date(2026, 10, 1), amigo=FakeAmigo())
+        for name in (GET_SERVICE_STATUS, GET_RECENT_TRIPS):
+            self.assertIn("When the customer asks", registry.specs[name].description, name)
