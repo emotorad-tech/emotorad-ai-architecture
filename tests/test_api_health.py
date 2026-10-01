@@ -22,12 +22,12 @@ class HealthTests(unittest.TestCase):
         # any machine, including one with a real key in its environment.
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
                          "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
-                         "EMOTORAD_AI_BUILD": ""})
+                         "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"})
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
-             "amigo": "not configured", "build": "unknown"},
+             "amigo": "not configured", "build": "unknown", "ip_location": "not configured"},
         )
 
     def test_health_names_the_commit_it_was_built_from(self):

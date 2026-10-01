@@ -54,6 +54,7 @@ from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
 from .client_ip import client_ip, trusted_from_env
+from . import origin as origin_place
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
@@ -375,6 +376,9 @@ upload_limiter = RateLimiter(limit=20, window_seconds=60.0)
 # The proxies whose X-Real-IP is believed (client_ip.py). Without this every
 # customer behind nginx shared one limit.
 TRUSTED_PROXIES = trusted_from_env()
+# The DB-IP file the image was built with (origin.py), or None. Each message's
+# IP becomes a place here; the IP itself goes no further than this module.
+IP_LOCATOR = origin_place.ip_locator_from_env()
 
 
 class AttachmentOut(BaseModel):
@@ -440,6 +444,7 @@ def health() -> dict:
         "tracing": "on" if TRACING is not None else "off",
         "amigo": "configured" if AMIGO is not None else "not configured",
         "build": BUILD,
+        "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
     }
 
 
@@ -773,6 +778,10 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     # written to the state here: with a durable store, a change made outside
     # the turn is to a copy the turn never saves.
     extra = {key: value for key, value in (("cluster_id", message_cluster), ("pinned_agent", body.agent)) if value}
+    # Where the customer is, as a place: the runtime keeps the run's first one.
+    place = IP_LOCATOR.place(client_ip(request, TRUSTED_PROXIES)) if IP_LOCATOR is not None else None
+    if place is not None:
+        extra["origin"] = place.as_dict()
     if extra:
         message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
     reply = runtime.handle(message)
