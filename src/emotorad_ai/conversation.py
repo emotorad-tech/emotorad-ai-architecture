@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -122,6 +123,8 @@ class ConversationState:
     # Self-service erasure (erasure.py): "wanted" or "cancel_wanted" while the
     # verify step runs, "confirming" while the bot waits for DELETE.
     erasure_step: Optional[str] = None
+    # The turn that asked for DELETE: only the next one may answer it.
+    erasure_turn: Optional[int] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None
@@ -421,6 +424,8 @@ class InMemoryConversationStore:
         self._origins: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Self-service erasure requests (erasure.py): reference -> request.
         self._erasures: Dict[str, Dict[str, Any]] = {}
+        # One pending request per person, even for two requests at once.
+        self._erasure_lock = threading.Lock()
         # The erasure_log audit records the nightly job writes.
         self.erasure_log: List[Dict[str, Any]] = []
 
@@ -494,16 +499,17 @@ class InMemoryConversationStore:
 
     def request_erasure(self, user_key: str, channel: str, conversation_id: Optional[str], now: str) -> str:
         """One pending request per person: asking again returns it."""
-        pending = self.pending_erasure_of(user_key)
-        if pending is not None:
-            return pending["_id"]
-        reference = erasure_rules.new_reference()
-        while reference in self._erasures:
+        with self._erasure_lock:
+            pending = self.pending_erasure_of(user_key)
+            if pending is not None:
+                return pending["_id"]
             reference = erasure_rules.new_reference()
-        self._erasures[reference] = {"_id": reference, "user_key": user_key, "status": "pending",
-                                     "requested_at": now, "channel": channel, "conversation_id": conversation_id,
-                                     "attempts": 0, "last_error": None}
-        return reference
+            while reference in self._erasures:
+                reference = erasure_rules.new_reference()
+            self._erasures[reference] = {"_id": reference, "user_key": user_key, "status": "pending",
+                                         "requested_at": now, "channel": channel,
+                                         "conversation_id": conversation_id, "attempts": 0, "last_error": None}
+            return reference
 
     def cancel_erasure(self, user_key: str, now: str) -> Optional[str]:
         pending = self.pending_erasure_of(user_key)

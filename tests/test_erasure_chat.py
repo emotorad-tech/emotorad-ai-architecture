@@ -119,3 +119,33 @@ class WebsiteVisitorTests(unittest.TestCase):
         verified = chat.say(chat.code())
         self.assertIn(erasure.ERASURE_CANCELLED.format(reference=reference), verified.text)
         self.assertEqual(chat.conversations.erasure_record(reference)["status"], "cancelled")
+
+
+class ProofTests(unittest.TestCase):
+    """The final review (2026-10-01): only this turn's proven identity may ask
+    or cancel, and DELETE confirms only as the very next message."""
+
+    def test_a_lapsed_verification_cannot_ask_for_the_first_persons_deletion(self):
+        now = [0.0]
+        chat = AppChat(replies=[say("Is the charger light on?")] * 6, clock=lambda: now[0])
+        chat.verify(ONE_BIKE)
+        now[0] += 12 * 60 * 60 + 1  # the verification lapses; the saved owner does not
+        asked = chat.say("delete my data")
+        self.assertEqual(asked.handled_by, "verify_first:ask_number")
+        self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + ONE_BIKE))
+
+    def test_a_lapsed_verification_cannot_confirm_either(self):
+        now = [0.0]
+        chat = AppChat(replies=[say("Is the charger light on?")] * 6, clock=lambda: now[0])
+        chat.verify(ONE_BIKE)
+        self.assertEqual(chat.say("delete my data").handled_by, "erasure:confirm")
+        now[0] += 12 * 60 * 60 + 1
+        self.assertNotEqual(chat.say("DELETE").handled_by, "erasure:requested")
+        self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + ONE_BIKE))
+
+    def test_delete_confirms_only_as_the_next_message(self):
+        chat = new_chat()
+        chat.ask("delete my data")
+        self.assertEqual(chat.ask("talk to a person").handled_by, "guardrail:human_handoff")
+        self.assertNotEqual(chat.ask("delete").handled_by, "erasure:requested")
+        self.assertIsNone(chat.conversations.pending_erasure_of("PHONE#" + RIDER))

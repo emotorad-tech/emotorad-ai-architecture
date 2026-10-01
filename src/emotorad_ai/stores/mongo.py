@@ -87,6 +87,10 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     ],
     ERASURE_REQUESTS: [
         ([("user_key", 1), ("status", 1)], {"name": "user_status"}),
+        # One pending request per person, enforced by the database: a double
+        # tap cannot make two (the final review, 2026-10-01).
+        ([("user_key", 1)], {"name": "one_pending_per_person", "unique": True,
+                             "partialFilterExpression": {"status": "pending"}}),
         ([("status", 1), ("requested_at", 1)], {"name": "status_requested"}),
     ],
 }
@@ -319,7 +323,16 @@ class MongoConversationStore:
         record = {"_id": reference, "user_key": user_key, "status": "pending", "requested_at": now,
                   "channel": channel, "conversation_id": conversation_id, "attempts": 0, "last_error": None}
         requests = self._collection(ERASURE_REQUESTS)
-        self._guard("insert_one", lambda: requests.insert_one(record))
+        try:
+            self._guard("insert_one", lambda: requests.insert_one(record))
+        except DuplicateKeyError:
+            # Another request for this person landed between the look and the
+            # insert (a double tap): that one is the pending request.
+            existing = self._guard(
+                "find_one", lambda: requests.find_one({"user_key": user_key, "status": "pending"}))
+            if existing is None:
+                raise
+            return existing["_id"]
         return reference
 
     def cancel_erasure(self, user_key: str, now: str) -> Optional[str]:

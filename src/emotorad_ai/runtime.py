@@ -656,14 +656,20 @@ class Runtime:
         if resolved.persona != "customer":
             return {}
         text = message.message_text or ""
-        user_key = state.user_key or self._user_key(resolved)
-        if state.erasure_step == erasure_rules.CONFIRMING and user_key:
+        # This turn's proven identity only: the conversation's saved owner
+        # outlives a lapsed verification (the final review, 2026-10-01).
+        user_key = self._user_key(resolved)
+        if state.erasure_step == erasure_rules.CONFIRMING:
+            # DELETE confirms only as the very next message, from a person
+            # still proven. Anything later is an ordinary message.
+            answering = user_key is not None and state.turns == (state.erasure_turn or 0) + 1
             state.erasure_step = None
-            if erasure_rules.is_confirmation(text):
-                reply, label = self._erasure_request(message, state, user_key)
-                return {"reply": self._finish(message, state, reply, label)}
-            self.log.emit("erasure_kept", message.conversation_id)
-            return {"reply": self._finish(message, state, erasure_rules.ERASURE_KEPT, "erasure:kept")}
+            if answering:
+                if erasure_rules.is_confirmation(text):
+                    reply, label = self._erasure_request(message, state, user_key)
+                    return {"reply": self._finish(message, state, reply, label)}
+                self.log.emit("erasure_kept", message.conversation_id)
+                return {"reply": self._finish(message, state, erasure_rules.ERASURE_KEPT, "erasure:kept")}
         cancel = erasure_rules.wants_cancel(text)
         if not cancel and not erasure_rules.wants_deletion(text):
             return {}
@@ -685,6 +691,7 @@ class Runtime:
         if pending is not None:
             return erasure_rules.ERASURE_EXISTING.format(reference=pending["_id"]), "erasure:existing"
         state.erasure_step = erasure_rules.CONFIRMING
+        state.erasure_turn = state.turns
         return erasure_rules.ERASURE_CONFIRM, "erasure:confirm"
 
     def _erasure_request(self, message: InboundMessage, state: ConversationState, user_key: str) -> Tuple[str, str]:

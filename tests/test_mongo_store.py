@@ -32,6 +32,16 @@ class MongoStoreTests(StoreContract, unittest.TestCase):
         store.log_erasure({"key_sha256": "x" * 64, "kind": "PHONE", "reason": "self-service request DEL-222222"})
         self.assertEqual(self.db["erasure_log"].count_documents({"kind": "PHONE"}), 1)
 
+    def test_two_requests_racing_leave_one_pending(self):
+        # The final review (2026-10-01): a double tap on the app's button made
+        # two pending requests, and a cancel stopped only one.
+        store = self.make_store()
+        first = store.request_erasure("PHONE#+919700000031", "amiigo_app", None, "2026-10-01T10:00:00+00:00")
+        with mock.patch.object(store, "pending_erasure_of", return_value=None):  # it looked before the other insert
+            second = store.request_erasure("PHONE#+919700000031", "amiigo_app", None, "2026-10-01T10:00:01+00:00")
+        self.assertEqual(second, first)
+        self.assertEqual(self.db["erasure_requests"].count_documents({"status": "pending"}), 1)
+
     def test_a_stale_save_is_refused(self):
         store = self.make_store()
         state = store.get("c1")
