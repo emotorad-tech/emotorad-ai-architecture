@@ -4,11 +4,14 @@ from emotorad_ai.contract import VERIFIED, Identity, InboundMessage
 from emotorad_ai.conversation import (
     AWAITING_BIKE_SELECTION,
     AWAITING_ISSUE,
+    AWAITING_UNLISTED_BIKE,
     ROUTED,
     ConversationState,
 )
 from emotorad_ai.identity import ResolvedIdentity
 from emotorad_ai.triage import (
+    ASK_FOR_MODEL,
+    ASK_FOR_UNLISTED_BIKE,
     TriageAgent,
     classify_issue,
     describe_bike,
@@ -233,7 +236,7 @@ class OneBikeSelectionTests(unittest.TestCase):
     own still picks a lone bike without asking."""
 
     def setUp(self):
-        self.triage = TriageAgent(TOPIC_AGENTS, unlisted_agent="late_warranty_registration")
+        self.triage = TriageAgent(TOPIC_AGENTS)
         self.state = ConversationState("c1")
         self.state.move_to(AWAITING_BIKE_SELECTION, "verified")
         self.state.pending_topic = "battery"
@@ -243,28 +246,32 @@ class OneBikeSelectionTests(unittest.TestCase):
         self.assertEqual(outcome.agent, "battery_support")
         self.assertEqual(self.state.selected_frame, BIKES[0]["frame_number"])
 
-    def test_no_goes_to_the_unlisted_agent(self):
+    def test_no_asks_for_the_frame_number_and_model(self):
+        # The bike not listed (spec 2026-10-01, unlisted bike): no route to
+        # late registration any more.
         outcome = self.triage.handle(message("no"), resolved(BIKES[:1]), self.state)
-        self.assertEqual(outcome.agent, "late_warranty_registration")
-        self.assertEqual(outcome.reason, "bike_not_listed")
+        self.assertFalse(outcome.is_handoff)
+        self.assertEqual(outcome.reply, ASK_FOR_UNLISTED_BIKE)
+        self.assertEqual(self.state.phase, AWAITING_UNLISTED_BIKE)
         self.assertIsNone(self.state.selected_frame)
+
+    def test_ji_nahi_asks_for_the_frame_number_and_model(self):
+        outcome = self.triage.handle(message("ji nahi"), resolved(BIKES[:1]), self.state)
+        self.assertEqual(outcome.reply, ASK_FOR_UNLISTED_BIKE)
+        self.assertIsNone(self.state.selected_frame)
+
+    def test_the_frame_number_of_a_bike_not_listed_asks_for_its_model(self):
+        # The question invites it ("send the frame number of the bike you
+        # mean"); it used to loop on "did not catch" for ever.
+        outcome = self.triage.handle(message("DDL32023045678"), resolved(BIKES[:1]), self.state)
+        self.assertEqual(outcome.reply, ASK_FOR_MODEL)
+        self.assertEqual(self.state.unlisted_bike["frame_number"], "DDL32023045678")
 
     def test_anything_else_asks_again(self):
         outcome = self.triage.handle(message("what?"), resolved(BIKES[:1]), self.state)
         self.assertFalse(outcome.is_handoff)
         self.assertIn("did not catch", outcome.reply)
         self.assertIn(BIKES[0]["frame_number"], outcome.reply)
-
-    def test_ji_nahi_goes_to_the_unlisted_agent(self):
-        outcome = self.triage.handle(message("ji nahi"), resolved(BIKES[:1]), self.state)
-        self.assertEqual(outcome.agent, "late_warranty_registration")
-        self.assertIsNone(self.state.selected_frame)
-
-    def test_the_frame_number_of_a_bike_not_listed_goes_to_the_unlisted_agent(self):
-        # The question invites it ("send the frame number of the bike you
-        # mean"); it used to loop on "did not catch" for ever.
-        outcome = self.triage.handle(message("DDL32023045678"), resolved(BIKES[:1]), self.state)
-        self.assertEqual(outcome.agent, "late_warranty_registration")
 
     def test_no_bikes_to_choose_from_carries_on_to_the_issue(self):
         # A lookup that failed after verification: no list to ask about.

@@ -22,11 +22,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .conversation import (
     AWAITING_BIKE_SELECTION,
     AWAITING_ISSUE,
+    AWAITING_UNLISTED_BIKE,
     ROUTED,
     ConversationState,
 )
 from .contract import InboundMessage
 from .identity import ResolvedIdentity
+from .tools import fixtures
+from .tools.amigo import MODEL_NAMES
 
 # Deterministic issue classification. Keywords are the cheap path; anything they
 # do not catch falls through to the model rather than being force-fitted here.
@@ -252,15 +255,118 @@ def names_a_frame(text: str) -> bool:
     return bool(_FRAME.search(text or ""))
 
 
+# --- a bike that is not in the list (spec 2026-10-01, unlisted bike) ---------
+# "its not one of these 2" chose bike 2 on staging: the ordinal matched and
+# nothing checked for the "not". This is checked before any bike is matched.
+_NOT_LISTED = re.compile(
+    r"\b(?:not|none)\s+(?:(?:one|any)\s+)?of\s+(?:these|them|those|the\s+two|the\s+three|both)\b"
+    r"|\bneither\b|^\W*none\W*$|\bnot\s+these\b"
+    r"|\bnot\s+(?:mine|listed|here|there|in\s+(?:the|this|your)\s+list|on\s+(?:the|this|your)\s+list)\b"
+    r"|\b(?:a\s+)?different\s+(?:one|bike|cycle)\b|\banother\s+(?:bike|cycle)\b"
+    r"|\bnot\s+(?:this|that)\s+(?:one|bike)\b"
+    r"|\bkoi\s+(?:bhi\s+)?nahi\b|\bdono\s+(?:hi\s+)?nahi\b|इनमें\s+से\s+कोई\s+नहीं|दोनों\s+नहीं",
+    re.IGNORECASE,
+)
+_DONT_KNOW = re.compile(
+    r"\b(?:don'?t|do\s+not)\s+know\b|\bnot\s+sure\b|\bno\s+idea\b|\bpata\s+nahi\b|\bcan'?t\s+find\b|पता\s+नहीं",
+    re.IGNORECASE,
+)
+# EMotorad's model names: the Amiigo app's, and those on the test records.
+KNOWN_MODELS = tuple(sorted(
+    set(MODEL_NAMES.values())
+    | {record["product_name"] for records in fixtures.WARRANTY_RECORDS.values() for record in records
+       if record.get("product_name")},
+    key=len, reverse=True,
+))
+_MODEL_PATTERNS = [
+    (model, re.compile(r"\b" + r"\W*".join(re.findall(r"[a-z0-9]+", model.lower())) + r"\b", re.IGNORECASE))
+    for model in KNOWN_MODELS
+]
+
+ASK_FOR_UNLISTED_BIKE = ("No problem. Please send your bike's frame number and model. "
+                         "The frame number is printed on the sticker on the frame.")
+ASK_FOR_MODEL = "Thanks. Which model is it?"
+ASK_FOR_FRAME = "Thanks. What's its frame number? It's printed on the sticker on the frame."
+# Two asks while collecting, the opening one included: each missing part is
+# asked for at most twice, then the bot carries on with what it has.
+UNLISTED_MAX_ASKS = 2
+# The conversation's bike reference when the customer never gave a frame number.
+UNLISTED_REF = "unlisted"
+
+
+def not_listed(text: str) -> bool:
+    return bool(_NOT_LISTED.search(text or ""))
+
+
+def _joined(text: str) -> str:
+    """A frame number typed with spaces or hyphens before its digits, joined:
+    "emxp 2026009999" is EMXP2026009999."""
+    return re.sub(r"(?<=[A-Za-z0-9])[\s-]+(?=\d)", "", text or "")
+
+
+def _find_frame(text: str) -> Optional[str]:
+    match = _FRAME.search(_joined(text))
+    return match.group(0).upper() if match else None
+
+
+def known_model(text: str) -> Optional[str]:
+    """An EMotorad model named in the text, the longest when several match
+    ("T-Rex Plus V2" over "T-Rex Plus"). Frame numbers are left out first:
+    TREX2024881201 is not a T-Rex, and it holds "X2"."""
+    words = _FRAME.sub(" ", _joined(text))
+    for model, pattern in _MODEL_PATTERNS:
+        if pattern.search(words):
+            return model
+    return None
+
+
+def unlisted_label(bike: Optional[Dict[str, Optional[str]]]) -> str:
+    bike = bike or {}
+    parts = [bike.get("model") or "", "frame %s" % bike["frame_number"] if bike.get("frame_number") else ""]
+    return ", ".join(part for part in parts if part) or "your bike"
+
+
+def unlisted_context(bike: Optional[Dict[str, Optional[str]]]) -> str:
+    """What the agent is told about the conversation's unlisted bike, or ""."""
+    if not bike:
+        return ""
+    text = ("The customer's bike for this conversation is not registered on their number: %s, as they read it. "
+            "There is no warranty record for it: never say it is or is not covered." % unlisted_label(bike))
+    if bike.get("frame_number"):
+        text += " Use this frame number on any ticket."
+    return "\n\n" + text
+
+
+def unlisted_as_bike(bike: Dict[str, Optional[str]]) -> Dict[str, Any]:
+    """The unlisted bike in the shape a listed one has, for the knowledge
+    filter and Jev."""
+    return {"product_name": bike.get("model"), "frame_number": bike.get("frame_number"), "on_record": False}
+
+
+def _listed_frame(text: str, bikes: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A listed bike whose frame number the text gives exactly."""
+    frame = _find_frame(text)
+    for bike in bikes:
+        if frame and frame == (bike.get("frame_number") or "").upper():
+            return bike
+    return None
+
+
+def _model_as_typed(text: str, bike: Dict[str, Optional[str]], frame_in_reply: Optional[str]) -> bool:
+    """Whether a reply is the model, as typed, when only the model is missing:
+    a short answer that is not a question, not the issue, not "I don't know"."""
+    words = (text or "").split()
+    return bool(bike.get("frame_number") and not bike.get("model") and not frame_in_reply and words
+                and len(words) <= 4 and not text.strip().endswith("?") and classify_issue(text) is None
+                and not _DONT_KNOW.search(text) and not not_listed(text))
+
+
 class TriageAgent:
     """Greets, narrows to one bike, captures the issue, hands off."""
 
-    def __init__(self, topic_agents: Dict[str, str], unlisted_agent: Optional[str] = None) -> None:
+    def __init__(self, topic_agents: Dict[str, str]) -> None:
         # topic -> sub-agent name, e.g. {"battery": "battery_support"}.
         self.topic_agents = topic_agents
-        # Where a customer goes who says the one bike listed is not theirs:
-        # the bike they mean is not registered on this number.
-        self.unlisted_agent = unlisted_agent
 
     def handle(
         self,
@@ -269,6 +375,9 @@ class TriageAgent:
         state: ConversationState,
     ) -> TriageOutcome:
         text = message.message_text.strip()
+
+        if state.phase == AWAITING_UNLISTED_BIKE:
+            return self._collect_unlisted(text, resolved, state)
 
         if state.phase == AWAITING_BIKE_SELECTION:
             return self._resolve_selection(text, resolved, state)
@@ -312,19 +421,20 @@ class TriageAgent:
             return self._route_or_ask(self._take_pending(state)[0], state, "text")
 
         single = len(bikes) == 1
+        # Before any ordinal, frame number or model is matched (spec
+        # 2026-10-01, unlisted bike): "its not one of these 2" chose bike 2.
+        if not_listed(text) or (single and says_no(text)):
+            return self._start_unlisted(text, resolved, state)
         bike = bikes[0] if single and says_yes(text) else match_bike(text, bikes)
         if bike is None and single and not bikes[0].get("frame_number") and names_a_frame(text):
             # The only bike has no frame number on record, so a frame number
             # typed now is the rider reading theirs, not a different bike.
             bike = bikes[0]
         if bike is None:
-            # One bike listed and the customer says it is not theirs, or sends
-            # the frame number of one that is not on the list (as the question
-            # invites): the bike they mean is not registered on this number.
-            if single and self.unlisted_agent and (says_no(text) or names_a_frame(text)):
-                self._take_pending(state)
-                state.route_to(self.unlisted_agent)
-                return TriageOutcome(agent=self.unlisted_agent, reason="bike_not_listed")
+            if names_a_frame(text):
+                # The frame number of a bike that is not in the list, as the
+                # question invites ("send the frame number of the bike you mean").
+                return self._start_unlisted(text, resolved, state)
             # Re-ask rather than guess. An unmatched reply usually means the
             # customer answered something else entirely, and picking a bike here
             # would silently attach the whole conversation to the wrong one.
@@ -337,6 +447,54 @@ class TriageAgent:
         state.move_to(AWAITING_ISSUE, "bike_selected")
         topic, source = self._take_pending(state)
         return self._route_or_ask(topic, state, source)
+
+    def _start_unlisted(self, text: str, resolved: ResolvedIdentity, state: ConversationState) -> TriageOutcome:
+        state.move_to(AWAITING_UNLISTED_BIKE, "bike_not_listed")
+        state.unlisted_bike = {"frame_number": None, "model": None}
+        state.unlisted_asks = 0
+        return self._collect_unlisted(text, resolved, state)
+
+    def _collect_unlisted(self, text: str, resolved: ResolvedIdentity, state: ConversationState) -> TriageOutcome:
+        """The frame number and model of a bike that is not in the list, then
+        on with the issue (spec 2026-10-01, unlisted bike)."""
+        listed = _listed_frame(text, resolved.bikes)
+        if listed is not None:
+            # A listed bike's own frame number: it was in the list after all.
+            state.unlisted_bike = None
+            state.select_bike(bike_ref(listed), bike_name(listed))
+            state.move_to(AWAITING_ISSUE, "bike_selected")
+            topic, source = self._take_pending(state)
+            return self._route_or_ask(topic, state, source)
+        bike = dict(state.unlisted_bike or {"frame_number": None, "model": None})
+        frame = _find_frame(text)
+        if frame and not bike.get("frame_number"):
+            bike["frame_number"] = frame
+        model = known_model(text)
+        if model is None and _model_as_typed(text, bike, frame):
+            model = " ".join(text.split())[:60]
+        if model and not bike.get("model"):
+            bike["model"] = model
+        # The issue, if they gave it here, is kept for when the bike is known.
+        topic = classify_issue(text)
+        if topic and not state.pending_topic:
+            state.pending_topic, state.pending_topic_source = topic, "text"
+        state.unlisted_bike = bike
+        missing = [part for part in ("frame_number", "model") if not bike.get(part)]
+        if missing and state.unlisted_asks < UNLISTED_MAX_ASKS:
+            state.unlisted_asks += 1
+            reply = ASK_FOR_UNLISTED_BIKE if len(missing) == 2 else ASK_FOR_MODEL if missing == ["model"] else ASK_FOR_FRAME
+            return TriageOutcome(reply=reply, reason="unlisted_bike:ask:%s" % "+".join(missing))
+        return self._unlisted_done(state)
+
+    def _unlisted_done(self, state: ConversationState) -> TriageOutcome:
+        bike = state.unlisted_bike or {}
+        state.select_bike(bike.get("frame_number") or UNLISTED_REF, unlisted_label(bike))
+        state.move_to(AWAITING_ISSUE, "unlisted_bike")
+        topic, source = self._take_pending(state)
+        outcome = self._route_or_ask(topic, state, source)
+        if outcome.reason == "issue_unknown":
+            return TriageOutcome(reply="Thanks: %s. %s" % (unlisted_label(bike), outcome.reply), reason=outcome.reason)
+        return outcome
 
     @staticmethod
     def _take_pending(state: ConversationState) -> Tuple[Optional[str], str]:

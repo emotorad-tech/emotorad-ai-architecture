@@ -42,6 +42,7 @@ from .config import Settings, load_settings
 from .contract import Attachment, InboundMessage, Reply
 from .conversation import (
     AWAITING_BIKE_SELECTION,
+    AWAITING_UNLISTED_BIKE,
     HISTORY_TURNS,
     ConversationConflict,
     ConversationState,
@@ -255,7 +256,7 @@ class Runtime:
         self.enricher = ContextEnricher()
         # A customer who says the one bike listed is not theirs goes to
         # registration: the bike they mean is not on this number.
-        self.triage = TriageAgent(TOPIC_AGENTS, unlisted_agent=LATE_WARRANTY)
+        self.triage = TriageAgent(TOPIC_AGENTS)
         # Verify first (the person's decision, 2026-09-30): an anonymous
         # customer proves their number and picks a bike before triage or any
         # model. Off unless asked for; the web chat API turns it on.
@@ -573,7 +574,7 @@ class Runtime:
         meta = message.entry_metadata
         if state.cluster_id is None and meta.get("cluster_id"):
             state.cluster_id = meta["cluster_id"]
-        choosing = self.verify_gate is not None and state.phase == AWAITING_BIKE_SELECTION
+        choosing = self.verify_gate is not None and state.phase in (AWAITING_BIKE_SELECTION, AWAITING_UNLISTED_BIKE)
         if meta.get("pinned_agent") and not choosing:
             # A pin waits while the bike is being chosen (verify first).
             state.route_to(meta["pinned_agent"])
@@ -849,10 +850,6 @@ class Runtime:
                     message, state, outcome.reply or UNSUPPORTED_MESSAGE, "triage",
                     metadata=dict(outcome.metadata, reason=outcome.reason),
                 )}
-            if outcome.agent == LATE_WARRANTY and LATE_WARRANTY in self.agents:
-                # The one bike listed is not theirs: straight to registration,
-                # with no Jev category to route around it.
-                return {"reply": self._run_agent_or_handover(LATE_WARRANTY, message, resolved, state)}
         return {}
 
     def _node_classify(self, turn: Dict[str, Any]) -> Dict[str, Any]:

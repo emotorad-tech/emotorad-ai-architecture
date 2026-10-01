@@ -33,8 +33,11 @@ from .observability import redact_pii
 GREETING = "greeting"
 AWAITING_BIKE_SELECTION = "awaiting_bike_selection"
 AWAITING_ISSUE = "awaiting_issue"
+# The customer said their bike is not in the list: collecting its frame number
+# and model (spec 2026-10-01, unlisted bike).
+AWAITING_UNLISTED_BIKE = "awaiting_unlisted_bike"
 ROUTED = "routed"
-PHASES = (GREETING, AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ROUTED)
+PHASES = (GREETING, AWAITING_BIKE_SELECTION, AWAITING_UNLISTED_BIKE, AWAITING_ISSUE, ROUTED)
 
 
 @dataclass
@@ -54,6 +57,11 @@ class ConversationState:
     # The chosen bike's model and colour, as the rider saw it in the list. For
     # a safety ticket raised when that bike has since left the bike list.
     selected_bike_label: Optional[str] = None
+    # A bike the customer says is not in the list (spec 2026-10-01, unlisted
+    # bike): {"frame_number", "model"} as they gave them, either None if they
+    # never did, and the asks made while collecting them.
+    unlisted_bike: Optional[Dict[str, Optional[str]]] = None
+    unlisted_asks: int = 0
     agent: Optional[str] = None
     # Topic understood before we knew which bike it was about. A customer taps
     # "Battery issue" and *then* picks a bike from three; without this the intent

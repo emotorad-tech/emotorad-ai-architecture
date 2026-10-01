@@ -57,7 +57,7 @@ class ChosenTests(unittest.TestCase):
         state = ConversationState("c1")
         state.move_to(AWAITING_BIKE_SELECTION, "verified")
         state.pending_topic = "battery"
-        outcome = TriageAgent({"battery": "battery_support"}, unlisted_agent="late").handle(
+        outcome = TriageAgent({"battery": "battery_support"}).handle(
             InboundMessage(conversation_id="c1", persona="customer", channel="website_chat", message_text="yes",
                            identity=Identity(strength=VERIFIED, phone=RIDER_B, em_aid="a")), who, state)
         self.assertEqual(outcome.agent, "battery_support")

@@ -23,6 +23,7 @@ from emotorad_ai.runtime import Runtime
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import build_registry
 from emotorad_ai.tools.verification import VerificationStore
+from emotorad_ai.triage import ASK_FOR_UNLISTED_BIKE
 from emotorad_ai.verify_first import PHOTO_SAFETY
 
 TODAY = date(2026, 9, 30)
@@ -156,12 +157,15 @@ class OneBikeTests(unittest.TestCase):
         self.assertEqual(chat.state().selected_frame, "EMXP2025004417")
         self.assertEqual(chat.state().agent, battery_support.AGENT_NAME)
 
-    def test_no_goes_to_warranty_registration(self):
+    def test_no_asks_for_the_frame_number_and_model(self):
+        # The bike not listed (spec 2026-10-01, unlisted bike): asked for, no
+        # route to late registration, and no model call for it.
         chat = Chat(replies=[say("Let's register it. What's the frame number?")])
         chat.verify(phone=ONE_BIKE)
-        chat.say("no")
-        self.assertEqual(chat.state().agent, late_warranty.AGENT_NAME)
-        self.assertEqual(len(chat.llm.requests), 1)
+        reply = chat.say("no")
+        self.assertIn(ASK_FOR_UNLISTED_BIKE, reply.text)
+        self.assertIsNone(chat.state().agent)
+        self.assertEqual(len(chat.llm.requests), 0)
 
 
 class NoBikeTests(unittest.TestCase):
