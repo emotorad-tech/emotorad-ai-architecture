@@ -86,6 +86,7 @@ from .guardrails import (
 )
 from .errorcodes import load_table
 from .identity import IdentityResolver, ResolvedIdentity
+from . import origin as origin_place
 from .jev import JevError
 from .knowledge import KnowledgeBase
 from .llm import BedrockClaude
@@ -453,6 +454,7 @@ class Runtime:
         fresh.escalated = fresh.escalated or ours.escalated
         fresh.ticket_id = reply.ticket_id or fresh.ticket_id
         fresh.evidence_seen = fresh.evidence_seen or ours.evidence_seen
+        fresh.origin = fresh.origin or ours.origin
         fresh.disclosed = fresh.disclosed or ours.disclosed
         # What this turn learnt stands: its lookup, if it made one, is the
         # newer one (otherwise the other server's stands: ours is only what we
@@ -547,6 +549,7 @@ class Runtime:
             strength=resolved.identity.strength,
             error=resolved.error,
         )
+        self._note_origin(message, state, resolved)
 
         # Built once per conversation and cached on the state. Rebuilding it every
         # turn costs queries, moves the block in the prompt (defeating prefix
@@ -574,6 +577,37 @@ class Runtime:
         # customer's turn is built for the model (_note_customer_turn), and
         # only when that turn shows a photo or video.
         return {"message": message, "conversation": state, "resolved": resolved}
+
+    def _note_origin(self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity) -> None:
+        """Where this run comes from, for reporting (spec 2026-10-01): set from
+        its first message, then only filled in. An unknown country takes the
+        country of a phone proven later; the record takes the person once
+        known, so an erasure by phone finds a run that began anonymous. Never
+        stops the turn: a failed write is logged and tried again next turn."""
+        phone = resolved.identity.phone if resolved.identity.may_disclose else None
+        current = state.origin
+        if current is None:
+            place = origin_place.choose(origin_place.place_from_dict(message.entry_metadata.get("origin")),
+                                        origin_place.from_phone(phone))
+            updated = dict(place.as_dict(), user_key=state.user_key)
+        else:
+            updated = dict(current)
+            if current["country"] == origin_place.UNKNOWN.country:
+                by_phone = origin_place.from_phone(phone)
+                if by_phone is not None:
+                    updated.update(by_phone.as_dict())
+            if state.user_key and not current.get("user_key"):
+                updated["user_key"] = state.user_key
+            if updated == current:
+                return
+        record = dict(updated, _id=summary_key(state.conversation_id, state.started_at),
+                      conversation_id=state.conversation_id, started_at=state.started_at, channel=message.channel)
+        try:
+            self.conversations.record_origin(record)
+        except Exception as exc:
+            self.log.emit("origin_record_failed", message.conversation_id, error=type(exc).__name__)
+            return
+        state.origin = updated
 
     def _node_safety(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 1. Safety. A keyword gate ahead of the agent turn, not something the

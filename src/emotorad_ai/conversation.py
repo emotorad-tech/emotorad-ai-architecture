@@ -115,6 +115,9 @@ class ConversationState:
     turn_offset: int = 0
     user_key: Optional[str] = None
     started_at: Optional[str] = None
+    # Where this run came from (origin.py): the place fields and the person
+    # once known. Set from the run's first message; only filled in after.
+    origin: Optional[Dict[str, Any]] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None
