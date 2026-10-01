@@ -45,7 +45,7 @@ USER = "PHONE#+919876543210"
 CTX = ToolContext(conversation_id="c1", phone="+919876543210")
 TICKET = {"category": "battery_charging", "severity": "normal", "description": "LED stays off.", "idempotency_key": "k1"}
 TICKET_CALL = call_tool(CREATE_SUPPORT_TICKET, dict(TICKET), "toolu_1")
-COLLECTIONS = ("conversations", "transcript_turns", "conversation_summaries", "idempotency_keys")
+COLLECTIONS = ("conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "conversation_origins")
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
@@ -282,12 +282,15 @@ class ErasureTests(unittest.TestCase):
         store.save(state)
         store.record_turn(state, inbound("signed in"), reply("Hello."), summary("c1"))
         MongoIdempotencyStore(db, now=lambda: NOW).put("c1:book_service_slot:k", ok({"booking_id": "BK-1"}))
+        store.record_origin({"_id": "c1#run", "conversation_id": "c1", "started_at": "run", "channel": "website_chat",
+                             "country": "IN", "region": None, "city": None, "source": "phone", "db": None,
+                             "user_key": USER})
         before = {name: db[name].count_documents({}) for name in COLLECTIONS}
         dry = store.delete_person(USER, dry_run=True)
         self.assertEqual({name: db[name].count_documents({}) for name in COLLECTIONS}, before)
         real = store.delete_person(USER)
         self.assertEqual(real, {"conversations": 1, "transcript_turns": 4, "conversation_summaries": 1,
-                                "idempotency_keys": 1, "media": 0})
+                                "idempotency_keys": 1, "media": 0, "conversation_origins": 1})
         self.assertEqual(dry, real)
 
     def test_a_conversation_with_no_summary_yet_is_still_erased(self):
