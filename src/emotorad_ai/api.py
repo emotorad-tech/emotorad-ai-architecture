@@ -53,6 +53,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
+from .client_ip import client_ip, trusted_from_env
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
@@ -371,6 +372,9 @@ message_limiter = RateLimiter(limit=20, window_seconds=60.0)
 # memory, and a message can carry at most a few attachments, so a caller
 # minting presigns faster than they can send messages is not a customer.
 upload_limiter = RateLimiter(limit=20, window_seconds=60.0)
+# The proxies whose X-Real-IP is believed (client_ip.py). Without this every
+# customer behind nginx shared one limit.
+TRUSTED_PROXIES = trusted_from_env()
 
 
 class AttachmentOut(BaseModel):
@@ -458,7 +462,7 @@ def _cluster_for_session(session_token: str, em_aid: Optional[str] = None) -> st
 
 @app.post("/uploads")
 def post_upload(body: UploadIn, request: Request) -> Dict[str, Any]:
-    if not upload_limiter.allow(request.client.host if request.client else None):
+    if not upload_limiter.allow(client_ip(request, TRUSTED_PROXIES)):
         raise HTTPException(
             status_code=429,
             detail="Too many uploads. Wait a moment and try again.",
@@ -712,7 +716,7 @@ def _summarise_video(key: str, mime: str) -> Optional[str]:
 
 @app.post("/message", response_model=MessageOut)
 def post_message(body: MessageIn, request: Request) -> MessageOut:
-    if not message_limiter.allow(request.client.host if request.client else None):
+    if not message_limiter.allow(client_ip(request, TRUSTED_PROXIES)):
         raise HTTPException(
             status_code=429,
             detail="Too many messages. Wait a moment and try again.",
