@@ -82,6 +82,8 @@ from .guardrails import (
     check_human_handoff,
     check_order_claim,
     check_safety,
+    claims_ticket,
+    gives_safety_stop,
     check_safety_in_description,
 )
 from .errorcodes import load_table
@@ -1178,6 +1180,25 @@ class Runtime:
                 already_in_history=True,
             )
 
+        # The backstop (spec 2026-10-01): a reply that gives safety stop
+        # instructions must come with the safety ticket, and a reply that says
+        # a ticket exists must have one.
+        raised = any(call.get("tool") == CREATE_SUPPORT_TICKET and not is_error(call.get("result") or {})
+                     for call in turn.tool_calls)
+        if not raised:
+            hazards = gives_safety_stop(turn.text)
+            if hazards:
+                turn = self._safety_backstop(message, resolved, state, turn, hazards)
+            elif state.ticket_id is None and claims_ticket(turn.text):
+                self.log.guardrail(message.conversation_id, "ticket_promise_unbacked",
+                                   {"suppressed_text": turn.text})
+                self.log.escalation(message.conversation_id, "ticket_promise_unbacked", turn.ticket_id)
+                return self._finish(
+                    message, state, HANDOVER_TEXT + self._already_done(turn), "guardrail:ticket_promise_unbacked",
+                    escalated=True, ticket_id=turn.ticket_id,
+                    metadata={"suppressed_text": turn.text}, already_in_history=True,
+                )
+
         return Reply(
             conversation_id=message.conversation_id,
             text=self._outbound(turn.text, state, message.channel),
@@ -1233,6 +1254,90 @@ class Runtime:
         evidence = check_evidence(text, state.evidence_seen)
         return coverage, order, evidence
 
+    def _raise_safety_ticket(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity, description: str
+    ) -> Optional[str]:
+        """The priority safety ticket, one per conversation run: the safety
+        gate's, and the backstop's when a reply gave safety instructions
+        without one (spec 2026-10-01). The ticket id, or None."""
+        arguments: Dict[str, Any] = {
+            "category": "battery_safety",
+            "severity": "critical",
+            "description": description,
+            # One ticket per run of the conversation: repeats inside a run
+            # share it, and a thread that returns after its working state
+            # expired (48 h; receipts live 7 days) raises a new one rather
+            # than being quoted the old reference (the person's decision,
+            # 2026-09-29). A run is the id and its start, as for summaries.
+            "idempotency_key": "safety:%s:%s" % (message.conversation_id, state.started_at or ""),
+        }
+        # With several bikes the ticket needs one named, and triage may not
+        # have run yet — the safety branch fires before it.
+        # The chosen bike goes as the conversation's choice, not as a
+        # frame number: if this turn's bike list no longer holds it (Amigo
+        # stopped answering since it was chosen), the ticket is raised
+        # without a bike, naming it here, rather than refused.
+        late: Dict[str, Any] = {}
+        if state.selected_frame:
+            late["selected_bike"] = lambda: state.selected_frame
+            if state.selected_bike_label:
+                arguments["description"] += " The rider's bike: %s." % state.selected_bike_label
+        elif resolved.single_bike:
+            arguments["frame_number"] = bike_ref(resolved.single_bike)
+
+        # Raised even if the receipt store is down: a duplicate safety
+        # ticket is a lesser harm than none.
+        self.log.tool_request(message.conversation_id, CREATE_SUPPORT_TICKET)
+        started = time.monotonic()
+        envelope = self.registry.call(
+            CREATE_SUPPORT_TICKET,
+            arguments,
+            ToolContext(
+                conversation_id=message.conversation_id,
+                phone=resolved.identity.phone,
+                cluster_id=resolved.cluster_id,
+                late=late,
+            ),
+            run_without_idempotency=True,
+        )
+        self.log.tool_call(
+            message.conversation_id, CREATE_SUPPORT_TICKET, {"category": "battery_safety"}, envelope,
+            duration_ms=int(round((time.monotonic() - started) * 1000)),
+        )
+        return None if is_error(envelope) else envelope["data"]["ticket_id"]
+
+    def _safety_backstop(
+        self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState, turn: Any,
+        hazards: List[str],
+    ) -> Any:
+        """A reply gave safety stop instructions about a hazard and no ticket
+        was raised: raise the safety ticket here and add its reference. The
+        model wrote "I'm raising an urgent support ticket" about a smoking
+        battery and raised nothing (staging, 2026-10-01). Never stops the
+        reply: a failure is logged and the reply goes as written."""
+        if not resolved.identity.phone:
+            return turn
+        description = (
+            "Automatic safety escalation: the assistant gave safety instructions without raising a ticket. "
+            "Customer wrote: %s. Assistant replied: %s. Matched safety indicators: %s."
+            % (message.message_text or "(a photo or video, no text)", turn.text, ", ".join(hazards))
+        )
+        try:
+            ticket_id = self._raise_safety_ticket(message, state, resolved, description)
+        except Exception as exc:
+            self.log.emit("safety_backstop_failed", message.conversation_id, error=type(exc).__name__)
+            return turn
+        if not ticket_id:
+            self.log.emit("safety_backstop_failed", message.conversation_id, error="no_ticket")
+            return turn
+        self.log.guardrail(message.conversation_id, "safety_backstop", hazards)
+        self.log.escalation(message.conversation_id, "safety_backstop", ticket_id)
+        text = turn.text or ""
+        if ticket_id not in text:
+            text = text.rstrip() + "\n\nI have raised this as a priority safety case, reference %s." % ticket_id
+            replace_turn_text(state.history, text)
+        return replace(turn, text=text, ticket_id=ticket_id, escalate=True)
+
     def _handle_safety(
         self,
         message: InboundMessage,
@@ -1255,53 +1360,8 @@ class Runtime:
                 # The trigger came from the clip, and the typed text may say
                 # nothing alarming: the safety team needs what the analyser
                 # saw, not just "video attached".
-                description += " Seen in the customer's video: %s" % " ".join(evidence)
-            arguments: Dict[str, Any] = {
-                "category": "battery_safety",
-                "severity": "critical",
-                "description": description,
-                # One ticket per run of the conversation: repeats inside a run
-                # share it, and a thread that returns after its working state
-                # expired (48 h; receipts live 7 days) raises a new one rather
-                # than being quoted the old reference (the person's decision,
-                # 2026-09-29). A run is the id and its start, as for summaries.
-                "idempotency_key": "safety:%s:%s" % (message.conversation_id, state.started_at or ""),
-            }
-            # With several bikes the ticket needs one named, and triage may not
-            # have run yet — the safety branch fires before it.
-            # The chosen bike goes as the conversation's choice, not as a
-            # frame number: if this turn's bike list no longer holds it (Amigo
-            # stopped answering since it was chosen), the ticket is raised
-            # without a bike, naming it here, rather than refused.
-            late: Dict[str, Any] = {}
-            if state.selected_frame:
-                late["selected_bike"] = lambda: state.selected_frame
-                if state.selected_bike_label:
-                    arguments["description"] += " The rider's bike: %s." % state.selected_bike_label
-            elif resolved.single_bike:
-                arguments["frame_number"] = bike_ref(resolved.single_bike)
-
-            # Raised even if the receipt store is down: a duplicate safety
-            # ticket is a lesser harm than none.
-            self.log.tool_request(message.conversation_id, CREATE_SUPPORT_TICKET)
-            started = time.monotonic()
-            envelope = self.registry.call(
-                CREATE_SUPPORT_TICKET,
-                arguments,
-                ToolContext(
-                    conversation_id=message.conversation_id,
-                    phone=resolved.identity.phone,
-                    cluster_id=resolved.cluster_id,
-                    late=late,
-                ),
-                run_without_idempotency=True,
-            )
-            self.log.tool_call(
-                message.conversation_id, CREATE_SUPPORT_TICKET, {"category": "battery_safety"}, envelope,
-                duration_ms=int(round((time.monotonic() - started) * 1000)),
-            )
-            if not is_error(envelope):
-                ticket_id = envelope["data"]["ticket_id"]
+                description += " Seen in the customer's photo or video: %s" % " ".join(evidence)
+            ticket_id = self._raise_safety_ticket(message, state, resolved, description)
 
         text = SAFETY_MESSAGE
         if ticket_id:
