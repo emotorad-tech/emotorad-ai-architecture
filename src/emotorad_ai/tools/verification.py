@@ -98,6 +98,9 @@ class _Pending:
     # The time of day of the same moment, for a person to read (an erasure
     # request's proof). verified_at is monotonic and means nothing to them.
     verified_on: str = ""
+    # The customer asked to use another number (cancel_code): the code can no
+    # longer be used or resent, but its attempts still count.
+    cancelled: bool = False
 
     def code_expired(self, now: float) -> bool:
         return now - self.issued_at > CODE_TTL_SECONDS
@@ -183,7 +186,7 @@ class VerificationStore:
     def check(self, conversation_id: str, code: str) -> bool:
         with self._lock:
             pending = self._pending.get(conversation_id)
-            if pending is None or pending.attempts >= MAX_ATTEMPTS:
+            if pending is None or pending.cancelled or pending.attempts >= MAX_ATTEMPTS:
                 return False
             # An expired code fails without costing an attempt: the customer has
             # done nothing wrong, and they need a fresh code, not a lockout.
@@ -222,7 +225,7 @@ class VerificationStore:
         """The outstanding code — for the harness to display. Never for the model."""
         with self._lock:
             pending = self._pending.get(conversation_id)
-            if pending is None or pending.verified:
+            if pending is None or pending.verified or pending.cancelled:
                 return None
             if pending.code_expired(self.clock()):
                 return None
@@ -237,7 +240,7 @@ class VerificationStore:
         """
         with self._lock:
             pending = self._pending.get(conversation_id)
-            if pending is None or pending.verified:
+            if pending is None or pending.verified or pending.cancelled:
                 return None
             return pending.phone
 
@@ -245,6 +248,16 @@ class VerificationStore:
         with self._lock:
             pending = self._pending.get(conversation_id)
             return MAX_ATTEMPTS - (pending.attempts if pending else 0)
+
+    def cancel_code(self, conversation_id: str) -> None:
+        """The outstanding code, voided: it can no longer be used or resent.
+        The attempts stay, as they do on a re-request (MAX_ATTEMPTS), so asking
+        for another number is not a way to buy more guesses (the final review,
+        2026-10-02). A proved number is left alone: reset() forgets that."""
+        with self._lock:
+            pending = self._pending.get(conversation_id)
+            if pending is not None and not pending.verified:
+                pending.cancelled = True
 
     def reset(self, conversation_id: str) -> None:
         with self._lock:

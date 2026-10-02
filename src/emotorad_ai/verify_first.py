@@ -344,9 +344,10 @@ class VerifyFirst:
 
     def _change_number(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
         """Another number, at the number or the code step: a code waiting for
-        the old one is cancelled (spec 2026-10-02). The lock is checked first
-        in handle(), so a locked step stays locked."""
-        self.store.reset(message.conversation_id)
+        the old one is cancelled (spec 2026-10-02), keeping its wrong-code
+        attempts (the final review). The lock is checked first in handle(), so
+        a locked step stays locked."""
+        self.store.cancel_code(message.conversation_id)
         state.verify_step = NUMBER
         state.verify_masked = None
         return self._reply(message, state, CHANGE_NUMBER, "change_number", text)

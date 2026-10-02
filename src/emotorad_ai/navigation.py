@@ -48,7 +48,8 @@ def _whole(body: str, after: str = "") -> "re.Pattern[str]":
 
 _CHANGE_NUMBER = _whole(
     r"(?:(?:that'?s|it'?s|that\s+is|this\s+is)\s+)?(?:the\s+|a\s+)?wrong\s+(?:mobile\s+|phone\s+)?(?:number|no)"
-    r"|(?:change|update|edit|correct|fix)\s+(?:the\s+|my\s+)?(?:mobile\s+|phone\s+)?(?:number|no)"
+    # Not "correct number": in Indian English that is a yes (the final review).
+    r"|(?:change|update)\s+(?:the\s+|my\s+)?(?:mobile\s+|phone\s+)?(?:number|no)"
     r"|(?:use|try|give(?:\s+you)?|enter|send)\s+(?:a\s+|an\s+)?(?:another|different|other|new)\s+"
     r"(?:mobile\s+|phone\s+)?(?:number|no)"
     r"|(?:(?:that'?s|it'?s|this\s+is)\s+)?not\s+my\s+(?:mobile\s+|phone\s+)?(?:number|no)"
@@ -58,10 +59,9 @@ _CHANGE_NUMBER = _whole(
 )
 _CHANGE_BIKE = _whole(
     r"not\s+(?:this|that)\s+(?:one|bike|cycle)"
-    r"|(?:(?:it'?s|that'?s)\s+)?(?:the\s+|a\s+)?wrong\s+(?:bike|cycle|one)"
+    r"|(?:(?:it'?s|that'?s)\s+)?(?:the\s+|a\s+)?wrong\s+(?:bike|cycle)"
     r"|(?:change|switch)\s+(?:the\s+|my\s+)?(?:bike|cycle)"
     r"|(?:(?:it'?s|i\s+mean|i\s+meant)\s+)?(?:about\s+)?(?:a\s+|the\s+|my\s+)?(?:different|other|another)\s+(?:bike|cycle)"
-    r"|a\s+different\s+one"
     r"|(?:doosri|dusri|doosra|dusra)\s+(?:bike|cycle|wali|wala)|(?:ye|yeh)\s+(?:wali|wala)\s+(?:nahi|nahin|nhi)"
     r"|दूसरी\s+(?:बाइक|साइकिल)|(?:ये|यह)\s+वाली\s+नहीं"
 )
@@ -73,15 +73,17 @@ _LIST = _whole(
 )
 _START_OVER = _whole(
     r"start\s+(?:over|again|afresh|from\s+(?:the\s+)?(?:beginning|start|scratch))"
-    r"|restart(?:\s+(?:the\s+)?(?:chat|conversation))?"
+    r"|restart\s+(?:the\s+)?(?:chat|conversation)"
     r"|(?:begin|go)\s+(?:again|from\s+(?:the\s+)?(?:beginning|start))"
     r"|from\s+the\s+(?:beginning|start)"
     r"|(?:phir\s+se\s+)?shuru\s+se(?:\s+(?:karo|karte\s+hai|karte\s+hain))?|phir\s+se\s+shuru(?:\s+karo)?|शुरू\s+से"
 )
-# "restart?" alone is the customer asking about a step ("restart the bike"),
-# not asking to start over.
-_RESTART_QUESTION = re.compile(r"^[\W_]*restart[\W_]*\?[\W_]*$", re.IGNORECASE)
-_MOBILE = re.compile(r"\b(?:mobile|phone|cell)\b|मोबाइल|फ़ोन|फोन", re.IGNORECASE)
+# A bare "restart" starts over only as the whole message, with no lead and no
+# question: "ok let me restart" and "restart?" answer a troubleshooting step
+# ("switch it off and restart it"), and starting over there lost the bike and
+# the problem (the final review, 2026-10-02).
+_BARE_RESTART = re.compile(r"^\s*restart\s*[.!]*\s*$", re.IGNORECASE)
+_MOBILE = re.compile(r"\b(?:mobile|phone|cell)\b|\bmy\s+(?:number|no)\b|मोबाइल|फ़ोन|फोन", re.IGNORECASE)
 
 
 def is_greeting_only(text: str) -> bool:
@@ -93,7 +95,9 @@ def wants_change_number(text: str) -> bool:
 
 
 def wants_change_bike(text: str) -> bool:
-    return bool(_CHANGE_BIKE.match(text or ""))
+    # A question ("other bike?", "not this one?") echoes the agent rather
+    # than asking to change bike (the final review, 2026-10-02).
+    return bool(_CHANGE_BIKE.match(text or "")) and not (text or "").rstrip().endswith("?")
 
 
 def wants_list(text: str) -> bool:
@@ -101,7 +105,7 @@ def wants_list(text: str) -> bool:
 
 
 def wants_start_over(text: str) -> bool:
-    return bool(_START_OVER.match(text or "")) and not _RESTART_QUESTION.match(text or "")
+    return bool(_START_OVER.match(text or "") or _BARE_RESTART.match(text or ""))
 
 
 def names_the_mobile(text: str) -> bool:

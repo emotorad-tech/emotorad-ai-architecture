@@ -30,7 +30,7 @@ from .conversation import (
 )
 from .contract import InboundMessage
 from .identity import ResolvedIdentity
-from .navigation import GREETING_TEXT, is_greeting_only
+from .navigation import GREETING_TEXT, is_greeting_only, names_the_mobile, wants_change_number
 from .tools import fixtures
 from .tools.amigo import MODEL_NAMES
 
@@ -608,6 +608,12 @@ class TriageAgent:
         """The frame number and model of a bike that is not in the list,
         confirmed once (spec 2026-10-02), then on with the issue (spec
         2026-10-01, unlisted bike)."""
+        if (wants_change_number(text) and not names_the_mobile(text)
+                and (state.unlisted_bike or {}).get("frame_number")):
+            # "sorry wrong number": the frame number just given, typed wrong
+            # (the final review, 2026-10-02).
+            state.unlisted_bike = dict(state.unlisted_bike, frame_number=None)
+            return TriageOutcome(reply=ASK_RIGHT_FRAME, reason="unlisted_bike:correct")
         listed = _listed_frame(text, resolved.bikes)
         if listed is not None:
             # A listed bike's own frame number: confirmed once before it is

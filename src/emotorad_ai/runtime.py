@@ -162,6 +162,9 @@ AGENT_TITLES = {
 TOPIC_AGENTS = {"battery": BATTERY_SUPPORT, "motor": MOTOR_SUPPORT}
 # The topic an agent works on, kept when the customer changes bike mid-chat.
 _TOPIC_OF_AGENT = {agent: topic for topic, agent in TOPIC_AGENTS.items()}
+# Where some other number is being asked for or talked about (a frame number,
+# an invoice number): a plain "wrong number" there does not mean the mobile.
+_NUMBER_ASKED_BY_OTHERS = (AWAITING_UNLISTED_BIKE, AWAITING_BIKE_CONFIRMATION, ROUTED)
 DEALER_AGENTS = {"order": DEALER_ORDERS}
 
 # What a surface needs to establish identity inside the conversation, when the
@@ -709,8 +712,10 @@ class Runtime:
         if resolved.persona != "customer" or state.erasure_step == erasure_rules.CONFIRMING:
             return {}
         text = message.message_text or ""
-        if wants_change_number(text) and (state.phase != AWAITING_BIKE_CONFIRMATION or names_the_mobile(text)):
-            # While a bike is confirmed, "wrong number" is its frame number.
+        if wants_change_number(text) and (state.phase not in _NUMBER_ASKED_BY_OTHERS or names_the_mobile(text)):
+            # While a frame number is given or confirmed, or an agent is
+            # talking, "wrong number" is about whatever was asked; only "my",
+            # "mobile" or "phone" wording means the mobile (the final review).
             return self._navigate_number(message, state, resolved)
         bikes = resolved.bikes
         if not bikes or not resolved.may_disclose:

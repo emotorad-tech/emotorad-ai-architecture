@@ -58,7 +58,7 @@ class ChangeNumberTests(unittest.TestCase):
     def test_mid_troubleshooting(self):
         chat = Chat(replies=[CHECK])
         troubleshooting(chat)
-        self.assertEqual(chat.say("wrong number").handled_by, "verify_first:change_number")
+        self.assertEqual(chat.say("wrong mobile number").handled_by, "verify_first:change_number")
         self.assertIsNone(chat.state().agent)
 
     def test_a_new_number_in_the_same_message_gets_its_code(self):
