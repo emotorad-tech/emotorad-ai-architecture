@@ -107,6 +107,16 @@ class SeamContract:
         self.assertEqual((record["created_at"], record["next_attempt_at"], record["state"]),
                          (T0, plus(T0, 120), "waiting"))
 
+    def test_a_number_typed_in_devanagari_digits_is_hidden_in_the_summary(self):
+        # Digits of any script are read as ASCII before the summary is cleaned (digits.ascii_digits).
+        desk = self.desk()
+        desk.create(source_key=KEY, persona="customer",
+                    **support_fields(description="LED band. मेरा नंबर ९८७६५४३२१० है, call after five"))
+        summary = desk.store.get("EM-1000001")["summary"]
+        self.assertEqual(summary, "LED band. मेरा नंबर [phone] है, call after five")
+        self.assertNotIn("९८७६५", summary)
+        self.assertNotIn("98765", summary)
+
     def test_the_same_source_key_is_one_record_even_from_a_second_server(self):
         first_desk = self.desk()
         first = first_desk.create(source_key=KEY, persona="customer", **support_fields())

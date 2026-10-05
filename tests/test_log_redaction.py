@@ -9,9 +9,10 @@ The log is gitignored and untracked, so none of this reached the public repo. It
 still sat unencrypted on a laptop.
 """
 
+import json
 import unittest
 
-from emotorad_ai.observability import EventLog, redact_pii
+from emotorad_ai.observability import EventLog, redact_fields, redact_pii
 
 
 class RedactPiiTests(unittest.TestCase):
@@ -44,6 +45,24 @@ class IdentifiersAreNotPhonesTests(unittest.TestCase):
     def test_a_number_after_a_label_still_goes(self):
         self.assertEqual(redact_pii("mobile: 9876543210, call me"), "mobile: [phone], call me")
         self.assertEqual(redact_pii("reach me on +91 98765-43210."), "reach me on [phone].")
+
+    def test_an_id_that_starts_with_ten_digits_and_letters_is_left_alone(self):
+        """Spec 2026-10-05, section 8. The glued-number rule must not reach
+        into an identifier. In a key the digits follow a slash or an
+        underscore. In a hex id the letters are a to f only, or they run on
+        into more digits, a dash or a file extension."""
+        for text in (
+            "customers/c1/images/9876543210abcd.jpg",
+            "upl_9876543210qx",
+            "9876543210abcdef",
+            "9876543210ab12cd",
+            "trace 9876543210abc-4cd2-8a28 saved",
+        ):
+            self.assertEqual(redact_pii(text), text)
+
+    def test_a_hex_id_in_a_logged_field_is_left_alone(self):
+        event = EventLog(path=None).emit("tool_call", "c1", result={"data": {"id": "9876543210abcdef"}})
+        self.assertEqual(event["result"]["data"]["id"], "9876543210abcdef")
 
 
 class ToolArgumentsAreRedactedTests(unittest.TestCase):
@@ -181,6 +200,97 @@ class ErrorCodesStayReadableTests(unittest.TestCase):
         self.log.tool_call("c1", "some_tool", {}, {"errors": [{"code": "039760"}]})
         self.assertNotIn("039760", str(self.log.events[-1]))
         self.assertEqual(self.log.events[-1]["result"]["errors"][0]["code"], "[redacted]")
+
+
+class GluedNumbersTests(unittest.TestCase):
+    """A number typed straight against a word (spec 2026-10-05, section 8).
+    Transcripts now go to Zoho, so whatever the log misses, a third party keeps."""
+
+    def test_english_letters_after_the_number(self):
+        self.assertEqual(redact_pii("9876543210pls"), "[phone]pls")
+        self.assertEqual(redact_pii("call me on 9876543210asap."), "call me on [phone]asap.")
+        self.assertEqual(redact_pii("ring 98765 43210please"), "ring [phone]please")
+        self.assertEqual(redact_pii("+919876543210pls"), "[phone]pls")
+
+    def test_hinglish_letters_after_the_number(self):
+        self.assertEqual(redact_pii("mera number 9876543210hai"), "mera number [phone]hai")
+        self.assertEqual(redact_pii("isi 9876543210pe call karo"), "isi [phone]pe call karo")
+
+    def test_devanagari_after_the_number(self):
+        self.assertEqual(redact_pii("नंबर 9876543210पर कॉल करें"), "नंबर [phone]पर कॉल करें")
+
+    def test_devanagari_before_the_number(self):
+        self.assertEqual(redact_pii("नंबर9876543210 है"), "नंबर[phone] है")
+
+    def test_letters_then_a_full_stop_then_devanagari_still_goes(self):
+        """A full stop with no space after it, then Hindi. `\\w` would read the
+        next Devanagari letter as a run-on and the number would stay."""
+        self.assertEqual(redact_pii("call 9876543210pls.धन्यवाद"), "call [phone]pls.धन्यवाद")
+
+
+class DevanagariDigitsTests(unittest.TestCase):
+    """Digits typed on a Hindi keyboard are the same digits (digits.ascii_digits)."""
+
+    def test_a_number_in_devanagari_digits_goes(self):
+        self.assertEqual(redact_pii("मेरा नंबर ९८७६५४३२१० है"), "मेरा नंबर [phone] है")
+
+    def test_hinglish_with_devanagari_digits_in_groups(self):
+        self.assertEqual(redact_pii("mera number ९८७६५ ४३२१० hai"), "mera number [phone] hai")
+
+    def test_devanagari_digits_glued_to_devanagari(self):
+        self.assertEqual(redact_pii("मेरा नंबर ९८७६५४३२१०पर"), "मेरा नंबर [phone]पर")
+
+    def test_a_code_in_devanagari_digits_is_still_hidden(self):
+        self.assertEqual(redact_pii("०३९७६०"), "[6 digits]")
+
+
+class OtherCountriesNumbersTests(unittest.TestCase):
+    """A +<country code> number (spec 2026-10-05, section 8): customers in Spain
+    write to the same chat."""
+
+    def test_a_spanish_number_goes(self):
+        self.assertEqual(redact_pii("llámame al +34 612 345 678"), "llámame al [phone]")
+        self.assertEqual(redact_pii("+34612345678"), "[phone]")
+
+    def test_a_foreign_number_typed_straight_after_a_devanagari_word_goes(self):
+        self.assertEqual(redact_pii("नंबर+34612345678"), "नंबर[phone]")
+
+    def test_a_plus_sign_inside_a_longer_token_is_left_alone(self):
+        self.assertEqual(redact_pii("ref ab+34612345678"), "ref ab+34612345678")
+
+    def test_other_groupings_go(self):
+        self.assertEqual(redact_pii("UK office +44 20 7946 0958."), "UK office [phone].")
+        self.assertEqual(redact_pii("call +1 (415) 555-0100 now"), "call [phone] now")
+
+    def test_an_indian_number_is_still_one_phone(self):
+        self.assertEqual(redact_pii("reach me on +91 98765-43210."), "reach me on [phone].")
+
+    def test_a_plus_sign_on_a_short_figure_is_left_alone(self):
+        self.assertEqual(redact_pii("range +15 km after the update"), "range +15 km after the update")
+
+
+class SecretFieldsTests(unittest.TestCase):
+    """Zoho's OAuth values are removed by name wherever they appear in an event
+    (spec 2026-10-05, section 8). They are secret because of what they are,
+    not what they look like."""
+
+    def test_each_oauth_field_is_redacted(self):
+        event = EventLog(path=None).emit(
+            "zoho_token_refused", "-",
+            access_token="1000.aaaa.bbbb", refresh_token="1000.cccc.dddd",
+            client_secret="test-client-secret", error="invalid_client_secret",
+        )
+        for name in ("access_token", "refresh_token", "client_secret"):
+            self.assertEqual(event[name], "[redacted]")
+        self.assertEqual(event["error"], "invalid_client_secret")
+        self.assertNotIn("1000.", json.dumps(event))
+        self.assertNotIn("test-client-secret", json.dumps(event))
+
+    def test_an_authorization_header_is_redacted_whatever_its_case(self):
+        self.assertEqual(
+            redact_fields({"headers": {"Authorization": "Zoho-oauthtoken 1000.aaaa.bbbb", "orgId": "60001234567"}}),
+            {"headers": {"Authorization": "[redacted]", "orgId": "60001234567"}},
+        )
 
 
 if __name__ == "__main__":

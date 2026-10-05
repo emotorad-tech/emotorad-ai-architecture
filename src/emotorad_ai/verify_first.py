@@ -18,12 +18,15 @@ step (`VerifyFirst`).
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from .contract import InboundMessage
 from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState, utc_now_iso
+# ascii_digits lives in digits.py so observability.py can use it without an
+# import cycle. It is imported here by name, so `verify_first.ascii_digits`
+# still works for anything that reads it from this module.
+from .digits import ascii_digits
 from .identity import IdentityResolver, ResolvedIdentity
 from .navigation import GREETING_TEXT, is_greeting_only, wants_change_number
 from .observability import LOOSE_PHONE
@@ -151,14 +154,6 @@ MAX_CODES = 3
 
 def tries(left: int) -> str:
     return "1 try" if left == 1 else "%d tries" % left
-
-
-def ascii_digits(text: str) -> str:
-    """Digits of any script (Devanagari ९७००…) as ASCII, everything else as typed."""
-    return "".join(
-        str(unicodedata.decimal(ch)) if not ch.isascii() and unicodedata.decimal(ch, None) is not None else ch
-        for ch in text
-    )
 
 
 # -- the step ----------------------------------------------------------------
