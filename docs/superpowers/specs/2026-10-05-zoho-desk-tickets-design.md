@@ -687,14 +687,16 @@ The disclosure line still reaches every new reply through `_outbound`.
   body, because `registry.py:295-296` copies `str(exc)` to the model and the log.
 - Events: `ticket_recorded`, `zoho_ticket_sent` (reference, Zoho number,
   attempts, credits remaining), `zoho_retry`, `zoho_rejected`,
-  `zoho_token_refused`, `zoho_misconfigured`, `zoho_worker_error`,
+  `zoho_token_refused`, `zoho_misconfigured`, `zoho_worker_error`, `zoho_worker_store_unavailable`,
   `zoho_ticket_stuck`, `safety_ticket_late`, `safety_ticket_not_recorded`,
   `unverified_ticket_capped`.
 - **Alarms.** A CloudWatch metric filter on the deployment's log group (today
   `emotorad-ai-stage`). It watches `zoho_misconfigured`, `zoho_token_refused`,
   `zoho_worker_error`, `zoho_ticket_stuck`, `safety_ticket_late`,
   `safety_ticket_not_recorded` and `unverified_ticket_capped`, with an alarm
-  that emails a named person (person step 9). It is defined in `infra/` with the
+  that emails a named person (person step 9). Added 5 October after the final
+  review: `zoho_worker_store_unavailable`, alarmed only when it is logged in each
+  of three consecutive five-minute periods (a long Atlas outage). It is defined in `infra/` with the
   log group as a parameter, and deployed by the person.
 
 ### 9. Health, local chat, playground and CLI
