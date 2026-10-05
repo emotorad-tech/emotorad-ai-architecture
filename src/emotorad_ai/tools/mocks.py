@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
 from ..contract import ASSERTED, VERIFIED
-from ..conversation import address_tokens
+from ..conversation import StoreUnavailable, address_tokens
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
 from ..tickets.caps import CAP_TEXTS, cap_reached
@@ -838,9 +838,15 @@ def build_registry(
             source_key = ticket_source_key(conversation_id, started_at, RAISE_INTAKE_TICKET, idempotency_key)
             # The caps on unverified tickets (spec 2026-10-05, section 6), the
             # same helper the runtime's gates use. A verified customer's intake
-            # is never capped, and nor is a retry of a recorded one.
+            # is never capped, and nor is a retry of a recorded one. A store
+            # that cannot count does not cap, as for the gates
+            # (Runtime._cap_refusal): the write below then succeeds or fails
+            # on its own.
             if identity != "verified" and persona == "customer" and getattr(tickets, "records_real_tickets", False):
-                capped = cap_reached(tickets.store, phone=callback, source_key=source_key, now=now_iso())
+                try:
+                    capped = cap_reached(tickets.store, phone=callback, source_key=source_key, now=now_iso())
+                except StoreUnavailable:
+                    capped = None
                 if capped is not None:
                     raise ToolError(
                         "unverified_ticket_capped",

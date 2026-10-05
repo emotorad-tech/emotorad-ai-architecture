@@ -456,6 +456,18 @@ class IntakeCapTests(unittest.TestCase):
         first = self.call(chat, CALL_BACK)
         self.assertEqual(first["data"]["ticket_id"], "EM-00001")
 
+    def test_a_store_that_cannot_count_does_not_cap_and_the_write_decides(self):
+        # The final review, safety-flow Minor 7: the runtime's rule
+        # (_cap_refusal). A cap read that fails is no cap; it never comes back
+        # to the model as a tool_exception naming StoreUnavailable.
+        chat = DeskChat(ticket_clock=lambda: NOW)
+        with mock.patch.object(chat.tickets, "unverified_since", side_effect=StoreUnavailable("down")):
+            envelope = self.call(chat, CALL_BACK)
+        self.assertNotIn("error", envelope)
+        self.assertTrue(is_desk_reference(envelope["data"]["ticket_id"]))
+        (record,) = chat.records()
+        self.assertEqual((record["kind"], record["phone"], record["identity"]), ("intake", FAKE, "unverified"))
+
 
 class DocsTests(unittest.TestCase):
     """The edge case register and the app contract say what the code does."""
