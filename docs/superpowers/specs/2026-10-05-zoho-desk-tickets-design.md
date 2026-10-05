@@ -32,6 +32,47 @@ The person's decisions (5 October 2026):
   for Zoho.
 - **An intake ticket needs a number to call back.** Without one, the tool
   refuses and the bot asks for a number.
+- **Later the same day (5 October 2026):** "ignore the deleting part right now,
+  write all the code". So section 11 (erasure) is **deferred**: no erasure code
+  changes in this round, and the wording decision waits. Until it is done,
+  `delete_person` and `erasure_admin` do not reach the `tickets` collection,
+  and a person erasing someone must remove their `tickets` records by hand.
+  And parts 1 to 4 are written together, before the probe runs. Fixtures follow
+  Zoho's published API specification (https://github.com/zoho/zohodesk-oas) and
+  what the OMS sends in production, marked to be replaced by the probe's
+  capture. The values only the probe can give (custom field API names,
+  priority values, channel, credits floor) are settings, not constants.
+- **The test department is an existing one (5 October 2026):** "Inkodop
+  technologies Pvt.Ltd", not a new "AI chatbot test" department. Wherever this
+  spec says "the test department", it means that one, by its id in
+  `EMOTORAD_ZOHO_TEST_DEPARTMENT_ID`. Before use it is checked to be quiet (no
+  live channels, no real tickets coming in, only Sagnik and the lead
+  associated, no rules, SLAs or customer notifications). `test_ticket.py`
+  refuses unless the department id given is the configured test department and
+  the person types that department's name.
+- **No custom fields (5 October 2026).** The Desk's text-type custom fields are
+  at their limit (Single Line and Pick List are greyed out in the layout
+  editor, with 83 unused fields counting towards it), so "Chat reference" and
+  "Source" cannot be added, and no field is deleted to make room. Instead:
+  - the subject ends with the chat reference in square brackets, for example
+    `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. Truncation to
+    255 characters shortens the label, never the reference;
+  - the adoption look-up compares that suffix exactly, on the contact's ticket
+    list (worker step 2);
+  - "Source: AI chatbot" is the description's second line, and the subject's
+    `[AI chat]` prefix is what a Zoho rule or webhook criterion filters on;
+  - `EMOTORAD_ZOHO_CF_CHAT_REFERENCE` and `EMOTORAD_ZOHO_CF_SOURCE` are dropped;
+    the payload sends no `cf` at all.
+  - An optional `EMOTORAD_ZOHO_LAYOUT_ID` pins tickets to a layout
+    (`layoutId`, accepted by Zoho's OAS `createTicketRequest`).
+- **The test department's layout has 11 required custom fields** (Product
+  Name, Warranty Status, ISSUE, Replacement/Repair/Sale/No Spares sent,
+  Location, Account, Frame No., Reverse Pick Up - Spare, Priority Pick-up,
+  Reverse pick up request sent?, Spares Reverse pick up done?). Whether Zoho
+  enforces "Mark as required" on API-created tickets is unknown;
+  `test_ticket.py` settles it by creating one ticket without them. If Zoho
+  enforces them, the support lead decides the bot's value for each before any
+  further part ships, and the probe's recorded pick-list values are used.
 
 ## What exists today
 
