@@ -1793,6 +1793,14 @@ class AlarmStackTests(unittest.TestCase):
     def setUp(self):
         self.text = (ROOT / "infra" / "zoho-alarms.yaml").read_text(encoding="utf-8")
 
+    def test_the_container_sends_each_event_line_at_once(self):
+        # The filters only see what reaches CloudWatch. Without a TTY, Python
+        # holds stdout in an 8 KB buffer, so on a quiet box an alarmed event
+        # could sit unsent for minutes, past the safety alarms' 60 s period.
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ENV EMOTORAD_AI_LOG_STDOUT=1", dockerfile)
+        self.assertIn("ENV PYTHONUNBUFFERED=1", dockerfile)
+
     def test_the_scan_finds_an_emit_on_one_line_and_across_two(self):
         self.assertEqual(_EMITTED.findall('self.log.emit("zoho_ticket_sent", cid, reference=r)'), ["zoho_ticket_sent"])
         self.assertEqual(_EMITTED.findall("log.emit(\n    'safety_ticket_late', cid)"), ["safety_ticket_late"])

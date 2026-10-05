@@ -19,6 +19,9 @@ COPY docker/start.py start.py
 ENV PYTHONPATH=/app/src
 ENV EMOTORAD_AI_LOG_PATH=/app/logs/conversations.jsonl
 ENV EMOTORAD_AI_LOG_STDOUT=1
+# Each event line goes to CloudWatch at once. Without a TTY Python buffers
+# stdout, and the Zoho alarms would see events minutes late.
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
