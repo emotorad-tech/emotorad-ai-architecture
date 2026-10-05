@@ -309,6 +309,37 @@ class VerificationCodeTests(unittest.TestCase):
                 self.assert_code_hidden(chat, code)
                 self.assertEqual(chat.records(), [])
 
+    def test_a_code_typed_with_a_handover_request_is_kept_as_code(self):
+        # The final review, safety-flow Minor 11: the handover gate answers
+        # before the verify step, so the code is not spent, and it must not
+        # stay in what the model is shown on a later turn.
+        for form in (str, devanagari):
+            with self.subTest(form=form.__name__):
+                chat = DeskChat()
+                chat.say(ONE_BIKE[3:])
+                code = chat.store.pending_code("c1")
+                reply = chat.say("talk to a person, my code is " + form(code))
+                chat.assert_model_never_called()
+                self.assertEqual(reply.handled_by, "guardrail:human_handoff")
+                self.assertIn(HANDOVER_ASK_NUMBER_MESSAGE, reply.text)
+                self.assertEqual(chat.state().awaiting_callback, "handover")
+                self.assert_code_hidden(chat, code)
+                self.assertIn("talk to a person, my code is [code]", repr(chat.state().history))
+
+    def test_a_code_and_a_number_typed_with_a_handover_request_are_both_hidden(self):
+        chat = DeskChat()
+        chat.say(ONE_BIKE[3:])
+        code = chat.store.pending_code("c1")
+        reply = chat.say("talk to a person, call me on 9999999999, code %s" % code)
+        chat.assert_model_never_called()
+        (record,) = chat.records()
+        self.assertEqual((record["kind"], record["phone"]), ("handover", FAKE))
+        self.assertEqual(reply.ticket_id, record["_id"])
+        self.assert_code_hidden(chat, code)
+        said = " ".join(turn.text for turn in chat.conversations.transcript("c1"))
+        self.assertIn("talk to a person, call me on [phone], code [code]", said)
+        self.assertNotIn(CALL_BACK, said)
+
     def test_six_digits_with_no_code_pending_are_no_number(self):
         chat = DeskChat()
         chat.say("talk to a person")

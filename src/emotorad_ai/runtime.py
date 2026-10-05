@@ -353,6 +353,17 @@ def _as_shown(message: InboundMessage, typed: TypedNumber) -> InboundMessage:
     return message if typed.shown == (message.message_text or "") else replace(message, message_text=typed.shown)
 
 
+def _code_hidden(message: InboundMessage) -> InboundMessage:
+    """The message with a six-digit verification code in it kept as [code],
+    digits of any script read as ASCII first (verify_first.find_code), as the
+    verify step keeps one. The message itself when there is none."""
+    plain = ascii_digits(message.message_text or "")
+    found = find_code(plain)
+    if found is None:
+        return message
+    return replace(message, message_text=redact(plain, found[1], "[code]"))
+
+
 def _live(*records: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The first ticket record that exists and is not gone (deleted or merged
     in Desk): a gone one is never quoted."""
@@ -1437,6 +1448,12 @@ class Runtime:
         cid = message.conversation_id
         typed = read_number(message.message_text or "")
         shown = _as_shown(message, typed)
+        if state.verify_step == CODE:
+            # A code typed with the request, while one is pending. This gate
+            # answers before the verify step, so the code is not spent, and
+            # it is kept as [code] so no later model turn sees it (the final
+            # review, safety-flow Minor 11).
+            shown = _code_hidden(shown)
         metadata: Dict[str, Any] = {"matched": matched}
         if shown is not message:
             metadata["transcript_text"] = shown.message_text
