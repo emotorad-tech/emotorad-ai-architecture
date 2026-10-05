@@ -397,11 +397,12 @@ LOOKUP_ERRORS = ("no_warranty_record", "oms_unavailable")
 # OMS customer name, so a ticket about it names nobody.
 _APP_BIKE_STATES = ("not_registered", "warranty_unknown", "warranty_unavailable")
 
-# What a turn reads from the customer or a look-up, and the stretch of the run
-# someone else is writing (Runtime._note_speaker), carried when the turn loses
-# a save race and changed it (Runtime._merge_onto_fresh).
+# What a turn reads from the customer or a look-up, the stretch of the run
+# someone else is writing (Runtime._note_speaker) and where the run's own
+# person's stretch began after it (Runtime._owner_start), carried when the turn
+# loses a save race and changed it (Runtime._merge_onto_fresh).
 TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callback_asks", "last_code_phone",
-                    "newcomer_started_at", "newcomer_ticket_id")
+                    "newcomer_started_at", "newcomer_ticket_id", "owner_started_at")
 
 
 def _ticket_bike(bikes: Sequence[Dict[str, Any]], selected: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -777,22 +778,21 @@ class Runtime:
         since, their stretch ends here. Its start and ticket are cleared, and
         so is a wait for a number to call about their report, so this
         person's message is never read as that number. The time the stretch
-        ends, just after its last turn, is returned for
-        _end_run_before_this_turn to end its tickets before this turn is
-        recorded. None when no stretch ends."""
+        ends, just after its last turn, is where the run's own person's own
+        stretch begins (_owner_start), and is returned for
+        _end_run_before_this_turn to end the other person's tickets before
+        this turn is recorded. None when no stretch ends."""
         if not owns:
             self._newcomer_start(message, state)
             state.newcomer_ticket_id = reply.ticket_id or state.newcomer_ticket_id
             return None
         state.ticket_id = reply.ticket_id or state.ticket_id
-        began = state.newcomer_started_at
-        if began is None:
+        if state.newcomer_started_at is None:
             return None
+        ended = self._owner_start(message, state)
         state.newcomer_started_at = state.newcomer_ticket_id = None
         state.awaiting_callback, state.callback_asks = None, 0
-        # Never at or before the stretch's start, so even a stretch begun and
-        # ended in one turn has an end its tickets fall before.
-        return max(self._after_last_turn(message, state), plus(began, 0.000001), key=parse)
+        return ended
 
     def _attach_transcript(self, state: ConversationState, reply: Reply, owns: bool) -> None:
         """The run's ticket gets the run's thread, this turn included, on every
@@ -843,7 +843,11 @@ class Runtime:
         The run's own person writing again after them ends that stretch's
         records just after its last turn (`stretch_ended`, from
         _note_speaker), so none of the run's own person's turns reach a
-        ticket of the newcomer's (the review of Task 13, Important 1).
+        ticket of the newcomer's (the review of Task 13, Important 1). Their
+        own tickets from then on start at that same instant (_owner_start),
+        and close_runs ends only records that started before the end it
+        sets, so a ticket this very turn recorded for them keeps no end and
+        takes their report (the final review, safety-flow Important 1).
 
         A record that has an end keeps it."""
         ended = stretch_ended if owns else state.newcomer_started_at
@@ -894,18 +898,42 @@ class Runtime:
     def _ticket_run_start(
         self, message: InboundMessage, state: ConversationState, resolved: Optional[ResolvedIdentity],
     ) -> Optional[str]:
-        """The run a gate's or the safety branch's ticket belongs to, by its
-        start (the ruling for Task 13). The run's own start, for the run's own
-        person. For someone else writing in it before restart_for (a second
-        person on a shared browser, once the first person's proof lapsed), the
-        start of their own stretch of it, where the run ends for them
-        (_newcomer_start). Never the first person's start: the worker posts a
+        """The run a ticket belongs to, by its start (the ruling for Task 13):
+        a gate's, the safety branch's or one an agent's tool raises. For the
+        run's own person, the start of their stretch of it (_owner_start):
+        the run's start, or where someone else's stretch of it ended. For
+        someone else writing in it before restart_for (a second person on a
+        shared browser, once the first person's proof lapsed), the start of
+        their own stretch of it, where the run ends for them
+        (_newcomer_start). Never the other person's start: the worker posts a
         record's turns by its run's times, and the ticket keys hold the start,
-        so the first person's turns never reach a newcomer's ticket and their
-        tickets are never found by a newcomer's keys."""
+        so neither person's turns reach the other's ticket and neither's
+        tickets are found by the other's keys."""
         if self._speaker_owns_run(state, resolved):
-            return state.started_at
+            return self._owner_start(message, state)
         return self._newcomer_start(message, state)
+
+    def _owner_start(self, message: InboundMessage, state: ConversationState) -> Optional[str]:
+        """Where the run's own person's tickets begin (the final review,
+        safety-flow Important 1). The run's start, until someone else's
+        stretch of it ends. Then the end of that stretch, just after its last
+        turn and never at or before its start, so even a stretch begun and
+        ended in one turn ends after its own tickets begin. It is set on the
+        turn the run's own person writes again, by whichever comes first: a
+        ticket in that turn (_ticket_run_start) or _note_speaker after it, and
+        kept with the state. So every ticket of theirs from then on, in that
+        turn or a later one, takes none of the other person's turns or
+        photos, and their keys, receipts and one safety ticket are per
+        stretch, as restart_for makes them per run."""
+        began = state.newcomer_started_at
+        if began is not None:
+            ended = state.owner_started_at
+            # Set already in this turn, unless it is the end of an earlier
+            # stretch, which is before this one's start.
+            if ended is None or parse(ended) <= parse(began):
+                state.owner_started_at = max(
+                    self._after_last_turn(message, state), plus(began, 0.000001), key=parse)
+        return state.owner_started_at or state.started_at
 
     def _wake_newcomers_ticket(self, state: ConversationState, tickets: Any) -> None:
         """The ticket recorded for someone who does not own the run, in their
@@ -1969,9 +1997,10 @@ class Runtime:
             # evidence_seen can flip during this very turn when a photo arrives
             # with the message that triggers the order.
             facts={
-                # This run of the conversation. Write receipts and tickets are
-                # scoped by it (tools/registry.py), read when the tool runs.
-                "started_at": lambda: state.started_at,
+                # This run of the conversation, or the writer's stretch of it
+                # (_ticket_run_start). Write receipts and tickets are scoped
+                # by it (tools/registry.py), read when the tool runs.
+                "started_at": lambda: self._ticket_run_start(message, state, resolved),
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
                 # The ticket tool's check on a frame number the rider reads

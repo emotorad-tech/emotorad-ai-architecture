@@ -168,6 +168,11 @@ class ConversationState:
     # again, which ends the stretch's tickets (Runtime._note_speaker).
     newcomer_started_at: Optional[str] = None
     newcomer_ticket_id: Optional[str] = None
+    # Where the run's own person's stretch of the run began, once someone
+    # else's stretch has ended (Runtime._owner_start): their tickets after it
+    # take this start, never the run's, so none of them takes in the other
+    # person's turns or photos. None until then: the run's start stands.
+    owner_started_at: Optional[str] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None

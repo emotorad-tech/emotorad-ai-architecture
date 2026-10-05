@@ -33,7 +33,8 @@ from emotorad_ai.guardrails import (
     SAFETY_STEPS,
 )
 from emotorad_ai.identity import IdentityResolver
-from emotorad_ai.llm import ScriptedClaude, say
+from emotorad_ai.llm import ScriptedClaude, call_tool, say
+from emotorad_ai.media_records import media_record
 from emotorad_ai.observability import EventLog
 from emotorad_ai.runtime import HANDOVER_TEXT, Runtime, read_number
 from emotorad_ai.tickets.clock import now_iso, parse, plus
@@ -116,6 +117,14 @@ class DeskChat:
     def events(self, name):
         return [e for e in self.log.events if e["event"] == name]
 
+    def assert_model_never_called(self, since=0):
+        """No model call after the first `since`: a gate, the safety branch or
+        the verify step answered, as the definition of done asks of every
+        blocked path (the final review, safety-flow Minor 10)."""
+        made = len(self.llm.requests) - since
+        if made:
+            raise AssertionError("the model was called %d time(s) on a path that must never call it" % made)
+
     def mark_gone(self, reference):
         """Deleted or merged in Desk, as the worker records it: taken under a
         lease, then saved as gone."""
@@ -128,6 +137,15 @@ class DeskChat:
 
 def customer_turn(chat, text, cid="c1"):
     return next(turn for turn in chat.conversations.transcript(cid) if turn.role == "customer" and turn.text == text)
+
+
+def in_window(record, at):
+    """Whether a time falls inside a ticket record's run, by the worker's rule
+    (zoho/worker.ZohoWorker._in_run): at or after its start, before its end."""
+    moment = parse(at)
+    if moment < parse(record["started_at"]):
+        return False
+    return record["ended_at"] is None or moment < parse(record["ended_at"])
 
 
 class ReadNumberTests(unittest.TestCase):
@@ -685,15 +703,107 @@ class SomeoneElsesRunTests(unittest.TestCase):
         self.assertLessEqual(parse(theirs["ended_at"]), parse(returning.at))
         self.assertEqual(theirs["wake"], woken)
         self.assertEqual(theirs["notes"], [])
-        # The report goes to the run's own ticket, and the stranger's is not named.
-        self.assertEqual(back.ticket_id, owner.ticket_id)
+        # The run's own person has a stretch of their own from here (the
+        # final review, safety-flow Important 1): one safety ticket per
+        # stretch, as restart_for gives one per run. Their report records a
+        # ticket whose run starts where the stranger's ended, so it holds
+        # their words and none of the stranger's. The stranger's is not named.
+        self.assertTrue(is_desk_reference(back.ticket_id))
+        self.assertNotIn(back.ticket_id, (owner.ticket_id, stranger.ticket_id))
         self.assertNotIn(stranger.ticket_id, back.text)
-        self.assertEqual(len(chat.tickets.get(owner.ticket_id)["notes"]), 1)
+        ours = chat.tickets.get(back.ticket_id)
+        self.assertEqual(ours["started_at"], theirs["ended_at"])
+        self.assertIsNone(ours["ended_at"])
+        self.assertTrue(in_window(ours, returning.at))
+        self.assertFalse(in_window(ours, reported.at))
+        self.assertEqual(chat.tickets.get(owner.ticket_id)["notes"], [])
         state = chat.state()
-        self.assertEqual(state.ticket_id, owner.ticket_id)
+        self.assertEqual(state.ticket_id, back.ticket_id)
+        self.assertEqual(state.owner_started_at, ours["started_at"])
         self.assertEqual((state.newcomer_started_at, state.newcomer_ticket_id), (None, None))
         (summary,) = chat.conversations.recent_summaries("PHONE#" + ONE_BIKE)
-        self.assertEqual(summary.ticket_id, owner.ticket_id)
+        self.assertEqual(summary.ticket_id, back.ticket_id)
+
+    def test_the_owners_report_on_coming_back_is_in_their_ticket_and_the_strangers_is_not(self):
+        # The final review's probe (safety-flow Important 1): the run's own
+        # person says hello, someone else on the browser reports smoke with a
+        # number, then the run's own person reports a swollen pack. Before the
+        # fix their ticket took the run's start and was ended in the same
+        # turn, so it held the stranger's smoke and not their own report.
+        chat = DeskChat()
+        chat.say("hello", identity=RIDER)
+        stranger = chat.say("smoke from my battery, my number is 9999999999")
+        back = chat.say("my battery is swollen", identity=RIDER)
+        chat.assert_model_never_called()
+        self.assertTrue(is_desk_reference(back.ticket_id))
+        self.assertNotEqual(back.ticket_id, stranger.ticket_id)
+        ours, theirs = chat.tickets.get(back.ticket_id), chat.tickets.get(stranger.ticket_id)
+        smoke = customer_turn(chat, "smoke from my battery, my number is [phone]")
+        swollen = customer_turn(chat, "my battery is swollen")
+        self.assertTrue(in_window(ours, swollen.at))
+        self.assertFalse(in_window(ours, smoke.at))
+        self.assertIsNone(ours["ended_at"])
+        self.assertTrue(in_window(theirs, smoke.at))
+        self.assertFalse(in_window(theirs, swollen.at))
+        self.assertEqual(theirs["ended_at"], ours["started_at"])
+
+    def test_an_owners_ticket_on_a_later_turn_takes_none_of_the_strangers_turns_or_photos(self):
+        chat = DeskChat(replies=[say("Thank you. Please keep it outside.")] * 4)
+        chat.say("hello", identity=RIDER)
+        key = "customers/clu_1/c1/photos/smoke.jpg"
+        photo = media_record("media-bucket", key, "image", "image/jpeg", 2048, "c1", "clu_1", "inline", now_iso())
+        chat.conversations.record_media(photo)  # stored before its turn, as api._persist_media does
+        chat.say("smoke from my battery, my number is 9999999999",
+                 attachments=[Attachment("image", "s3://media-bucket/" + key, "image/jpeg")])
+        chat.say("I have moved the bike outside", identity=RIDER)
+        before = len(chat.llm.requests)
+        later = chat.say("my battery is swollen", identity=RIDER)
+        chat.assert_model_never_called(since=before)
+        record = chat.tickets.get(later.ticket_id)
+        smoke = customer_turn(chat, "smoke from my battery, my number is [phone]")
+        self.assertFalse(in_window(record, smoke.at))
+        self.assertFalse(in_window(record, photo["stored_at"]))
+        for text in ("I have moved the bike outside", "my battery is swollen"):
+            self.assertTrue(in_window(record, customer_turn(chat, text).at), text)
+        self.assertIsNone(record["ended_at"])
+        self.assertEqual(record["started_at"], chat.state().owner_started_at)
+
+    def test_a_ticket_an_agent_raises_on_the_owners_return_takes_their_stretch(self):
+        # The agent's tools read the run from the facts (Runtime._run), so a
+        # ticket the model raises on the turn the run's own person comes back
+        # takes their stretch too, and is not ended by that same turn.
+        chat = DeskChat(replies=[
+            call_tool(CREATE_SUPPORT_TICKET, {"category": "battery_charging", "severity": "normal",
+                                              "description": "LED stays off.", "idempotency_key": "k1"}, "t1"),
+            say("I have raised a ticket for the team."),
+        ])
+        chat.say("hello", identity=RIDER)
+        chat.say("smoke from my battery, my number is 9999999999")
+        chat.assert_model_never_called()
+        state = chat.conversations.get("c1")
+        state.evidence_seen = True  # a fault ticket needs a photo (test_evidence_before_ticket)
+        chat.conversations.save(state)
+        back = chat.say("the charger light stays off", identity=RIDER)
+        record = chat.tickets.get(back.ticket_id)
+        self.assertEqual(record["kind"], "support")
+        self.assertEqual(record["started_at"], chat.state().owner_started_at)
+        self.assertIsNone(record["ended_at"])
+        self.assertTrue(in_window(record, customer_turn(chat, "the charger light stays off").at))
+        self.assertFalse(in_window(record, customer_turn(chat, "smoke from my battery, my number is [phone]").at))
+
+    def test_a_save_conflict_on_the_owners_return_keeps_their_stretchs_start(self):
+        store = ConflictedStore()
+        chat = DeskChat(conversations=store)
+        chat.say("hello", identity=RIDER)
+        chat.say("smoke from my battery, my number is 9999999999")
+        store.conflicts = 1
+        back = chat.say("my battery is swollen", identity=RIDER)
+        chat.assert_model_never_called()
+        self.assertEqual(len(chat.events("conversation_merged")), 1)
+        state = chat.state()
+        self.assertEqual(state.owner_started_at, chat.tickets.get(back.ticket_id)["started_at"])
+        self.assertEqual(state.ticket_id, back.ticket_id)
+        self.assertIsNone(state.newcomer_started_at)
 
     def test_a_strangers_wait_for_a_number_ends_with_their_stretch(self):
         # The ask was the stranger's: the run's own person's next message is
@@ -773,6 +883,14 @@ class SomeoneElsesRunTests(unittest.TestCase):
         self.assertEqual((old.newcomer_started_at, old.newcomer_ticket_id), (None, None))
         state.restart_for("PHONE#" + TWO_BIKES, "2026-10-05T11:00:00.000000+00:00")
         self.assertEqual((state.newcomer_started_at, state.newcomer_ticket_id), (None, None))
+
+    def test_the_owners_stretch_start_is_kept_with_the_state_and_goes_with_restart_for(self):
+        state = ConversationState("c1", turns=3, user_key="PHONE#" + ONE_BIKE,
+                                  owner_started_at="2026-10-05T10:05:00.000000+00:00")
+        self.assertEqual(ConversationState.from_json(state.to_json()), state)
+        self.assertIsNone(ConversationState.from_json('{"conversation_id": "c1"}').owner_started_at)
+        state.restart_for("PHONE#" + TWO_BIKES, "2026-10-05T11:00:00.000000+00:00")
+        self.assertIsNone(state.owner_started_at)
 
 
 class TextsTests(unittest.TestCase):
