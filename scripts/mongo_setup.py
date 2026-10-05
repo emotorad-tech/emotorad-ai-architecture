@@ -8,8 +8,8 @@ database only. A Claude session never runs this: org rules forbid writing to a
 shared database from one.
 
 Prints every collection and index so the output can be checked, and fails if
-the permanent record (transcripts, summaries, media) has picked up an expiry
-index.
+the permanent record (transcripts, summaries, media, tickets and the counter
+behind their references) has picked up an expiry index.
 """
 
 import os
@@ -21,10 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src")]
 
 from emotorad_ai.stores.mongo import (  # noqa: E402
-    CONVERSATION_SUMMARIES, MEDIA, MONGO_URI_ENV, TRANSCRIPT_TURNS, connect, ensure_indexes,
+    CONVERSATION_SUMMARIES, COUNTERS, MEDIA, MONGO_URI_ENV, TICKETS, TRANSCRIPT_TURNS, connect, ensure_indexes,
 )
 
-PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA)
+# Tickets are permanent like the transcript, and so is the counter that
+# numbers them: a counter that expired would hand out EM-1000001 again.
+PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA, TICKETS, COUNTERS)
 
 
 def main() -> int:

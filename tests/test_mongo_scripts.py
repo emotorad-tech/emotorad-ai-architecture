@@ -98,6 +98,10 @@ class SetupScriptTests(unittest.TestCase):
         # Customer media is kept permanently (decision 2026-09-29), so its
         # record is part of the permanent record and must never get a TTL.
         self.assertRegex(text, r"\bmedia\s+permanent")
+        # So are the ticket records, and the counter behind their references:
+        # one that expired would hand out EM-1000001 again.
+        self.assertRegex(text, r"\btickets\s+permanent")
+        self.assertRegex(text, r"\bcounters\s+permanent")
 
 
 class DeletePersonScriptTests(unittest.TestCase):

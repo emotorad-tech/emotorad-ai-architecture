@@ -8,6 +8,11 @@ deletion on request through `delete_person` or `delete_conversation`.
 `conversations` (working state) and `idempotency_keys` expire through TTL
 indexes.
 
+`tickets` (the Zoho Desk ticket record, tickets/record.py) and `counters`
+(the number behind each reference) are permanent too. Erasure does not reach
+`tickets` yet: spec 2026-10-05 section 11 is deferred, so a person erasing
+someone removes their ticket records by hand.
+
 Every driver failure becomes a typed error the runtime handles:
 ConversationConflict when another server saved first, StoreUnavailable for
 anything else. Nothing here ever continues on an empty state after a failed
@@ -19,6 +24,7 @@ here and nowhere else, and never logged or put into an error message.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -26,6 +32,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from .. import erasure as erasure_rules
@@ -41,6 +48,10 @@ from ..conversation import (
     transcript_turns,
     utc_now_iso,
 )
+from ..tickets.clock import plus
+from ..tickets.kinds import FIRST_DESK_NUMBER, STUCK_SECONDS, URGENT_LATE_SECONDS, desk_reference
+from ..tickets.record import GONE, OUTSTANDING, SENT, STUCK, WAITING
+from ..tickets.store import age_seconds, listing_row
 from ..tools.registry import CLAIM_LEASE_SECONDS, write_in_progress
 
 MONGO_URI_ENV = "EMOTORAD_MONGO_URI"
@@ -57,6 +68,12 @@ CONVERSATION_ORIGINS = "conversation_origins"
 # writes. Neither is erased with the person: a closed request holds only a hash.
 ERASURE_REQUESTS = "erasure_requests"
 ERASURE_LOG = "erasure_log"
+# The Zoho Desk ticket record (tickets/record.py), permanent like the
+# transcript, and the counter that numbers its references.
+TICKETS = "tickets"
+COUNTERS = "counters"
+# The counters document behind EM-1000001, EM-1000002, ...
+TICKET_COUNTER = "ticket_reference"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
 INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
@@ -93,6 +110,17 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
                              "partialFilterExpression": {"status": "pending"}}),
         ([("status", 1), ("requested_at", 1)], {"name": "status_requested"}),
     ],
+    TICKETS: [
+        # One record per source key: a retried create finds the first, and two
+        # servers racing make one. Zoho stays off without it (spec section 1).
+        ([("source_key", 1)], {"name": "source_key", "unique": True}),
+        # The worker's due query.
+        ([("state", 1), ("next_attempt_at", 1)], {"name": "due"}),
+        ([("phone", 1)], {"name": "phone"}),
+        ([("conversation_id", 1)], {"name": "conversation"}),
+    ],
+    # One small document per sequence, found by its _id: no index of its own.
+    COUNTERS: [],
 }
 
 
@@ -516,3 +544,181 @@ class MongoIdempotencyStore:
     def release(self, key: str) -> None:
         # Only a pending claim is released; a finished receipt is never undone.
         self._guard("delete_one", lambda: self._receipts.delete_one({"_id": key, "status": "pending"}))
+
+
+class MongoTicketStore:
+    """The ticket record (tickets/record.py) for every server.
+
+    The next reference is one atomic `$inc` on a `counters` document. A save
+    is conditional on the worker's lease, and on the wake count when asked,
+    and never upserts: a record removed, or taken by another worker, is
+    dropped rather than written back. Held to the same contract as
+    InMemoryTicketStore (tests/ticket_store_contract.py).
+    """
+
+    def __init__(self, db: Any) -> None:
+        self._tickets = db[TICKETS]
+        self._counters = db[COUNTERS]
+
+    def _guard(self, operation: str, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except DuplicateKeyError:
+            raise
+        except PyMongoError as exc:
+            raise StoreUnavailable("MongoDB %s failed (%s)" % (operation, type(exc).__name__)) from None
+
+    # -- recording ---------------------------------------------------------------
+
+    def next_reference(self) -> str:
+        doc = self._guard("find_one_and_update", lambda: self._counters.find_one_and_update(
+            {"_id": TICKET_COUNTER}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER))
+        return desk_reference(FIRST_DESK_NUMBER - 1 + int(doc["seq"]))
+
+    def insert(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """The record, or the one already recorded under its source key. The
+        unique index decides, so two servers racing make one."""
+        try:
+            self._guard("insert_one", lambda: self._tickets.insert_one(copy.deepcopy(record)))
+        except DuplicateKeyError:
+            existing = self.by_source_key(record["source_key"])
+            if existing is None:
+                # The reference itself was taken: refuse rather than overwrite.
+                raise StoreUnavailable("MongoDB insert_one failed (DuplicateKeyError)") from None
+            return existing
+        return copy.deepcopy(record)
+
+    def get(self, reference: str) -> Optional[Dict[str, Any]]:
+        return self._guard("find_one", lambda: self._tickets.find_one({"_id": reference}))
+
+    def by_source_key(self, source_key: str) -> Optional[Dict[str, Any]]:
+        return self._guard("find_one", lambda: self._tickets.find_one({"source_key": source_key}))
+
+    # -- new content -------------------------------------------------------------
+
+    def wake(self, reference: str, now: str) -> bool:
+        return self._wake(reference, now, {})
+
+    def add_note(self, reference: str, text: str, now: str) -> bool:
+        return self._wake(reference, now, {"$push": {"notes": {"text": text, "at": now}}})
+
+    def _wake(self, reference: str, now: str, extra: Dict[str, Any]) -> bool:
+        # The count first, then the state. A worker finishing in between
+        # cannot save over this wake: its last save expects the count it read.
+        update = dict(extra)
+        update["$inc"] = {"wake": 1}
+        update["$min"] = {"next_attempt_at": now}
+        result = self._guard("update_one", lambda: self._tickets.update_one(
+            {"_id": reference, "state": {"$ne": GONE}}, update))
+        if result.matched_count == 0:
+            return False
+        self._guard("update_one", lambda: self._tickets.update_one(
+            {"_id": reference, "state": SENT},
+            {"$set": {"state": WAITING, "due_since": now, "next_attempt_at": now}}))
+        return True
+
+    def close_runs(self, conversation_id: str, new_started_at: str) -> int:
+        result = self._guard("update_many", lambda: self._tickets.update_many(
+            {"conversation_id": conversation_id, "started_at": {"$lt": new_started_at}, "ended_at": None},
+            {"$set": {"ended_at": new_started_at}}))
+        return result.modified_count
+
+    # -- the worker --------------------------------------------------------------
+
+    def take_due(self, now: str, mode: str, lease_seconds: float, token: str) -> Optional[Dict[str, Any]]:
+        query = {"state": {"$in": list(OUTSTANDING)}, "mode": mode, "next_attempt_at": {"$lte": now},
+                 "$or": [{"lease_until": None}, {"lease_until": {"$lt": now}}]}
+        return self._guard("find_one_and_update", lambda: self._tickets.find_one_and_update(
+            query, {"$set": {"lease_until": plus(now, lease_seconds), "lease_token": token}},
+            sort=[("urgent", -1), ("next_attempt_at", 1), ("created_at", 1), ("_id", 1)],
+            return_document=ReturnDocument.AFTER))
+
+    def renew_lease(self, reference: str, token: str, until: str) -> bool:
+        if not token:
+            return False
+        result = self._guard("update_one", lambda: self._tickets.update_one(
+            {"_id": reference, "lease_token": token}, {"$set": {"lease_until": until}}))
+        return result.matched_count == 1
+
+    def save(
+        self,
+        reference: str,
+        token: str,
+        changes: Dict[str, Any],
+        add_to_set: Optional[Dict[str, List[Any]]] = None,
+        push: Optional[Dict[str, List[Any]]] = None,
+        expect_wake: Optional[int] = None,
+    ) -> bool:
+        if not token:
+            return False
+        query: Dict[str, Any] = {"_id": reference, "lease_token": token}
+        if expect_wake is not None:
+            query["wake"] = expect_wake
+        update: Dict[str, Any] = {}
+        if changes:
+            update["$set"] = dict(changes)
+        if add_to_set:
+            update["$addToSet"] = {path: {"$each": list(values)} for path, values in add_to_set.items()}
+        if push:
+            update["$push"] = {path: {"$each": list(values)} for path, values in push.items()}
+        if not update:
+            return self._guard("find_one", lambda: self._tickets.find_one(query, {"_id": 1})) is not None
+        # No upsert: a record erased meanwhile is not written back.
+        result = self._guard("update_one", lambda: self._tickets.update_one(query, update))
+        return result.matched_count == 1
+
+    def mark_stuck(self, reference: str) -> bool:
+        """A waiting record becomes stuck, with or without a lease: the check
+        for overdue records does not hold one. Nothing else is changed, and
+        any other state is refused."""
+        result = self._guard("update_one", lambda: self._tickets.update_one(
+            {"_id": reference, "state": WAITING}, {"$set": {"state": STUCK}}))
+        return result.matched_count == 1
+
+    # -- reporting ---------------------------------------------------------------
+
+    def overdue(self, now: str, mode: str) -> List[Dict[str, Any]]:
+        query = {"state": {"$in": list(OUTSTANDING)}, "mode": mode, "$or": [
+            {"urgent": True, "due_since": {"$lte": plus(now, -URGENT_LATE_SECONDS)}},
+            {"urgent": False, "due_since": {"$lte": plus(now, -STUCK_SECONDS)}},
+        ]}
+        return self._guard("find", lambda: list(self._tickets.find(query).sort([("due_since", 1), ("_id", 1)])))
+
+    def counts(self, mode: str, now: str) -> Dict[str, Any]:
+        outstanding = {"$in": list(OUTSTANDING)}
+
+        def count(query: Dict[str, Any]) -> int:
+            return self._guard("count_documents", lambda: self._tickets.count_documents(query))
+
+        oldest = self._guard("find_one", lambda: self._tickets.find_one(
+            {"state": outstanding, "mode": mode}, {"due_since": 1}, sort=[("due_since", 1)]))
+        return {
+            "waiting": count({"state": WAITING, "mode": mode}),
+            "stuck": count({"state": STUCK, "mode": mode}),
+            "held": count({"state": outstanding, "mode": {"$ne": mode}}),
+            "oldest_due_seconds": age_seconds(oldest["due_since"], now) if oldest else None,
+        }
+
+    def unverified_since(self, since: str, phone: Optional[str] = None) -> int:
+        query: Dict[str, Any] = {"identity": "unverified", "urgent": False, "created_at": {"$gte": since}}
+        if phone is not None:
+            query["phone"] = phone
+        return self._guard("count_documents", lambda: self._tickets.count_documents(query))
+
+    def contact_for(self, phone: str) -> Optional[str]:
+        docs = self._guard("find", lambda: list(self._tickets.find(
+            {"phone": phone, "mode": "live", "identity": "verified"}, {"zoho": 1, "created_at": 1})
+            .sort([("created_at", -1), ("_id", -1)])))
+        return next((d["zoho"]["contact_id"] for d in docs if (d.get("zoho") or {}).get("contact_id")), None)
+
+    def listing(self, mode: str) -> List[Dict[str, Any]]:
+        docs = self._guard("find", lambda: list(self._tickets.find({"state": {"$in": list(OUTSTANDING)}})
+                                                .sort([("created_at", 1), ("_id", 1)])))
+        return [listing_row(d, mode) for d in docs]
+
+    def has_unique_source_key(self) -> bool:
+        """Whether mongo_setup.py has made `source_key` unique. Zoho stays
+        off without it (spec section 1)."""
+        info = self._guard("index_information", lambda: self._tickets.index_information())
+        return any([name for name, _ in spec.get("key", [])] == ["source_key"] and bool(spec.get("unique"))
+                   for spec in info.values())
