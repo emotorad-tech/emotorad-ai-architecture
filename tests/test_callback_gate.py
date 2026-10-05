@@ -110,6 +110,7 @@ class GoldenPhraseTests(unittest.TestCase):
                 chat = DeskChat()
                 chat.say("talk to a person")
                 chat.say(text)
+                chat.assert_model_never_called()
                 history = repr(chat.state().history)
                 self.assertIn("[phone]", history)
                 for form in (CALL_BACK, "९९९९९९९९९९"):
@@ -145,6 +146,7 @@ class QuotedReferenceTests(unittest.TestCase):
         chat = DeskChat()
         chat.say("talk to a person")
         reply = chat.say("my old ticket is EM-1000001")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "guardrail:callback:no_number")
         self.assertEqual(chat.events("callback_number_invalid"), [])
         self.assertEqual(chat.records(), [])
@@ -153,6 +155,7 @@ class QuotedReferenceTests(unittest.TestCase):
         chat = DeskChat()
         chat.say("talk to a person")
         reply = chat.say("ticket EM-1000001, call 9999999999")
+        chat.assert_model_never_called()
         (record,) = chat.records()
         self.assertEqual(record["phone"], FAKE)
         self.assertEqual(reply.ticket_id, record["_id"])
@@ -231,6 +234,7 @@ class NotRecordedTests(unittest.TestCase):
         chat.say("talk to a person")
         with mock.patch.object(chat.registry.tickets, "create", side_effect=StoreUnavailable("down")):
             reply = chat.say("9999999999")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "guardrail:callback:not_recorded")
         self.assertEqual(reply.text, HANDOVER_NOT_RECORDED_MESSAGE)
         self.assertFalse(reply.escalated)
@@ -244,6 +248,7 @@ class StartOverTests(unittest.TestCase):
         chat = DeskChat()
         chat.say("talk to a person")
         reply = chat.say("start over")
+        chat.assert_model_never_called()
         self.assertIsNone(chat.state().awaiting_callback)
         self.assertEqual(chat.records(), [])
         self.assertTrue(reply.handled_by.startswith("verify_first:"), reply.handled_by)
@@ -344,6 +349,7 @@ class VerificationCodeTests(unittest.TestCase):
         chat = DeskChat()
         chat.say("talk to a person")
         reply = chat.say("123456")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "guardrail:callback:no_number")
         self.assertEqual(codes_sent(chat), [])
 
@@ -352,6 +358,7 @@ class VerificationCodeTests(unittest.TestCase):
         # a try at a number to call, so the wait goes on and no code is tried.
         chat, _ = self.code_sent_then("talk to a person")
         reply = chat.say("+34 612 345 678")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "guardrail:callback:invalid_number")
         self.assertEqual(chat.state().awaiting_callback, "handover")
         self.assertEqual(chat.store.attempts_left("c1"), MAX_ATTEMPTS)
@@ -365,6 +372,7 @@ class KnownPhoneTests(unittest.TestCase):
         chat = DeskChat(replies=[say("Thank you. Please keep it outside.")] * 4)
         chat.say("my battery is swollen", identity=RIDER)
         chat.say("my battery is smoking")
+        chat.assert_model_never_called()  # both safety turns; the next one is the model's
         self.assertEqual(chat.state().awaiting_callback, "safety")
         reply = chat.say("I have moved the bike outside", identity=RIDER)
         self.assertFalse(reply.handled_by.startswith("guardrail:callback"), reply.handled_by)
@@ -438,6 +446,7 @@ class ConflictTests(unittest.TestCase):
         chat.say("talk to a person")
         store.conflicts = 1
         reply = chat.say("9999999999")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "guardrail:callback:recorded")
         (record,) = chat.records()
         saved = chat.state()
@@ -454,6 +463,7 @@ class ZohoOffTests(unittest.TestCase):
         chat.say("talk to a person")
         chat.registry.tickets = chat.mock  # Zoho switched off between turns
         reply = chat.say("9999999999")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "verify_first:code_sent")
         self.assertIsNone(chat.state().awaiting_callback)
         (event,) = chat.events("callback_wait_ended")

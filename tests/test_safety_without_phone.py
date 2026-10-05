@@ -148,6 +148,17 @@ def in_window(record, at):
     return record["ended_at"] is None or moment < parse(record["ended_at"])
 
 
+class DeskChatTests(unittest.TestCase):
+    def test_the_model_check_fails_once_the_model_was_called(self):
+        chat = DeskChat(replies=[say("Is the charger light on?")])
+        chat.assert_model_never_called()
+        chat.say("my battery won't charge", identity=RIDER)
+        self.assertEqual(len(chat.llm.requests), 1)
+        with self.assertRaises(AssertionError):
+            chat.assert_model_never_called()
+        chat.assert_model_never_called(since=1)
+
+
 class ReadNumberTests(unittest.TestCase):
     def test_a_number_in_each_language_and_shape(self):
         for text, shown in (
@@ -256,6 +267,7 @@ class NumberInTheSameMessageTests(unittest.TestCase):
             with self.subTest(language=language):
                 chat = DeskChat()
                 chat.say(text)
+                chat.assert_model_never_called()
                 history = repr(chat.state().history)
                 self.assertIn("[phone]", history)
                 for form in (CALL_BACK, "99999 99999", "९९९९९९९९९९"):
@@ -444,6 +456,7 @@ class NotRecordedTests(unittest.TestCase):
         chat = DeskChat()
         with mock.patch.object(chat.registry.tickets, "create", return_value=None):
             reply = chat.say("smoke from my battery, my number is 9999999999")
+        chat.assert_model_never_called()
         self.assert_no_promise(reply)
         self.assertEqual(len(chat.events("safety_ticket_not_recorded")), 1)
 
@@ -498,10 +511,12 @@ class NotRecordedTests(unittest.TestCase):
         with mock.patch.object(chat.registry.tickets, "create", side_effect=StoreUnavailable("down")):
             chat.say("smoke from my battery, my number is 9999999999")
             chat.say("smoke from my battery, my number is 9999999999", cid="c2")
+        chat.assert_model_never_called()
         self.assertEqual(chat.runtime.safety_not_recorded, 2)
         # Zoho off with no number is the expected reply, not a failure.
         off = DeskChat(zoho=False)
         off.say("my battery is smoking")
+        off.assert_model_never_called()
         self.assertEqual(off.runtime.safety_not_recorded, 0)
 
 
@@ -533,12 +548,14 @@ class StoreDownTests(unittest.TestCase):
             conversation_id="c1", persona="customer", channel="website_chat", message_text="",
             identity=Identity(strength=ANONYMOUS, em_aid="aid-1"), attachments=[clip],
         ))
+        self.assertEqual(runtime.llm.requests, [])
         self.assertIn(SAFETY_NOT_RECORDED_MESSAGE, reply.text)
         self.assertFalse(reply.escalated)
 
     def test_any_other_message_while_the_store_is_down_still_hands_over(self):
         runtime = runtime_on(self.DownStore(), [])
         reply = send(runtime, "my battery won't charge")
+        self.assertEqual(runtime.llm.requests, [])
         self.assertIn(HANDOVER_TEXT, reply.text)
         self.assertTrue(reply.escalated)
         self.assertEqual(runtime.safety_not_recorded, 0)
@@ -563,6 +580,7 @@ class ZohoOffTests(unittest.TestCase):
     def test_a_number_in_the_message_records_nothing(self):
         chat = DeskChat(zoho=False)
         reply = chat.say("smoke from the battery, call me on 9999999999")
+        chat.assert_model_never_called()
         self.assertEqual(chat.mock.tickets, {})
         self.assertIsNone(reply.ticket_id)
         self.assertIn(SAFETY_NOT_RECORDED_MESSAGE, reply.text)
@@ -811,6 +829,7 @@ class SomeoneElsesRunTests(unittest.TestCase):
         chat = DeskChat(replies=[say("Thank you. Please keep it outside.")] * 4)
         chat.say("my battery is swollen", identity=RIDER)
         chat.say("my battery is smoking")
+        chat.assert_model_never_called()  # both safety turns; the next one is the model's
         self.assertEqual(chat.state().awaiting_callback, "safety")
         chat.say("I have moved the bike outside", identity=RIDER)
         self.assertEqual((chat.state().awaiting_callback, chat.state().callback_asks), (None, 0))

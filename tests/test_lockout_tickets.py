@@ -97,6 +97,7 @@ class LockoutTests(unittest.TestCase):
         chat = DeskChat()
         lock_out(chat)
         chat.say("9876543210")
+        chat.assert_model_never_called()
         self.assertNotIn("9876543210", repr(chat.state().history))
 
     def test_a_fourth_code_asked_for_records_the_number_in_the_message(self):
@@ -106,6 +107,7 @@ class LockoutTests(unittest.TestCase):
         chat.say("9876543210")
         chat.say("9700000009")
         reply = chat.say("9999999999")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "verify_first:too_many_codes")
         (record,) = chat.records()
         self.assertEqual((record["kind"], record["phone"]), ("lockout", FAKE))
@@ -119,6 +121,7 @@ class LockoutTests(unittest.TestCase):
         chat.say("resend")
         chat.say("resend")
         reply = chat.say("resend")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "verify_first:too_many_codes")
         (record,) = chat.records()
         self.assertEqual(record["phone"], PENDING)
@@ -132,6 +135,7 @@ class LockoutTests(unittest.TestCase):
         chat.say("wrong number")  # cancels the pending code
         self.assertEqual(chat.state().last_code_phone, PENDING)
         reply = chat.say("my order number is EMO-100234")
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "verify_first:too_many_codes")
         (record,) = chat.records()
         self.assertEqual(record["phone"], PENDING)
@@ -142,11 +146,13 @@ class LockoutTests(unittest.TestCase):
         chat.say("9700000010")
         self.assertEqual(chat.state().last_code_phone, PENDING)
         chat.say("sorry, wrong number, it's 9876543210")
+        chat.assert_model_never_called()
         self.assertEqual(chat.state().last_code_phone, "+919876543210")
 
     def test_zoho_off_locks_out_as_today(self):
         chat = DeskChat(zoho=False)
         locked = lock_out(chat)
+        chat.assert_model_never_called()
         self.assertEqual(locked.text, LOCKED)
         self.assertIsNone(locked.ticket_id)
         self.assertTrue(locked.escalated)
@@ -221,6 +227,7 @@ class LockoutTests(unittest.TestCase):
             identity=Identity(strength=ANONYMOUS, em_aid="aid-1"),
         )
         recorded = chat.runtime._record_lockout(message, chat.state(), None, "locked")
+        chat.assert_model_never_called()
         self.assertEqual(tuple(recorded), (None, None))
         self.assertEqual(chat.records(), [])
         (event,) = chat.events("lockout_ticket_not_recorded")
@@ -282,6 +289,7 @@ class CapTests(unittest.TestCase):
         with at(NOW):
             chat.say("talk to a person")
             reply = chat.say(CALL_BACK)
+        chat.assert_model_never_called()
         self.assertEqual(reply.handled_by, "guardrail:callback:capped")
         self.assertEqual(reply.text, CAP_PER_NUMBER_MESSAGE)
         self.assertIsNone(chat.state().awaiting_callback)
@@ -292,6 +300,7 @@ class CapTests(unittest.TestCase):
         seed(chat, FAKE, count=PER_NUMBER, created_at=EARLIER)
         with at(NEXT_DAY):
             reply = chat.say("call me on 9999999999")
+        chat.assert_model_never_called()
         self.assertIn(HANDOVER_RECORDED_MESSAGE.format(reference=reply.ticket_id), reply.text)
 
     def test_fifty_unverified_tickets_in_a_day_refuse_any_more(self):
@@ -299,6 +308,7 @@ class CapTests(unittest.TestCase):
         seed(chat, None, count=OVERALL)
         with at(NOW):
             reply = chat.say("call me on 9999999999")
+        chat.assert_model_never_called()
         self.assertIn(CAP_OVERALL_MESSAGE, reply.text)
         self.assertIsNone(reply.ticket_id)
         (event,) = chat.events("unverified_ticket_capped")
@@ -321,6 +331,7 @@ class CapTests(unittest.TestCase):
         seed(chat, None, count=OVERALL)
         with at(NOW):
             reply = chat.say("I want to talk to a person", identity=RIDER)
+        chat.assert_model_never_called()
         self.assertTrue(is_desk_reference(reply.ticket_id))
         self.assertEqual(chat.tickets.get(reply.ticket_id)["identity"], "verified")
         self.assertEqual(chat.events("unverified_ticket_capped"), [])
@@ -330,6 +341,7 @@ class CapTests(unittest.TestCase):
         seed(chat, PENDING, count=PER_NUMBER)
         with at(NOW):
             locked = lock_out(chat)
+        chat.assert_model_never_called()
         self.assertEqual(locked.text, LOCKED_WHY + " " + CAP_PER_NUMBER_MESSAGE)
         self.assertNotIn(PASSING_ON, locked.text)
         self.assertFalse(locked.escalated)
@@ -358,6 +370,7 @@ class CapTests(unittest.TestCase):
         with at(NOW):
             locked = lock_out(chat)
             later = chat.say("hello?")
+        chat.assert_model_never_called()
         self.assertEqual(locked.text, LOCKED_WHY + " " + CAP_OVERALL_MESSAGE)
         self.assertEqual(later.text, LOCKED_WHY + " " + CAP_OVERALL_MESSAGE)
         (event,) = chat.events("unverified_ticket_capped")
@@ -369,6 +382,7 @@ class CapTests(unittest.TestCase):
             locked = lock_out(chat)
             seed(chat, PENDING, count=PER_NUMBER)  # the number is now over its cap
             again = chat.say("hello?")
+        chat.assert_model_never_called()
         self.assertEqual(again.ticket_id, locked.ticket_id)
         self.assertEqual(chat.events("unverified_ticket_capped"), [])
 
@@ -376,6 +390,7 @@ class CapTests(unittest.TestCase):
         chat = DeskChat(ticket_clock=lambda: NOW)
         with at(NOW), mock.patch.object(chat.tickets, "unverified_since", side_effect=StoreUnavailable("down")):
             reply = chat.say("call me on 9999999999")
+        chat.assert_model_never_called()
         self.assertTrue(is_desk_reference(reply.ticket_id))
         (event,) = chat.events("ticket_cap_unchecked")
         self.assertEqual((event["kind"], event["error"]), ("handover", "StoreUnavailable"))
@@ -384,6 +399,7 @@ class CapTests(unittest.TestCase):
     def test_with_zoho_off_nothing_is_capped_or_counted(self):
         chat = DeskChat(zoho=False)
         reply = chat.say("call me on 9999999999")
+        chat.assert_model_never_called()
         self.assertIsNone(reply.ticket_id)
         self.assertEqual(chat.events("unverified_ticket_capped"), [])
         self.assertEqual(chat.events("ticket_cap_unchecked"), [])

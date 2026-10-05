@@ -46,6 +46,7 @@ class WithAPhoneTests(unittest.TestCase):
         # Amendment A, finding 30: what a ticket the agent raises would carry.
         chat = DeskChat()
         chat.say("I want to talk to a person", identity=RIDER)
+        chat.assert_model_never_called()
         (record,) = chat.records()
         self.assertEqual(record["coverage"], "computed")
         self.assertEqual(record["customer_name"], "Ananya Rao")
