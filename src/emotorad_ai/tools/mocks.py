@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
+from ..contract import ASSERTED, VERIFIED
 from ..conversation import address_tokens
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
@@ -67,6 +68,11 @@ TICKET_SEVERITIES = ("low", "normal", "high", "critical")
 
 # An Indian pincode. Six digits, first digit 1 to 9.
 _PINCODE = re.compile(r"\b[1-9]\d{5}\b")
+# An Indian mobile as the runtime keeps a typed one (ConversationState.typed_number,
+# from verify_first.find_phone): ten ASCII digits, the first 6 to 9. Matched
+# whole with fullmatch, so no word boundary is needed, and [0-9] rather than \d
+# so a Devanagari digit is never a number to call.
+_TEN_DIGIT_MOBILE = re.compile(r"[6-9][0-9]{9}")
 
 
 def _clean(value: Any) -> Any:
@@ -398,6 +404,30 @@ def _owned_bike(
     return records[0]
 
 
+# Where a warranty proof's frame number came from: the customer read it out
+# for a registration nobody has checked yet (spec 2026-10-05, section 3).
+CLAIMED_FRAME_SOURCE = "given by the customer for registration; not checked"
+
+
+def ticket_source_key(conversation_id: str, started_at: Optional[str], tool: str, idempotency_key: str) -> str:
+    """A ticket's own key (spec 2026-10-05, section 2): the run, the tool and
+    the call's idempotency key. The ticket system answers a key it has seen
+    with the first ticket, so a retry whose receipt was lost, or a second
+    server, never raises a second one, and a new run (a new person after
+    restart_for) never gets the last run's."""
+    return "%s:%s:%s:%s" % (conversation_id, started_at or "", tool, idempotency_key)
+
+
+def _record_name(record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The customer's name from an OMS warranty record, or None. An app record
+    carries the rider's username instead (tools/amigo.amigo_records marks it
+    warranty_on_record False), and a name typed in the chat is a claim:
+    neither is ever a ticket's customer name."""
+    if not record or record.get("warranty_on_record") is False:
+        return None
+    return _clean(record.get("customer_name"))
+
+
 class MockTicketSystem:
     """Stands in for Zoho Desk: in tests, the playground, the CLI and the live
     evaluation, and for every persona but the customer's when Zoho is on
@@ -720,18 +750,24 @@ def build_registry(
 
         @registry.register(
             RAISE_INTAKE_TICKET,
-            "Raise a ticket for a customer whose identity could NOT be confirmed — they could "
+            "Raise a ticket for a customer whose identity could NOT be confirmed: they could "
             "not complete the one-time code, or could not give a number or order number at "
-            "all. Use it so the conversation still ends with the case in a human's queue "
+            "all. Use it so the conversation still ends with the case in a person's queue "
             "rather than nowhere. Everything you pass is what the customer TOLD you, not "
             "anything the system confirmed: pass their words. Do not state or imply any "
-            "warranty outcome to the customer — a person verifies who they are before anyone "
-            "acts on this.",
+            "warranty outcome to the customer: a person verifies who they are before anyone "
+            "acts on this. The team calls back on the customer's verified number, or else on "
+            "the last mobile number they typed in this chat, never on anything you pass. If "
+            "there is neither, this answers contact_number_required: ask the customer for a "
+            "mobile number we can call, and call this again once they have typed it.",
             parameters={
                 "stated_name": {"type": "string", "description": "Name as the customer gave it."},
                 "stated_contact": {
                     "type": "string",
-                    "description": "Any phone or email they offered, unverified, exactly as given.",
+                    "description": (
+                        "Any phone or email they offered, unverified, exactly as given. Kept as "
+                        "their claim only: it is never the number we call back."
+                    ),
                 },
                 "summary": {
                     "type": "string",
@@ -748,6 +784,11 @@ def build_registry(
             },
             required=("summary", "idempotency_key"),
             injects=("conversation_id",),
+            # The number to call back and what the ticket record needs, from
+            # the runtime (spec 2026-10-05, section 2). None is in the model's
+            # schema, and anything it sends under these names is dropped.
+            optional_injects=("phone", "identity_strength", "typed_number", "persona", "started_at",
+                              "cluster_id", "channel"),
             write=True,
         )
         def raise_intake_ticket(
@@ -757,26 +798,53 @@ def build_registry(
             stated_name: str = "",
             stated_contact: str = "",
             evidence: str = "",
+            phone: Optional[str] = None,
+            identity_strength: Optional[str] = None,
+            typed_number: Optional[str] = None,
+            persona: Optional[str] = None,
+            started_at: Optional[str] = None,
+            cluster_id: Optional[str] = None,
+            channel: Optional[str] = None,
         ) -> Dict[str, Any]:
             """A ticket that records claims, deliberately kept apart from the verified one.
 
-            `create_support_ticket` injects a phone from a resolved identity and
-            refuses without one, which is right: a ticket carrying a frame number
-            and a coverage claim should only exist for someone we know. But that
-            left an unverified customer with no path at all — the agent would
-            promise to raise something and then raise nothing, which is worse
-            than saying no.
+            `create_support_ticket` needs a resolved phone and puts a bike and a
+            coverage outcome on the ticket, which is right only for someone we
+            know. This is the weaker ticket for everyone else, and the weakness
+            is the point: it asserts nothing. Every field is what the customer
+            said, labelled as such, and `identity` travels with it so triage
+            cannot mistake it for a confirmed case.
 
-            So this is a second, weaker ticket, and the weakness is the point. It
-            asserts nothing. Every field is what the customer said, labelled as
-            such, and `identity: unverified` travels with it so triage cannot
-            mistake it for a confirmed case.
+            It does need a number to call back (the person's decision,
+            2026-10-05): the verified phone when there is one, otherwise the
+            last Indian mobile the customer typed in this run, which the
+            runtime reads from their messages. Never `stated_contact`, which is
+            the model's copy of their words. With neither it refuses, so the
+            bot asks for a number rather than promising a call nobody can make.
             """
+            if phone and identity_strength == VERIFIED:
+                callback, identity = phone, "verified"
+            elif typed_number and _TEN_DIGIT_MOBILE.fullmatch(typed_number):
+                callback, identity = "+91" + typed_number, "unverified"
+            else:
+                raise ToolError(
+                    "contact_number_required",
+                    "There is no number to call this customer back on: ask the customer for a mobile "
+                    "number we can call, then raise the ticket again once they have typed it.",
+                    remedy="ask_for_callback_number",
+                )
             ticket = tickets.create(
+                source_key=ticket_source_key(conversation_id, started_at, RAISE_INTAKE_TICKET, idempotency_key),
+                persona=persona,
+                kind="intake",
+                conversation_id=conversation_id,
+                started_at=started_at,
+                cluster_id=cluster_id,
+                channel=channel,
+                phone=callback,
+                identity=identity,
                 category="intake_unverified",
                 severity="normal",
-                identity="unverified",
-                conversation_id=conversation_id,
                 stated_name=_clean(stated_name) or "not given",
                 stated_contact=_clean(stated_contact) or "not given",
                 evidence=_clean(evidence) or "none offered",
@@ -786,7 +854,7 @@ def build_registry(
                 {
                     "ticket_id": ticket["ticket_id"],
                     "status": ticket["status"],
-                    "identity": "unverified",
+                    "identity": identity,
                     "expected_response": "a person will verify the customer before acting on this",
                 }
             )
@@ -974,14 +1042,21 @@ def build_registry(
             },
         },
         required=("category", "description", "severity", "idempotency_key"),
-        injects=("phone",),
+        injects=("phone", "conversation_id"),
         # Whether any photo or video has arrived in the conversation, from the
         # runtime's facts; absent for a caller that has none (the safety branch).
-        optional_injects=("evidence_seen", "selected_bike", "unlisted_bike"),
+        # Then what the ticket record needs (spec 2026-10-05, section 2): the
+        # run, the persona (absent: the mock), the channel, how well the phone
+        # is known (absent: unverified), the cover code worked out, and the
+        # kind, which only the safety branch sets. None is in the model's
+        # schema, and anything it sends under these names is dropped.
+        optional_injects=("evidence_seen", "selected_bike", "unlisted_bike", "persona", "started_at",
+                          "cluster_id", "channel", "identity_strength", "coverage", "ticket_kind"),
         write=True,
     )
     def create_support_ticket(
         phone: str,
+        conversation_id: str,
         category: str,
         description: str,
         severity: str,
@@ -990,6 +1065,13 @@ def build_registry(
         evidence_seen: Optional[bool] = None,
         selected_bike: Optional[str] = None,
         unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
+        persona: Optional[str] = None,
+        started_at: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        identity_strength: Optional[str] = None,
+        coverage: Optional[str] = None,
+        ticket_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
@@ -1006,16 +1088,37 @@ def build_registry(
                 "(a voice call, or they say they cannot), hand the conversation to a person instead.",
                 remedy="collect_evidence",
             )
-        bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
-            phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
+        verified = identity_strength == VERIFIED
+        if identity_strength == ASSERTED:
+            # Caller ID, which anyone can send (identity.resolve_voice): no
+            # bike is looked up for it, so the real owner's bike never lands on
+            # a stranger's ticket, and no frame number is checked against it.
+            bike = None
+        else:
+            bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
+                phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
         ticket = tickets.create(
+            source_key=ticket_source_key(conversation_id, started_at, CREATE_SUPPORT_TICKET, idempotency_key),
+            persona=persona,
+            # Set by code, never from the model's category: only the safety
+            # branch's fact makes a safety ticket (spec 2026-10-05, section 3).
+            kind="safety" if ticket_kind == "safety" else "support",
+            conversation_id=conversation_id,
+            started_at=started_at,
+            cluster_id=cluster_id,
+            channel=channel,
             phone=phone,
+            identity="verified" if verified else "unverified",
             category=category,
             description=description,
             severity=severity,
             frame_number=bike.get("frame_number") if bike else None,
             frame_number_source=bike.get("frame_number_source") if bike else None,
             bike_model=bike.get("product_name") if bike else None,
+            # A person's cover and name go on a ticket only for a phone
+            # someone proved.
+            coverage=coverage if verified else None,
+            customer_name=_record_name(bike) if verified else None,
         )
         return ok(
             {
@@ -1087,22 +1190,45 @@ def build_registry(
             },
         },
         required=("frame_number", "idempotency_key"),
-        injects=("phone",),
+        injects=("phone", "conversation_id"),
+        # What the ticket record needs, from the runtime (spec 2026-10-05,
+        # section 2). None is in the model's schema, and anything it sends
+        # under these names is dropped.
+        optional_injects=("persona", "started_at", "cluster_id", "channel", "identity_strength", "coverage"),
         write=True,
     )
     def submit_warranty_proof(
         phone: str,
+        conversation_id: str,
         frame_number: str,
         idempotency_key: str,
         proof_url: Optional[str] = None,
         claimed_purchase_date: Optional[str] = None,
         purchase_channel: str = "unknown",
+        persona: Optional[str] = None,
+        started_at: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        identity_strength: Optional[str] = None,
+        coverage: Optional[str] = None,
     ) -> Dict[str, Any]:
         if purchase_channel not in ("dealer", "website", "marketplace", "unknown"):
             raise ToolError("invalid_channel", "Unknown purchase channel %r." % purchase_channel)
 
+        # `proof_url` stays in the schema and is ignored (spec 2026-10-05,
+        # section 3): the model never sees a URL, so one here is one it wrote.
+        # The customer's own photo reaches the ticket from the conversation.
+        verified = identity_strength == VERIFIED
         submission = tickets.create(
+            source_key=ticket_source_key(conversation_id, started_at, SUBMIT_WARRANTY_PROOF, idempotency_key),
+            persona=persona,
+            kind="warranty_proof",
+            conversation_id=conversation_id,
+            started_at=started_at,
+            cluster_id=cluster_id,
+            channel=channel,
             phone=phone,
+            identity="verified" if verified else "unverified",
             category="late_warranty_registration",
             severity="normal",
             description=(
@@ -1110,14 +1236,22 @@ def build_registry(
                 "REQUIRES HUMAN VERIFICATION against the document before any coverage is set."
                 % (frame_number, purchase_channel, claimed_purchase_date or "not given")
             ),
+            # The customer's claims, labelled as such: nobody has checked the
+            # frame number, the date or where it was bought.
             frame_number=frame_number,
-            proof_url=proof_url,
+            frame_number_source=CLAIMED_FRAME_SOURCE,
             claimed_purchase_date=claimed_purchase_date,
+            purchase_channel=purchase_channel,
+            coverage=coverage if verified else None,
+            # The proof, not the person: nobody has read the document yet.
             verified=False,
         )
         return ok(
             {
                 "reference": submission["ticket_id"],
+                # The same id under the name the runtime reads, so this ticket
+                # gets the transcript and counts as this turn's ticket.
+                "ticket_id": submission["ticket_id"],
                 "status": "awaiting_human_verification",
                 # Stated in the payload so the model cannot read this as a
                 # completed registration and congratulate the customer on being

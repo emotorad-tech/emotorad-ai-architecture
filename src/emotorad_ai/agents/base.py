@@ -60,8 +60,9 @@ MODEL_UNAVAILABLE_TEXT = (
     "of our support team who can help."
 )
 
-# Tool names whose successful result carries a ticket the customer must be told about.
-TICKET_PRODUCING_TOOLS = ("create_support_ticket",)
+# Tool names whose successful result carries a ticket the customer must be told
+# about, and which the run's transcript is attached to (spec 2026-10-05, section 6).
+TICKET_PRODUCING_TOOLS = ("create_support_ticket", "raise_intake_ticket", "submit_warranty_proof")
 
 # Every agent that can send a guide picture is given this, last in its prompt
 # (Agent.run). On 2026-09-29 the bot offered "I can show you where it is", the

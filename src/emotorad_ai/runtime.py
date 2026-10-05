@@ -39,7 +39,7 @@ from .agents.narrow_support import AGENT_NAME as NARROW_SUPPORT
 from .agents.narrow_support import build_narrow_definition
 from .attachments import shows_media, user_content
 from .config import Settings, load_settings
-from .contract import Attachment, InboundMessage, Reply
+from .contract import VERIFIED, Attachment, InboundMessage, Reply
 from .conversation import (
     AWAITING_BIKE_CONFIRMATION,
     AWAITING_BIKE_SELECTION,
@@ -224,7 +224,7 @@ _REFERENCE = re.compile(r"\b[A-Z]{2,4}-\d{3,}\b")
 
 def _ticket_raised(turn: Any) -> bool:
     """Whether any tool this turn returned a ticket (create_support_ticket,
-    raise_intake_ticket)."""
+    raise_intake_ticket, submit_warranty_proof)."""
     for call in turn.tool_calls:
         result = call.get("result") or {}
         if isinstance(result, dict) and not is_error(result) and (result.get("data") or {}).get("ticket_id"):
@@ -369,6 +369,18 @@ class Runtime:
             if extra in self.registry.specs and extra not in names:
                 names.append(extra)
         return replace(definition, tool_names=tuple(names))
+
+    def _identity_strength(self, conversation_id: str, resolved: ResolvedIdentity) -> str:
+        """How well the phone a ticket tool is given is known (spec 2026-10-05,
+        section 2). The channel's phone keeps the channel's strength: verified
+        for WhatsApp, an app sign-in or a code, asserted for caller ID. With
+        no channel phone, the tools get the one this conversation proved by a
+        code (Agent._late_facts), which is verified. Nobody proved: the
+        identity's own strength."""
+        identity = resolved.identity
+        if identity.phone or self.phone_resolver is None:
+            return identity.strength
+        return VERIFIED if self.phone_resolver(conversation_id) else identity.strength
 
     def _remember_lookup(
         self, state: ConversationState, name: str, arguments: Dict[str, Any], envelope: Dict[str, Any]
@@ -1239,6 +1251,10 @@ class Runtime:
                 # A bike the customer gave because it is not in their list:
                 # the ticket tool puts its frame number on a ticket.
                 "unlisted_bike": lambda: state.unlisted_bike,
+                # How well the ticket tools know who this is (spec 2026-10-05,
+                # section 2): a ticket is verified only on a proven phone, and
+                # a caller ID's phone never has a bike looked up for it.
+                "identity_strength": lambda: self._identity_strength(message.conversation_id, resolved),
                 # The customer's own words, for the address backstop: an
                 # address is accepted only if it matches the record or
                 # something the customer actually typed in this conversation.
@@ -1498,7 +1514,12 @@ class Runtime:
         # frame number: if this turn's bike list no longer holds it (Amigo
         # stopped answering since it was chosen), the ticket is raised
         # without a bike, naming it here, rather than refused.
-        late: Dict[str, Any] = {}
+        late: Dict[str, Any] = {
+            # Set here and nowhere else: the model never chooses a ticket's
+            # kind, and anything it sends under this name is dropped.
+            "ticket_kind": lambda: "safety",
+            "identity_strength": lambda: self._identity_strength(message.conversation_id, resolved),
+        }
         if state.unlisted_bike:
             late["unlisted_bike"] = lambda: state.unlisted_bike
         if state.selected_frame:

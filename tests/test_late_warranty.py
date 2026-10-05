@@ -99,6 +99,13 @@ class ProofSubmissionTests(unittest.TestCase):
         self.assertFalse(data["coverage_set"])
         self.assertEqual(data["status"], "awaiting_human_verification")
         self.assertIn("Do not tell the customer their warranty is now active", data["note"])
+        # The runtime reads ticket_id (agents.base.TICKET_PRODUCING_TOOLS), and
+        # the URL the model passed never reaches the ticket (spec 2026-10-05).
+        self.assertEqual(data["ticket_id"], data["reference"])
+        submission = self.registry.tickets.tickets[data["ticket_id"]]
+        self.assertNotIn("proof_url", submission)
+        self.assertNotIn("example.test", str(submission))
+        self.assertEqual(submission["kind"], "warranty_proof")
 
     def test_the_claimed_date_is_recorded_as_a_claim_not_a_fact(self):
         self.registry.call(
