@@ -494,6 +494,10 @@ def health() -> dict:
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.
     report.update(ticket_health(ZOHO, now_iso()))
+    # Safety reports this server could not record a ticket for (spec
+    # 2026-10-05, section 6), since it started. Alarmed by their event too.
+    if runtime.safety_not_recorded > 0:
+        report["safety_tickets_not_recorded"] = runtime.safety_not_recorded
     return report
 
 

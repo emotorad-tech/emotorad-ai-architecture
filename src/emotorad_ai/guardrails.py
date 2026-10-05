@@ -110,21 +110,62 @@ _HANDOFF_PATTERNS = _compile(_HANDOFF_TERMS)
 # routed to the right agent first.
 _ALL_SAFETY_PATTERNS = _SAFETY_PATTERNS + _MOTOR_SAFETY_PATTERNS
 
-SAFETY_MESSAGE = (
+# The safety reply's parts (spec 2026-10-05, section 7). The replies that
+# cannot promise a call reuse the same steps and the same 112 line, word for word.
+SAFETY_STEPS = (
     "Please stop using and stop charging the battery right now, and move it away from "
     "anything flammable and away from people. Do not try to open, repair or charge it "
-    "again, and do not put it in water.\n\n"
-    "What you have described is a safety issue rather than a normal support question, so "
-    "I am handing this to our safety team immediately rather than troubleshooting it here. "
-    "They will call you on the number linked to your account.\n\n"
+    "again, and do not put it in water."
+)
+SAFETY_EMERGENCY = (
     "If you can see smoke or flames right now, move away from the bike and call emergency "
     "services on 112."
+)
+
+# A number we know, and the safety ticket raised (runtime._safety_with_phone).
+SAFETY_MESSAGE = (
+    SAFETY_STEPS + "\n\n"
+    "What you have described is a safety issue rather than a normal support question, so "
+    "I am handing this to our safety team immediately rather than troubleshooting it here. "
+    "They will call you on the number linked to your account.\n\n" + SAFETY_EMERGENCY
 )
 
 HANDOFF_MESSAGE = (
     "Of course — I am connecting you to a member of our support team now. I have passed "
     "on this conversation so you will not need to repeat yourself."
 )
+
+# --- the Zoho Desk handovers (spec 2026-10-05, section 7) ---------------------
+# Drafts. The support lead confirms or rewrites them in person step 10, before
+# part 4 merges. None of them promises a channel or a time
+# (docs/contracts/amiigo-support-chat.md). The ones with {reference} are
+# filled with str.format.
+
+# Safety, with no number we know and Zoho on: the steps, then a request for a
+# number in place of a promise, then 112. The callback gate waits for the number.
+SAFETY_NO_CONTACT_MESSAGE = (
+    SAFETY_STEPS + "\n\n"
+    "This is a safety issue, so I want our safety team to reach you. Please send me your "
+    "mobile number and I'll pass this on straight away.\n\n" + SAFETY_EMERGENCY
+)
+# Safety when nothing could be recorded (Zoho off with no number, a failed
+# write, the store down): the steps and 112, and no promise of a call.
+SAFETY_NOT_RECORDED_MESSAGE = SAFETY_STEPS + "\n\n" + SAFETY_EMERGENCY
+# A later report in a run whose safety ticket exists: added to it as a note.
+SAFETY_ADDED_MESSAGE = "I've added this to your safety case. Your reference is {reference}."
+# A call-back number received and its ticket recorded.
+NUMBER_RECEIVED_MESSAGE = "Thank you. I've passed this on. Your reference is {reference}."
+# Talk to a person: the ticket recorded, or the question when no number is known.
+HANDOVER_RECORDED_MESSAGE = (
+    "I've passed this conversation to our support team, so you won't need to repeat yourself. "
+    "They will be in touch. Your reference is {reference}."
+)
+HANDOVER_ASK_NUMBER_MESSAGE = "I can pass you to our support team. What mobile number can they reach you on?"
+# After the verify step's lock-out text, once its ticket is recorded.
+REFERENCE_SUFFIX = " Your reference is {reference}."
+# The caps on unverified tickets that are not urgent.
+CAP_PER_NUMBER_MESSAGE = "I can't take another request for that number today."
+CAP_OVERALL_MESSAGE = "I can't pass this on right now. Please try again tomorrow."
 
 
 @dataclass(frozen=True)

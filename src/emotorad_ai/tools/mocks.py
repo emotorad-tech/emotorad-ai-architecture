@@ -1095,8 +1095,17 @@ def build_registry(
             # a stranger's ticket, and no frame number is checked against it.
             bike = None
         else:
-            bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
-                phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
+            try:
+                bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
+                    phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
+            except ToolError as exc:
+                # The safety branch fires before a bike is chosen. On a number
+                # with several bikes its ticket is raised with no bike, never
+                # refused for want of a frame number (spec 2026-10-05, section
+                # 6). Only the kind code sets: the model's call is refused as before.
+                if ticket_kind != "safety" or exc.code != "frame_number_required":
+                    raise
+                bike = None
         ticket = tickets.create(
             source_key=ticket_source_key(conversation_id, started_at, CREATE_SUPPORT_TICKET, idempotency_key),
             persona=persona,

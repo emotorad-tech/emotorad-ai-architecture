@@ -253,16 +253,39 @@ class CloseRunsTests(unittest.TestCase):
         _, first, _, _ = two_people(router, before_stranger=stranger_sends_a_photo)
         self.assertLessEqual(parse(store.get(first.ticket_id)["ended_at"]), parse(photos[0]["stored_at"]))
 
-    def test_with_none_of_the_runs_turns_on_record_it_ends_at_the_strangers_turn(self):
+    def test_with_none_of_the_runs_turns_on_record_it_ends_when_the_strangers_message_arrived(self):
+        # The run ends before the stranger's turn is recorded (the ruling for
+        # Task 13), so with no earlier turn to end after, it ends at the
+        # message's arrival, which is before the turn's record.
         router, store = desk()
 
         def transcript_back(chat):
             chat.conversations.failing = False
 
-        chat, first, _, _ = two_people(router, before_stranger=transcript_back,
-                                       conversations=UnrecordedWhileFailing())
+        chat, first, _, first_started = two_people(router, before_stranger=transcript_back,
+                                                   conversations=UnrecordedWhileFailing())
         stranger = next(turn for turn in chat.conversations.transcript("c1") if turn.text == STRANGER_FIRST_WORDS)
-        self.assertEqual(store.get(first.ticket_id)["ended_at"], stranger.at)
+        ended = store.get(first.ticket_id)["ended_at"]
+        self.assertLess(parse(first_started), parse(ended))
+        self.assertLessEqual(parse(ended), parse(stranger.at))
+
+    def test_a_strangers_turn_ends_the_run_before_it_is_recorded(self):
+        # The ruling for Task 13: the run's end is set before the stranger's
+        # first turn is recorded, so no worker pass in between can find that
+        # turn inside the first person's run.
+        order = []
+        router, _ = desk()
+        closing = router.close_runs
+
+        def close_runs(conversation_id, new_started_at):
+            order.append("close_runs")
+            closing(conversation_id, new_started_at)
+
+        router.close_runs = close_runs
+        chat, _, _, _ = two_people(router, conversations=RecordingStore(order))
+        stranger = next(turn for turn in chat.conversations.transcript("c1") if turn.text == STRANGER_FIRST_WORDS)
+        recorded = "record_turn:%d" % ((stranger.n + 1) // 2)
+        self.assertEqual(order[order.index(recorded) - 1], "close_runs")
 
     def test_a_failed_close_is_logged_and_the_turn_goes_on(self):
         registry = build_registry(today=TODAY, ticket_system=BrokenClose(), warranty_source=fake_bikes)

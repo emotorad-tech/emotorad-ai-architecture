@@ -43,6 +43,14 @@ class HealthTests(unittest.TestCase):
              "photo_check": "off", "zoho": "not configured"},
         )
 
+    def test_safety_reports_not_recorded_are_counted_once_there_are_any(self):
+        # Spec 2026-10-05, section 6: safety_ticket_not_recorded is alarmed and
+        # counted on /health. Absent at 0, so the pinned report above holds.
+        api = fresh_api(dict({"EMOTORAD_AI_MODE": "offline"}, **zoho_blank()))
+        self.assertNotIn("safety_tickets_not_recorded", api.health())
+        api.runtime.safety_not_recorded = 2
+        self.assertEqual(api.health()["safety_tickets_not_recorded"], 2)
+
     def test_health_names_the_commit_it_was_built_from(self):
         # The deploy checks this, so a build that failed on the server and
         # left an older image running fails the deploy instead of passing it

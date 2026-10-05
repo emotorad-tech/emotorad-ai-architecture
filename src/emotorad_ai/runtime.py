@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from .agents.base import HANDOVER_TEXT, Agent, AgentDefinition
 from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
@@ -69,6 +69,7 @@ from .decisions import (
     load_thresholds,
     route,
 )
+from .digits import ascii_digits
 from .disclosure import apply_disclosure
 from .enrichment import ContextEnricher, summarise_past, without_bikes
 from .graph import TurnNodes, build_turn_graph
@@ -76,8 +77,14 @@ from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
     EVIDENCE_BLOCKED_MESSAGE,
     HANDOFF_MESSAGE,
+    NUMBER_RECEIVED_MESSAGE,
     ORDER_BLOCKED_MESSAGE,
+    SAFETY_ADDED_MESSAGE,
+    SAFETY_EMERGENCY,
     SAFETY_MESSAGE,
+    SAFETY_NO_CONTACT_MESSAGE,
+    SAFETY_NOT_RECORDED_MESSAGE,
+    SAFETY_STEPS,
     CoverageCheck,
     EvidenceCheck,
     OrderCheck,
@@ -128,6 +135,7 @@ from .tools.mocks import (
     RAISE_INTAKE_TICKET,
     SEND_GUIDE_MEDIA,
     build_registry,
+    ticket_source_key,
 )
 from .tools.registry import ToolContext, ToolRegistry, is_error
 from .tools.verification import (
@@ -136,10 +144,11 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
-from .tickets.clock import plus
-from .tickets.kinds import is_desk_reference
+from .tickets.clock import now_iso, plus
+from .tickets.kinds import is_desk_reference, is_urgent
+from .tickets.record import GONE
 from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
-from .verify_first import CONFIRMED, NUMBER, VerifyFirst, ascii_digits, find_phone
+from .verify_first import CONFIRMED, NUMBER, VerifyFirst, find_phone, looks_like_a_number, redact
 from . import erasure as erasure_rules
 
 UNSUPPORTED_MESSAGE = (
@@ -219,6 +228,115 @@ def _hazard_sentences(summary: str) -> List[str]:
     description and a prose one both come out as short quotes."""
     pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", summary) if p.strip()]
     return [p for p in pieces if check_safety_in_description(p).triggered]
+
+
+def _safety_scan(message: InboundMessage) -> Tuple[List[str], List[str]]:
+    """The safety terms a message trips, and the hazard sentences of any clip
+    description that tripped them. The typed text gets the plain scan. A
+    video's description (Attachment.summary, written by the video analyser at
+    ingest) gets the negation-aware one, because an analyser that writes "no
+    smoke visible" is describing a safe clip. One function, so the safety gate
+    and the store-down reply judge a message the same way."""
+    matched = list(check_safety(message.message_text).matched)
+    evidence: List[str] = []
+    for attachment in message.attachments:
+        if attachment.summary:
+            verdict = check_safety_in_description(attachment.summary)
+            matched += [m for m in verdict.matched if m not in matched]
+            if verdict.triggered:
+                evidence += _hazard_sentences(attachment.summary)
+    return matched, evidence
+
+
+def _again_note(matched: Sequence[str]) -> str:
+    """The note a later safety report in the same run adds to its ticket. Built
+    by code, with no customer text: the transcript carries their words."""
+    return "Customer reported a safety issue again. Matched safety indicators: %s." % ", ".join(matched)
+
+
+# Added to the safety reply when its ticket is raised or found.
+_PRIORITY_CASE = "I have raised this as a priority safety case, reference %s."
+
+
+def _safety_idempotency_key(conversation_id: str, started_at: Optional[str]) -> str:
+    """The safety branch's key for create_support_ticket: one ticket per run of
+    the conversation. Repeats inside a run share it, and a thread that returns
+    after its working state expired (48 h; receipts live 7 days) raises a new
+    one rather than being quoted the old reference (the person's decision,
+    2026-09-29). A run is the id and its start, as for summaries."""
+    return "safety:%s:%s" % (conversation_id, started_at or "")
+
+
+# The purposes of the tickets the runtime's gates record (spec 2026-10-05,
+# section 6). Each is the last part of the source key
+# "<conversation_id>:<started_at>:<purpose>", so a run gets one ticket per need
+# and a retry gets the same one.
+PURPOSE_SAFETY = "safety_callback"
+PURPOSE_HANDOVER = "handover"
+PURPOSE_LOCKOUT = "lockout"
+
+
+class Recorded(NamedTuple):
+    """What a gate's recording came to: the reference, or None when nothing
+    was recorded. When a cap on unverified tickets refused it, `refusal` is
+    the text to send instead, so the caller promises nothing."""
+
+    reference: Optional[str]
+    refusal: Optional[str] = None
+
+
+class TypedNumber(NamedTuple):
+    """A call-back number read from a customer's message (read_number)."""
+
+    number: Optional[str]  # ten digits: the first valid Indian mobile, or None
+    shown: str  # the text as the model's history and the transcript keep it
+    attempted: bool  # no valid mobile, but something that looked like a number
+
+
+# Our ticket, booking and order references, which a customer may quote. They
+# are blanked at the same length before a number is read, so a quoted
+# EM-1000001 is neither a mobile nor a failed try at one. Read after
+# ascii_digits, so [0-9] covers digits of any script. The left side checks for
+# ASCII letters and digits on purpose: no \b next to text that may be
+# Devanagari.
+_QUOTED_REFERENCE = re.compile(r"(?<![A-Za-z0-9])(?:EM|BK|RO)-[0-9]+", re.IGNORECASE)
+# A try at a number: seven or more digits, however spaced. This is the shape
+# verify_first.looks_like_a_number counts.
+_NUMBER_TRY = re.compile(r"\+?[0-9][0-9 \-]{5,}[0-9]")
+
+
+def read_number(text: str) -> TypedNumber:
+    """The call-back number in a customer's message (spec 2026-10-05, section 6).
+
+    Digits in any script are read as ASCII first (Devanagari ९८७६…), quoted
+    references are set aside, then the first valid Indian mobile is taken
+    (verify_first.find_phone). In the text that is kept, the number becomes
+    [phone] and a try that is not a valid Indian mobile becomes [number]. A
+    message with neither is kept as typed."""
+    plain = ascii_digits(text or "")
+    probe = _QUOTED_REFERENCE.sub(lambda m: " " * len(m.group()), plain)
+    found = find_phone(probe)
+    if found is not None:
+        number, span = found
+        return TypedNumber(number, redact(plain, span, "[phone]"), False)
+    if not looks_like_a_number(probe):
+        return TypedNumber(None, text or "", False)
+    shown = plain
+    tries = [m.span() for m in _NUMBER_TRY.finditer(probe) if sum(ch.isdigit() for ch in m.group()) >= 7]
+    for start, end in reversed(tries):
+        shown = shown[:start] + "[number]" + shown[end:]
+    return TypedNumber(None, shown, True)
+
+
+def _as_shown(message: InboundMessage, typed: TypedNumber) -> InboundMessage:
+    """The message as the model's history and the transcript keep it."""
+    return message if typed.shown == (message.message_text or "") else replace(message, message_text=typed.shown)
+
+
+def _live(*records: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The first ticket record that exists and is not gone (deleted or merged
+    in Desk): a gone one is never quoted."""
+    return next((record for record in records if record is not None and record.get("state") != GONE), None)
 
 
 _REFERENCE = re.compile(r"\b[A-Z]{2,4}-\d{3,}\b")
@@ -350,6 +468,9 @@ class Runtime:
         # When a conversation proved its number by SMS code, for an erasure
         # request's proof (VerificationStore.verified_on).
         self.otp_verified_at = otp_verified_at
+        # Safety reports whose ticket could not be recorded since this server
+        # started (safety_ticket_not_recorded), shown on /health when above 0.
+        self.safety_not_recorded = 0
         self.agents = {
             name: Agent(
                 definition,
@@ -549,8 +670,10 @@ class Runtime:
             except StoreUnavailable as exc:
                 return self._store_down(message, exc, reply.ticket_id)
         # After the save and before the record: a worker pass in between must
-        # never find this run's first turn inside an earlier run's bounds.
+        # never find this run's first turn inside an earlier run's bounds, nor
+        # a newcomer's turn inside the run of the person before them.
         self._close_earlier_runs(state)
+        self._end_run_before_this_turn(message, state, reply, resolved)
         try:
             recorded, summary = message, self._summary_for(state, resolved)
             if "transcript_text" in reply.metadata:
@@ -603,14 +726,14 @@ class Runtime:
         run of this conversation id, which may be someone else's
         (restart_for), never reaches it. And only while the person writing is
         the run's own: once their proof lapses, the next visitor's words reach
-        no ticket of theirs, and a Desk record's run ends before them."""
+        no ticket of theirs (_end_run_before_this_turn has ended its Desk
+        record's run before them)."""
         tickets = getattr(self.registry, "tickets", None)
         ticket_id = reply.ticket_id or state.ticket_id
         if not ticket_id or not hasattr(tickets, "attach_transcript"):
             return
         if not self._speaker_owns_run(state, resolved):
-            if is_desk_reference(ticket_id) and hasattr(tickets, "close_runs"):
-                self._end_run_before_this_turn(state, tickets)
+            self._wake_newcomers_ticket(state, reply, tickets)
             return
         cid = state.conversation_id
         try:
@@ -622,29 +745,85 @@ class Runtime:
                 ticket_id=ticket_id, error="%s: %s" % (type(exc).__name__, exc),
             )
 
-    def _end_run_before_this_turn(self, state: ConversationState, tickets: Any) -> None:
+    def _end_run_before_this_turn(
+        self, message: InboundMessage, state: ConversationState, reply: Reply, resolved: Optional[ResolvedIdentity],
+    ) -> None:
         """Someone other than the run's own person is writing, and nobody has
         proved a number since, so restart_for has not begun a run of theirs.
         The run's Desk record ends before this turn, so the worker, which
         posts by time, never sends the newcomer's words or photos to it (spec
-        2026-10-05, section 3, and the plan's cross-check, finding 9).
+        2026-10-05, section 3, and the plan's cross-check, finding 9). Called
+        after the save and before the turn is recorded, so no worker pass in
+        between finds this turn inside the run (the ruling for Task 13).
 
-        It ends just after the run's last turn before this one, not at this
-        turn: the API records a photo sent with a message before the turn
-        runs (api._persist_media), so that photo is older than the turn.
-        With no earlier turn of the run on record, at this turn. A record
-        that has an end keeps it."""
-        cid = state.conversation_id
+        It ends where a newcomer's ticket starts (_newcomer_start). A ticket
+        this turn recorded for the newcomer starts at that same instant, so it
+        is not ended with the run. A record that has an end keeps it."""
+        tickets = getattr(self.registry, "tickets", None)
+        ticket_id = reply.ticket_id or state.ticket_id
+        if (not is_desk_reference(ticket_id) or not hasattr(tickets, "close_runs")
+                or self._speaker_owns_run(state, resolved)):
+            return
+        try:
+            tickets.close_runs(state.conversation_id, self._newcomer_start(message, state))
+        except Exception as exc:  # the turn happened; the log says the run stays open
+            self.log.emit("close_runs_failed", state.conversation_id, error=type(exc).__name__)
+
+    def _newcomer_start(self, message: InboundMessage, state: ConversationState) -> str:
+        """Where a run ends for someone who does not own it, and their own
+        tickets' run begins: just after the run's last turn before this one.
+        Not at this turn: the API records a photo sent with a message before
+        the turn runs (api._persist_media), so that photo is older than the
+        turn and belongs to the newcomer. With no earlier turn of the run on
+        record, when this message arrived.
+
+        Read before this turn is recorded, so the safety gate and the close
+        after the save see the same transcript and get the same time."""
         this_turn = state.turn_offset + state.turns * 2 - 1  # its customer line (transcript_turns)
         try:
-            turns = self.conversations.transcript(cid)
-            before = [turn for turn in turns if state.turn_offset < turn.n < this_turn]
-            ended = (plus(before[-1].at, 0.000001) if before
-                     else next((turn.at for turn in turns if turn.n == this_turn), None))
-            if ended is not None:
-                tickets.close_runs(cid, ended)
-        except Exception as exc:  # the turn happened; the log says the run stays open
-            self.log.emit("close_runs_failed", cid, error=type(exc).__name__)
+            before = [turn for turn in self.conversations.transcript(state.conversation_id)
+                      if state.turn_offset < turn.n < this_turn]
+            if before:
+                return plus(before[-1].at, 0.000001)
+        except Exception as exc:  # the class only; the arrival time stands in
+            self.log.emit("transcript_read_failed", state.conversation_id, error=type(exc).__name__)
+        try:
+            return plus(message.timestamp, 0)
+        except (TypeError, ValueError):
+            return now_iso()
+
+    def _ticket_run_start(
+        self, message: InboundMessage, state: ConversationState, resolved: Optional[ResolvedIdentity],
+    ) -> Optional[str]:
+        """The run a gate's or the safety branch's ticket belongs to, by its
+        start (the ruling for Task 13). The run's own start, for the run's own
+        person. For someone else writing in it before restart_for (a second
+        person on a shared browser, once the first person's proof lapsed), a
+        start of their own, where the run ends for them (_newcomer_start).
+        Never the first person's start: the worker posts a record's turns by
+        its run's times, and the ticket keys hold the start, so the first
+        person's turns never reach a newcomer's ticket and their tickets are
+        never found by a newcomer's keys."""
+        if self._speaker_owns_run(state, resolved):
+            return state.started_at
+        return self._newcomer_start(message, state)
+
+    def _wake_newcomers_ticket(self, state: ConversationState, reply: Reply, tickets: Any) -> None:
+        """A ticket this turn recorded for someone who does not own the run
+        has a run of its own (_ticket_run_start). It is woken, so the worker
+        sends it after this reply rather than two minutes on. Desk ignores the
+        text: the worker posts the ticket's own turns by its run's times. The
+        run's own ticket, by its start, is never touched."""
+        store = self._desk_store()
+        if store is None or not is_desk_reference(reply.ticket_id):
+            return
+        try:
+            record = store.get(reply.ticket_id)
+            if record is not None and record.get("started_at") != state.started_at:
+                tickets.attach_transcript(reply.ticket_id, "")
+        except Exception as exc:  # the ticket exists either way; the worker's first pass sends it
+            self.log.emit("transcript_attach_failed", state.conversation_id,
+                          ticket_id=reply.ticket_id, error=type(exc).__name__)
 
     def _merge_onto_fresh(
         self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply, looked_up: bool = False,
@@ -720,15 +899,32 @@ class Runtime:
 
     def _store_down(self, message: InboundMessage, exc: Exception, ticket_id: Optional[str] = None) -> Reply:
         """The store cannot be reached: hand over, never start from blank. A
-        ticket the turn already raised is named, so the customer can quote it."""
-        self.log.emit("store_unavailable", message.conversation_id, error=str(exc))
-        self.log.escalation(message.conversation_id, "store_unavailable", ticket_id)
+        ticket the turn already raised is named, so the customer can quote it.
+
+        A safety report is the exception (spec 2026-10-05, section 6). With
+        the store down no safety ticket could be recorded, so it gets the
+        safety steps and 112 and no promise of a call. Unless the turn already
+        raised a ticket, this is logged as safety_ticket_not_recorded, which
+        is alarmed."""
+        cid = message.conversation_id
+        self.log.emit("store_unavailable", cid, error=str(exc))
+        reference = "\n\nYour reference is %s." % ticket_id if ticket_id else ""
+        matched, _ = _safety_scan(message)
+        metadata: Dict[str, Any] = {}
+        if matched:
+            if ticket_id:
+                self.log.escalation(cid, "store_unavailable", ticket_id)
+            else:
+                self._note_safety_not_recorded(cid, "store_unavailable")
+            text, escalated, metadata = SAFETY_NOT_RECORDED_MESSAGE + reference, bool(ticket_id), {"matched": matched}
+        else:
+            self.log.escalation(cid, "store_unavailable", ticket_id)
+            text, escalated = HANDOVER_TEXT + reference, True
         # A throwaway state, so the AI disclosure is always added: we cannot
         # know whether this person has already seen it.
-        text = HANDOVER_TEXT + ("\n\nYour reference is %s." % ticket_id if ticket_id else "")
-        text = apply_disclosure(text, ConversationState(conversation_id=message.conversation_id), message.channel)
-        return Reply(conversation_id=message.conversation_id, text=text, handled_by="store_unavailable",
-                     escalated=True, ticket_id=ticket_id)
+        text = apply_disclosure(text, ConversationState(conversation_id=cid), message.channel)
+        return Reply(conversation_id=cid, text=text, handled_by="store_unavailable",
+                     escalated=escalated, ticket_id=ticket_id, metadata=metadata)
 
     # -- graph nodes (graph.py says what follows what) -----------------------
 
@@ -860,15 +1056,7 @@ class Runtime:
         #    the negation-aware scan, because an analyser that writes "no
         #    smoke visible" is describing a safe clip, not a hazard.
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
-        safety = check_safety(message.message_text)
-        matched = list(safety.matched)
-        evidence: List[str] = []
-        for attachment in message.attachments:
-            if attachment.summary:
-                verdict = check_safety_in_description(attachment.summary)
-                matched += [m for m in verdict.matched if m not in matched]
-                if verdict.triggered:
-                    evidence += _hazard_sentences(attachment.summary)
+        matched, evidence = _safety_scan(message)
         if matched:
             return {"reply": self._handle_safety(message, resolved, state, matched, evidence)}
         return {}
@@ -1275,10 +1463,19 @@ class Runtime:
     def _side_effects_since(self, log_mark: int, conversation_id: str) -> List[Dict[str, Any]]:
         """Tool calls since `log_mark` that changed something for the customer:
         any write tool, plus SIDE_EFFECT_TOOLS (a picture sent, a code sent or
-        spent), which a rerun would repeat or break."""
+        spent), which a rerun would repeat or break. Also a ticket a gate
+        recorded or noted straight through the seam (ticket_recorded,
+        ticket_note_added). A turn that recorded one is merged, never run
+        again, and a rerun would add the note twice (spec 2026-10-05,
+        section 6)."""
         done: List[Dict[str, Any]] = []
         for event in self.log.events[log_mark:]:
-            if event.get("event") != "tool_call" or event.get("conversation_id") != conversation_id:
+            if event.get("conversation_id") != conversation_id:
+                continue
+            if event.get("event") in ("ticket_recorded", "ticket_note_added"):
+                done.append({"tool": event["event"], "ticket_id": event.get("ticket_id")})
+                continue
+            if event.get("event") != "tool_call":
                 continue
             # A failed call changed nothing, except a code tried: that attempt
             # is spent either way, so a rerun would cost the customer another.
@@ -1669,17 +1866,16 @@ class Runtime:
     ) -> Optional[str]:
         """The priority safety ticket, one per conversation run: the safety
         gate's, and the backstop's when a reply gave safety instructions
-        without one (spec 2026-10-01). The ticket id, or None."""
+        without one (spec 2026-10-01). The ticket id, or None.
+
+        The run is the ticket's own (_ticket_run_start): the run's start for
+        its own person, a start of their own for anyone else."""
+        started_at = self._ticket_run_start(message, state, resolved)
         arguments: Dict[str, Any] = {
             "category": "battery_safety",
             "severity": "critical",
             "description": description,
-            # One ticket per run of the conversation: repeats inside a run
-            # share it, and a thread that returns after its working state
-            # expired (48 h; receipts live 7 days) raises a new one rather
-            # than being quoted the old reference (the person's decision,
-            # 2026-09-29). A run is the id and its start, as for summaries.
-            "idempotency_key": "safety:%s:%s" % (message.conversation_id, state.started_at or ""),
+            "idempotency_key": _safety_idempotency_key(message.conversation_id, started_at),
         }
         # With several bikes the ticket needs one named, and triage may not
         # have run yet — the safety branch fires before it.
@@ -1720,7 +1916,7 @@ class Runtime:
                 phone=resolved.identity.phone,
                 cluster_id=resolved.cluster_id,
                 persona=resolved.persona,
-                started_at=state.started_at,
+                started_at=started_at,
                 late=late,
             ),
             run_without_idempotency=True,
@@ -1738,10 +1934,12 @@ class Runtime:
         """A reply claimed a ticket about a live hazard and none exists: raise
         the safety ticket here and add its reference. The model wrote "I'm
         raising an urgent support ticket" about a smoking battery and raised
-        nothing (staging, 2026-10-01). None when it cannot be backed (no known
-        customer, or the ticket failed): the caller then hands over."""
+        nothing (staging, 2026-10-01). None when it cannot be backed (not a
+        customer and no number known, or the ticket failed): the caller then
+        hands over. A customer with no number known gets a reply that
+        promises nothing instead (_backstop_without_phone)."""
         if not resolved.identity.phone:
-            return None
+            return self._backstop_without_phone(message, resolved, state, turn, hazards)
         description = (
             "Automatic safety escalation: the assistant said a ticket was raised about a safety hazard, "
             "and none was. "
@@ -1753,16 +1951,43 @@ class Runtime:
         except Exception as exc:
             self.log.emit("safety_backstop_failed", message.conversation_id, error=type(exc).__name__)
             return None
-        if not ticket_id:
-            self.log.emit("safety_backstop_failed", message.conversation_id, error="no_ticket")
+        if not ticket_id or self._is_gone(message.conversation_id, ticket_id):
+            self.log.emit("safety_backstop_failed", message.conversation_id,
+                          error="gone" if ticket_id else "no_ticket")
             return None
         self.log.guardrail(message.conversation_id, "safety_backstop", hazards)
         self.log.escalation(message.conversation_id, "safety_backstop", ticket_id)
         text = turn.text or ""
         if ticket_id not in text:
-            text = text.rstrip() + "\n\nI have raised this as a priority safety case, reference %s." % ticket_id
+            text = text.rstrip() + "\n\n" + _PRIORITY_CASE % ticket_id
             replace_turn_text(state.history, text)
         return replace(turn, text=text, ticket_id=ticket_id, escalate=True)
+
+    def _backstop_without_phone(
+        self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState, turn: Any,
+        hazards: List[str],
+    ) -> Any:
+        """The backstop for a customer with no number we know (the plan's
+        cross-check, finding 13). The model's claim of a ticket is replaced by
+        what the safety gate says in the same place: with Zoho on, the steps,
+        a request for a number and 112, and the callback gate waits for the
+        number; with Zoho off, the steps and 112, and the failure is alarmed.
+        Neither promises a call or a hand-over, because nothing is recorded.
+        No model is called. None for anyone but a customer: the caller hands
+        over, as before."""
+        if resolved.persona != "customer":
+            return None
+        cid = message.conversation_id
+        self.log.guardrail(cid, "safety_backstop", hazards)
+        if self._desk_store() is not None:
+            text = SAFETY_NO_CONTACT_MESSAGE
+            state.awaiting_callback, state.callback_asks = "safety", 0
+            self.log.emit("callback_asked", cid, purpose="safety")
+        else:
+            text = SAFETY_NOT_RECORDED_MESSAGE
+            self._note_safety_not_recorded(cid, "backstop_no_contact")
+        replace_turn_text(state.history, text)
+        return replace(turn, text=text, ticket_id=None, escalate=False)
 
     def _handle_safety(
         self,
@@ -1772,28 +1997,148 @@ class Runtime:
         matched: List[str],
         evidence: Optional[List[str]] = None,
     ) -> Reply:
+        """The safety branch, never a model call (spec 2026-10-05, section 6).
+        The reply promises a call only when a ticket is behind it."""
         self.log.guardrail(message.conversation_id, "battery_safety", matched)
-
-        ticket_id: Optional[str] = None
         if resolved.identity.phone:
-            # Deterministic: code decides this ticket exists, not the model.
-            description = (
-                "Automatic safety escalation. Customer reported: %s. Matched safety "
-                "indicators: %s. No troubleshooting was offered."
-                % (message.message_text, ", ".join(matched))
-            )
-            if evidence:
-                # The trigger came from the clip, and the typed text may say
-                # nothing alarming: the safety team needs what the analyser
-                # saw, not just "video attached".
-                description += " Seen in the customer's photo or video: %s" % " ".join(evidence)
+            return self._safety_with_phone(message, resolved, state, matched, evidence)
+        if resolved.persona == "customer" and self._desk_store() is not None:
+            return self._safety_without_phone(message, resolved, state, matched, evidence)
+        # Zoho off, or not a customer, and no number we know: nothing can be
+        # recorded. So the steps and 112, with no question and no promise.
+        self.log.emit("safety_without_contact", message.conversation_id)
+        return self._safety_reply(message, message, state, SAFETY_NOT_RECORDED_MESSAGE, matched, evidence,
+                                  outcome="no_contact")
+
+    def _safety_with_phone(
+        self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
+        matched: List[str], evidence: Optional[List[str]],
+    ) -> Reply:
+        """A number we know (WhatsApp, the app, a code proved, caller ID). The
+        ticket goes through create_support_ticket with the run's safety key,
+        as before. One safety ticket per run (the plan's cross-check, finding
+        11): with Zoho on, a ticket the run already holds under either safety
+        key gets a note and is quoted, and no second is raised. If no ticket
+        can be raised, the reply promises nothing."""
+        cid = message.conversation_id
+        try:
+            gate, tool = self._run_safety_records(message, state, resolved)
+        except StoreUnavailable:
+            # The tool decides. A second safety ticket is a lesser harm than none.
+            gate = tool = None
+        held = _live(gate, tool)
+        if held is not None:
+            return self._safety_added(message, message, state, matched, evidence, held["_id"],
+                                      SAFETY_MESSAGE + "\n\n" + _PRIORITY_CASE % held["_id"])
+        # Deterministic: code decides this ticket exists, not the model.
+        description = (
+            "Automatic safety escalation. Customer reported: %s. Matched safety "
+            "indicators: %s. No troubleshooting was offered."
+            % (message.message_text, ", ".join(matched))
+        )
+        if evidence:
+            # The trigger came from the clip, and the typed text may say
+            # nothing alarming: the safety team needs what the analyser
+            # saw, not just "video attached".
+            description += " Seen in the customer's photo or video: %s" % " ".join(evidence)
+        # The run's ticket before this report. With the mock (Zoho off),
+        # getting the same id back means its receipt returned the run's safety
+        # ticket: this is a repeat.
+        before = state.ticket_id
+        try:
             ticket_id = self._raise_safety_ticket(message, state, resolved, description)
+        except Exception as exc:  # the class only; the customer still gets the steps
+            self.log.emit("safety_ticket_failed", cid, error=type(exc).__name__)
+            ticket_id = None
+        if not ticket_id:
+            return self._safety_not_recorded(message, message, state, matched, evidence, why="tool_error")
+        if self._is_gone(cid, ticket_id):
+            # Its key returned a ticket deleted or merged in Desk.
+            return self._safety_not_recorded(message, message, state, matched, evidence, why="ticket_gone")
+        text = SAFETY_MESSAGE + "\n\n" + _PRIORITY_CASE % ticket_id
+        if ticket_id == before:
+            return self._safety_added(message, message, state, matched, evidence, ticket_id, text)
+        self.log.escalation(cid, "battery_safety", ticket_id)
+        return self._safety_reply(message, message, state, text, matched, evidence, outcome="recorded",
+                                  escalated=True, ticket_id=ticket_id)
 
-        text = SAFETY_MESSAGE
-        if ticket_id:
-            text += "\n\nI have raised this as a priority safety case, reference %s." % ticket_id
+    def _safety_without_phone(
+        self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
+        matched: List[str], evidence: Optional[List[str]],
+    ) -> Reply:
+        """A customer with no number we know (an anonymous web visitor), with
+        Zoho on (spec 2026-10-05, section 6). A number in this message records
+        the urgent safety ticket at once, unverified and with no bike looked
+        up. Without one, the safety steps ask for a number instead of
+        promising a call, and the callback gate waits for it. A report after
+        the run's safety ticket was recorded, under either safety key, adds a
+        note to that ticket."""
+        cid = message.conversation_id
+        typed = read_number(message.message_text or "")
+        shown = _as_shown(message, typed)
+        try:
+            gate, tool = self._run_safety_records(message, state, resolved)
+        except StoreUnavailable:
+            return self._safety_not_recorded(message, shown, state, matched, evidence, why="store_unavailable")
+        held = _live(gate, tool)
+        if held is not None:
+            text = "\n\n".join((SAFETY_STEPS, SAFETY_ADDED_MESSAGE.format(reference=held["_id"]), SAFETY_EMERGENCY))
+            return self._safety_added(message, shown, state, matched, evidence, held["_id"], text)
+        if gate is not None:
+            # The run's safety ticket was deleted or merged in Desk, and its key
+            # records no other: quoting it would promise nothing real.
+            return self._safety_not_recorded(message, shown, state, matched, evidence, why="ticket_gone")
+        if typed.number is None:
+            state.awaiting_callback, state.callback_asks = "safety", 0
+            self.log.emit("callback_asked", cid, purpose="safety")
+            return self._safety_reply(message, shown, state, SAFETY_NO_CONTACT_MESSAGE, matched, evidence,
+                                      outcome="asked_for_number")
+        state.typed_number = typed.number
+        description = (
+            "Automatic safety escalation. Customer reported: %s. Matched safety indicators: %s. "
+            "No troubleshooting was offered. The number to call was typed in the chat and is not verified."
+            % (typed.shown, ", ".join(matched))
+        )
+        if evidence:
+            description += " Seen in the customer's photo or video: %s" % " ".join(evidence)
+        recorded = self._record_ticket(
+            message, state, resolved, kind="safety", purpose=PURPOSE_SAFETY, phone="+91" + typed.number,
+            verified=False, description=description, cluster_id=resolved.cluster_id,
+            category="battery_safety", severity="critical",
+        )
+        if recorded.reference is None:
+            return self._safety_not_recorded(message, shown, state, matched, evidence, why="not_recorded")
+        state.awaiting_callback, state.callback_asks = None, 0
+        self.log.escalation(cid, "battery_safety", recorded.reference)
+        text = "\n\n".join((SAFETY_STEPS, NUMBER_RECEIVED_MESSAGE.format(reference=recorded.reference),
+                            SAFETY_EMERGENCY))
+        return self._safety_reply(message, shown, state, text, matched, evidence, outcome="recorded",
+                                  escalated=True, ticket_id=recorded.reference)
 
-        self.log.escalation(message.conversation_id, "battery_safety", ticket_id)
+    def _safety_added(
+        self, message: InboundMessage, shown: InboundMessage, state: ConversationState, matched: List[str],
+        evidence: Optional[List[str]], reference: str, text: str,
+    ) -> Reply:
+        """A later safety report in a run whose safety ticket exists: a note
+        on that ticket, and its reference (one safety ticket per run, spec
+        2026-10-05, section 6). Any wait for a number ends: the ticket has
+        one."""
+        cid = message.conversation_id
+        self._add_note(cid, reference, _again_note(matched))
+        state.awaiting_callback, state.callback_asks = None, 0
+        self.log.escalation(cid, "battery_safety", reference)
+        return self._safety_reply(message, shown, state, text, matched, evidence, outcome="note_added",
+                                  escalated=True, ticket_id=reference)
+
+    def _safety_reply(
+        self, message: InboundMessage, shown: InboundMessage, state: ConversationState, text: str,
+        matched: List[str], evidence: Optional[List[str]], *, outcome: str, escalated: bool = False,
+        ticket_id: Optional[str] = None,
+    ) -> Reply:
+        """Every safety reply. `shown` is the message as the model's history
+        and the transcript keep it, with a typed number replaced by [phone].
+        `escalated` only when a ticket is behind the reply (spec 2026-10-05,
+        section 6)."""
         if evidence:
             # The whole description goes into the transcript, not just the
             # matched lines, so a human reading it later sees what the
@@ -1804,15 +2149,149 @@ class Runtime:
             # Every photo, fetched, so it stays in history as a photo (the
             # final review: unfetched, a stored photo read "could not be
             # retrieved" on every later turn); a video only by its text.
-            kept = [a for a in message.attachments if a.summary or _is_image(a)]
-            content = user_content(replace(message, attachments=kept), self.fetch)
+            kept = [a for a in shown.attachments if a.summary or _is_image(a)]
+            content = user_content(replace(shown, attachments=kept), self.fetch)
             state.history.append({"role": "user", "content": content})
-            self._note_customer_turn(message, state, content)
+            self._note_customer_turn(shown, state, content)
+        metadata: Dict[str, Any] = {"matched": matched, "safety": outcome}
+        if shown is not message:
+            metadata["transcript_text"] = shown.message_text
         return self._finish(
-            message, state, text, "guardrail:battery_safety",
-            escalated=True, ticket_id=ticket_id, metadata={"matched": matched},
+            shown, state, text, "guardrail:battery_safety",
+            escalated=escalated, ticket_id=ticket_id, metadata=metadata,
             already_in_history=bool(evidence),
         )
+
+    def _safety_not_recorded(
+        self, message: InboundMessage, shown: InboundMessage, state: ConversationState,
+        matched: List[str], evidence: Optional[List[str]], why: str,
+    ) -> Reply:
+        """No safety ticket could be recorded: the steps and 112, and no
+        promise of a call. Logged at error level and alarmed (spec section 8)."""
+        self._note_safety_not_recorded(message.conversation_id, why)
+        return self._safety_reply(message, shown, state, SAFETY_NOT_RECORDED_MESSAGE, matched, evidence,
+                                  outcome="not_recorded")
+
+    def _note_safety_not_recorded(self, conversation_id: str, why: str) -> None:
+        """A safety report whose ticket could not be recorded: alarmed by its
+        event (infra/zoho-alarms.yaml) and counted on /health (spec
+        2026-10-05, section 6). Every such report comes through here."""
+        self.safety_not_recorded += 1
+        self.log.emit("safety_ticket_not_recorded", conversation_id, why=why, level="error")
+
+    def _desk_store(self) -> Any:
+        """The ticket store when Zoho is on, else None. Zoho is on exactly
+        when api.py wired a TicketRouter (_records_real_tickets). The
+        playground, the CLI, the live evaluation and Zoho off keep the mock,
+        and the gates record nothing (spec 2026-10-05, section 6)."""
+        return self.registry.tickets.store if self._records_real_tickets() else None
+
+    @staticmethod
+    def _gate_key(conversation_id: str, started_at: Optional[str], purpose: str) -> str:
+        """A gate ticket's source key: one per run and purpose (spec section 2)."""
+        return "%s:%s:%s" % (conversation_id, started_at or "", purpose)
+
+    def _run_safety_records(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """The run's safety ticket records, under the gate's key and under the
+        safety branch's create_support_ticket key, gone or not (the plan's
+        cross-check, finding 11). Both None with Zoho off, or for anyone but a
+        customer, whose tickets never go to Desk. Raises StoreUnavailable."""
+        store = self._desk_store()
+        if store is None or resolved.persona != "customer":
+            return None, None
+        cid = message.conversation_id
+        started_at = self._ticket_run_start(message, state, resolved)
+        gate = store.by_source_key(self._gate_key(cid, started_at, PURPOSE_SAFETY))
+        tool = store.by_source_key(ticket_source_key(
+            cid, started_at, CREATE_SUPPORT_TICKET, _safety_idempotency_key(cid, started_at)))
+        return gate, tool
+
+    def _is_gone(self, conversation_id: str, ticket_id: str) -> bool:
+        """Whether a Desk ticket was deleted or merged in Desk (gone), so it is
+        never quoted. A store that cannot answer counts as not gone: the
+        ticket was just returned for this run, so it exists."""
+        store = self._desk_store()
+        if store is None or not is_desk_reference(ticket_id):
+            return False
+        try:
+            record = store.get(ticket_id)
+        except StoreUnavailable as exc:
+            self.log.emit("ticket_read_failed", conversation_id, ticket_id=ticket_id, error=type(exc).__name__)
+            return False
+        return record is not None and record.get("state") == GONE
+
+    def _record_ticket(
+        self,
+        message: InboundMessage,
+        state: ConversationState,
+        resolved: Optional[ResolvedIdentity],
+        *,
+        kind: str,
+        purpose: str,
+        phone: Optional[str],
+        verified: bool,
+        description: str,
+        cluster_id: Optional[str] = None,
+        category: Optional[str] = None,
+        severity: Optional[str] = None,
+        bike: Optional[Dict[str, Any]] = None,
+    ) -> Recorded:
+        """A ticket a gate writes straight to the seam (spec sections 2 and 6):
+        safety with no number we know, the call-back number, the handover and
+        the lock-out. It never goes through create_support_ticket, so no bike
+        is looked up for a number nobody proved. There is one per run and
+        purpose: the same source key always returns the same ticket, so a
+        retry or a rerun records nothing new.
+
+        The run is the ticket's own (_ticket_run_start, from this turn's
+        `resolved`): every gate's ticket has a start, and never the start of
+        a run that belongs to someone else.
+
+        Called only for a customer, with Zoho on (_desk_store). It logs
+        ticket_recorded, which a save conflict counts as a side effect. A
+        failure is logged and comes back as no reference, and the caller then
+        promises nothing. So does a ticket gone in Desk that its key returned
+        (the plan's cross-check, finding 18)."""
+        cid = message.conversation_id
+        started_at = self._ticket_run_start(message, state, resolved)
+        source_key = self._gate_key(cid, started_at, purpose)
+        fields: Dict[str, Any] = dict(
+            kind=kind, conversation_id=cid, started_at=started_at,
+            cluster_id=cluster_id or state.cluster_id, channel=message.channel, phone=phone,
+            identity="verified" if verified else "unverified", category=category, severity=severity,
+            description=description,
+        )
+        fields.update(bike or {})
+        try:
+            created = self.registry.tickets.create(source_key=source_key, persona="customer", **fields)
+        except Exception as exc:  # StoreUnavailable included; the class only, never str(exc)
+            self.log.emit("ticket_record_failed", cid, kind=kind, error=type(exc).__name__)
+            return Recorded(None)
+        reference = (created or {}).get("ticket_id")
+        if not reference:
+            self.log.emit("ticket_record_failed", cid, kind=kind, error="no_ticket")
+            return Recorded(None)
+        if self._is_gone(cid, reference):
+            self.log.emit("ticket_record_failed", cid, kind=kind, error="gone")
+            return Recorded(None)
+        self.log.emit("ticket_recorded", cid, ticket_id=reference, kind=kind, urgent=is_urgent(kind, category))
+        return Recorded(reference)
+
+    def _add_note(self, conversation_id: str, ticket_id: str, text: str) -> bool:
+        """A line on a ticket the run already holds (spec section 2). A failed
+        note is logged. The ticket stands either way."""
+        tickets = getattr(self.registry, "tickets", None)
+        if not hasattr(tickets, "add_note"):
+            return False
+        try:
+            tickets.add_note(ticket_id, text)
+        except Exception as exc:  # the class only
+            self.log.emit("ticket_note_failed", conversation_id, ticket_id=ticket_id, error=type(exc).__name__)
+            return False
+        self.log.emit("ticket_note_added", conversation_id, ticket_id=ticket_id)
+        return True
 
     def _admit_unsent_media(self, message: InboundMessage, state: ConversationState, turn: Any) -> Any:
         """The backstop for GUIDE_MEDIA_RULE: a guide picture the model asked
