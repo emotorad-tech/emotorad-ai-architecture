@@ -10,8 +10,11 @@ emits.
 
 Zoho is a pair of small doubles with DeskHTTP.call's signature: FakeAccounts
 answers the accounts server in order, FakeHTTP answers Desk by method and
-path, and FakeDesk stands in for DeskClient.contact_tickets. Test data is
-fake: +919999999999 and the fixtures' frame numbers.
+path, and FakeDesk stands in for DeskClient.contact_tickets. The probe's
+runs with the OMS's token go through the real DeskHTTP and the opener fake
+(tests/fake_zoho.py RoutedZoho), so Zoho's 403s are classified as the service
+classifies them. Test data is fake: +919999999999 and the fixtures' frame
+numbers.
 """
 
 import ast
@@ -45,7 +48,8 @@ from emotorad_ai.zoho.desk import DESK_URL  # noqa: E402
 from emotorad_ai.zoho.errors import ZohoAuthExpired, ZohoRejected, ZohoUnavailable, ZohoUnknownOutcome  # noqa: E402
 from emotorad_ai.zoho.payload import ticket_payload  # noqa: E402
 from emotorad_ai.zoho.settings import ENV_NAMES  # noqa: E402
-from tests.fake_zoho import SHAPES as DRAFTS, shape  # noqa: E402
+from emotorad_ai.zoho.http import DeskHTTP  # noqa: E402
+from tests.fake_zoho import SHAPES as DRAFTS, RoutedZoho, shape  # noqa: E402
 from tests.test_zoho_desk import ShapeChecks  # noqa: E402
 
 SCRIPTS =("_common", "consent_url", "exchange_code", "probe", "test_ticket", "revoke", "tickets_report")
@@ -1212,6 +1216,38 @@ class TestTicketRunTests(unittest.TestCase):
         self.assertEqual(self.posted(http)[0]["layoutId"], "555")
 
 
+def run_test_ticket(shapes_dir, token, earlier_attachment="4000000008001", typed_name=TEST_DEPARTMENT):
+    """test_ticket.py, run to the end in the test department (111) against a
+    Desk that answers with the committed drafts, writing into `shapes_dir`.
+    The ticket read back carries Zoho's "cf" object, as a real answer does,
+    with a value that names a dealer. Returns its exit code."""
+    ticket = shape("zoho-ticket.json")
+    comment = shape("zoho-comment.json")
+    attachment = shape("zoho-attachment.json")
+    read_back = dict(ticket, cf={"cf_dealer_principle_name": "Ravi Motors - D001"})
+    on_ticket = "/api/v1/tickets/%s" % ticket["id"]
+    script = load("test_ticket")
+    routes = {
+        ("POST", "/oauth/v2/token"): (200, token),
+        ("GET", "/api/v1/contacts/search"): (200, shape("zoho-contact-search.json")),
+        ("POST", "/api/v1/tickets"): (200, ticket),
+        ("GET", on_ticket): (200, read_back),
+        ("GET", "/api/v1/contacts/%s/tickets" % CONTACT_ID): (200, shape("zoho-contact-tickets.json")),
+        ("POST", on_ticket + "/comments"): (200, comment),
+        ("GET", "%s/comments/%s" % (on_ticket, comment["id"])): (200, comment),
+        ("POST", on_ticket + "/attachments"): (200, attachment),
+        # Another file first, so the list's first entry is not the upload's own answer.
+        ("GET", on_ticket + "/attachments"): (200, {"data": [dict(attachment, id=earlier_attachment), attachment]}),
+    }
+    small_only = lambda reference: [("%s-small.png" % reference, script.tiny_png(), "image/png")]  # noqa: E731
+    with mock.patch.object(script, "uploads", small_only):
+        return script.main(
+            TICKET_ARGS + ["--department-id", "111", "--n", "7"],
+            ask=answers("1000.TESTCLIENT", "test-client-secret", "1000.refresh.value"),
+            typed=lambda prompt: typed_name, http=FakeHTTP(routes), out=Screen().out,
+            sleep=lambda seconds: None, shapes_dir=Path(shapes_dir))
+
+
 class CapturedShapeTests(ShapeChecks, unittest.TestCase):
     """Part 1's captures replace the drafts the suite answers from, so they must
     pass the same checks (the final review, scripts-docs Important 1). probe.py
@@ -1239,32 +1275,7 @@ class CapturedShapeTests(ShapeChecks, unittest.TestCase):
             ask=answers("1000.TESTCLIENT", "test-client-secret", "1000.refresh.value"), http=FakeHTTP(routes),
             out=Screen().out, shapes_dir=Path(cls.shapes_dir))
 
-        ticket = shape("zoho-ticket.json")
-        comment = shape("zoho-comment.json")
-        attachment = shape("zoho-attachment.json")
-        read_back = dict(ticket, cf={"cf_dealer_principle_name": "Ravi Motors - D001"})
-        on_ticket = "/api/v1/tickets/%s" % ticket["id"]
-        script = load("test_ticket")
-        routes = {
-            ("POST", "/oauth/v2/token"): (200, token),
-            ("GET", "/api/v1/contacts/search"): (200, shape("zoho-contact-search.json")),
-            ("POST", "/api/v1/tickets"): (200, ticket),
-            ("GET", on_ticket): (200, read_back),
-            ("GET", "/api/v1/contacts/%s/tickets" % CONTACT_ID): (200, shape("zoho-contact-tickets.json")),
-            ("POST", on_ticket + "/comments"): (200, comment),
-            ("GET", "%s/comments/%s" % (on_ticket, comment["id"])): (200, comment),
-            ("POST", on_ticket + "/attachments"): (200, attachment),
-            # Another file first, so the list's first entry is not the upload's own answer.
-            ("GET", on_ticket + "/attachments"): (200, {"data": [dict(attachment, id=cls.EARLIER_ATTACHMENT),
-                                                                  attachment]}),
-        }
-        small_only = lambda reference: [("%s-small.png" % reference, script.tiny_png(), "image/png")]  # noqa: E731
-        with mock.patch.object(script, "uploads", small_only):
-            cls.ticket_rc = script.main(
-                TICKET_ARGS + ["--department-id", "111", "--n", "7"],
-                ask=answers("1000.TESTCLIENT", "test-client-secret", "1000.refresh.value"),
-                typed=lambda prompt: TEST_DEPARTMENT, http=FakeHTTP(routes), out=Screen().out,
-                sleep=lambda seconds: None, shapes_dir=Path(cls.shapes_dir))
+        cls.ticket_rc = run_test_ticket(cls.shapes_dir, token, cls.EARLIER_ATTACHMENT)
 
     @classmethod
     def tearDownClass(cls):
@@ -1304,6 +1315,188 @@ class CapturedShapeTests(ShapeChecks, unittest.TestCase):
         written = "".join(path.read_text(encoding="utf-8") for path in Path(self.shapes_dir).iterdir())
         for private in PERSONAL + ("Ravi Motors", "1000.refresh.value", "test-client-secret"):
             self.assertNotIn(private, written)
+
+
+# What the OMS's configuration asks Zoho for (spec 2026-10-05, the 5 October
+# decision): no Desk.basic.READ, Desk.departments.READ, Desk.organization.READ
+# or Desk.settings.READ, so the organisations, departments, layouts and
+# channels reads are refused for scope.
+OMS_SCOPES = ("Desk.tickets.ALL Desk.tickets.READ Desk.tickets.WRITE Desk.tickets.UPDATE Desk.tickets.CREATE "
+              "Desk.contacts.READ Desk.contacts.WRITE Desk.contacts.UPDATE Desk.contacts.CREATE Desk.search.READ "
+              "Desk.basic.CREATE")
+SCOPE_MISMATCH = (403, {"errorCode": "SCOPE_MISMATCH"})
+OMS_TOKEN = dict(INDIA, scope=OMS_SCOPES)
+
+
+def tickets_in(departments):
+    """GET /api/v1/tickets as Zoho answers it (OAS v1.0 getTickets): with
+    include=departments, the newest ticket of the department asked for, with
+    its "department" {"name", "id"} and a customer's details; 204 for a
+    department with no ticket."""
+    def answer(query):
+        asked = query.get("departmentId")
+        if asked not in departments:
+            return 204, None
+        return 200, {"data": [{
+            "id": "1892000000120125", "ticketNumber": "120125", "subject": "Ananya Rao: battery will not charge",
+            "email": "ananya.rao@example.com", "phone": "+919999999999", "departmentId": asked,
+            "contactId": CONTACT_ID, "department": {"name": departments[asked], "id": asked},
+            "contact": {"firstName": "Ananya", "lastName": "Rao", "email": "ananya.rao@example.com",
+                        "phone": "9876543210"}}]}
+    return answer
+
+
+def oms_token_routes(tickets=None):
+    routes = probe_routes()
+    routes[("POST", "/oauth/v2/token")] = (200, OMS_TOKEN)
+    for path in ("/api/v1/organizations", "/api/v1/departments", "/api/v1/layouts", "/api/v1/channels"):
+        routes[("GET", path)] = SCOPE_MISMATCH
+    routes[("GET", "/api/v1/tickets")] = tickets or tickets_in({"111": TEST_DEPARTMENT})
+    return routes
+
+
+def probe_through_the_opener(routes, shapes_dir, argv=None):
+    """probe.py through the real DeskHTTP and the opener fake, so Zoho's 403s
+    are classified as the service classifies them."""
+    opener = RoutedZoho(routes)
+    screen = Screen()
+    rc = load("probe").main(argv or ProbeRunTests.ARGS, ask=answers("1000.TESTCLIENT", "test-client-secret",
+                                                                    "1000.refresh.value"),
+                            http=DeskHTTP(opener=opener), out=screen.out, shapes_dir=Path(shapes_dir))
+    return rc, opener, screen
+
+
+class OmsTokenProbeTests(ShapeChecks, unittest.TestCase):
+    """The probe with the OMS's token, whose scopes do not reach organisations,
+    departments or layouts (re-review, 5 October). It carries on, confirms the
+    organisation by the test contact read and each department by one ticket
+    in it, and test_ticket.py's guard then works unchanged. ShapeChecks runs
+    on what both scripts wrote."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._folder = tempfile.TemporaryDirectory()
+        cls.shapes_dir = cls._folder.name
+        for path in Path(DRAFTS).glob("zoho-*.json"):
+            shutil.copy(path, cls.shapes_dir)
+        # The test department (111) holds a ticket; the real one (222) none.
+        cls.probe_rc, cls.opener, cls.screen = probe_through_the_opener(oms_token_routes(), cls.shapes_dir)
+        cls.ticket_rc = run_test_ticket(cls.shapes_dir, OMS_TOKEN)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._folder.cleanup()
+
+    def test_it_carries_on_past_the_scope_refusals_and_confirms_the_organisation_by_the_contact_read(self):
+        text = self.screen.text
+        self.assertEqual(self.probe_rc, 0)
+        self.assertIn("organisations: refused (error=SCOPE_MISMATCH)", text)
+        self.assertIn("cannot list organisations, which is expected with the OMS's token", text)
+        self.assertNotIn("Stopping", text)
+        self.assertIn("organisation 60001234567: confirmed", text)
+        [contact_read] = self.opener.to("GET", "/api/v1/contacts/%s" % CONTACT_ID)
+        self.assertEqual(contact_read["headers"]["orgid"], "60001234567")
+        self.assertLess(text.index("test contact %s: found" % CONTACT_ID),
+                        text.index("organisation 60001234567: confirmed"))
+
+    def test_each_department_given_is_looked_for_through_one_ticket_in_it(self):
+        reads = self.opener.to("GET", "/api/v1/tickets")
+        self.assertEqual([read["query"] for read in reads], [
+            {"departmentId": ["111"], "include": ["departments"], "limit": ["1"]},
+            {"departmentId": ["222"], "include": ["departments"], "limit": ["1"]}])
+        self.assertIn("test department 111: %s (confirmed through a ticket in it)" % TEST_DEPARTMENT,
+                      self.screen.text)
+
+    def test_the_departments_shape_is_the_list_shape_with_a_note_saying_how(self):
+        raw = self.raw("zoho-departments.json")
+        self.assertEqual(raw["data"], [{"id": "111", "name": TEST_DEPARTMENT}])
+        source = raw["_source"]
+        self.assertTrue(source.startswith("Captured by scripts/zoho/probe.py"))
+        self.assertIn("masked by scripts/zoho/_common.py", source)
+        self.assertIn("confirmed through a ticket in each department", source)
+        self.assertIn("cannot list departments", source)
+        self.assertEqual(_common.department_names(Path(self.shapes_dir)), {"111": TEST_DEPARTMENT})
+
+    def test_nothing_of_the_ticket_is_saved_or_shown(self):
+        written = self.screen.text + "".join(path.read_text(encoding="utf-8")
+                                             for path in Path(self.shapes_dir).iterdir())
+        for private in PERSONAL + ("120125", "1892000000120125", "will not charge"):
+            self.assertNotIn(private, written)
+
+    def test_a_department_with_no_ticket_is_reported_with_what_to_do(self):
+        text = self.screen.text
+        self.assertIn("real department 222: NOT CONFIRMED", text)
+        self.assertIn("Create one ticket in that department by hand in Desk, then run the probe again", text)
+
+    def test_test_ticket_accepts_the_name_typed_for_the_confirmed_department(self):
+        self.assertEqual(self.ticket_rc, 0)
+
+    def test_test_ticket_refuses_the_department_with_no_ticket(self):
+        screen = Screen()
+        rc = load("test_ticket").main(
+            ["--org-id", "60001234567", "--contact-id", CONTACT_ID, "--test-department-id", "111",
+             "--department-id", "222", "--real-department"],
+            ask=never, typed=lambda prompt: "Service", http=FakeHTTP({}), out=screen.out,
+            sleep=lambda seconds: None, shapes_dir=Path(self.shapes_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn("Department 222 is not in docs/api-shapes/zoho-departments.json", screen.text)
+
+    def test_the_layout_refusal_is_explained_once(self):
+        text = self.screen.text
+        self.assertIn("test ticket layouts: refused (error=SCOPE_MISMATCH)", text)
+        self.assertEqual(text.count("The layout id is optional"), 1)
+        self.assertIn("the first ticket is sent without one", text)
+
+
+class OmsTokenProbeEdgeTests(unittest.TestCase):
+    def run_probe(self, routes, argv=None):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        rc, opener, screen = probe_through_the_opener(routes, folder.name, argv)
+        return rc, opener, screen, Path(folder.name)
+
+    def test_a_refusal_of_organisations_that_names_no_scope_still_stops(self):
+        for code in ("FORBIDDEN", "OAUTH_ORG_MISMATCH", "LICENSE_ACCESS_LIMITED"):
+            with self.subTest(code=code):
+                routes = oms_token_routes()
+                routes[("GET", "/api/v1/organizations")] = (403, {"errorCode": code})
+                rc, opener, screen, _ = self.run_probe(routes)
+                self.assertEqual(rc, 1)
+                self.assertIn("cannot see organisation 60001234567. Stopping.", screen.text)
+                self.assertEqual(opener.to("GET", "/api/v1/departments"), [])
+                self.assertEqual(opener.to("GET", "/api/v1/tickets"), [])
+
+    def test_an_organisation_no_read_confirms_is_said_and_the_run_fails(self):
+        routes = oms_token_routes()
+        routes[("GET", "/api/v1/contacts/%s" % CONTACT_ID)] = (403, {"errorCode": "OAUTH_ORG_MISMATCH"})
+        rc, _, screen, _ = self.run_probe(routes)
+        self.assertEqual(rc, 1)
+        self.assertIn("organisation 60001234567: NOT confirmed", screen.text)
+
+    def test_a_department_refusal_that_names_no_scope_reads_no_ticket(self):
+        routes = oms_token_routes()
+        routes[("GET", "/api/v1/departments")] = (403, {"errorCode": "FORBIDDEN"})
+        _, opener, screen, shapes = self.run_probe(routes)
+        self.assertEqual(opener.to("GET", "/api/v1/tickets"), [])
+        self.assertIn("test department 111: NOT FOUND", screen.text)
+        self.assertFalse((shapes / "zoho-departments.json").exists())
+
+    def test_a_ticket_that_names_another_department_confirms_nothing(self):
+        def elsewhere(query):
+            return 200, {"data": [{"id": "1", "departmentId": "999", "department": {"id": "999", "name": "Sales"}}]}
+
+        _, _, screen, shapes = self.run_probe(oms_token_routes(tickets=elsewhere))
+        self.assertIn("test department 111: NOT CONFIRMED", screen.text)
+        self.assertEqual(_common.department_names(shapes), {})
+
+    def test_with_full_scopes_the_departments_are_listed_and_no_ticket_is_read(self):
+        routes = probe_routes()
+        routes[("GET", "/api/v1/tickets")] = tickets_in({"111": TEST_DEPARTMENT})
+        rc, opener, screen, shapes = self.run_probe(routes)
+        self.assertEqual(rc, 0)
+        self.assertEqual(opener.to("GET", "/api/v1/tickets"), [])
+        self.assertNotIn("The layout id is optional", screen.text)
+        self.assertEqual(_common.department_names(shapes), {"111": TEST_DEPARTMENT, "222": "Service"})
 
 
 class TicketsReportTests(unittest.TestCase):
@@ -1492,6 +1685,18 @@ class DocsTests(unittest.TestCase):
         self.assertIn("--profile emotorad-staging", deploy)
         self.assertIn("--region ap-south-1", deploy)
         self.assertIn("Streamlit", section)
+
+    def test_the_runbook_says_what_the_probe_shows_with_the_omss_token_and_that_it_is_expected(self):
+        section = self.zoho_section()
+        probe = section[section.index("1. **The probe.**"):section.index("2. **The test ticket.**")]
+        probe = " ".join(probe.split())
+        for needle in ("With the OMS's token", "expected", "organisations: refused (error=SCOPE_MISMATCH)",
+                       "the test contact read sent with it succeeded", "departments: refused (error=SCOPE_MISMATCH)",
+                       "(confirmed through a ticket in it)", "never the ticket", "#120125", "NOT CONFIRMED",
+                       "create one ticket in that department by hand in Desk, then run the probe again",
+                       "layout id is optional", "EMOTORAD_ZOHO_LAYOUT_ID", "still stops"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, probe)
 
     def test_the_rulebook_has_a_zoho_paragraph_and_the_manual_ticket_erasure(self):
         rulebook = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")

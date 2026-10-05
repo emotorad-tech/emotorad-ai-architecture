@@ -172,8 +172,9 @@ token (Sachin's decision, 5 October 2026). No grant is made for it, so `consent_
 - **Scopes.** The OMS's config asks for `Desk.tickets.ALL Desk.tickets.READ Desk.tickets.WRITE
   Desk.tickets.UPDATE Desk.tickets.CREATE Desk.contacts.READ Desk.contacts.WRITE Desk.contacts.UPDATE
   Desk.contacts.CREATE Desk.search.READ Desk.basic.CREATE`. It does not ask for `Desk.basic.READ` or
-  `Desk.settings.READ`, which only `probe.py` uses (departments and layouts). Whether the token
-  really lacks them, the probe shows (step 1).
+  `Desk.settings.READ`, which only `probe.py` uses (organisations, departments and layouts). The
+  service never needs them. Whether the token really lacks them, the probe shows (step 1), and it
+  carries on either way.
 - **Never revoke the token,** with `revoke.py` or on Zoho's Connected Apps page: it stops the OMS's
   ticketing and AFS dispatch. Rollback is removing `EMOTORAD_ZOHO_REFRESH_TOKEN` (below).
 
@@ -191,7 +192,7 @@ and counts only. With the token shared, the person's steps start at the probe.
 
 | Script | What it does |
 | --- | --- |
-| `probe.py` | Read only. Lists the departments, every active ticket layout (its id, whether it is the default, each field and the required custom ones), the channels and the contacts, and writes masked shapes to `docs/api-shapes/` |
+| `probe.py` | Read only. Lists the departments (or, with the OMS's token, confirms each one through a ticket in it), every active ticket layout (its id, whether it is the default, each field and the required custom ones), the channels and the contacts, and writes masked shapes to `docs/api-shapes/` |
 | `test_ticket.py` | Writes one ticket in the test department and reads it back. It asks for the department's name every time. If Zoho enforces the layout's required fields, it names them and stops |
 | `tickets_report.py` | Waiting, stuck and held tickets, for the support lead |
 | `revoke.py` | Refuses, and says why: the token is the OMS's. Only with `--own-client` does it revoke, and only a token of a client of our own |
@@ -201,6 +202,28 @@ and counts only. With the token shared, the person's steps start at the probe.
    --test-contact-id <id>`. It asks for the OMS's client id, client secret and refresh token by
    hidden input. Claude reviews the masked shapes it writes and fills in the settings. It prints the
    scopes Zoho says it granted (see the scope note above).
+
+   With the OMS's token, this is what you see, and all of it is expected:
+
+   - `scopes MISSING: Desk.basic.READ, Desk.settings.READ`.
+   - `organisations: refused (error=SCOPE_MISMATCH)`, then that the token cannot list
+     organisations and the probe carries on. Near the end, `organisation <id>: confirmed, the test
+     contact read sent with it succeeded.` If it says `NOT confirmed`, check the organisation id and
+     the test contact id, and run the probe again.
+   - `departments: refused (error=SCOPE_MISMATCH)`, then each department given is confirmed through
+     one ticket in it (`GET /api/v1/tickets` with the department's id, which needs only
+     `Desk.tickets.READ`): `test department <id>: <name> (confirmed through a ticket in it)`. Only
+     the department's id and name are kept, never the ticket. They go to
+     `docs/api-shapes/zoho-departments.json`, which `test_ticket.py` checks the typed name against.
+     The test department already holds the manual ticket #120125. A department with no ticket says
+     `NOT CONFIRMED`, and `test_ticket.py` refuses it: create one ticket in that department by hand
+     in Desk, then run the probe again.
+   - `... layouts: refused (error=SCOPE_MISMATCH)`, once with the note that the layout id is
+     optional. Leave `EMOTORAD_ZOHO_LAYOUT_ID` out: the first ticket is sent without one.
+   - `channels: refused (error=SCOPE_MISMATCH)` and `channels: none listed`.
+
+   Any other refusal of the organisations read (`FORBIDDEN`, `OAUTH_ORG_MISMATCH` and the rest)
+   still stops the probe.
 2. **The test ticket.** Run `python scripts/zoho/test_ticket.py` with the ids the probe confirmed,
    then close the ticket in Desk.
 3. **The collection.** Run `python scripts/mongo_setup.py` against the environment's

@@ -11,7 +11,21 @@ chatbot's refresh token by hidden input, and keeps them in memory.
 It only reads. It checks that the token sees the organisation given. Then it
 lists the departments, every active ticket layout of the test and real
 departments, the contact layout, the channels, and the test and unverified
-contacts. For each layout it records the layout id, whether it is the default,
+contacts.
+
+With the OMS's token (no Desk.basic.READ or Desk.settings.READ), Zoho refuses
+the organisations, departments and layouts reads for scope, and that is
+expected. The probe carries on. The organisation id is confirmed when the
+test contact read, sent with it, succeeds. Each department given is confirmed
+through one ticket in it (GET /api/v1/tickets with include=departments, which
+needs only Desk.tickets.READ): its id and name are kept, never the ticket,
+which holds a customer's details. zoho-departments.json is then written in
+the list's own shape, so test_ticket.py's guard works unchanged. A
+department with no ticket cannot be confirmed: create one in it by hand in
+Desk and run the probe again. A layout id is optional, and the first ticket
+is sent without one. Any other refusal of the organisations read stops it.
+
+For each layout it records the layout id, whether it is the default,
 and each field's API name, label, type, whether it is mandatory and, for a
 pick list, the allowed values (a pick list whose label names people, dealers
 or accounts is counted, never listed). It sums up each layout's required
@@ -35,11 +49,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from _common import (
-    SCOPES, SHAPES, TOKEN_URL, ScriptClient, ask_secret, granted_scopes, mask, post_form, refresh_form, rows,
-    save_shape, says_india, script_settings, source_note, step, zoho_id,
+    SCOPES, SHAPES, TOKEN_URL, ScriptClient, ask_secret, attempt, granted_scopes, mask, post_form, refresh_form,
+    refused_for_scope, rows, save_shape, says_india, script_settings, source_note, step, zoho_id,
 )
 from emotorad_ai.zoho.errors import ZohoError
 from emotorad_ai.zoho.http import DeskHTTP
+
+# Added to the departments shape's note when the departments were confirmed
+# one ticket at a time.
+BY_TICKET_NOTE = (" The token cannot list departments (no Desk.basic.READ, as with the OMS's token), so this"
+                  " list was confirmed through a ticket in each department: GET /api/v1/tickets with the"
+                  " department's id, include=departments and limit=1. Only each department's id and name were"
+                  " kept, never the ticket.")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -116,10 +137,15 @@ def layout_lines(masked: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def layout_details(client: ScriptClient, out: Callable[[str], None], label: str,
-                   params: Dict[str, Any]) -> Dict[str, Any]:
-    """A module's active layouts, and each one's sections and fields."""
-    listed = step(out, "%s layouts" % label, lambda: client.get("/api/v1/layouts", params))
+def layout_details(client: ScriptClient, out: Callable[[str], None], label: str, params: Dict[str, Any],
+                   refused: Optional[Callable[[ZohoError], None]] = None) -> Dict[str, Any]:
+    """A module's active layouts, and each one's sections and fields. A
+    refusal of the list is printed and handed to `refused`."""
+    listed, refusal = attempt(lambda: client.get("/api/v1/layouts", params))
+    if refusal is not None:
+        out("%s layouts: refused (error=%s)" % (label, refusal.error))
+        if refused is not None:
+            refused(refusal)
     every = rows(listed)
     in_use = active(every)
     out("%s layouts: %d active, %d not read (not active)" % (label, len(in_use), len(every) - len(in_use)))
@@ -134,6 +160,26 @@ def layout_details(client: ScriptClient, out: Callable[[str], None], label: str,
         if detail is not None:
             details.append(detail)
     return {"layouts": listed, "details": details}
+
+
+def department_by_ticket(client: ScriptClient, department_id: str) -> Optional[str]:
+    """A department's name, read from one ticket in it, or None when no ticket
+    can be read or the ticket names another department. Only the department's
+    id and name are taken. The ticket holds a customer's details: it is never
+    printed or saved, and the client's in-memory copy of the answer is dropped."""
+    if zoho_id(department_id) is None:
+        return None
+    answer, _ = attempt(lambda: client.get(
+        "/api/v1/tickets", {"departmentId": department_id, "include": "departments", "limit": 1}))
+    client.http.answers.pop(("GET", "/api/v1/tickets"), None)
+    for ticket in rows(answer):
+        department = ticket.get("department")
+        if not isinstance(department, dict) or str(department.get("id")) != str(department_id):
+            continue
+        name = department.get("name")
+        if isinstance(name, str) and name.strip():
+            return name
+    return None
 
 
 def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.getpass, http: Any = None,
@@ -170,35 +216,79 @@ def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.g
         client_id=client_id, client_secret=client_secret, refresh_token=refresh_token, org_id=args.org_id,
         department_id=args.test_department_id, contact_id=args.test_contact_id), http)
 
-    orgs = step(out, "organisations", lambda: client.get("/api/v1/organizations", org=False))
-    mine = [row for row in rows(orgs) if str(row.get("id")) == str(args.org_id)]
-    if not mine:
-        out("The token cannot see organisation %s. Stopping." % args.org_id)
-        return 1
-    out("organisation %s: found, edition %s" % (args.org_id, mine[0].get("edition")))
-    save_shape("organizations", orgs, source, shapes_dir)
+    orgs, refusal = attempt(lambda: client.get("/api/v1/organizations", org=False))
+    # True while the organisation id rests on a later read sent with it.
+    org_unconfirmed = False
+    if refusal is not None:
+        out("organisations: refused (error=%s)" % refusal.error)
+        if not refused_for_scope(refusal):
+            out("The token cannot see organisation %s. Stopping." % args.org_id)
+            return 1
+        org_unconfirmed = True
+        out("  The token cannot list organisations, which is expected with the OMS's token. Carrying on:"
+            " organisation %s is confirmed when a read sent with it succeeds (the test contact, below)." % args.org_id)
+    else:
+        mine = [row for row in rows(orgs) if str(row.get("id")) == str(args.org_id)]
+        if not mine:
+            out("The token cannot see organisation %s. Stopping." % args.org_id)
+            return 1
+        out("organisation %s: found, edition %s" % (args.org_id, mine[0].get("edition")))
+        save_shape("organizations", orgs, source, shapes_dir)
 
-    departments = step(out, "departments", lambda: client.get("/api/v1/departments", {"limit": 100}))
-    if departments is not None:
-        save_shape("departments", departments, source, shapes_dir)
-    names = {str(row.get("id")): str(row.get("name")) for row in rows(departments)}
-    out("departments: %d" % len(names))
-    for label, department_id in (("test", args.test_department_id), ("real", args.department_id)):
-        if not department_id:
-            continue
+    wanted = [(label, department_id) for label, department_id in (("test", args.test_department_id),
+                                                                  ("real", args.department_id)) if department_id]
+    departments, refusal = attempt(lambda: client.get("/api/v1/departments", {"limit": 100}))
+    by_ticket = refused_for_scope(refusal)
+    if refusal is not None:
+        out("departments: refused (error=%s)" % refusal.error)
+    if by_ticket:
+        out("  The token cannot list departments, which is expected with the OMS's token. Each department given"
+            " is confirmed through one ticket in it instead.")
+        names = {}
+        for _, department_id in wanted:
+            name = department_by_ticket(client, department_id)
+            if name is not None:
+                names[str(department_id)] = name
+        save_shape("departments", {"data": [{"id": key, "name": value} for key, value in names.items()]},
+                   source + BY_TICKET_NOTE, shapes_dir)
+        out("departments confirmed through a ticket: %d of %d" % (len(names), len(wanted)))
+    else:
+        if departments is not None:
+            save_shape("departments", departments, source, shapes_dir)
+        names = {str(row.get("id")): str(row.get("name")) for row in rows(departments)}
+        out("departments: %d" % len(names))
+
+    said_layouts: List[bool] = []
+
+    def layouts_refused(exc: ZohoError) -> None:
+        if refused_for_scope(exc) and not said_layouts:
+            said_layouts.append(True)
+            out("  The token cannot read layouts, which is expected with the OMS's token. The layout id is optional:"
+                " leave EMOTORAD_ZOHO_LAYOUT_ID out, and the first ticket is sent without one.")
+
+    for label, department_id in wanted:
         name = names.get(str(department_id))
-        out("%s department %s: %s" % (label, department_id, name or "NOT FOUND"))
-        if name is None:
-            out("  Not in the departments listed. Check the id; test_ticket.py refuses a department it has not seen.")
-        elif label == "test":
+        if by_ticket:
+            out("%s department %s: %s" % (label, department_id,
+                                          "%s (confirmed through a ticket in it)" % name if name else "NOT CONFIRMED"))
+            if name is None:
+                out("  No ticket in it could be read, so it cannot be confirmed, and test_ticket.py refuses it."
+                    " Create one ticket in that department by hand in Desk, then run the probe again.")
+        else:
+            out("%s department %s: %s" % (label, department_id, name or "NOT FOUND"))
+            if name is None:
+                out("  Not in the departments listed. Check the id; test_ticket.py refuses a department it has not"
+                    " seen.")
+        if name is not None and label == "test":
             out("  test_ticket.py asks for this name, typed exactly. Check the department is quiet first.")
-        found = layout_details(client, out, "%s ticket" % label, {"module": "tickets", "departmentId": department_id})
+        found = layout_details(client, out, "%s ticket" % label, {"module": "tickets", "departmentId": department_id},
+                               layouts_refused)
         save_shape("ticket-layouts-%s" % label, found, source, shapes_dir)
         for detail in found["details"]:
             for line in layout_lines(mask(detail)):
                 out(line)
 
-    found = layout_details(client, out, "contact", {"module": "contacts"})
+    found = layout_details(client, out, "contact", {"module": "contacts"}, layouts_refused)
     save_shape("contact-layout", found, source, shapes_dir)
     for detail in found["details"]:
         for line in layout_lines(mask(detail)):
@@ -220,11 +310,19 @@ def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.g
                                lambda contact_id=contact_id: client.get("/api/v1/contacts/%s" % contact_id))
         out("%s contact %s: %s" % (label, contact_id, describe_contact(contacts[label])))
     save_shape("contacts", contacts, source, shapes_dir, person=True)
+    if org_unconfirmed:
+        test_contact = contacts.get("test")
+        if isinstance(test_contact, dict) and test_contact.get("id"):
+            org_unconfirmed = False
+            out("organisation %s: confirmed, the test contact read sent with it succeeded." % args.org_id)
+        else:
+            out("organisation %s: NOT confirmed, no read sent with it succeeded. Check the organisation id and the"
+                " test contact id, then run the probe again." % args.org_id)
 
     credits = getattr(http, "last_credits_remaining", None)
     out("API credits left today: %s" % (credits if credits is not None else "not reported"))
     out("Masked shapes written to %s. Ask Claude to review them." % shapes_dir)
-    return 0
+    return 1 if org_unconfirmed else 0
 
 
 if __name__ == "__main__":

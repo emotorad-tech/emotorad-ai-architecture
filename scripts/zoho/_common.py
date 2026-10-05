@@ -36,7 +36,7 @@ from emotorad_ai.observability import redact_pii  # noqa: E402
 # them names the address.
 from emotorad_ai.zoho.auth import ACCOUNTS_URL, TOKEN_URL, TokenSource  # noqa: E402,F401
 from emotorad_ai.zoho.desk import DESK_URL, DeskClient  # noqa: E402
-from emotorad_ai.zoho.errors import ZohoAuthExpired, ZohoError  # noqa: E402
+from emotorad_ai.zoho.errors import ZohoAuthExpired, ZohoConfigError, ZohoError  # noqa: E402
 from emotorad_ai.zoho.http import DeskHTTP  # noqa: E402
 from emotorad_ai.zoho.settings import ZohoSettings  # noqa: E402
 
@@ -252,6 +252,22 @@ def step(out: Callable[[str], None], label: str, read: Callable[[], Any]) -> Any
     except ZohoError as exc:
         out("%s: refused (error=%s)" % (label, exc.error))
         return None
+
+
+def attempt(read: Callable[[], Any]) -> Tuple[Any, Optional[ZohoError]]:
+    """Run one read: its answer and None, or None and Zoho's refusal."""
+    try:
+        return read(), None
+    except ZohoError as exc:
+        return None, exc
+
+
+def refused_for_scope(exc: Optional[BaseException]) -> bool:
+    """Whether Zoho refused a read because the token lacks its scope: a 401
+    or 403 whose error code names a scope (SCOPE_MISMATCH). The OMS's token
+    has no Desk.basic.READ or Desk.settings.READ, so its organisations,
+    departments and layouts reads are refused this way, and that is expected."""
+    return isinstance(exc, ZohoConfigError) and "SCOPE" in str(exc.error).upper()
 
 
 def rows(answer: Any) -> List[Dict[str, Any]]:

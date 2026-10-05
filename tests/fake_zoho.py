@@ -181,10 +181,7 @@ class FakeZoho:
                 self.tokens_issued += 1
                 issued = self.tokens_issued
             return _Response(200, json.dumps(token_answer(issued)).encode("utf-8"), headers_of({}))
-        with self._lock:
-            if not self.answers:
-                raise AssertionError("FakeZoho has no answer queued for %s %s" % (record["method"], parts.path))
-            answer = self.answers.pop(0)
+        answer = self._next(record)
         if isinstance(answer, BaseException):
             raise answer
         raw = answer.raw()
@@ -193,6 +190,12 @@ class FakeZoho:
             raise urllib.error.HTTPError(request.full_url, answer.status, "fake", headers, io.BytesIO(raw))
         return _Response(answer.status, raw, headers, answer.read_error)
 
+    def _next(self, record: Dict[str, Any]) -> Any:
+        with self._lock:
+            if not self.answers:
+                raise AssertionError("FakeZoho has no answer queued for %s %s" % (record["method"], record["path"]))
+            return self.answers.pop(0)
+
     @property
     def desk_requests(self) -> List[Dict[str, Any]]:
         return [r for r in self.requests if r["host"] == DESK_HOST]
@@ -200,3 +203,34 @@ class FakeZoho:
     @property
     def token_requests(self) -> List[Dict[str, Any]]:
         return [r for r in self.requests if r["url"] == TOKEN_URL]
+
+
+class RoutedZoho(FakeZoho):
+    """The same opener, answering by method and path instead of in order, for
+    a whole script run through the real DeskHTTP, so Zoho's refusals are
+    classified as the service classifies them.
+
+    A route's reply is an Answer, a (status, body) pair, an exception to
+    raise, a list of those (taken in order, the last one kept) or a function
+    of the query (each name's first value). A call nobody routed fails the
+    test. Token requests are routed like any other."""
+
+    def __init__(self, routes: Dict[Any, Any]) -> None:
+        super().__init__(auto_token=False)
+        self.routes = routes
+
+    def _next(self, record: Dict[str, Any]) -> Any:
+        key = (record["method"], record["path"])
+        if key not in self.routes:
+            raise AssertionError("unrouted call: %s %s" % key)
+        reply = self.routes[key]
+        if callable(reply) and not isinstance(reply, (Answer, BaseException)):
+            reply = reply({name: values[0] for name, values in record["query"].items()})
+        if isinstance(reply, list):
+            reply = reply.pop(0) if len(reply) > 1 else reply[0]
+        if isinstance(reply, tuple):
+            reply = Answer(*reply)
+        return reply
+
+    def to(self, method: str, path: str) -> List[Dict[str, Any]]:
+        return [r for r in self.requests if (r["method"], r["path"]) == (method, path)]
