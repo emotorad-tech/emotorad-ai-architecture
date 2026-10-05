@@ -17,11 +17,10 @@
 # An alarm fires on one event in its period. The worker logs a stuck or late
 # record once an hour, so a stuck record means one email an hour until it is sent.
 #
-# Seven events are alarmed. The others the code logs (zoho_ticket_sent,
-# zoho_retry, zoho_rejected, zoho_ticket_gone, zoho_ticket_adopted,
-# zoho_record_dropped, safety_ticket_failed) are end states, or are followed
-# by an alarmed event when they matter. tests/test_zoho_scripts.py keeps this
-# list and the code's events in step.
+# Seven events are alarmed. Every other ticket event the code logs is an end
+# state, or is followed by an alarmed event when it matters. Each is listed
+# with its reason in NOT_ALARMED in tests/test_zoho_scripts.py, which keeps
+# that list, this template and the code's events in step.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: EMotorad AI platform - alarms on the Zoho Desk ticket events
 

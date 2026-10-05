@@ -1362,12 +1362,36 @@ class DocsTests(unittest.TestCase):
 # The events the spec alarms on (section 8), and those it logs without an alarm.
 ALARMED = ("zoho_misconfigured", "zoho_token_refused", "zoho_worker_error", "zoho_ticket_stuck",
            "safety_ticket_late", "safety_ticket_not_recorded", "unverified_ticket_capped")
-# Each of these is an end state or an event another alarm already covers:
-# safety_ticket_not_recorded follows safety_ticket_failed. zoho_worker_store_unavailable
-# is an Atlas blip; the store's own alarms cover a long outage.
-NOT_ALARMED = ("zoho_ticket_sent", "zoho_retry", "zoho_rejected", "zoho_ticket_gone", "zoho_ticket_adopted",
-               "zoho_record_dropped", "safety_ticket_failed", "zoho_worker_store_unavailable")
-_EMITTED = re.compile(r"""\bemit\(\s*["']((?:zoho|safety_ticket|unverified_ticket)_[a-z_]+)["']""")
+# Every other ticket event the code logs, with the reason it has no alarm: an
+# end state, or an event another alarm already covers when it matters.
+STORE_ALARMS = "a store blip; the store's own alarms cover a long outage"
+NOT_ALARMED = {
+    "zoho_ticket_sent": "an end state: the ticket is in Desk",
+    "zoho_retry": "the record is tried again; one that never gets through alarms as zoho_ticket_stuck or "
+                  "safety_ticket_late",
+    "zoho_rejected": "the record is tried hourly and /health says sending failing; one that never gets through "
+                     "alarms as zoho_ticket_stuck or safety_ticket_late",
+    "zoho_ticket_gone": "an end state: a person deleted or merged the ticket in Desk",
+    "zoho_ticket_adopted": "an end state: the ticket an unanswered create made was found",
+    "zoho_record_dropped": "an end state: the record was erased, or another worker holds it",
+    "safety_ticket_failed": "followed by safety_ticket_not_recorded, which alarms",
+    "zoho_worker_store_unavailable": "an Atlas blip; the store's own alarms cover a long outage",
+    "ticket_recorded": "an end state: the record is made, and the worker sends it",
+    "ticket_note_added": "an end state: the line is on the record",
+    "ticket_note_failed": "the ticket stands without the line, and the reply promises nothing on it",
+    "ticket_read_failed": "the read counts as not gone, so the record then succeeds or fails with its own event",
+    "ticket_record_failed": "a safety report on that path alarms as safety_ticket_not_recorded; the other paths "
+                            "promise nothing",
+    "ticket_cap_unchecked": "the ticket is recorded without the cap; if the store is down, the record fails "
+                            "with its own event",
+    "handover_ticket_not_recorded": "the reply promises nothing: it says the hand-over was not passed on",
+    "lockout_ticket_not_recorded": "with Zoho on the reply promises nothing: it says the hand-over was not "
+                                   "passed on",
+    "close_runs_failed": "the earlier run's record stays open, and its ticket goes to support only; " + STORE_ALARMS,
+}
+_EMITTED = re.compile(
+    r"""\bemit\(\s*["']((?:zoho|safety_ticket|unverified_ticket|ticket|handover_ticket|lockout_ticket|close_runs)"""
+    r"""_[a-z_]+)["']""")
 
 
 class _CloudFormationLoader(yaml.SafeLoader):
@@ -1389,7 +1413,20 @@ class AlarmStackTests(unittest.TestCase):
     def test_the_scan_finds_an_emit_on_one_line_and_across_two(self):
         self.assertEqual(_EMITTED.findall('self.log.emit("zoho_ticket_sent", cid, reference=r)'), ["zoho_ticket_sent"])
         self.assertEqual(_EMITTED.findall("log.emit(\n    'safety_ticket_late', cid)"), ["safety_ticket_late"])
-        self.assertEqual(_EMITTED.findall('log.emit("ticket_recorded", cid)'), [])
+        self.assertEqual(_EMITTED.findall('log.emit("turn_handled", cid)'), [])
+        self.assertEqual(_EMITTED.findall('log.emit("tickets_listed", cid)'), [])
+
+    def test_the_scan_finds_every_ticket_event_family(self):
+        # The final review, scripts-docs Minor 13: these were outside the scan.
+        for event in ("ticket_record_failed", "handover_ticket_not_recorded", "lockout_ticket_not_recorded",
+                      "ticket_cap_unchecked", "close_runs_failed", "unverified_ticket_capped"):
+            with self.subTest(event=event):
+                self.assertEqual(_EMITTED.findall('self.log.emit(\n    "%s", cid, why="x")' % event), [event])
+
+    def test_every_event_without_an_alarm_says_why(self):
+        for event, reason in NOT_ALARMED.items():
+            with self.subTest(event=event):
+                self.assertGreater(len(reason.split()), 3)
 
     def test_every_alarmed_event_has_a_filter_and_an_alarm(self):
         for event in ALARMED:
