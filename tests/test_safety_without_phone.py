@@ -835,6 +835,43 @@ class SomeoneElsesRunTests(unittest.TestCase):
         self.assertEqual((chat.state().awaiting_callback, chat.state().callback_asks), (None, 0))
         self.assertIsNone(chat.state().newcomer_started_at)
 
+    def test_a_strangers_safety_wait_ended_by_the_owners_own_report_is_counted(self):
+        # Fixer A's concern in the final fix wave: the run's own person comes
+        # back with a hazard of their own, so the safety gate answers before
+        # the callback gate and no other end of the wait counts the stranger's
+        # report. It has no ticket, so it is alarmed and counted once.
+        chat = DeskChat()
+        chat.say("hello", identity=RIDER)
+        chat.say("my battery is smoking")
+        self.assertEqual(chat.state().awaiting_callback, "safety")
+        self.assertEqual(chat.events("safety_ticket_not_recorded"), [])
+        back = chat.say("my battery is swollen", identity=RIDER)
+        chat.assert_model_never_called()
+        (event,) = chat.events("safety_ticket_not_recorded")
+        self.assertEqual((event["why"], event["level"]), ("owner_returned", "error"))
+        self.assertEqual(chat.runtime.safety_not_recorded, 1)
+        (ended,) = chat.events("callback_wait_ended")
+        self.assertEqual((ended["purpose"], ended["why"]), ("safety", "owner_returned"))
+        self.assertEqual((chat.state().awaiting_callback, chat.state().callback_asks), (None, 0))
+        # The run's own person's report is recorded as before: only the
+        # stranger's has no ticket.
+        self.assertTrue(is_desk_reference(back.ticket_id))
+        (record,) = chat.records()
+        self.assertEqual(record["_id"], back.ticket_id)
+
+    def test_a_strangers_handover_wait_ended_by_the_owners_return_is_not_a_safety_report(self):
+        chat = DeskChat()
+        chat.say("hello", identity=RIDER)
+        chat.say("talk to a person")
+        self.assertEqual(chat.state().awaiting_callback, "handover")
+        chat.say("my battery is swollen", identity=RIDER)
+        chat.assert_model_never_called()
+        (ended,) = chat.events("callback_wait_ended")
+        self.assertEqual((ended["purpose"], ended["why"]), ("handover", "owner_returned"))
+        self.assertEqual(chat.events("safety_ticket_not_recorded"), [])
+        self.assertEqual(chat.runtime.safety_not_recorded, 0)
+        self.assertIsNone(chat.state().awaiting_callback)
+
     def test_a_strangers_later_reports_stay_on_their_own_ticket(self):
         # Review of Task 13, Important 2: one safety ticket per run holds for
         # the stranger too (decision 11). Their start does not move, so their

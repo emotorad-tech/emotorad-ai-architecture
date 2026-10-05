@@ -788,7 +788,12 @@ class Runtime:
         The run's own person: their ticket is the run's. If someone else wrote
         since, their stretch ends here. Its start and ticket are cleared, and
         so is a wait for a number to call about their report, so this
-        person's message is never read as that number. The time the stretch
+        person's message is never read as that number. A wait still there was
+        not ended by the callback gate: this person's own report answered
+        first (the safety gate runs before it). So it ends here, through
+        _end_wait, and the other person's safety report, left with no ticket,
+        is alarmed and counted as `owner_returned` (Fixer A's concern in the
+        final fix wave). The time the stretch
         ends, just after its last turn, is where the run's own person's own
         stretch begins (_owner_start), and is returned for
         _end_run_before_this_turn to end the other person's tickets before
@@ -802,6 +807,8 @@ class Runtime:
             return None
         ended = self._owner_start(message, state)
         state.newcomer_started_at = state.newcomer_ticket_id = None
+        if state.awaiting_callback is not None:
+            self._end_wait(message.conversation_id, state, "owner_returned")
         state.awaiting_callback, state.callback_asks = None, 0
         return ended
 
@@ -1275,8 +1282,9 @@ class Runtime:
         itself), so a safety report's is alarmed and counted on /health, as
         every safety report with no ticket is, however the wait ended: no
         number, the verification code, a number we know now, starting over,
-        or Zoho off since the question (the final review, safety-flow
-        Important 4)."""
+        Zoho off since the question (the final review, safety-flow
+        Important 4), or the run's own person back with a report of their own
+        (_note_speaker, `owner_returned`)."""
         waiting = state.awaiting_callback
         self.log.emit("callback_wait_ended", conversation_id, purpose=waiting, why=why)
         state.awaiting_callback, state.callback_asks = None, 0
