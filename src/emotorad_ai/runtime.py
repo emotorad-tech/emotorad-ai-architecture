@@ -136,8 +136,10 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
+from .tickets.clock import plus
+from .tickets.kinds import is_desk_reference
 from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
-from .verify_first import CONFIRMED, NUMBER, VerifyFirst
+from .verify_first import CONFIRMED, NUMBER, VerifyFirst, ascii_digits, find_phone
 from . import erasure as erasure_rules
 
 UNSUPPORTED_MESSAGE = (
@@ -247,6 +249,48 @@ def _is_image(attachment: Any) -> bool:
 
 # The agents whose asks to see something are fault evidence (video first).
 _FAULT_AGENTS = (BATTERY_SUPPORT, MOTOR_SUPPORT, NARROW_SUPPORT)
+
+# Look-up failures a ticket's coverage names (spec 2026-10-05, section 3).
+# Any other failure says nothing about the customer's cover.
+LOOKUP_ERRORS = ("no_warranty_record", "oms_unavailable")
+
+# What a turn reads from the customer or a look-up, carried when the turn
+# loses a save race and changed it (Runtime._merge_onto_fresh).
+TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callback_asks", "last_code_phone")
+
+
+def _ticket_bike(bikes: Sequence[Dict[str, Any]], selected: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The chosen bike by its reference, or the only bike; None with several
+    and none chosen."""
+    if selected:
+        return next((bike for bike in bikes if bike_ref(bike) == selected), None)
+    return bikes[0] if len(bikes) == 1 else None
+
+
+def coverage_fact(state: ConversationState, resolved: Optional[ResolvedIdentity] = None) -> Optional[str]:
+    """What a ticket says about cover, worked out in code (spec 2026-10-05,
+    section 3).
+
+    The coverage_status of the bike the ticket is about, the chosen bike or
+    the only one: from the conversation's last warranty look-up first, then
+    from this turn's identity look-up (the safety branch fires before any
+    agent has looked). Failing both, the run's last look-up error, then this
+    turn's. None when nothing is known, and always None for a bike the
+    customer gave as not in their list: the listed bikes' cover says nothing
+    about it.
+    """
+    if state.unlisted_bike:
+        return None
+    looked_up = ((state.coverage_result or {}).get("data") or {}).get("bikes") or []
+    for bikes in (looked_up, list(resolved.bikes) if resolved is not None else []):
+        bike = _ticket_bike(bikes, state.selected_frame)
+        if bike is not None and bike.get("coverage_status"):
+            return bike["coverage_status"]
+    if state.lookup_error:
+        return state.lookup_error
+    if resolved is not None and resolved.error in LOOKUP_ERRORS:
+        return resolved.error
+    return None
 
 
 class Runtime:
@@ -395,8 +439,8 @@ class Runtime:
         injection saw the previous turn's lookup, or nothing at all, when the
         model had just done both in one turn.
         """
-        if name == LOOKUP_WARRANTY_RECORD and not is_error(envelope):
-            state.coverage_result = envelope
+        if name == LOOKUP_WARRANTY_RECORD:
+            self._remember_coverage(state, envelope)
         if name == PLACE_REPLACEMENT_ORDER and not is_error(envelope):
             order_id = (envelope.get("data") or {}).get("order_id")
             if order_id and order_id not in state.placed_order_ids:
@@ -408,6 +452,19 @@ class Runtime:
             code = str(arguments.get("code", "")).strip()
             if code and code not in state.consumed_codes:
                 state.consumed_codes.append(code)
+
+    @staticmethod
+    def _remember_coverage(state: ConversationState, envelope: Dict[str, Any]) -> None:
+        """A warranty look-up's answer. One that worked is the conversation's
+        cover and clears any failure; a failure that says something about the
+        customer (LOOKUP_ERRORS) is kept for a ticket's coverage, because
+        coverage_result keeps only answers that worked. Other failures change
+        nothing."""
+        if not is_error(envelope):
+            state.coverage_result = envelope
+            state.lookup_error = None
+        elif (envelope.get("error") or {}).get("code") in LOOKUP_ERRORS:
+            state.lookup_error = envelope["error"]["code"]
 
     # -- entry point ---------------------------------------------------------
 
@@ -448,6 +505,8 @@ class Runtime:
             state.history[:] = trim_history(state.history, HISTORY_TURNS - 1)
             history_mark, log_mark = len(state.history), len(self.log.events)
             coverage_loaded = state.coverage_result
+            # What the turn may change that a merge must not lose or overwrite.
+            facts_loaded = {name: getattr(state, name) for name in TURN_FACT_FIELDS}
             try:
                 final = self.graph.invoke({"message": message, "conversation": state})
             except StoreUnavailable as exc:
@@ -475,7 +534,8 @@ class Runtime:
                 if self._side_effects_since(log_mark, cid):
                     try:
                         state = self._merge_onto_fresh(
-                            state, this_turn, reply, looked_up=state.coverage_result != coverage_loaded
+                            state, this_turn, reply, looked_up=state.coverage_result != coverage_loaded,
+                            loaded=facts_loaded,
                         )
                     except (ConversationConflict, StoreUnavailable) as exc:
                         return self._store_down(message, exc, reply.ticket_id)
@@ -488,6 +548,9 @@ class Runtime:
                     )
             except StoreUnavailable as exc:
                 return self._store_down(message, exc, reply.ticket_id)
+        # After the save and before the record: a worker pass in between must
+        # never find this run's first turn inside an earlier run's bounds.
+        self._close_earlier_runs(state)
         try:
             recorded, summary = message, self._summary_for(state, resolved)
             if "transcript_text" in reply.metadata:
@@ -502,25 +565,90 @@ class Runtime:
             # The turn happened and the state is saved; only the record of it
             # failed. Said in the log, and the customer still gets the answer.
             self.log.emit("transcript_write_failed", cid, error=str(exc))
-        self._attach_transcript(cid, reply)
+        self._attach_transcript(state, reply, resolved)
         return reply
 
-    def _attach_transcript(self, conversation_id: str, reply: Reply) -> None:
-        """Every ticket, from an agent or the safety branch, gets the whole
-        thread, this turn included, so a person never starts from nothing."""
+    def _close_earlier_runs(self, state: ConversationState) -> None:
+        """On a run's first turn (a fresh state, or restart_for), the ticket
+        seam marks where this conversation's earlier runs ended, so their
+        tickets take none of this run's turns or files (spec 2026-10-05,
+        section 3)."""
         tickets = getattr(self.registry, "tickets", None)
-        if not reply.ticket_id or not hasattr(tickets, "attach_transcript"):
+        if state.turns != 1 or not state.started_at or not hasattr(tickets, "close_runs"):
             return
         try:
-            tickets.attach_transcript(reply.ticket_id, render_transcript(self.conversations.transcript(conversation_id)))
+            tickets.close_runs(state.conversation_id, state.started_at)
+        except Exception as exc:  # the turn happened; the log says the earlier runs stay open
+            self.log.emit("close_runs_failed", state.conversation_id, error=type(exc).__name__)
+
+    def _speaker_owns_run(self, state: ConversationState, resolved: Optional[ResolvedIdentity]) -> bool:
+        """Whether this turn comes from the person the run belongs to: the run
+        has no proven owner, or this turn proved the same person, through the
+        channel or by a code in this chat."""
+        if state.user_key is None:
+            return True
+        if resolved is not None and self._user_key(resolved) == state.user_key:
+            return True
+        proven = self.phone_resolver(state.conversation_id) if self.phone_resolver is not None else None
+        return bool(proven) and "PHONE#" + proven == state.user_key
+
+    def _attach_transcript(
+        self, state: ConversationState, reply: Reply, resolved: Optional[ResolvedIdentity]
+    ) -> None:
+        """The run's ticket gets the run's thread, this turn included, on every
+        turn of the run, not only the one that raised it, so a person sees
+        what was said after the ticket too (spec 2026-10-05, section 2).
+
+        Only this run's turns, those numbered after `turn_offset`: an earlier
+        run of this conversation id, which may be someone else's
+        (restart_for), never reaches it. And only while the person writing is
+        the run's own: once their proof lapses, the next visitor's words reach
+        no ticket of theirs, and a Desk record's run ends before them."""
+        tickets = getattr(self.registry, "tickets", None)
+        ticket_id = reply.ticket_id or state.ticket_id
+        if not ticket_id or not hasattr(tickets, "attach_transcript"):
+            return
+        if not self._speaker_owns_run(state, resolved):
+            if is_desk_reference(ticket_id) and hasattr(tickets, "close_runs"):
+                self._end_run_before_this_turn(state, tickets)
+            return
+        cid = state.conversation_id
+        try:
+            turns = [turn for turn in self.conversations.transcript(cid) if turn.n > state.turn_offset]
+            tickets.attach_transcript(ticket_id, render_transcript(turns))
         except Exception as exc:  # the ticket exists either way; say the thread did not reach it
             self.log.emit(
-                "transcript_attach_failed", conversation_id,
-                ticket_id=reply.ticket_id, error="%s: %s" % (type(exc).__name__, exc),
+                "transcript_attach_failed", cid,
+                ticket_id=ticket_id, error="%s: %s" % (type(exc).__name__, exc),
             )
 
+    def _end_run_before_this_turn(self, state: ConversationState, tickets: Any) -> None:
+        """Someone other than the run's own person is writing, and nobody has
+        proved a number since, so restart_for has not begun a run of theirs.
+        The run's Desk record ends before this turn, so the worker, which
+        posts by time, never sends the newcomer's words or photos to it (spec
+        2026-10-05, section 3, and the plan's cross-check, finding 9).
+
+        It ends just after the run's last turn before this one, not at this
+        turn: the API records a photo sent with a message before the turn
+        runs (api._persist_media), so that photo is older than the turn.
+        With no earlier turn of the run on record, at this turn. A record
+        that has an end keeps it."""
+        cid = state.conversation_id
+        this_turn = state.turn_offset + state.turns * 2 - 1  # its customer line (transcript_turns)
+        try:
+            turns = self.conversations.transcript(cid)
+            before = [turn for turn in turns if state.turn_offset < turn.n < this_turn]
+            ended = (plus(before[-1].at, 0.000001) if before
+                     else next((turn.at for turn in turns if turn.n == this_turn), None))
+            if ended is not None:
+                tickets.close_runs(cid, ended)
+        except Exception as exc:  # the turn happened; the log says the run stays open
+            self.log.emit("close_runs_failed", cid, error=type(exc).__name__)
+
     def _merge_onto_fresh(
-        self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply, looked_up: bool = False
+        self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply, looked_up: bool = False,
+        loaded: Optional[Dict[str, Any]] = None,
     ) -> ConversationState:
         """Add a turn that lost the save race, and did something, to the state
         the other server saved. Its words and its ticket are kept; the routing
@@ -546,6 +674,14 @@ class Runtime:
             fresh.coverage_result = ours.coverage_result
         fresh.placed_order_ids += [o for o in ours.placed_order_ids if o not in fresh.placed_order_ids]
         fresh.consumed_codes += [c for c in ours.consumed_codes if c not in fresh.consumed_codes]
+        # What this turn read and kept (spec 2026-10-05, section 6): a number
+        # the customer typed, a failed look-up, a wait for a number to call,
+        # the number a code went to. Where this turn changed one, its value
+        # stands; where it did not, the other server's does. With nothing
+        # loaded to compare (a direct caller), this turn's stands.
+        for name in TURN_FACT_FIELDS:
+            if loaded is None or getattr(ours, name) != loaded.get(name):
+                setattr(fresh, name, getattr(ours, name))
         for name in ("user_key", "channel", "context_block", "cluster_id"):
             if getattr(fresh, name) is None:
                 setattr(fresh, name, getattr(ours, name))
@@ -600,6 +736,7 @@ class Runtime:
         message = turn["message"]
         state = turn["conversation"]  # loaded by handle(), saved after the graph
         state.turns += 1
+        self._note_typed_number(message, state)
         if self.verify_gate is not None and self.phone_resolver is not None:
             # A number this conversation has proved opens the identity here,
             # so the runtime does not depend on the API having done it.
@@ -661,6 +798,22 @@ class Runtime:
         # customer's turn is built for the model (_note_customer_turn), and
         # only when that turn shows a photo or video.
         return {"message": message, "conversation": state, "resolved": resolved}
+
+    @staticmethod
+    def _note_typed_number(message: InboundMessage, state: ConversationState) -> None:
+        """The latest Indian mobile the customer typed in this run, ten digits
+        (spec 2026-10-05, section 6): the number a ticket is called back on
+        when nobody proved one. Digits of any script are read as ASCII first,
+        and a code the conversation already spent is not a number. Customers
+        only: a dealer typing a customer's number is not giving their own."""
+        if message.persona != "customer":
+            return
+        text = ascii_digits(message.message_text or "")
+        if text.strip() in state.consumed_codes:
+            return
+        found = find_phone(text)
+        if found is not None:
+            state.typed_number = found[0]
 
     def _note_origin(self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity) -> None:
         """Where this run comes from, for reporting (spec 2026-10-01): set from
@@ -1263,6 +1416,13 @@ class Runtime:
                 "customer_messages": lambda: [
                     m for m in customer_texts(state.history) if m.strip() not in state.consumed_codes
                 ],
+                # What the ticket record needs, worked out in code (spec
+                # 2026-10-05, section 2): this turn's channel, the cover of
+                # the ticket's bike and the number the customer last typed.
+                # The run is started_at, above.
+                "channel": lambda: message.channel,
+                "coverage": lambda: coverage_fact(state, resolved),
+                "typed_number": lambda: state.typed_number,
             },
             # Recorded as the loop runs, not only once the turn ends: a model
             # that calls lookup_warranty_record and place_replacement_order in
@@ -1278,8 +1438,8 @@ class Runtime:
         # so a claim made in the same turn as the lookup and a claim made three
         # turns later are judged against the same fact. Latest wins.
         for call in turn.tool_calls:
-            if call["tool"] == LOOKUP_WARRANTY_RECORD and not is_error(call["result"]):
-                state.coverage_result = call["result"]
+            if call["tool"] == LOOKUP_WARRANTY_RECORD:
+                self._remember_coverage(state, call["result"])
 
         # The one-step cut runs before the post-checks, so they judge the text
         # the customer is sent. But the post-checks judge the model's own reply
@@ -1519,6 +1679,11 @@ class Runtime:
             # kind, and anything it sends under this name is dropped.
             "ticket_kind": lambda: "safety",
             "identity_strength": lambda: self._identity_strength(message.conversation_id, resolved),
+            # The same facts an agent's ticket gets (spec 2026-10-05,
+            # section 2). The run is on the ToolContext below.
+            "channel": lambda: message.channel,
+            "coverage": lambda: coverage_fact(state, resolved),
+            "typed_number": lambda: state.typed_number,
         }
         if state.unlisted_bike:
             late["unlisted_bike"] = lambda: state.unlisted_bike

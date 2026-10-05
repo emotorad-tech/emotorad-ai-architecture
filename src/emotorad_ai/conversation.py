@@ -144,6 +144,21 @@ class ConversationState:
     erasure_step: Optional[str] = None
     # The turn that asked for DELETE: only the next one may answer it.
     erasure_turn: Optional[int] = None
+    # The latest Indian mobile the customer typed in this run, ten digits
+    # (Runtime._note_typed_number): the number a ticket is called back on when
+    # nobody proved one (spec 2026-10-05, section 6). Never the model's, and it
+    # goes with the run.
+    typed_number: Optional[str] = None
+    # The run's last failed warranty look-up, "no_warranty_record" or
+    # "oms_unavailable", for a ticket's coverage: coverage_result keeps only a
+    # look-up that worked. Cleared by one that works, and with the bike.
+    lookup_error: Optional[str] = None
+    # The call-back gate (spec 2026-10-05, section 6): "handover" or "safety"
+    # while it waits for a number to call, and the asks it has made.
+    awaiting_callback: Optional[str] = None
+    callback_asks: int = 0
+    # The last number a verification code was sent to, for a lock-out ticket.
+    last_code_phone: Optional[str] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None
@@ -213,8 +228,10 @@ class ConversationState:
         """Back to before a bike was chosen (navigation, spec 2026-10-02). The
         bike goes, with any unlisted one and its confirmation, the agent, and
         what was learnt about that bike, which does not hold for another: its
-        warranty lookup, the evidence seen and the asks for it. Orders placed
-        stay: they were placed. The topic is the caller's to keep or clear."""
+        warranty lookup and a failed one, the evidence seen and the asks for
+        it. Orders placed stay: they were placed. A number the customer typed
+        stays: it is theirs, not the bike's. The topic is the caller's to keep
+        or clear."""
         if self.selected_frame:
             self.transitions.append("bike_forgotten:%s" % self.selected_frame)
         self.selected_frame = None
@@ -223,6 +240,7 @@ class ConversationState:
         self.agent = None
         self.sub_category = None
         self.coverage_result = None
+        self.lookup_error = None
         self.evidence_seen = False
         self.evidence_asks, self.video_declined = 0, False
 
