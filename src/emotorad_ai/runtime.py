@@ -1241,10 +1241,8 @@ class Runtime:
             # keeps it as [code], so the model never sees it. Read after a
             # number and a try at one, as the verify step reads a number first.
             # The wait ends; a safety report then has no ticket, so it is
-            # counted as every such report is.
+            # counted as every such report is (_end_wait).
             self._end_wait(cid, state, "code")
-            if waiting == "safety":
-                self._note_safety_not_recorded(cid, "code")
             return {}
         if waiting == "handover":
             self._end_wait(cid, state, "no_number")
@@ -1256,15 +1254,23 @@ class Runtime:
             state.callback_asks += 1
             return {"reply": self._finish(shown, state, SAFETY_ASK_AGAIN_MESSAGE, "guardrail:callback:ask_again",
                                           metadata=metadata)}
-        self._end_wait(cid, state, "no_number")
-        self._note_safety_not_recorded(cid, "no_number")
+        self._end_wait(cid, state, "no_number")  # counted there, as a safety report with no ticket
         return {"reply": self._finish(shown, state, SAFETY_NOT_RECORDED_MESSAGE, "guardrail:callback:no_number",
                                       metadata=metadata)}
 
     def _end_wait(self, conversation_id: str, state: ConversationState, why: str) -> None:
-        """The wait for a call-back number ends, and the log says why."""
-        self.log.emit("callback_wait_ended", conversation_id, purpose=state.awaiting_callback, why=why)
+        """The wait for a call-back number ends, and the log says why. A wait
+        that ends here ends with no ticket (a recorded one clears the wait
+        itself), so a safety report's is alarmed and counted on /health, as
+        every safety report with no ticket is, however the wait ended: no
+        number, the verification code, a number we know now, starting over,
+        or Zoho off since the question (the final review, safety-flow
+        Important 4)."""
+        waiting = state.awaiting_callback
+        self.log.emit("callback_wait_ended", conversation_id, purpose=waiting, why=why)
         state.awaiting_callback, state.callback_asks = None, 0
+        if waiting == "safety":
+            self._note_safety_not_recorded(conversation_id, why)
 
     def _callback_number(
         self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity, waiting: str,

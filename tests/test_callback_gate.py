@@ -345,6 +345,61 @@ class KnownPhoneTests(unittest.TestCase):
         self.assertEqual(len(chat.records()), 1)
 
 
+class SafetyWaitEndsTests(unittest.TestCase):
+    """A safety report's wait for a number that ends with no ticket is
+    alarmed and counted on /health, however it ends (the final review,
+    safety-flow Important 4)."""
+
+    def assert_counted(self, chat, why):
+        (event,) = chat.events("safety_ticket_not_recorded")
+        self.assertEqual((event["why"], event["level"]), (why, "error"))
+        self.assertEqual(chat.runtime.safety_not_recorded, 1)
+        self.assertEqual(chat.records(), [])
+        self.assertIsNone(chat.state().awaiting_callback)
+
+    def test_a_safety_wait_ended_by_a_known_phone_is_counted(self):
+        # The run's own person back after someone else's report asked for a
+        # number: that report is left with no ticket.
+        chat = DeskChat(replies=[say("Thank you. Please keep it outside.")] * 4)
+        chat.say("hello", identity=RIDER)
+        chat.say("my battery is smoking")
+        chat.assert_model_never_called()
+        self.assertEqual(chat.state().awaiting_callback, "safety")
+        chat.say("I have moved the bike outside", identity=RIDER)
+        (ended,) = chat.events("callback_wait_ended")
+        self.assertEqual((ended["purpose"], ended["why"]), ("safety", "known_phone"))
+        self.assert_counted(chat, "known_phone")
+
+    def test_a_safety_wait_ended_by_start_over_is_counted(self):
+        chat = DeskChat()
+        chat.say("my battery is smoking")
+        reply = chat.say("start over")
+        chat.assert_model_never_called()
+        self.assertTrue(reply.handled_by.startswith("verify_first:"), reply.handled_by)
+        (ended,) = chat.events("callback_wait_ended")
+        self.assertEqual((ended["purpose"], ended["why"]), ("safety", "start_over"))
+        self.assert_counted(chat, "start_over")
+
+    def test_a_safety_wait_left_when_zoho_went_off_is_counted(self):
+        chat = DeskChat()
+        chat.say("my battery is smoking")
+        chat.registry.tickets = chat.mock  # Zoho switched off between turns
+        reply = chat.say("9999999999")
+        chat.assert_model_never_called()
+        self.assertEqual(reply.handled_by, "verify_first:code_sent")
+        (ended,) = chat.events("callback_wait_ended")
+        self.assertEqual((ended["purpose"], ended["why"]), ("safety", "not_recordable"))
+        self.assert_counted(chat, "not_recordable")
+
+    def test_a_handover_wait_that_ends_is_not_a_safety_report(self):
+        chat = DeskChat()
+        chat.say("talk to a person")
+        chat.say("start over")
+        chat.assert_model_never_called()
+        self.assertEqual(chat.events("safety_ticket_not_recorded"), [])
+        self.assertEqual(chat.runtime.safety_not_recorded, 0)
+
+
 class ConflictTests(unittest.TestCase):
     def test_a_conflict_after_a_recording_merges_and_does_not_run_again(self):
         store = ConflictedStore()
