@@ -167,6 +167,21 @@ REFERENCE_SUFFIX = " Your reference is {reference}."
 CAP_PER_NUMBER_MESSAGE = "I can't take another request for that number today."
 CAP_OVERALL_MESSAGE = "I can't pass this on right now. Please try again tomorrow."
 
+# The callback gate (runtime._node_callback).
+# A safety wait with no number in the reply: asked once more.
+SAFETY_ASK_AGAIN_MESSAGE = (
+    "Please send me your mobile number so our safety team can reach you.\n\n" + SAFETY_EMERGENCY
+)
+# A handover wait with no number in the reply. Draft: the line on how else to
+# reach support comes from the support lead (person step 10). Until then it
+# promises nothing.
+HANDOVER_NO_NUMBER_MESSAGE = (
+    "Without a number I can't pass this on from here, so nothing has been sent. "
+    "You can send me a mobile number at any time."
+)
+# The handover ticket could not be written: nothing is promised.
+HANDOVER_NOT_RECORDED_MESSAGE = "Sorry, I couldn't pass this on just now. Please try again in a few minutes."
+
 
 @dataclass(frozen=True)
 class GuardrailVerdict:

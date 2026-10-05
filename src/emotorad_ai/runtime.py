@@ -77,9 +77,14 @@ from .guardrails import (
     COVERAGE_BLOCKED_MESSAGE,
     EVIDENCE_BLOCKED_MESSAGE,
     HANDOFF_MESSAGE,
+    HANDOVER_ASK_NUMBER_MESSAGE,
+    HANDOVER_NO_NUMBER_MESSAGE,
+    HANDOVER_NOT_RECORDED_MESSAGE,
+    HANDOVER_RECORDED_MESSAGE,
     NUMBER_RECEIVED_MESSAGE,
     ORDER_BLOCKED_MESSAGE,
     SAFETY_ADDED_MESSAGE,
+    SAFETY_ASK_AGAIN_MESSAGE,
     SAFETY_EMERGENCY,
     SAFETY_MESSAGE,
     SAFETY_NO_CONTACT_MESSAGE,
@@ -148,7 +153,7 @@ from .tickets.clock import now_iso, parse, plus
 from .tickets.kinds import is_desk_reference, is_urgent
 from .tickets.record import GONE
 from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
-from .verify_first import CONFIRMED, NUMBER, VerifyFirst, find_phone, looks_like_a_number, redact
+from .verify_first import CONFIRMED, INVALID_NUMBER, NUMBER, VerifyFirst, find_phone, looks_like_a_number, redact
 from . import erasure as erasure_rules
 
 UNSUPPORTED_MESSAGE = (
@@ -372,6 +377,11 @@ _FAULT_AGENTS = (BATTERY_SUPPORT, MOTOR_SUPPORT, NARROW_SUPPORT)
 # Any other failure says nothing about the customer's cover.
 LOOKUP_ERRORS = ("no_warranty_record", "oms_unavailable")
 
+# The cover states only a bike from the rider's app has (tools/mocks._coverage
+# of tools/amigo.amigo_records). Its record holds the app's username, never the
+# OMS customer name, so a ticket about it names nobody.
+_APP_BIKE_STATES = ("not_registered", "warranty_unknown", "warranty_unavailable")
+
 # What a turn reads from the customer or a look-up, and the stretch of the run
 # someone else is writing (Runtime._note_speaker), carried when the turn loses
 # a save race and changed it (Runtime._merge_onto_fresh).
@@ -506,6 +516,7 @@ class Runtime:
             TurnNodes(
                 prepare=self._node_prepare,
                 safety_gate=self._node_safety,
+                callback_gate=self._node_callback,
                 navigation_gate=self._node_navigation,
                 handoff_gate=self._node_handoff,
                 erasure_gate=self._node_erasure,
@@ -1135,6 +1146,115 @@ class Runtime:
             return {"reply": self._handle_safety(message, resolved, state, matched, evidence)}
         return {}
 
+    def _node_callback(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 1a. The call-back number (spec 2026-10-05, section 6). While a
+        #     handover or a safety report waits for a number, code reads the
+        #     next message for one here. This runs after safety and before
+        #     going back, the handover, erasure and the verify step, so a
+        #     number typed for a call is never taken as a number to verify.
+        #     Fixed replies, no model.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        waiting = state.awaiting_callback
+        if waiting is None:
+            return {}
+        cid = message.conversation_id
+        if resolved.persona != "customer" or self._desk_store() is None:
+            # Zoho switched off since the question: nothing can be recorded,
+            # so the wait goes and the turn carries on as any other.
+            self._end_wait(cid, state, "not_recordable")
+            return {}
+        if resolved.identity.phone:
+            # A number we know now: the run's own person writing again after
+            # someone else's stretch of it, whose wait this was, or a sign-in
+            # since the question. The safety and handover gates record with
+            # that number, so this message is never read as the one to call.
+            self._end_wait(cid, state, "known_phone")
+            return {}
+        if wants_start_over(message.message_text or ""):
+            self._end_wait(cid, state, "start_over")
+            return {}
+        typed = read_number(message.message_text or "")
+        if typed.number is not None:
+            return {"reply": self._callback_number(message, state, resolved, waiting, typed)}
+        shown = _as_shown(message, typed)
+        metadata: Dict[str, Any] = {"purpose": waiting}
+        if shown is not message:
+            metadata["transcript_text"] = shown.message_text
+        if typed.attempted:
+            # Not a valid Indian mobile (too short, or +34 and the like). The
+            # gate says so and keeps waiting; the try is kept as [number].
+            self.log.emit("callback_number_invalid", cid, purpose=waiting)
+            return {"reply": self._finish(shown, state, INVALID_NUMBER, "guardrail:callback:invalid_number",
+                                          metadata=metadata)}
+        if waiting == "handover":
+            self._end_wait(cid, state, "no_number")
+            self.log.escalation(cid, "customer_requested_human", None)
+            return {"reply": self._finish(shown, state, HANDOVER_NO_NUMBER_MESSAGE, "guardrail:callback:no_number",
+                                          escalated=True, metadata=metadata)}
+        if state.callback_asks < 1:
+            # A safety report: asked once more.
+            state.callback_asks += 1
+            return {"reply": self._finish(shown, state, SAFETY_ASK_AGAIN_MESSAGE, "guardrail:callback:ask_again",
+                                          metadata=metadata)}
+        self._end_wait(cid, state, "no_number")
+        self._note_safety_not_recorded(cid, "no_number")
+        return {"reply": self._finish(shown, state, SAFETY_NOT_RECORDED_MESSAGE, "guardrail:callback:no_number",
+                                      metadata=metadata)}
+
+    def _end_wait(self, conversation_id: str, state: ConversationState, why: str) -> None:
+        """The wait for a call-back number ends, and the log says why."""
+        self.log.emit("callback_wait_ended", conversation_id, purpose=state.awaiting_callback, why=why)
+        state.awaiting_callback, state.callback_asks = None, 0
+
+    def _callback_number(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity, waiting: str,
+        typed: TypedNumber,
+    ) -> Reply:
+        """The number a handover or a safety report waited for. It is recorded
+        unverified, straight through the seam, so no bike is looked up for it
+        (spec 2026-10-05, section 6). The ticket's run is the writer's own
+        (_record_ticket)."""
+        cid = message.conversation_id
+        shown = _as_shown(message, typed)
+        metadata: Dict[str, Any] = {"purpose": waiting, "transcript_text": typed.shown}
+        state.typed_number = typed.number
+        phone = "+91" + typed.number
+        if waiting == "safety":
+            recorded = self._record_ticket(
+                message, state, resolved, kind="safety", purpose=PURPOSE_SAFETY, phone=phone, verified=False,
+                description=("Automatic safety escalation. The customer reported a safety issue in the AI chat "
+                             "and gave this number when asked. The number is not verified. Their words are "
+                             "in the transcript."),
+                cluster_id=resolved.cluster_id, category="battery_safety", severity="critical",
+            )
+        else:
+            recorded = self._record_ticket(
+                message, state, resolved, kind="handover", purpose=PURPOSE_HANDOVER, phone=phone, verified=False,
+                description="Customer asked for a person and gave this number when asked.",
+                cluster_id=resolved.cluster_id,
+            )
+        if recorded.refusal is not None:
+            # A cap on unverified tickets refused it: say so, promise nothing.
+            state.awaiting_callback, state.callback_asks = None, 0
+            return self._finish(shown, state, recorded.refusal, "guardrail:callback:capped", metadata=metadata)
+        if recorded.reference is None:
+            # The wait stays, so the number sent again is still read here,
+            # never by the verify step.
+            if waiting == "safety":
+                self._note_safety_not_recorded(cid, "not_recorded")
+                return self._finish(shown, state, SAFETY_NOT_RECORDED_MESSAGE, "guardrail:callback:not_recorded",
+                                    metadata=metadata)
+            self.log.emit("handover_ticket_not_recorded", cid)
+            return self._finish(shown, state, HANDOVER_NOT_RECORDED_MESSAGE, "guardrail:callback:not_recorded",
+                                metadata=metadata)
+        state.awaiting_callback, state.callback_asks = None, 0
+        self.log.escalation(cid, "battery_safety" if waiting == "safety" else "customer_requested_human",
+                            recorded.reference)
+        return self._finish(
+            shown, state, NUMBER_RECEIVED_MESSAGE.format(reference=recorded.reference),
+            "guardrail:callback:recorded", escalated=True, ticket_id=recorded.reference, metadata=metadata,
+        )
+
     def _node_navigation(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 1b. Going back (navigation.py, spec 2026-10-02): another number,
         #     another bike, the list again or a fresh start, from any step.
@@ -1210,17 +1330,121 @@ class Runtime:
         return {"reply": self._finish(message, state, lead + " " + which_bike_text(bikes), "navigation:" + why)}
 
     def _node_handoff(self, turn: Dict[str, Any]) -> Dict[str, Any]:
-        # 2. Human handoff, reachable at any point, no friction.
-        message, state = turn["message"], turn["conversation"]
+        # 2. Human handoff, reachable at any point, no friction. With Zoho
+        #    on, a customer's request records a handover ticket, or asks for
+        #    the number to record it with (spec 2026-10-05, section 6). With
+        #    Zoho off, or a dealer asking for their account manager, it is
+        #    exactly as before and nothing is recorded (dealer tickets wait
+        #    for W1).
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         handoff = check_human_handoff(message.message_text)
         if handoff.triggered:
             self.log.guardrail(message.conversation_id, "human_handoff", handoff.matched)
+            if resolved.persona == "customer" and self._desk_store() is not None:
+                return {"reply": self._handover_ticket(message, state, resolved, handoff.matched)}
             self.log.escalation(message.conversation_id, "customer_requested_human", None)
             return {"reply": self._finish(
                 message, state, HANDOFF_MESSAGE, "guardrail:human_handoff",
                 escalated=True, metadata={"matched": handoff.matched},
             )}
         return {}
+
+    def _handover_ticket(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity, matched: List[str],
+    ) -> Reply:
+        """Talk to a person, for a customer, with Zoho on (spec 2026-10-05,
+        section 6). One ticket per need in a run: a Desk ticket the person
+        writing already holds in the run gets the note and is quoted.
+        Otherwise a number typed in this message, or failing that the number
+        we know, records a handover ticket. With neither, the number is asked
+        for and the callback gate waits for it. "Call me" is itself a trigger,
+        so the number is read from this message first."""
+        cid = message.conversation_id
+        typed = read_number(message.message_text or "")
+        shown = _as_shown(message, typed)
+        metadata: Dict[str, Any] = {"matched": matched}
+        if shown is not message:
+            metadata["transcript_text"] = shown.message_text
+        if typed.number:
+            state.typed_number = typed.number
+        held = self._live_run_ticket(message, state, resolved)
+        if held is not None:
+            self._add_note(cid, held, "Customer asked for a person.")
+            self.log.escalation(cid, "customer_requested_human", held)
+            return self._finish(shown, state, HANDOVER_RECORDED_MESSAGE.format(reference=held),
+                                "guardrail:human_handoff", escalated=True, ticket_id=held,
+                                metadata=dict(metadata, handover="note_added"))
+        known = resolved.identity.phone
+        phone = "+91" + typed.number if typed.number else known
+        if phone is None:
+            state.awaiting_callback, state.callback_asks = "handover", 0
+            self.log.emit("callback_asked", cid, purpose="handover")
+            return self._finish(shown, state, HANDOVER_ASK_NUMBER_MESSAGE, "guardrail:human_handoff",
+                                metadata=dict(metadata, handover="asked_for_number"))
+        # Verified only when it is the number the channel or a code proved.
+        verified = resolved.identity.may_disclose and phone == known
+        recorded = self._record_ticket(
+            message, state, resolved, kind="handover", purpose=PURPOSE_HANDOVER, phone=phone, verified=verified,
+            description="Customer asked for a person.", cluster_id=resolved.cluster_id,
+            # What a ticket the agent raises carries (the plan's cross-check,
+            # finding 30), kept by _record_ticket only for a proved number.
+            bike=self._handover_bike(resolved, state), coverage=coverage_fact(state, resolved),
+            customer_name=self._handover_name(resolved, state),
+        )
+        if recorded.refusal is not None:
+            # A cap on unverified tickets refused it: say so, promise nothing.
+            return self._finish(shown, state, recorded.refusal, "guardrail:human_handoff",
+                                metadata=dict(metadata, handover="capped"))
+        if recorded.reference is None:
+            self.log.emit("handover_ticket_not_recorded", cid)
+            if typed.number:
+                # The number sent again is read by the callback gate, not the verify step.
+                state.awaiting_callback, state.callback_asks = "handover", 0
+            return self._finish(shown, state, HANDOVER_NOT_RECORDED_MESSAGE, "guardrail:human_handoff",
+                                metadata=dict(metadata, handover="not_recorded"))
+        self.log.escalation(cid, "customer_requested_human", recorded.reference)
+        return self._finish(
+            shown, state, HANDOVER_RECORDED_MESSAGE.format(reference=recorded.reference),
+            "guardrail:human_handoff", escalated=True, ticket_id=recorded.reference,
+            metadata=dict(metadata, handover="recorded"),
+        )
+
+    def _live_run_ticket(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity,
+    ) -> Optional[str]:
+        """The Desk ticket the person writing already holds in this run
+        (_speakers_ticket): the run's, for the run's own person; for anyone
+        else, their own stretch's, never the run's. None when it is a mock
+        ticket, or gone (deleted or merged in Desk) and so never quoted. A new
+        run starts with a fresh state, and restart_for clears both."""
+        ticket_id = self._speakers_ticket(state, resolved)
+        if self._desk_store() is None or not is_desk_reference(ticket_id):
+            return None
+        if self._is_gone(message.conversation_id, ticket_id):
+            return None
+        return ticket_id
+
+    def _handover_bike(self, resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
+        """The bike on a verified handover ticket: the chosen one, or the only
+        one. Never an unlisted bike, which is a claim and not a record."""
+        if state.unlisted_bike:
+            return None
+        bike = self._selected_bike(resolved, state)
+        if not bike or not bike.get("frame_number"):
+            return None
+        return {"frame_number": bike.get("frame_number"), "frame_number_source": bike.get("frame_number_source"),
+                "bike_model": bike.get("product_name")}
+
+    def _handover_name(self, resolved: ResolvedIdentity, state: ConversationState) -> Optional[str]:
+        """The OMS customer name on a verified handover ticket, as a ticket the
+        agent raises carries it (tools/mocks._record_name). Only with the
+        ticket's bike, and only for a bike the OMS holds: a bike only the
+        rider's app knows has the app's username on its record, never the
+        customer's name."""
+        bike = None if state.unlisted_bike else self._selected_bike(resolved, state)
+        if not bike or not bike.get("frame_number") or bike.get("coverage_status") in _APP_BIKE_STATES:
+            return None
+        return (resolved.profile or {}).get("name") or None
 
     def _node_erasure(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 2b. Delete my data (erasure.py). A customer's request is recorded,
@@ -2315,6 +2539,8 @@ class Runtime:
         category: Optional[str] = None,
         severity: Optional[str] = None,
         bike: Optional[Dict[str, Any]] = None,
+        coverage: Optional[str] = None,
+        customer_name: Optional[str] = None,
     ) -> Recorded:
         """A ticket a gate writes straight to the seam (spec sections 2 and 6):
         safety with no number we know, the call-back number, the handover and
@@ -2331,7 +2557,11 @@ class Runtime:
         ticket_recorded, which a save conflict counts as a side effect. A
         failure is logged and comes back as no reference, and the caller then
         promises nothing. So does a ticket gone in Desk that its key returned
-        (the plan's cross-check, finding 18)."""
+        (the plan's cross-check, finding 18).
+
+        The bike, the cover and the name are kept only for a number someone
+        proved, as on a ticket the agent raises (tools/mocks): a typed number
+        could be anyone's."""
         cid = message.conversation_id
         started_at = self._ticket_run_start(message, state, resolved)
         source_key = self._gate_key(cid, started_at, purpose)
@@ -2341,7 +2571,8 @@ class Runtime:
             identity="verified" if verified else "unverified", category=category, severity=severity,
             description=description,
         )
-        fields.update(bike or {})
+        if verified:
+            fields.update(bike or {}, coverage=coverage, customer_name=customer_name)
         try:
             created = self.registry.tickets.create(source_key=source_key, persona="customer", **fields)
         except Exception as exc:  # StoreUnavailable included; the class only, never str(exc)

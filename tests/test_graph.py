@@ -17,8 +17,8 @@ class GraphShapeTests(unittest.TestCase):
         self.assertIn("Check the socket first.", reply.text)
         self.assertEqual(reply.handled_by, "battery_support")
 
-    def test_going_back_comes_after_safety_and_before_the_handoff(self):
-        self.assertEqual(NODE_NAMES[1:4], ("safety_gate", "navigation_gate", "handoff_gate"))
+    def test_the_callback_number_then_going_back_come_after_safety_and_before_the_handoff(self):
+        self.assertEqual(NODE_NAMES[1:5], ("safety_gate", "callback_gate", "navigation_gate", "handoff_gate"))
 
 
 if __name__ == "__main__":
