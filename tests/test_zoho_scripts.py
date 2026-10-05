@@ -530,6 +530,31 @@ class MaskingTests(unittest.TestCase):
                 self.assertEqual(masked["allowedValues"]["count"], 1)
                 self.assertEqual(masked["defaultValue"], "<withheld>")
 
+    def test_a_pick_list_of_staff_is_withheld(self):
+        # The org rule forbids capturing an employee's name: a list of service
+        # engineers, executives, managers or sales staff names them.
+        for api_name, label in (("cf_engineer_name", "Engineer Name"),
+                                ("cf_service_executive_name", "Service Executive Name"),
+                                ("cf_asm_name", "ASM Name"), ("cf_manager_name", "Manager Name"),
+                                ("cf_rsm", "RSM"), ("cf_zsm", "ZSM Name"), ("cf_salesman", "Salesman"),
+                                ("cf_sales_person", "Sales Person"), ("cf_staff", "Staff"),
+                                ("cf_assignee", "Assignee"), ("cf_user", "User"), ("cf_username", "Username"),
+                                ("cf_service_technician", "Service Technician"), ("cf_employee_name", "Employee Name")):
+            with self.subTest(label=label):
+                masked = _common.mask({"apiName": api_name, "displayLabel": label, "type": "Picklist",
+                                       "allowedValues": ["Ravi Kumar"], "defaultValue": "Ravi Kumar"})
+                self.assertEqual(masked["allowedValues"]["count"], 1)
+                self.assertEqual(masked["defaultValue"], "<withheld>")
+                self.assertNotIn("Ravi", json.dumps(masked))
+
+    def test_the_staff_words_leave_product_model_and_fault_lists_alone(self):
+        for api_name, label in (("cf_product_name", "Product Name"), ("cf_model_name", "Model Name"),
+                                ("cf_mechanical_issue", "Mechanical issue"), ("cf_plasma_check", "Plasma check")):
+            with self.subTest(label=label):
+                masked = _common.mask({"apiName": api_name, "displayLabel": label, "type": "Picklist",
+                                       "allowedValues": ["EMX Plus", "T-Rex Air"], "defaultValue": "EMX Plus"})
+                self.assertEqual(masked["allowedValues"], ["EMX Plus", "T-Rex Air"])
+
     def test_a_layout_keeps_its_id_name_default_flag_and_status(self):
         masked = _common.mask(LAYOUT_DETAILS)[0]
         self.assertEqual((masked["id"], masked["layoutName"], masked["isDefaultLayout"], masked["status"]),

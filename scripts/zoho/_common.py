@@ -301,10 +301,16 @@ PERSON_KEYS = frozenset({"contact", "assignee", "commenter", "author", "creator"
 # Name" list names real dealers). "Name" alone is not a person word: B4 needs
 # the "Product Name" list, and "Model Name" lists bikes. A person's name is
 # caught by the word beside it (first, last, full or contact name), and a
-# "Mechanical issue" list is a fault list, not a mechanic's name.
+# "Mechanical issue" list is a fault list, not a mechanic's name. A list of
+# staff names employees, which the org rule forbids capturing: engineers,
+# executives, managers, area, regional and zonal sales managers (ASM, RSM,
+# ZSM), salesmen, staff, assignees, users and technicians. The three short
+# ones and "user" must stand alone, so "plasma" is not an ASM.
 _PERSONAL_FIELD = re.compile(
     r"first[\s_]*name|last[\s_]*name|full[\s_]*name|contact[\s_]*name|person|dealer|principle|customer|"
-    r"account|owner|agent|franchise|technician|mechanic(?!al)|rider|employee|phone|mobile|email|address",
+    r"account|owner|agent|franchise|technician|mechanic(?!al)|rider|employee|phone|mobile|email|address|"
+    r"engineer|executive|manager|sales[\s_]*m[ae]n|staff|assignee|"
+    r"(?<![a-z])(?:asm|rsm|zsm)(?![a-z])|(?<![a-z])user(?:s|[\s_]*name)?(?![a-z])",
     re.IGNORECASE)
 
 
