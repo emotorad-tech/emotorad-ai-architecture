@@ -15,11 +15,12 @@ from emotorad_ai.disclosure import DISCLOSURE_TEXT
 from emotorad_ai.guardrails import (
     HANDOFF_MESSAGE,
     HANDOVER_ASK_NUMBER_MESSAGE,
+    HANDOVER_GONE_MESSAGE,
     HANDOVER_NOT_RECORDED_MESSAGE,
     HANDOVER_RECORDED_MESSAGE,
     NUMBER_RECEIVED_MESSAGE,
 )
-from tests.test_safety_without_phone import CALL_BACK, FAKE, ONE_BIKE, RIDER, DeskChat
+from tests.test_safety_without_phone import CALL_BACK, FAKE, ONE_BIKE, PROMISES, RIDER, DeskChat
 from tests.test_verify_first import ConflictedStore
 
 HEALTHY_DEALER = "919000000001"  # Royal Cycle Stores (fixtures)
@@ -163,6 +164,88 @@ class OneTicketPerRunTests(unittest.TestCase):
         self.assertIn("merged_after_conflict", chat.state().transitions)
         (record,) = chat.records()
         self.assertEqual(len(record["notes"]), 1)
+
+
+class GoneHandoverTests(unittest.TestCase):
+    """The run's handover ticket deleted or merged in Desk (the review of
+    Task 14, Important 2). Its key returns that record for the rest of the
+    run, so no number can record another. Nothing is asked for and no wait is
+    set, and each later request gets the same reply, which promises nothing
+    and does not ask the customer to try again."""
+
+    def assert_gone_reply(self, chat, reply, gone):
+        self.assertEqual(reply.handled_by, "guardrail:human_handoff")
+        self.assertIn(HANDOVER_GONE_MESSAGE, reply.text)
+        self.assertNotIn(gone, reply.text)
+        self.assertNotIn(HANDOVER_ASK_NUMBER_MESSAGE, reply.text)
+        self.assertNotIn(HANDOVER_NOT_RECORDED_MESSAGE, reply.text)
+        self.assertFalse(reply.escalated)
+        self.assertIsNone(reply.ticket_id)
+        self.assertIsNone(chat.state().awaiting_callback)
+
+    def test_a_typed_numbers_later_requests_are_not_a_refusal_loop(self):
+        chat = DeskChat()
+        first = chat.say("call me on 9999999999")
+        chat.mark_gone(first.ticket_id)
+        for text in ("I want to talk to a person", "call me on 9999999999", "talk to a human"):
+            with self.subTest(text=text):
+                self.assert_gone_reply(chat, chat.say(text), first.ticket_id)
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual([e["why"] for e in chat.events("handover_ticket_not_recorded")], ["ticket_gone"] * 3)
+        self.assertEqual(len(chat.records()), 1)
+        self.assertEqual(chat.tickets.get(first.ticket_id)["notes"], [])
+
+    def test_a_known_phones_later_request_is_not_told_to_try_again(self):
+        chat = DeskChat()
+        first = chat.say("I want to talk to a person", identity=RIDER)
+        chat.mark_gone(first.ticket_id)
+        reply = chat.say("I want to talk to a person", identity=RIDER)
+        self.assertEqual(chat.llm.requests, [])
+        self.assert_gone_reply(chat, reply, first.ticket_id)
+        self.assertEqual([e["why"] for e in chat.events("handover_ticket_not_recorded")], ["ticket_gone"])
+        self.assertEqual(len(chat.records()), 1)
+
+    def test_a_wait_saved_before_its_ticket_went_ends_on_the_number(self):
+        # A wait that outlived its ticket (saved by an earlier version, or a
+        # second tab): the number ends it, and the customer is not refused
+        # again on every number they send.
+        chat = DeskChat()
+        first = chat.say("call me on 9999999999")
+        chat.mark_gone(first.ticket_id)
+        state = chat.state()
+        state.awaiting_callback, state.callback_asks = "handover", 0
+        chat.conversations.save(state)
+        reply = chat.say("9999999999")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual(reply.handled_by, "guardrail:callback:not_recorded")
+        self.assertEqual(reply.text, HANDOVER_GONE_MESSAGE)
+        self.assertFalse(reply.escalated)
+        self.assertIsNone(reply.ticket_id)
+        self.assertIsNone(chat.state().awaiting_callback)
+        (event,) = chat.events("callback_wait_ended")
+        self.assertEqual((event["purpose"], event["why"]), ("handover", "ticket_gone"))
+        self.assertNotIn(CALL_BACK, repr(chat.state().history))
+        self.assertEqual(len(chat.records()), 1)
+
+    def test_the_owners_gone_ticket_never_stops_someone_elses_request(self):
+        # Keys are per stretch of the run (Task 13): a second person on the
+        # browser is asked for their number as usual.
+        chat = DeskChat()
+        owner = chat.say("I want to talk to a person", identity=RIDER)
+        chat.mark_gone(owner.ticket_id)
+        asked = chat.say("I want to talk to a person")
+        self.assertIn(HANDOVER_ASK_NUMBER_MESSAGE, asked.text)
+        self.assertEqual(chat.state().awaiting_callback, "handover")
+        recorded = chat.say("9999999999")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual(recorded.handled_by, "guardrail:callback:recorded")
+        self.assertNotEqual(recorded.ticket_id, owner.ticket_id)
+        self.assertEqual(chat.events("handover_ticket_not_recorded"), [])
+
+    def test_the_gone_text_promises_nothing(self):
+        for promise in PROMISES + ("try again",):
+            self.assertNotIn(promise, HANDOVER_GONE_MESSAGE.lower())
+        self.assertNotIn("—", HANDOVER_GONE_MESSAGE)  # no em dash
 
 
 class SomeoneElsesRunTests(unittest.TestCase):

@@ -78,6 +78,7 @@ from .guardrails import (
     EVIDENCE_BLOCKED_MESSAGE,
     HANDOFF_MESSAGE,
     HANDOVER_ASK_NUMBER_MESSAGE,
+    HANDOVER_GONE_MESSAGE,
     HANDOVER_NO_NUMBER_MESSAGE,
     HANDOVER_NOT_RECORDED_MESSAGE,
     HANDOVER_RECORDED_MESSAGE,
@@ -153,7 +154,17 @@ from .tickets.clock import now_iso, parse, plus
 from .tickets.kinds import is_desk_reference, is_urgent
 from .tickets.record import GONE
 from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
-from .verify_first import CONFIRMED, INVALID_NUMBER, NUMBER, VerifyFirst, find_phone, looks_like_a_number, redact
+from .verify_first import (
+    CODE,
+    CONFIRMED,
+    INVALID_NUMBER,
+    NUMBER,
+    VerifyFirst,
+    find_code,
+    find_phone,
+    looks_like_a_number,
+    redact,
+)
 from . import erasure as erasure_rules
 
 UNSUPPORTED_MESSAGE = (
@@ -1186,6 +1197,17 @@ class Runtime:
             self.log.emit("callback_number_invalid", cid, purpose=waiting)
             return {"reply": self._finish(shown, state, INVALID_NUMBER, "guardrail:callback:invalid_number",
                                           metadata=metadata)}
+        if state.verify_step == CODE and find_code(ascii_digits(message.message_text or "")):
+            # The verification code, typed while one is pending (the review of
+            # Task 14, Important 1). The verify step takes it, spends it and
+            # keeps it as [code], so the model never sees it. Read after a
+            # number and a try at one, as the verify step reads a number first.
+            # The wait ends; a safety report then has no ticket, so it is
+            # counted as every such report is.
+            self._end_wait(cid, state, "code")
+            if waiting == "safety":
+                self._note_safety_not_recorded(cid, "code")
+            return {}
         if waiting == "handover":
             self._end_wait(cid, state, "no_number")
             self.log.escalation(cid, "customer_requested_human", None)
@@ -1219,6 +1241,13 @@ class Runtime:
         metadata: Dict[str, Any] = {"purpose": waiting, "transcript_text": typed.shown}
         state.typed_number = typed.number
         phone = "+91" + typed.number
+        if waiting == "handover" and self._handover_gone(message, state, resolved):
+            # A wait that outlived the run's handover ticket: its key records
+            # no other, so the wait ends here rather than refusing every number.
+            self._end_wait(cid, state, "ticket_gone")
+            self.log.emit("handover_ticket_not_recorded", cid, why="ticket_gone")
+            return self._finish(shown, state, HANDOVER_GONE_MESSAGE, "guardrail:callback:not_recorded",
+                                metadata=dict(metadata, why="ticket_gone"))
         if waiting == "safety":
             recorded = self._record_ticket(
                 message, state, resolved, kind="safety", purpose=PURPOSE_SAFETY, phone=phone, verified=False,
@@ -1244,7 +1273,7 @@ class Runtime:
                 self._note_safety_not_recorded(cid, "not_recorded")
                 return self._finish(shown, state, SAFETY_NOT_RECORDED_MESSAGE, "guardrail:callback:not_recorded",
                                     metadata=metadata)
-            self.log.emit("handover_ticket_not_recorded", cid)
+            self.log.emit("handover_ticket_not_recorded", cid, why="not_recorded")
             return self._finish(shown, state, HANDOVER_NOT_RECORDED_MESSAGE, "guardrail:callback:not_recorded",
                                 metadata=metadata)
         state.awaiting_callback, state.callback_asks = None, 0
@@ -1354,11 +1383,13 @@ class Runtime:
     ) -> Reply:
         """Talk to a person, for a customer, with Zoho on (spec 2026-10-05,
         section 6). One ticket per need in a run: a Desk ticket the person
-        writing already holds in the run gets the note and is quoted.
-        Otherwise a number typed in this message, or failing that the number
-        we know, records a handover ticket. With neither, the number is asked
-        for and the callback gate waits for it. "Call me" is itself a trigger,
-        so the number is read from this message first."""
+        writing already holds in the run gets the note and is quoted. If the
+        run's handover ticket went from Desk, nothing is asked for or
+        recorded (_handover_gone). Otherwise a number typed in this message,
+        or failing that the number we know, records a handover ticket. With
+        neither, the number is asked for and the callback gate waits for it.
+        "Call me" is itself a trigger, so the number is read from this message
+        first."""
         cid = message.conversation_id
         typed = read_number(message.message_text or "")
         shown = _as_shown(message, typed)
@@ -1374,6 +1405,12 @@ class Runtime:
             return self._finish(shown, state, HANDOVER_RECORDED_MESSAGE.format(reference=held),
                                 "guardrail:human_handoff", escalated=True, ticket_id=held,
                                 metadata=dict(metadata, handover="note_added"))
+        if self._handover_gone(message, state, resolved):
+            # Asking for a number would only lead to a refusal on every number
+            # sent (the review of Task 14, Important 2).
+            self.log.emit("handover_ticket_not_recorded", cid, why="ticket_gone")
+            return self._finish(shown, state, HANDOVER_GONE_MESSAGE, "guardrail:human_handoff",
+                                metadata=dict(metadata, handover="ticket_gone"))
         known = resolved.identity.phone
         phone = "+91" + typed.number if typed.number else known
         if phone is None:
@@ -1396,7 +1433,7 @@ class Runtime:
             return self._finish(shown, state, recorded.refusal, "guardrail:human_handoff",
                                 metadata=dict(metadata, handover="capped"))
         if recorded.reference is None:
-            self.log.emit("handover_ticket_not_recorded", cid)
+            self.log.emit("handover_ticket_not_recorded", cid, why="not_recorded")
             if typed.number:
                 # The number sent again is read by the callback gate, not the verify step.
                 state.awaiting_callback, state.callback_asks = "handover", 0
@@ -1423,6 +1460,27 @@ class Runtime:
         if self._is_gone(message.conversation_id, ticket_id):
             return None
         return ticket_id
+
+    def _handover_gone(
+        self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity,
+    ) -> bool:
+        """Whether the writer's handover ticket in this run was deleted or
+        merged in Desk. Its key, one per run or stretch of a run
+        (_ticket_run_start), returns that record for the rest of it (the
+        plan's cross-check, finding 18), so no number can record another, as
+        _safety_without_phone finds for safety. A store that cannot answer
+        counts as not gone: the record then succeeds or fails on its own."""
+        store = self._desk_store()
+        if store is None:
+            return False
+        cid = message.conversation_id
+        key = self._gate_key(cid, self._ticket_run_start(message, state, resolved), PURPOSE_HANDOVER)
+        try:
+            record = store.by_source_key(key)
+        except StoreUnavailable as exc:
+            self.log.emit("ticket_read_failed", cid, kind="handover", error=type(exc).__name__)
+            return False
+        return record is not None and record.get("state") == GONE
 
     def _handover_bike(self, resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
         """The bike on a verified handover ticket: the chosen one, or the only

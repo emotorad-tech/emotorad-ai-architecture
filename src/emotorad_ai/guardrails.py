@@ -181,6 +181,10 @@ HANDOVER_NO_NUMBER_MESSAGE = (
 )
 # The handover ticket could not be written: nothing is promised.
 HANDOVER_NOT_RECORDED_MESSAGE = "Sorry, I couldn't pass this on just now. Please try again in a few minutes."
+# The run's handover ticket was deleted or merged in Desk, so its key records
+# no other in this run. Draft for person step 10: it promises nothing and does
+# not ask the customer to try again, since trying again cannot work.
+HANDOVER_GONE_MESSAGE = "I can't pass this on again from this chat, so nothing new has been sent."
 
 
 @dataclass(frozen=True)

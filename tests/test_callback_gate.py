@@ -22,8 +22,9 @@ from emotorad_ai.guardrails import (
     SAFETY_NOT_RECORDED_MESSAGE,
 )
 from emotorad_ai.llm import say
+from emotorad_ai.tools.verification import MAX_ATTEMPTS
 from emotorad_ai.verify_first import INVALID_NUMBER
-from tests.test_safety_without_phone import CALL_BACK, FAKE, PROMISES, RIDER, DeskChat
+from tests.test_safety_without_phone import CALL_BACK, FAKE, ONE_BIKE, PROMISES, RIDER, DeskChat
 from tests.test_verify_first import ConflictedStore
 
 # The number, as customers write it.
@@ -36,6 +37,11 @@ GOLDEN = {
 
 def codes_sent(chat):
     return [e for e in chat.events("tool_call") if e["tool"] == "request_identity_verification"]
+
+
+def devanagari(digits):
+    """ASCII digits written in Devanagari (०-९)."""
+    return "".join(chr(0x0966 + int(digit)) for digit in digits)
 
 
 class OrderTests(unittest.TestCase):
@@ -243,6 +249,81 @@ class StartOverTests(unittest.TestCase):
         self.assertTrue(reply.handled_by.startswith("verify_first:"), reply.handled_by)
         (event,) = chat.events("callback_wait_ended")
         self.assertEqual((event["purpose"], event["why"]), ("handover", "start_over"))
+
+
+class VerificationCodeTests(unittest.TestCase):
+    """A visitor whose code was sent, then a wait for a number to call, then
+    the code typed (the review of Task 14, Important 1). The verify step takes
+    the code and hides it as [code], so the model never sees it, and the wait
+    ends."""
+
+    def code_sent_then(self, text):
+        chat = DeskChat()
+        self.assertEqual(chat.say(ONE_BIKE[3:]).handled_by, "verify_first:code_sent")
+        code = chat.store.pending_code("c1")
+        self.assertIsNotNone(code)
+        chat.say(text)
+        return chat, code
+
+    def assert_code_hidden(self, chat, code):
+        history = repr(chat.state().history)
+        self.assertIn("[code]", history)
+        for form in (code, devanagari(code)):
+            self.assertNotIn(form, history)
+        said = " ".join(turn.text for turn in chat.conversations.transcript("c1"))
+        self.assertNotIn(code, said)
+
+    def test_a_code_typed_while_a_handover_waits_goes_to_the_verify_step(self):
+        for form in (str, devanagari):
+            with self.subTest(form=form.__name__):
+                chat, code = self.code_sent_then("I want to talk to a person")
+                self.assertEqual(chat.state().awaiting_callback, "handover")
+                reply = chat.say("the code is " + form(code))
+                self.assertEqual(chat.llm.requests, [])
+                self.assertEqual(reply.handled_by, "verify_first:verified")
+                self.assertIsNone(chat.store.pending_code("c1"))
+                self.assertFalse(reply.escalated)
+                self.assertIsNone(chat.state().awaiting_callback)
+                (event,) = chat.events("callback_wait_ended")
+                self.assertEqual((event["purpose"], event["why"]), ("handover", "code"))
+                self.assert_code_hidden(chat, code)
+                self.assertEqual(chat.records(), [])
+
+    def test_a_code_typed_while_a_safety_report_waits_goes_to_the_verify_step_and_is_counted(self):
+        for form in (str, devanagari):
+            with self.subTest(form=form.__name__):
+                chat, code = self.code_sent_then("my battery is smoking")
+                self.assertEqual(chat.state().awaiting_callback, "safety")
+                reply = chat.say(form(code))
+                self.assertEqual(chat.llm.requests, [])
+                self.assertEqual(reply.handled_by, "verify_first:verified")
+                self.assertIsNone(chat.store.pending_code("c1"))
+                self.assertIsNone(chat.state().awaiting_callback)
+                (event,) = chat.events("callback_wait_ended")
+                self.assertEqual((event["purpose"], event["why"]), ("safety", "code"))
+                # The report has no ticket: alarmed and counted on /health, as
+                # every safety report with no ticket is.
+                (missed,) = chat.events("safety_ticket_not_recorded")
+                self.assertEqual((missed["why"], missed["level"]), ("code", "error"))
+                self.assertEqual(chat.runtime.safety_not_recorded, 1)
+                self.assert_code_hidden(chat, code)
+                self.assertEqual(chat.records(), [])
+
+    def test_six_digits_with_no_code_pending_are_no_number(self):
+        chat = DeskChat()
+        chat.say("talk to a person")
+        reply = chat.say("123456")
+        self.assertEqual(reply.handled_by, "guardrail:callback:no_number")
+        self.assertEqual(codes_sent(chat), [])
+
+    def test_a_foreign_number_typed_while_a_code_is_pending_spends_no_try(self):
+        # "+34 612 345 678" holds six digits a code could be read from. It is
+        # a try at a number to call, so the wait goes on and no code is tried.
+        chat, _ = self.code_sent_then("talk to a person")
+        reply = chat.say("+34 612 345 678")
+        self.assertEqual(reply.handled_by, "guardrail:callback:invalid_number")
+        self.assertEqual(chat.state().awaiting_callback, "handover")
+        self.assertEqual(chat.store.attempts_left("c1"), MAX_ATTEMPTS)
 
 
 class KnownPhoneTests(unittest.TestCase):
