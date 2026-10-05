@@ -14,10 +14,11 @@ ticket, the ticket's comments for a comment, its attachments for a file. This
 is how a timeout after Zoho made the ticket still ends in one ticket, not two.
 
 Only the run's own turns and files go on its ticket: at or after the run's
-start, before its end. A file stored just before the start goes too when a
-turn of the run carried it: the API stores a file before its turn runs, so
-one sent with a run's first message is older than the run. The end can be set
-while a pass is under way, when someone else writes on the same browser
+start, before its end. A file a customer's turn carried is judged by that
+turn alone: the API stores a file before its turn runs, so one sent with a
+run's first message is older than the run, and belongs to the run its turn
+is in. Only a file no turn names is judged by when it was stored. The end can
+be set while a pass is under way, when someone else writes on the same browser
 (runtime._end_run_before_this_turn), so it is read again just before anything
 is posted.
 
@@ -40,6 +41,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from ..conversation import StoreUnavailable
 from ..storage.s3 import StorageError
 from ..tickets.clock import now_iso, parse, plus
 from ..tickets.record import GONE, SENT, STUCK, WAITING
@@ -55,6 +57,7 @@ from .errors import (
     ZohoTokenRefused,
     ZohoTokenThrottled,
     ZohoTooLarge,
+    ZohoUnknownOutcome,
 )
 from .payload import plus91, ticket_payload, transcript_chunks
 
@@ -67,6 +70,9 @@ LEASE_SECONDS = 300.0
 # The wait after the first, second, ... failure in a row. Hourly after the last.
 RETRY_WAITS = (30, 60, 120, 300, 600, 1800)
 HOURLY = 3600
+# The least wait after a ticket create of unknown outcome, before the look at
+# the contact's ticket list.
+TICKET_LOOKUP_WAIT = 120
 # Zoho's 429 TOO_MANY_REQUESTS is about calls in flight, not the day's credits.
 BUSY_WAIT = 30
 # The token endpoint throttles for ten minutes, and auth.py sends no request
@@ -232,6 +238,8 @@ class ZohoWorker:
             self._wake.clear()
             try:
                 self.check_overdue()
+            except StoreUnavailable:
+                self._store_unavailable()
             except Exception as exc:
                 self._worker_error(exc)
             try:
@@ -251,10 +259,27 @@ class ZohoWorker:
         # it failed on.
         self.log.emit("zoho_worker_error", "zoho", level="error", error=type(exc).__name__)
 
+    def _store_unavailable(self) -> None:
+        # An Atlas blip is not the worker's fault, so it is not the alarmed
+        # zoho_worker_error. The store's own alarms cover a long outage, and
+        # the next pass tries again.
+        self.log.emit("zoho_worker_store_unavailable", "zoho", level="warning")
+
     # -- one record ---------------------------------------------------------
 
     def run_once(self) -> bool:
-        """Take one due record and send what it has outstanding. True if one was taken."""
+        """Take one due record and send what it has outstanding. True if one was taken.
+
+        A store that cannot be reached (the tickets or the conversations) ends
+        the pass with False. A record already taken keeps its lease, which
+        lapses in five minutes, and is then taken again."""
+        try:
+            return self._take_and_send()
+        except StoreUnavailable:
+            self._store_unavailable()
+            return False
+
+    def _take_and_send(self) -> bool:
         now = self._clock()
         if self._paused_until is not None:
             if now < self._paused_until:
@@ -350,9 +375,12 @@ class ZohoWorker:
             if not self._searches_contacts(job):
                 raise
             # The stored contact was deleted or merged in Desk. Forget it and
-            # find the person again, once.
+            # find the person again, once. The ticket intent stays: a create
+            # that was never answered may have been made on the old contact
+            # and moved with a merge, so the new contact's ticket list is
+            # read before any create.
             job.zoho["contact_id"] = None
-            self._save(job, {"zoho": copy.deepcopy(job.zoho), "intent": None})
+            self._save(job, {"zoho": copy.deepcopy(job.zoho)})
             self._contact(job, use_stored=False)
             self._create_or_adopt(job)
 
@@ -604,10 +632,19 @@ class ZohoWorker:
             self.log.emit("zoho_rejected", cid, reference=job.ref, error=error)
         elif isinstance(exc, (ZohoRejected, ZohoTooLarge)):
             wait = HOURLY
+            if isinstance(exc, ZohoRejected):
+                # Probably the department's required fields: every record is
+                # refused until a person looks, so /health says so.
+                self.status["failing"] = "sending failing: %s" % code
             self.log.emit("zoho_rejected", cid, reference=job.ref, error=error,
                           fields=[str(name) for name in getattr(exc, "fields", None) or ()])
         elif isinstance(exc, ZohoTokenThrottled):
             wait = TOKEN_THROTTLED_WAIT
+        elif isinstance(exc, ZohoUnknownOutcome) and job.intent.get("step") == "ticket":
+            # A create that may have been made. The contact's ticket list can
+            # lag by minutes, so the look before a second create waits at
+            # least two minutes (spec section 4).
+            wait = max(retry_wait(attempts), TICKET_LOOKUP_WAIT)
         else:
             # Zoho unreachable, an unknown outcome, an access token refused
             # twice, or the bucket failing: the schedule.
@@ -714,11 +751,15 @@ class ZohoWorker:
         return carried
 
     def _file_in_run(self, job: _Job, item: Dict[str, Any], carried: Dict[str, Any]) -> bool:
-        """Stored inside the run, or carried by one of the run's own turns."""
-        if self._in_run(job, item.get("stored_at")):
-            return True
+        """A file a customer's turn carried belongs to the run that turn is in,
+        whatever time it was stored: one sent with a run's first message is
+        older than the run, and would otherwise look like the earlier run's
+        when that run is closed at this one's start. Only a file no turn names
+        is judged by the time it was stored."""
         key = item["_id"]
-        return key in carried and self._in_run(job, carried[key])
+        if key in carried:
+            return self._in_run(job, carried[key])
+        return self._in_run(job, item.get("stored_at"))
 
     def _still_in_run(self, job: _Job, item: Dict[str, Any], carried: Dict[str, Any]) -> bool:
         self._refresh_end(job)

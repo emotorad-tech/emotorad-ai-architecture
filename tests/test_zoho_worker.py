@@ -23,7 +23,7 @@ import unittest
 from types import SimpleNamespace
 
 from emotorad_ai.contract import Attachment, Reply
-from emotorad_ai.conversation import InMemoryConversationStore
+from emotorad_ai.conversation import InMemoryConversationStore, StoreUnavailable
 from emotorad_ai.media_records import media_record
 from emotorad_ai.observability import EventLog
 from emotorad_ai.storage.s3 import StorageError
@@ -35,9 +35,10 @@ from emotorad_ai.zoho.auth import TokenSource
 from emotorad_ai.zoho.desk import DeskClient
 from emotorad_ai.zoho.http import DeskHTTP
 from emotorad_ai.zoho.settings import ZohoSettings
+from emotorad_ai.zoho.wiring import ZohoWiring, ticket_health, zoho_status
 from emotorad_ai.zoho.worker import THREAD_NAME, ZohoWorker, retry_wait
 from tests.fake_zoho import TEST_CONTACT as FAKE_ZOHO_CONTACT
-from tests.fake_zoho import Answer, FakeZoho, zoho_settings
+from tests.fake_zoho import Answer, FakeZoho, shape, zoho_settings
 from tests.store_contract import inbound, reply
 
 START = "2026-10-05T10:00:00.000000+00:00"
@@ -629,6 +630,28 @@ class ContactTests(WorkerCase):
         self.assertEqual(self.saved(second)["state"], "sent")
         self.assertEqual(self.desk.tickets[self.ticket_of(second)]["contactId"], self.contact_of(second))
 
+    def test_a_contact_merged_after_an_unanswered_create_adopts_the_ticket_that_moved_with_it(self):
+        # The create landed on contact A, no answer came back, and while the
+        # record waited Desk merged A into B: the ticket is on B now, and A's
+        # ticket list is a 404. The look at B's list must come before any
+        # second create.
+        ref = self.live()
+        self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)
+        self.send(ref)
+        old = self.contact_of(ref)
+        [ticket_id] = self.desk.tickets
+        del self.desk.contacts[old]
+        self.desk.contacts["contact-merged"] = {"id": "contact-merged", "lastName": "Merged", "phone": PHONE[-10:]}
+        self.desk.tickets[ticket_id]["contactId"] = "contact-merged"
+        self.clock.advance(120)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(len(self.calls("create_ticket")), 1)
+        self.assertEqual(list(self.desk.tickets), [ticket_id])
+        saved = self.saved(ref)
+        self.assertEqual((saved["state"], saved["zoho"]["contact_id"], saved["zoho"]["ticket_id"]),
+                         ("sent", "contact-merged", ticket_id))
+        self.assertEqual([e["reference"] for e in self.events("zoho_ticket_adopted")], [ref])
+
     def test_a_contact_create_that_was_never_answered_searches_again_first(self):
         ref = self.live()
         self.desk.fail("create_contact", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)
@@ -652,7 +675,7 @@ class TicketTests(WorkerCase):
         saved = self.saved(ref)
         self.assertEqual((saved["state"], saved["intent"]["step"]), ("waiting", "ticket"))
         self.assertIsNone(saved["zoho"]["ticket_id"])
-        self.clock.advance(30)
+        self.clock.advance(120)
         self.assertTrue(self.worker.run_once())
         [ticket_id] = self.desk.tickets
         self.assertEqual(self.ticket_of(ref), ticket_id)
@@ -662,11 +685,41 @@ class TicketTests(WorkerCase):
         [adopted] = self.events("zoho_ticket_adopted")
         self.assertEqual((adopted["reference"], adopted["zoho_number"]), (ref, "#1000"))
 
+    def test_the_look_after_a_create_of_unknown_outcome_waits_two_minutes(self):
+        # Zoho's own list can lag by minutes, so the first look is not at 30 s.
+        ref = self.record(started_at=self.chat())
+        self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)
+        self.send(ref)
+        self.assertEqual(self.saved(ref)["next_attempt_at"], plus(self.clock(), 120))
+        self.clock.advance(119)
+        self.assertFalse(self.worker.run_once())
+        self.assertEqual(self.calls("contact_tickets"), [])
+        self.clock.advance(1)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(len(self.calls("contact_tickets")), 1)
+        self.assertEqual(len(self.desk.tickets), 1)
+
+    def test_a_second_unknown_outcome_waits_no_less_than_two_minutes_either(self):
+        ref = self.record(started_at=self.chat())
+        for _ in range(2):
+            self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"))
+        self.send(ref)
+        self.clock.advance(120)
+        self.assertTrue(self.worker.run_once())
+        saved = self.saved(ref)
+        self.assertEqual((saved["attempts"], saved["next_attempt_at"]), (2, plus(self.clock(), 120)))
+
+    def test_an_unknown_outcome_on_a_comment_keeps_the_plain_schedule(self):
+        ref = self.record(started_at=self.chat())
+        self.desk.fail("add_comment", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)
+        self.send(ref)
+        self.assertEqual(self.saved(ref)["next_attempt_at"], plus(self.clock(), 30))
+
     def test_a_timeout_before_it_was_made_looks_then_makes_it_once(self):
         ref = self.record(started_at=self.chat())
         self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"))
         self.send(ref)
-        self.clock.advance(30)
+        self.clock.advance(120)
         self.worker.run_once()
         self.assertEqual(len(self.desk.tickets), 1)
         self.assertEqual([c[0] for c in self.desk.calls if c[0] in ("contact_tickets", "create_ticket")],
@@ -701,7 +754,7 @@ class TicketTests(WorkerCase):
         second = self.record(started_at=started)
         self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"))
         self.send(second)
-        self.clock.advance(30)
+        self.clock.advance(120)
         self.worker.run_once()
         self.assertEqual(len(self.desk.tickets), 2)
         self.assertNotEqual(self.ticket_of(second), self.ticket_of(first))
@@ -741,7 +794,7 @@ class RealClientTests(WorkerCase):
         made = {"id": self.TICKET_ID, "ticketNumber": "1024", "subject": subject,
                 "createdTime": "2026-10-05T10:00:01.000Z", "webUrl": "https://desk.zoho.in/x/" + self.TICKET_ID}
         self.zoho.queue(Answer(200, {"data": [made]}), Answer(200, {"id": "4000000529001"}))
-        self.clock.advance(30)
+        self.clock.advance(120)
         self.assertTrue(self.worker.run_once())
         self.assertEqual(len(self.posts("/api/v1/tickets")), 1)
         listed = [r for r in self.zoho.desk_requests if r["method"] == "GET"]
@@ -751,6 +804,17 @@ class RealClientTests(WorkerCase):
                          ("sent", self.TICKET_ID, "1024"))
         self.assertEqual([e["zoho_number"] for e in self.events("zoho_ticket_adopted")], ["#1024"])
 
+    def test_a_moved_endpoint_is_ours_to_fix_and_never_marks_the_ticket_gone(self):
+        ref = self.record(started_at=self.chat())
+        made = {"id": self.TICKET_ID, "ticketNumber": "1024", "webUrl": "https://desk.zoho.in/x/" + self.TICKET_ID}
+        self.zoho.queue(Answer(200, made), Answer(404, shape("zoho-errors.json")["url_not_found"]))
+        self.assertTrue(self.send(ref))
+        saved = self.saved(ref)
+        self.assertEqual((saved["state"], saved["zoho"]["ticket_id"]), ("waiting", self.TICKET_ID))
+        self.assertEqual(saved["next_attempt_at"], plus(self.clock(), 3600))
+        self.assertEqual(self.worker.status["failing"], "sending failing: URL_NOT_FOUND")
+        self.assertEqual(self.events("zoho_ticket_gone"), [])
+
     def test_a_ticket_with_the_same_reference_made_before_the_record_is_not_adopted(self):
         # A reference comes round again when a database is started afresh.
         ref, subject = self.timed_out_create()
@@ -758,7 +822,7 @@ class RealClientTests(WorkerCase):
                "createdTime": "2026-10-04T09:00:00.000Z"}
         made = {"id": self.TICKET_ID, "ticketNumber": "1025", "webUrl": "https://desk.zoho.in/x/" + self.TICKET_ID}
         self.zoho.queue(Answer(200, {"data": [old]}), Answer(200, made), Answer(200, {"id": "4000000529001"}))
-        self.clock.advance(30)
+        self.clock.advance(120)
         self.assertTrue(self.worker.run_once())
         self.assertEqual(len(self.posts("/api/v1/tickets")), 2)
         self.assertEqual(self.saved(ref)["zoho"]["ticket_id"], self.TICKET_ID)
@@ -1002,6 +1066,28 @@ class RunStartTests(WorkerCase):
         self.assertEqual(self.files(second), ["%s-upl_with_the_code.jpg" % second])
         self.assertNotIn("first person", self.text_on(second))
 
+    def test_a_photo_sent_with_the_next_runs_first_message_never_goes_on_the_earlier_run_still_outstanding(self):
+        # The earlier run's record is still waiting (Zoho was down, say). The
+        # state expired, and the next message starts a run with a photo that
+        # was stored just before it, so inside the earlier run's window. The
+        # earlier run is closed at the new run's start, and the photo's turn
+        # is after that, so the turn decides, not the time it was stored.
+        earlier = self.record(started_at=self.chat(turns=[("an earlier run's words", "Ok.")]))
+        self.clock.advance(2 * 24 * 3600)
+        self.expire()
+        key = self.photo("upl_next_runs_opener", "cluster-1", self.clock())
+        second_started = self.message_with("my battery is swollen", key)
+        self.tickets.close_runs("conv-1", second_started)
+        stored_at = self.conversations.media_of("conv-1")[0]["stored_at"]
+        self.assertLess(stored_at, second_started)
+        self.assertGreater(stored_at, self.saved(earlier)["started_at"])
+        self.send(earlier)
+        self.assertEqual(self.files(earlier), [])
+        self.assertEqual(self.saved(earlier)["state"], "sent")
+        later = self.record(started_at=second_started, kind="safety", category="battery_safety")
+        self.send(later)
+        self.assertEqual(self.files(later), ["%s-upl_next_runs_opener.jpg" % later])
+
     def test_a_file_named_only_by_a_bot_reply_is_not_carried(self):
         # Only what the customer sent counts as carried. A bot reply's
         # pictures are ours, not theirs.
@@ -1172,6 +1258,20 @@ class AnswerTests(WorkerCase):
         [rejected] = self.events("zoho_rejected")
         self.assertEqual((rejected["reference"], rejected["fields"]), (ref, ["contactId"]))
 
+    def test_a_refused_payload_shows_on_health_until_a_record_is_sent(self):
+        ref = self.fail_once("create_ticket",
+                             zoho_error(errors.ZohoRejected, "REQUIRED_FIELD_MISSING", fields=["cf_chat_reference"]))
+        self.assertEqual(self.worker.status["failing"], "sending failing: REQUIRED_FIELD_MISSING")
+        wiring = ZohoWiring(status="test department", worker=self.worker, store=self.tickets)
+        self.assertEqual(zoho_status(wiring), "sending failing: REQUIRED_FIELD_MISSING")
+        health = ticket_health(wiring, self.clock())
+        self.assertEqual(health["zoho_worker"]["failing"], "sending failing: REQUIRED_FIELD_MISSING")
+        self.assertEqual(health["tickets_waiting"], 1)
+        self.clock.advance(3600)
+        self.worker.run_once()
+        self.assertEqual(self.saved(ref)["state"], "sent")
+        self.assertEqual(zoho_status(wiring), "test department")
+
     def test_a_configuration_fault_retries_hourly_and_shows_on_health(self):
         ref = self.fail_once("create_ticket", zoho_error(errors.ZohoConfigError, "SCOPE_MISMATCH"))
         self.assertEqual(self.saved(ref)["next_attempt_at"], plus(self.clock(), 3600))
@@ -1196,7 +1296,7 @@ class AnswerTests(WorkerCase):
     def test_an_unknown_outcome_goes_on_the_schedule_with_its_intent_kept(self):
         ref = self.fail_once("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"))
         saved = self.saved(ref)
-        self.assertEqual((saved["next_attempt_at"], saved["intent"]["step"]), (plus(self.clock(), 30), "ticket"))
+        self.assertEqual((saved["next_attempt_at"], saved["intent"]["step"]), (plus(self.clock(), 120), "ticket"))
 
     def test_the_days_credits_gone_pause_every_record_until_zoho_says(self):
         started = self.chat()
@@ -1320,6 +1420,79 @@ class SecretTests(WorkerCase):
             self.assertNotIn(secret, logged)
             self.assertNotIn(secret, stored)
         self.assertNotIn("9999999999", logged)
+
+
+class StoreBlipTests(WorkerCase):
+    """Atlas unreachable for a moment, in either store. It is logged at
+    warning level under its own name, and never as the alarmed
+    zoho_worker_error. A record already taken waits for its lease to lapse."""
+
+    def assert_a_blip_and_no_alarm(self):
+        [blip] = self.events("zoho_worker_store_unavailable")
+        self.assertEqual(blip["level"], "warning")
+        self.assertEqual(self.events("zoho_worker_error"), [])
+
+    def test_a_ticket_store_that_cannot_be_reached_ends_the_pass_quietly(self):
+        ref = self.record(started_at=self.chat())
+        self.wake(ref)
+
+        def down(*args, **kwargs):
+            raise StoreUnavailable("atlas")
+
+        self.worker.store = SimpleNamespace(take_due=down)
+        self.assertFalse(self.worker.run_once())
+        self.assert_a_blip_and_no_alarm()
+        self.assertEqual(self.desk.calls, [])
+
+    def test_a_conversation_store_that_fails_mid_pass_leaves_the_lease_to_lapse(self):
+        ref = self.record(started_at=self.chat())
+        real = self.conversations.transcript
+        down = {"on": True}
+
+        def transcript(cid):
+            if down["on"]:
+                raise StoreUnavailable("atlas")
+            return real(cid)
+
+        self.conversations.transcript = transcript
+        self.assertFalse(self.send(ref))
+        self.assert_a_blip_and_no_alarm()
+        self.assertEqual(self.saved(ref)["state"], "waiting")
+        self.assertIsNotNone(self.saved(ref)["lease_token"])
+        down["on"] = False
+        self.clock.advance(10)
+        self.assertFalse(self.worker.run_once())
+        self.clock.advance(301)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(self.saved(ref)["state"], "sent")
+        self.assertEqual(len(self.desk.tickets), 1)
+
+    def test_a_ticket_store_that_fails_while_a_failure_is_saved_is_a_blip_too(self):
+        ref = self.record(started_at=self.chat())
+        self.desk.fail("create_ticket", zoho_error(errors.ZohoUnavailable, "timeout"))
+        real = self.tickets.save
+
+        def save(reference, token, changes, **kwargs):
+            if "last_error" in changes:
+                raise StoreUnavailable("atlas")
+            return real(reference, token, changes, **kwargs)
+
+        self.tickets.save = save
+        self.assertFalse(self.send(ref))
+        self.assert_a_blip_and_no_alarm()
+
+    def test_the_loop_logs_a_blip_in_the_overdue_check_or_the_pass_as_a_blip(self):
+        def down(*args, **kwargs):
+            raise StoreUnavailable("atlas")
+
+        self.worker.store = SimpleNamespace(take_due=down, overdue=down)
+        self.worker.pass_seconds = 0.01
+        self.worker.start()
+        try:
+            self.assertTrue(wait_for(lambda: len(self.events("zoho_worker_store_unavailable")) >= 4))
+        finally:
+            self.worker.stop()
+        self.assertEqual(self.events("zoho_worker_error"), [])
 
 
 class LoopTests(WorkerCase):

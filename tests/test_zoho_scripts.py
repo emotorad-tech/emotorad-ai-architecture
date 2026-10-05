@@ -1099,9 +1099,10 @@ class DocsTests(unittest.TestCase):
 ALARMED = ("zoho_misconfigured", "zoho_token_refused", "zoho_worker_error", "zoho_ticket_stuck",
            "safety_ticket_late", "safety_ticket_not_recorded", "unverified_ticket_capped")
 # Each of these is an end state or an event another alarm already covers:
-# safety_ticket_not_recorded follows safety_ticket_failed.
+# safety_ticket_not_recorded follows safety_ticket_failed. zoho_worker_store_unavailable
+# is an Atlas blip; the store's own alarms cover a long outage.
 NOT_ALARMED = ("zoho_ticket_sent", "zoho_retry", "zoho_rejected", "zoho_ticket_gone", "zoho_ticket_adopted",
-               "zoho_record_dropped", "safety_ticket_failed")
+               "zoho_record_dropped", "safety_ticket_failed", "zoho_worker_store_unavailable")
 _EMITTED = re.compile(r"""\bemit\(\s*["']((?:zoho|safety_ticket|unverified_ticket)_[a-z_]+)["']""")
 
 
