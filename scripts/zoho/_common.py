@@ -300,10 +300,11 @@ PERSON_KEYS = frozenset({"contact", "assignee", "commenter", "author", "creator"
 # never written (the 1 October probe's rule: the OMS's "Dealer Principle
 # Name" list names real dealers). "Name" alone is not a person word: B4 needs
 # the "Product Name" list, and "Model Name" lists bikes. A person's name is
-# caught by the word beside it (first, last, full or contact name).
+# caught by the word beside it (first, last, full or contact name), and a
+# "Mechanical issue" list is a fault list, not a mechanic's name.
 _PERSONAL_FIELD = re.compile(
     r"first[\s_]*name|last[\s_]*name|full[\s_]*name|contact[\s_]*name|person|dealer|principle|customer|"
-    r"account|owner|agent|franchise|technician|mechanic|rider|employee|phone|mobile|email|address",
+    r"account|owner|agent|franchise|technician|mechanic(?!al)|rider|employee|phone|mobile|email|address",
     re.IGNORECASE)
 
 
@@ -381,7 +382,8 @@ def save_shape(name: str, answer: Any, source: str, shapes_dir: Path = SHAPES, p
         doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         if "_source" in doc and "_source_of_the_rest" not in doc:
             doc["_source_of_the_rest"] = doc["_source"]
-        doc["_source"] = '%s Only "%s" is this capture; the other keys were already in the file.' % (source, under)
+        doc["_source"] = '%s Only "%s" is this capture: the other keys were already in the file (see ' \
+                         '"_source_of_the_rest").' % (source, under)
         doc[under] = masked
     else:
         doc = {"_source": source}

@@ -479,7 +479,8 @@ class MaskingTests(unittest.TestCase):
         # B4: the support lead chooses the bot's value from the probe's list,
         # and "Product Name" is the first of the required fields.
         for api_name, label in (("cf_product_name", "Product Name"), ("cf_model_name", "Model Name"),
-                                ("cf_issue_name", "Name of the issue")):
+                                ("cf_issue_name", "Name of the issue"), ("cf_mechanical_issue", "Mechanical Issue"),
+                                ("cf_technical_issue", "Technical Issue")):
             with self.subTest(label=label):
                 masked = _common.mask({"apiName": api_name, "displayLabel": label, "type": "Picklist",
                                        "allowedValues": ["EMX Plus", "T-Rex Air"], "defaultValue": "EMX Plus"})
