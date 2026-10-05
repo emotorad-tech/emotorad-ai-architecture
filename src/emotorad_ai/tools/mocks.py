@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
@@ -574,6 +574,11 @@ def build_registry(
     """
 
     kb = knowledge_base or BatteryKnowledgeBase()
+
+    def _default_knowledge_bike() -> Optional[Mapping[str, Any]]:
+        # search_knowledge's own parameter shadows the name, so read it here.
+        return knowledge_bike() if callable(knowledge_bike) else knowledge_bike
+
     tickets = ticket_system if ticket_system is not None else MockTicketSystem()
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
@@ -999,13 +1004,21 @@ def build_registry(
             },
         },
         required=("query",),
+        # The bike this conversation chose (Runtime._selected_bike), injected
+        # when the tool runs. Absent from the model's schema, and a value the
+        # model supplies is dropped, so it can never widen the filter. Before
+        # 6 October 2026 nothing passed it on the web chat and a Doodle owner
+        # was given the standard flow.
+        optional_injects=("knowledge_bike",),
     )
-    def search_knowledge(query: str, topic: Optional[str] = None) -> Dict[str, Any]:
+    def search_knowledge(query: str, topic: Optional[str] = None,
+                         knowledge_bike: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         # `bike` drives the applies_to filter, so a record written for a bike with
         # a throttle is unretrievable for one without. The model cannot widen this
         # by phrasing the query differently — the filter is applied here, not by
-        # the search terms.
-        bike = knowledge_bike() if callable(knowledge_bike) else knowledge_bike
+        # the search terms. The conversation's chosen bike wins; the registry's
+        # own (the playground's, the live evaluation's) is the fallback.
+        bike = knowledge_bike if knowledge_bike is not None else _default_knowledge_bike()
         passages = kb.search(query, topic=topic, bike=bike or {})
         if not passages:
             # An explicit empty answer, not a shrug. Without this the model fills

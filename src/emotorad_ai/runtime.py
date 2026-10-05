@@ -2037,6 +2037,10 @@ class Runtime:
                 # The ticket tool's check on a frame number the rider reads
                 # off the sticker: only for the bike this conversation chose.
                 "selected_bike": lambda: state.selected_frame,
+                # The knowledge filter's bike: the one the router and the
+                # narrow path already use, so the full agent's search applies
+                # the same applies_to and excludes (6 October 2026).
+                "knowledge_bike": lambda: self._selected_bike(resolved, state),
                 # A bike the customer gave because it is not in their list:
                 # the ticket tool puts its frame number on a ticket.
                 "unlisted_bike": lambda: state.unlisted_bike,
