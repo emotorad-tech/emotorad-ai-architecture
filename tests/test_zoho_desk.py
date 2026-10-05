@@ -365,8 +365,12 @@ class AdoptTests(unittest.TestCase):
         # Read from the shape, so a capture (other ids, EM-TEST references)
         # is held to the same rule as the draft: each subject's reference
         # adopts the newest ticket carrying it, and a near miss adopts none.
+        # Only our own subjects carry a reference; a ticket made another way
+        # (masked, as in the first capture) is never adopted for any of them.
         recorded = shape("zoho-contact-tickets.json")["data"]
-        for item in recorded:
+        ours = [item for item in recorded if "[AI chat]" in item["subject"]]
+        self.assertTrue(ours)
+        for item in ours:
             reference = item["subject"].rstrip().rsplit("[", 1)[1].rstrip("]")
             with self.subTest(reference=reference):
                 newest = next(t for t in recorded if t["subject"].rstrip().endswith("[%s]" % reference))
@@ -494,12 +498,20 @@ class ShapeChecks:
 
     def test_the_chat_reference_ends_every_recorded_subject_in_square_brackets(self):
         # test_ticket.py's tickets carry EM-TEST-<n>, which no real record can have.
+        # A contact's list also holds tickets that are not ours (the first
+        # capture held the test contact's ticket made by hand in Desk): their
+        # subject is someone else's text, so it must be masked, never kept.
         subjects = [self.recorded("zoho-ticket.json")["subject"]]
-        subjects += [item["subject"] for item in self.recorded("zoho-contact-tickets.json")["data"]]
+        listed = [item["subject"] for item in self.recorded("zoho-contact-tickets.json")["data"]]
+        subjects += [subject for subject in listed if "[AI chat]" in subject]
         for subject in subjects:
             with self.subTest(subject=subject):
                 self.assertRegex(subject,
                                  r"^(\[Unverified\] )?\[AI chat\] .+ \[(stage|prod):EM-([0-9]{7}|TEST-[0-9]+)\]$")
+        for subject in listed:
+            if "[AI chat]" not in subject:
+                with self.subTest(foreign=subject):
+                    self.assertEqual(subject, "<str>")
 
     def test_every_error_code_the_client_classifies_is_recorded(self):
         errors = self.recorded("zoho-errors.json")

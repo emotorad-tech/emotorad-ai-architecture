@@ -1,0 +1,35 @@
+{
+  "_source": "Captured by scripts/zoho/test_ticket.py on 2026-10-05, masked by scripts/zoho/_common.py. Replaces the published-shape draft.",
+  "data": [
+    {
+      "id": "55430000068841001",
+      "creatorId": "<str>",
+      "name": "EM-TEST-1791221335-small.png",
+      "size": "71",
+      "isPublic": false,
+      "createdTime": "2026-10-05T17:31:01.000Z",
+      "previewurl": null,
+      "href": "<str>"
+    },
+    {
+      "id": "55430000068767749",
+      "creatorId": "<str>",
+      "name": "EM-TEST-1791221335-19mb.bin",
+      "size": "19922944",
+      "isPublic": false,
+      "createdTime": "2026-10-05T17:31:14.000Z",
+      "previewurl": null,
+      "href": "<str>"
+    },
+    {
+      "id": "55430000068836335",
+      "creatorId": "<str>",
+      "name": "EM-TEST-1791221335-26mb.bin",
+      "size": "27262976",
+      "isPublic": false,
+      "createdTime": "2026-10-05T17:31:29.000Z",
+      "previewurl": null,
+      "href": "<str>"
+    }
+  ]
+}

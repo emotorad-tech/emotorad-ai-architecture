@@ -1,15 +1,54 @@
 {
-  "_source": "Not a capture. Built from Zoho's published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/Search.json: searchContacts takes phone or mobile, with * as a wildcard, and answers 200 with a data list or 204 when nothing matches; the contact's properties come from v1.0/Contact.json). Every value is fake: the contact is the test contact of person step 3. scripts/zoho/probe.py and scripts/zoho/test_ticket.py replace this file with a masked capture (spec 2026-10-05, part 1).",
+  "_source": "Captured by scripts/zoho/test_ticket.py on 2026-10-05, masked by scripts/zoho/_common.py. Replaces the published-shape draft. Trimmed before commit to the test contact: the search also matched 8 other contacts whose numbers end in the same four digits, and their ids are not kept.",
   "data": [
     {
-      "id": "4000000000002",
-      "firstName": null,
-      "lastName": "AI chatbot test",
-      "mobile": "+919999999999",
-      "phone": null,
+      "lastName": "<str>",
+      "country": null,
+      "modifiedTime": "<str>",
+      "secondaryEmail": null,
+      "city": null,
+      "customFields": {},
+      "description": null,
+      "language": null,
+      "title": null,
+      "type": null,
+      "ownerId": "<str>",
+      "photoURL": null,
+      "twitter": null,
+      "street": null,
+      "createdTime": "<str>",
+      "isEndUser": false,
+      "zohoCRMContact": null,
+      "id": "55430000068790003",
+      "state": null,
+      "customerHappiness": {
+        "badPercentage": "<str>",
+        "okPercentage": "<str>",
+        "goodPercentage": "<str>"
+      },
       "email": null,
-      "webUrl": "https://desk.zoho.in/[masked]/4000000000002",
-      "createdTime": "2026-10-05T08:00:00.000Z"
+      "zip": null,
+      "owner": {
+        "photoURL": "<str>",
+        "firstName": "<str>",
+        "lastName": "<str>",
+        "emailId": "<str>",
+        "id": "55430000068563302",
+        "zuid": "<str>"
+      },
+      "accountCount": "<str>",
+      "cf": {},
+      "facebook": null,
+      "mobile": null,
+      "layoutId": "<str>",
+      "firstName": null,
+      "accountId": null,
+      "isAnonymous": false,
+      "phone": "<str>",
+      "webUrl": "<str>",
+      "isSpam": false,
+      "account": null
     }
-  ]
+  ],
+  "count": "<int>"
 }

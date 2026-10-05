@@ -1338,7 +1338,7 @@ def tickets_in(departments):
         if asked not in departments:
             return 204, None
         return 200, {"data": [{
-            "id": "1892000000120125", "ticketNumber": "120125", "subject": "Ananya Rao: battery will not charge",
+            "id": "1892000000990001", "ticketNumber": "990001", "subject": "Ananya Rao: battery will not charge",
             "email": "ananya.rao@example.com", "phone": "+919999999999", "departmentId": asked,
             "contactId": CONTACT_ID, "department": {"name": departments[asked], "id": asked},
             "contact": {"firstName": "Ananya", "lastName": "Rao", "email": "ananya.rao@example.com",
@@ -1420,7 +1420,9 @@ class OmsTokenProbeTests(ShapeChecks, unittest.TestCase):
     def test_nothing_of_the_ticket_is_saved_or_shown(self):
         written = self.screen.text + "".join(path.read_text(encoding="utf-8")
                                              for path in Path(self.shapes_dir).iterdir())
-        for private in PERSONAL + ("120125", "1892000000120125", "will not charge"):
+        # A number no capture holds: the first real capture lists the test
+        # contact's own ticket #120125, so that number may appear legitimately.
+        for private in PERSONAL + ("990001", "1892000000990001", "will not charge"):
             self.assertNotIn(private, written)
 
     def test_a_department_with_no_ticket_is_reported_with_what_to_do(self):
