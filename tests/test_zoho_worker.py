@@ -22,6 +22,7 @@ import time
 import unittest
 from types import SimpleNamespace
 
+from emotorad_ai.contract import Attachment, Reply
 from emotorad_ai.conversation import InMemoryConversationStore
 from emotorad_ai.media_records import media_record
 from emotorad_ai.observability import EventLog
@@ -87,10 +88,13 @@ class FakeDesk:
     anything. With `after=True` the write lands first and the error comes back
     afterwards, which is what a timeout after Zoho made the ticket looks like.
     `hooks[name]` runs at the start of the next call of that method. `down`
-    makes every call fail as unreachable."""
+    makes every call fail as unreachable. `credits` is what Zoho's answers
+    say is left for the day: each call that reaches Zoho copies it to the
+    reading, as DeskHTTP does from the header, and nothing else does."""
 
     def __init__(self):
         self.http = SimpleNamespace(last_credits_remaining=None)
+        self.credits = None
         # The two contacts from person step 3. They have no numbers here, so a
         # search never finds them by accident.
         self.contacts = {
@@ -116,6 +120,8 @@ class FakeDesk:
             hook()
         if self.down:
             raise zoho_error(errors.ZohoUnavailable, "network")
+        if self.credits is not None:
+            self.http.last_credits_remaining = self.credits
         queued = self._errors.get(name)
         if queued and not queued[0][1]:
             raise queued.pop(0)[0]
@@ -382,11 +388,28 @@ class LeaseTests(WorkerCase):
         self.assertIn("the light is red now", self.text_on(ref))
         self.assertEqual(sorted(saved["posted_turns"]), [1, 2, 3, 4])
 
+class CreditsTests(WorkerCase):
+    """Below the floor, records that are not urgent wait. The reading comes
+    only from Zoho's answers, so only a call refreshes it. None of these tests
+    sets the reading by hand: they set what Zoho says (FakeDesk.credits)."""
+
+    def low_reading(self, started):
+        """An urgent record sent while Zoho says 999 credits are left."""
+        self.desk.credits = 999
+        urgent = self.record(started_at=started, kind="safety", category="battery_safety")
+        self.send(urgent)
+        self.assertEqual(self.saved(urgent)["state"], "sent")
+        self.assertEqual(self.desk.http.last_credits_remaining, 999)
+        return urgent
+
+    def states(self, *references):
+        return sorted(self.saved(reference)["state"] for reference in references)
+
     def test_below_the_credits_floor_only_urgent_records_are_sent(self):
         started = self.chat()
         normal = self.record(started_at=started)
         urgent = self.record(started_at=started, kind="safety", category="battery_safety")
-        self.desk.http.last_credits_remaining = 999
+        self.desk.credits = 999
         self.wake(normal)
         self.wake(urgent)
         self.assertTrue(self.worker.run_once())
@@ -395,10 +418,60 @@ class LeaseTests(WorkerCase):
         self.assertEqual(self.saved(normal)["state"], "waiting")
         self.assertEqual(self.saved(normal)["next_attempt_at"], plus(self.clock(), 600))
         self.assertEqual(len(self.desk.tickets), 1)
-        self.desk.http.last_credits_remaining = 5000
+        [deferred] = [e for e in self.events("zoho_retry") if e["error"] == "credits_floor"]
+        self.assertEqual((deferred["reference"], deferred["credits_remaining"]), (normal, 999))
+
+    def test_a_low_reading_counts_for_ten_minutes_then_one_record_goes_out_to_read_it_again(self):
+        started = self.chat()
+        self.low_reading(started)
+        first, second = self.record(started_at=started), self.record(started_at=started)
+        self.wake(first)
+        self.wake(second)
+        self.assertTrue(self.worker.run_once())
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(self.states(first, second), ["waiting", "waiting"])
+        self.assertEqual(len(self.desk.tickets), 1)
         self.clock.advance(600)
+        # The reading is ten minutes old. One record goes out, and its calls
+        # read the credits again. Zoho still says 999, so the other waits.
+        self.assertTrue(self.worker.run_once())
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(self.states(first, second), ["sent", "waiting"])
+        self.assertEqual(len(self.desk.tickets), 2)
+        self.clock.advance(599)
+        self.assertFalse(self.worker.run_once())
+        self.clock.advance(1)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(self.states(first, second), ["sent", "sent"])
+        self.assertEqual(self.desk.http.last_credits_remaining, 999)
+
+    def test_after_zohos_daily_reset_a_waiting_record_goes_out_and_is_never_stuck(self):
+        # The review's probe: a low reading, one record that is not urgent,
+        # and nothing else calling Zoho. It must not wait for ever.
+        started = self.chat()
+        self.low_reading(started)
+        normal = self.record(started_at=started)
+        self.wake(normal)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(self.saved(normal)["state"], "waiting")
+        # Zoho's credits come back for the day. Nothing has called Zoho since.
+        self.desk.credits = 50000
+        self.clock.advance(600)
+        self.worker.check_overdue()
         self.assertTrue(self.worker.run_once())
         self.assertEqual(self.saved(normal)["state"], "sent")
+        self.assertEqual(self.desk.http.last_credits_remaining, 50000)
+        self.assertEqual(self.events("zoho_ticket_stuck"), [])
+        # The fresh reading is above the floor: the next record goes at once.
+        later = self.record(started_at=started)
+        self.send(later)
+        self.assertEqual(self.saved(later)["state"], "sent")
+
+    def test_with_no_reading_yet_nothing_waits_for_credits(self):
+        normal = self.record(started_at=self.chat())
+        self.send(normal)
+        self.assertEqual(self.saved(normal)["state"], "sent")
+        self.assertIsNone(self.desk.http.last_credits_remaining)
 
 
 class FieldTests(WorkerCase):
@@ -853,6 +926,107 @@ class RunEndTests(WorkerCase):
         ref = self.record(started_at=None)
         self.send(ref)
         self.assertEqual((self.comments(ref), self.files(ref)), ([], []))
+        self.assertEqual(self.saved(ref)["state"], "sent")
+
+
+class RunStartTests(WorkerCase):
+    """The API stores a photo or video before the turn runs
+    (api._persist_media), and a run's start is set later, inside that turn:
+    when it loads a new or expired conversation, or by restart_for. So a file
+    sent with a run's first message is older than the run. The turn that
+    carried it is not, and it names the file."""
+
+    def message_with(self, text, *keys, restart=False, cid="conv-1"):
+        """A message carrying `keys`, which were stored just before it, as
+        the API does. The state is loaded 50 ms after the files were stored
+        (a new run starts there if the state is new or expired, or at
+        restart_for), and the turn is recorded two seconds later, when the
+        reply is ready. Returns the run's start."""
+        self.clock.advance(0.05)
+        state = self.conversations.get(cid)
+        state.turns += 1
+        if restart:
+            state.restart_for("PHONE#" + PHONE, self.clock())
+        self.clock.advance(2)
+        carried = [Attachment(kind="image", url="s3://" + key, mime_type="image/jpeg") for key in keys]
+        self.conversations.record_turn(state, inbound(text, cid=cid, attachments=carried), reply("Ok.", cid=cid))
+        return state.started_at
+
+    def expire(self, cid="conv-1"):
+        """The working state expired (48 hours in MongoDB): the next message
+        starts a new run of the same conversation id."""
+        self.conversations._states.pop(cid)
+
+    def test_a_photo_sent_with_a_new_conversations_first_message_is_attached(self):
+        key = self.photo("upl_opener", "cluster-1", self.clock())
+        started = self.message_with("my battery is swollen", key)
+        self.assertLess(self.conversations.media_of("conv-1")[0]["stored_at"], started)
+        ref = self.record(started_at=started, kind="safety", category="battery_safety")
+        self.send(ref)
+        self.assertEqual(self.files(ref), ["%s-upl_opener.jpg" % ref])
+        self.assertEqual(self.saved(ref)["state"], "sent")
+
+    def test_a_file_carried_into_a_run_after_the_state_expired_is_attached_and_no_other(self):
+        self.chat(turns=[("an earlier run", "Ok.")])
+        self.clock.advance(30)
+        carried = self.photo("upl_earlier_run", "cluster-1", self.clock())
+        self.message_with("this photo belongs to the earlier run", carried)
+        self.clock.advance(30)
+        # A message whose turn was never recorded (the store failed, or the
+        # reply was the busy one): its photo is stored, and no turn names it.
+        self.photo("upl_never_recorded", "cluster-1", self.clock())
+        self.clock.advance(2 * 24 * 3600)
+        self.expire()
+        key = self.photo("upl_opener", "cluster-1", self.clock())
+        started = self.message_with("my battery is swollen", key)
+        ref = self.record(started_at=started, kind="safety", category="battery_safety")
+        self.send(ref)
+        self.assertEqual(self.files(ref), ["%s-upl_opener.jpg" % ref])
+        self.assertNotIn("earlier run", self.text_on(ref))
+
+    def test_a_photo_sent_with_the_message_that_starts_a_new_persons_run_goes_only_on_theirs(self):
+        first = self.record(started_at=self.chat(turns=[("first person's words", "Ok.")]))
+        self.clock.advance(60)
+        # The newcomer writes on the same browser. Their turn ends the first
+        # run just after its last turn (runtime._end_run_before_this_turn).
+        self.tickets.close_runs("conv-1", plus(self.conversations.transcript("conv-1")[-1].at, 0.000001))
+        self.chat(turns=[("[phone]", "I've sent a code.")])
+        self.clock.advance(30)
+        key = self.photo("upl_with_the_code", "cluster-1", self.clock())
+        second_started = self.message_with("[code]", key, restart=True)
+        self.tickets.close_runs("conv-1", second_started)
+        second = self.record(started_at=second_started)
+        self.send(first)
+        self.send(second)
+        self.assertEqual(self.files(first), [])
+        self.assertEqual(self.files(second), ["%s-upl_with_the_code.jpg" % second])
+        self.assertNotIn("first person", self.text_on(second))
+
+    def test_a_file_named_only_by_a_bot_reply_is_not_carried(self):
+        # Only what the customer sent counts as carried. A bot reply's
+        # pictures are ours, not theirs.
+        key = self.photo("upl_before", "cluster-1", self.clock())
+        self.clock.advance(0.05)
+        state = self.conversations.get("conv-1")
+        state.turns += 1
+        self.clock.advance(2)
+        shown = Reply(conversation_id="conv-1", text="Like this one?", handled_by="battery_support",
+                      attachments=[Attachment(kind="image", url="s3://" + key, mime_type="image/jpeg")])
+        self.conversations.record_turn(state, inbound("my battery is swollen", cid="conv-1"), shown)
+        ref = self.record(started_at=state.started_at)
+        self.send(ref)
+        self.assertEqual(self.files(ref), [])
+
+    def test_a_file_carried_by_a_turn_after_the_runs_end_is_not_attached(self):
+        started = self.chat(turns=[("before the end", "Ok.")])
+        ref = self.record(started_at=started)
+        self.clock.advance(5)
+        end = self.clock()
+        self.tickets.close_runs("conv-1", end)
+        key = self.photo("upl_after", "cluster-1", self.clock())
+        self.message_with("someone else", key)
+        self.send(ref)
+        self.assertEqual(self.files(ref), [])
         self.assertEqual(self.saved(ref)["state"], "sent")
 
 

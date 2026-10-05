@@ -14,9 +14,12 @@ ticket, the ticket's comments for a comment, its attachments for a file. This
 is how a timeout after Zoho made the ticket still ends in one ticket, not two.
 
 Only the run's own turns and files go on its ticket: at or after the run's
-start, before its end. The end can be set while a pass is under way, when
-someone else writes on the same browser (runtime._end_run_before_this_turn),
-so it is read again just before anything is posted.
+start, before its end. A file stored just before the start goes too when a
+turn of the run carried it: the API stores a file before its turn runs, so
+one sent with a run's first message is older than the run. The end can be set
+while a pass is under way, when someone else writes on the same browser
+(runtime._end_run_before_this_turn), so it is read again just before anything
+is posted.
 
 Failures are sorted by Zoho's error code, not by the HTTP status alone (the
 answers table in section 4). Nothing is ever dropped. A record with work
@@ -70,6 +73,9 @@ BUSY_WAIT = 30
 # until then.
 TOKEN_THROTTLED_WAIT = 600
 # How long a record that is not urgent waits while credits are below the floor.
+# It is also how long a reading below the floor counts. Only Zoho's answers
+# carry the reading, so after this one record that is not urgent goes out, and
+# its calls read the credits again (Zoho's daily reset is seen this way).
 CREDITS_FLOOR_WAIT = 600
 # A late or stuck record is logged at most this often.
 OVERDUE_LOG_SECONDS = 3600
@@ -78,6 +84,8 @@ STOP_JOIN_SECONDS = 10.0
 # The contact's last name when the OMS record gave no name (step 1).
 UNNAMED_CONTACT = "AI chat customer"
 _WHAT = {"image": "A photo", "video": "A video", "document": "A document"}
+# How a turn names a file the API stored: "s3://" and the key (api.py).
+_S3 = "s3://"
 _COMMENT_STEPS = ("transcript", "note", "media_note")
 
 
@@ -188,6 +196,9 @@ class ZohoWorker:
         self._thread: Optional[threading.Thread] = None
         # Set by Zoho's THRESHOLD_EXCEEDED. No record is taken before this time.
         self._paused_until: Optional[str] = None
+        # When this worker last called Zoho: the last time the credits
+        # reading (DeskHTTP.last_credits_remaining) can have been refreshed.
+        self._credits_read_at: Optional[str] = None
         # Reference -> when it was last logged as late or stuck.
         self._overdue_logged: Dict[str, str] = {}
 
@@ -452,15 +463,17 @@ class ZohoWorker:
         record = job.record
         posted = set(record.get("posted_media") or [])
         cluster = record.get("cluster_id")
-        for item in self.conversations.media_of(record["conversation_id"]):
+        media = self.conversations.media_of(record["conversation_id"])
+        carried = self._carried(job) if media else {}
+        for item in media:
             key = item["_id"]
             if key in posted or (cluster and item.get("cluster_id") != cluster):
                 continue
-            if not self._in_run(job, item.get("stored_at")):
+            if not self._file_in_run(job, item, carried):
                 continue
             if int(item.get("size_bytes") or 0) > self.settings.attachment_limit_bytes:
                 # Never read: a comment says so, and the file stays with us.
-                if self._still_in_run(job, item):
+                if self._still_in_run(job, item, carried):
                     self._too_large(job, item)
                 continue
             try:
@@ -469,10 +482,10 @@ class ZohoWorker:
                 if not self._missing(key):
                     raise
                 # Deleted from the bucket: no retry will bring it back.
-                if self._still_in_run(job, item):
+                if self._still_in_run(job, item, carried):
                     self._unreadable(job, item)
                 continue
-            if not self._still_in_run(job, item):
+            if not self._still_in_run(job, item, carried):
                 continue
             filename = safe_filename("%s-%s" % (job.ref, _file_name(key)))
             self._intent(job, {"step": "attachment", "key": key, "filename": filename})
@@ -606,12 +619,20 @@ class ZohoWorker:
         return getattr(getattr(self.client, "http", None), "last_credits_remaining", None)
 
     def _credits_low(self) -> bool:
+        """A reading below the floor, taken less than CREDITS_FLOOR_WAIT ago.
+        Deferring makes no call, so with only deferred records due the
+        reading would never change. Once it is that old it no longer counts:
+        the record goes out, and its calls bring a new reading."""
         remaining = self._credits()
-        return remaining is not None and remaining < self.settings.credits_floor
+        if remaining is None or remaining >= self.settings.credits_floor:
+            return False
+        read_at = self._credits_read_at
+        return read_at is not None and age_seconds(read_at, self._clock()) < CREDITS_FLOOR_WAIT
 
     def _defer_for_credits(self, job: _Job) -> None:
         """Credits are shared with the OMS, whose calls do not retry. Below
-        the floor only urgent records are sent, and the others wait."""
+        the floor only urgent records are sent, and the others wait. One of
+        them goes out each CREDITS_FLOOR_WAIT to read the credits again."""
         later = {"next_attempt_at": plus(self._clock(), CREDITS_FLOOR_WAIT), "lease_until": None, "lease_token": None}
         if not self.store.save(job.ref, job.token, later):
             raise _Dropped()
@@ -671,9 +692,33 @@ class ZohoWorker:
             raise _Dropped()
         job.record["ended_at"] = current.get("ended_at")
 
-    def _still_in_run(self, job: _Job, item: Dict[str, Any]) -> bool:
+    def _carried(self, job: _Job) -> Dict[str, Any]:
+        """The files the customer's messages in this conversation carried, by
+        S3 key, with the time of the turn that carried each. The API stores a
+        file before its turn runs (api._persist_media), and a new run's start
+        is set inside that turn (a new or expired state, or restart_for), so
+        a file sent with a run's first message is older than the run. Its
+        turn is not. A file whose turn was never recorded is named by none."""
+        carried: Dict[str, Any] = {}
+        for turn in self.conversations.transcript(job.record["conversation_id"]):
+            if turn.role != "customer":
+                continue
+            for attachment in turn.attachments or ():
+                url = str((attachment or {}).get("url") or "")
+                if url.startswith(_S3):
+                    carried.setdefault(url[len(_S3):], turn.at)
+        return carried
+
+    def _file_in_run(self, job: _Job, item: Dict[str, Any], carried: Dict[str, Any]) -> bool:
+        """Stored inside the run, or carried by one of the run's own turns."""
+        if self._in_run(job, item.get("stored_at")):
+            return True
+        key = item["_id"]
+        return key in carried and self._in_run(job, carried[key])
+
+    def _still_in_run(self, job: _Job, item: Dict[str, Any], carried: Dict[str, Any]) -> bool:
         self._refresh_end(job)
-        return self._in_run(job, item.get("stored_at"))
+        return self._file_in_run(job, item, carried)
 
     # -- the store, under the lease ---------------------------------------------------
 
@@ -694,7 +739,13 @@ class ZohoWorker:
         self._save(job, {"intent": dict(intent, at=self._clock())})
 
     def _call(self, job: _Job, method: Callable[..., Any], *args: Any) -> Any:
-        """One Zoho call, after the lease is renewed for it."""
+        """One Zoho call, after the lease is renewed for it. The credits
+        reading changes only in a call, so its age is counted from the last
+        one. A call that never reached Zoho makes a low reading count for
+        longer, which only delays a record that is not urgent."""
         if not self.store.renew_lease(job.ref, job.token, plus(self._clock(), LEASE_SECONDS)):
             raise _Dropped()
-        return method(*args)
+        try:
+            return method(*args)
+        finally:
+            self._credits_read_at = self._clock()
