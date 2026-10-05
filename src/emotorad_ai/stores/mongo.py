@@ -2,11 +2,12 @@
 
 Spec: docs/superpowers/specs/2026-09-29-mongodb-conversation-store-design.md.
 
-Five collections. `transcript_turns`, `conversation_summaries` and `media`
+Ten collections. `transcript_turns`, `conversation_summaries` and `media`
 are the conversation record and are kept permanently: no TTL index, and
 deletion on request through `delete_person` or `delete_conversation`.
 `conversations` (working state) and `idempotency_keys` expire through TTL
-indexes.
+indexes. `conversation_origins` (where each run came from), `erasure_requests`
+and `erasure_log` are described beside their names below.
 
 `tickets` (the Zoho Desk ticket record, tickets/record.py) and `counters`
 (the number behind each reference) are permanent too. Erasure does not reach
@@ -118,6 +119,9 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
         ([("state", 1), ("next_attempt_at", 1)], {"name": "due"}),
         ([("phone", 1)], {"name": "phone"}),
         ([("conversation_id", 1)], {"name": "conversation"}),
+        # The cap on unverified tickets (tickets/caps.py) counts a window of
+        # them on every one it records: unverified_since.
+        ([("identity", 1), ("urgent", 1), ("created_at", 1)], {"name": "unverified_recent"}),
     ],
     # One small document per sequence, found by its _id: no index of its own.
     COUNTERS: [],
@@ -571,8 +575,17 @@ class MongoTicketStore:
     # -- recording ---------------------------------------------------------------
 
     def next_reference(self) -> str:
-        doc = self._guard("find_one_and_update", lambda: self._counters.find_one_and_update(
-            {"_id": TICKET_COUNTER}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER))
+        for attempt in (1, 2):
+            try:
+                doc = self._guard("find_one_and_update", lambda: self._counters.find_one_and_update(
+                    {"_id": TICKET_COUNTER}, {"$inc": {"seq": 1}}, upsert=True,
+                    return_document=ReturnDocument.AFTER))
+                break
+            except DuplicateKeyError:
+                # Two servers upserting the first-ever counter at once: the
+                # loser collides on _id, and the document exists by now.
+                if attempt == 2:
+                    raise StoreUnavailable("MongoDB find_one_and_update failed (DuplicateKeyError)") from None
         return desk_reference(FIRST_DESK_NUMBER - 1 + int(doc["seq"]))
 
     def insert(self, record: Dict[str, Any]) -> Dict[str, Any]:

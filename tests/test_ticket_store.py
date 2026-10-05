@@ -4,7 +4,7 @@ import threading
 import unittest
 
 import mongomock
-from pymongo.errors import ServerSelectionTimeoutError
+from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError
 
 from emotorad_ai.config import Settings
 from emotorad_ai.conversation import StoreUnavailable
@@ -109,6 +109,27 @@ class InMemoryTicketStoreTests(TicketStoreContract, unittest.TestCase):
         self.assertEqual(store.get(record["_id"])["notes"], [])
 
 
+class CounterRace:
+    """The counters collection, except that the first `losses` calls of
+    find_one_and_update lose a race: another server's upsert of the first-ever
+    counter document lands first (it takes the next number), and this call is
+    answered with a duplicate key error, as MongoDB does for two upserts of
+    one _id."""
+
+    def __init__(self, inner, losses):
+        self.inner, self.losses = inner, losses
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def find_one_and_update(self, *args, **kwargs):
+        if self.losses:
+            self.losses -= 1
+            self.inner.find_one_and_update(*args, **kwargs)
+            raise DuplicateKeyError("E11000 duplicate key error")
+        return self.inner.find_one_and_update(*args, **kwargs)
+
+
 class MongoTicketStoreTests(TicketStoreContract, unittest.TestCase):
     def setUp(self):
         self.db = mongomock.MongoClient()["emotorad_ai"]
@@ -126,6 +147,17 @@ class MongoTicketStoreTests(TicketStoreContract, unittest.TestCase):
         again = record_for(two, source_key=key)
         self.assertEqual(again["_id"], first["_id"])
         self.assertEqual(self.db[TICKETS].count_documents({"source_key": key}), 1)
+
+    def test_the_first_ever_counter_lost_to_another_server_is_asked_for_again(self):
+        # Two servers create the first ticket on a fresh database at once.
+        store = MongoTicketStore({TICKETS: self.db[TICKETS], COUNTERS: CounterRace(self.db[COUNTERS], 1)})
+        self.assertEqual(store.next_reference(), "EM-1000002")
+        self.assertEqual(store.next_reference(), "EM-1000003")
+
+    def test_a_counter_that_loses_twice_is_a_store_that_cannot_record(self):
+        store = MongoTicketStore({TICKETS: self.db[TICKETS], COUNTERS: CounterRace(self.db[COUNTERS], 2)})
+        with self.assertRaises(StoreUnavailable):
+            store.next_reference()
 
     def test_a_second_worker_finds_nothing_while_the_first_holds_the_lease(self):
         one, two = MongoTicketStore(self.db), MongoTicketStore(self.db)
@@ -165,14 +197,18 @@ class MongoTicketStoreTests(TicketStoreContract, unittest.TestCase):
 
 
 class TicketIndexTests(unittest.TestCase):
-    def test_tickets_get_their_four_indexes_and_counters_none(self):
+    def test_tickets_get_their_five_indexes_and_counters_none(self):
         db = mongomock.MongoClient()["emotorad_ai"]
         report = ensure_indexes(db)
-        self.assertEqual(report[TICKETS], ["_id_", "conversation", "due", "phone", "source_key"])
+        self.assertEqual(report[TICKETS],
+                         ["_id_", "conversation", "due", "phone", "source_key", "unverified_recent"])
         self.assertEqual(report[COUNTERS], ["_id_"])
         info = db[TICKETS].index_information()
         self.assertTrue(info["source_key"]["unique"])
         self.assertEqual(info["due"]["key"], [("state", 1), ("next_attempt_at", 1)])
+        # The cap query (unverified_since) tests these three fields, in this order.
+        self.assertEqual(info["unverified_recent"]["key"], [("identity", 1), ("urgent", 1), ("created_at", 1)])
+        self.assertNotIn("unique", info["unverified_recent"])
 
     def test_neither_collection_ever_expires(self):
         for collection in (TICKETS, COUNTERS):

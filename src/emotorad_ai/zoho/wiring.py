@@ -68,7 +68,7 @@ def build_zoho(
         # "store is not mongodb": there is nowhere to keep a record.
         problem = startup_problem(
             settings,
-            region=env.get("AWS_REGION") or "",
+            region=env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "",
             store_kind=store_kind,
             ticket_store=ticket_store,
             dev_codes=env.get("EMOTORAD_AI_DEV_CODES") == "1",

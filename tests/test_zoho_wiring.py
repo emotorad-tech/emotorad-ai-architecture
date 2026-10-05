@@ -9,6 +9,7 @@ opener given to the wiring records each call and refuses it.
 """
 
 import asyncio
+import functools
 import importlib
 import io
 import logging
@@ -34,6 +35,9 @@ from emotorad_ai.tickets.kinds import is_desk_reference
 from emotorad_ai.tickets.record import new_record
 from emotorad_ai.tickets.seam import TicketRouter
 from emotorad_ai.tools.mocks import MockTicketSystem, build_registry
+from emotorad_ai.zoho import wiring as zoho_wiring
+from emotorad_ai.zoho.errors import ZohoError
+from emotorad_ai.zoho.http import DeskHTTP
 from emotorad_ai.zoho.settings import ENV_NAMES, STORE_UNREACHABLE
 from emotorad_ai.zoho.wiring import ZohoWiring, build_zoho, ticket_health, zoho_status
 from emotorad_ai.zoho.worker import THREAD_NAME, ZohoWorker
@@ -151,6 +155,8 @@ class MisconfiguredTests(unittest.TestCase):
         ("misconfigured: missing EMOTORAD_AI_ENV", {"EMOTORAD_AI_ENV": ""}, {}),
         ("misconfigured: bad number: EMOTORAD_ZOHO_CREDITS_FLOOR", {"EMOTORAD_ZOHO_CREDITS_FLOOR": "lots"}, {}),
         ("not allowed in this region", {"AWS_REGION": "eu-central-1"}, {}),
+        # A deployment that sets only the older name is still in the EU.
+        ("not allowed in this region", {"AWS_REGION": "", "AWS_DEFAULT_REGION": "eu-central-1"}, {}),
         ("misconfigured: store is not mongodb", {}, {"store": "memory"}),
         ("misconfigured: tickets index missing", {}, {"indexed": False}),
         ("misconfigured: live refused: test verification in use",
@@ -181,6 +187,11 @@ class MisconfiguredTests(unittest.TestCase):
                 self.assertEqual(runtime.llm.requests, [])
                 self.assertTrue(nothing_recorded(stores.tickets))
                 self.assertEqual(calls, [])
+
+    def test_a_region_set_only_as_the_default_region_counts_and_allows_what_it_allows(self):
+        result = wire(zoho_env(AWS_REGION="", AWS_DEFAULT_REGION="ap-south-1"), mongo_stores())
+        self.assertEqual(result.status, "test department")
+        self.assertIsNotNone(result.router)
 
     def test_a_reason_names_settings_never_their_values(self):
         log = EventLog(path=None)
@@ -305,9 +316,16 @@ class ApiTests(unittest.TestCase):
         reload_api(dict(BASE, EMOTORAD_STORE="memory", **blank_zoho()))
 
     def zoho_on_api(self, **changes):
+        """api.py imported with Zoho on. The api builds its own Zoho client, so
+        its transport is made to refuse every request, and each is kept in
+        `self.calls`: no test here can open a socket, even if the store ever
+        holds a due record."""
         client = mongomock.MongoClient()
         ensure_indexes(client[Settings().mongo_db])
-        return reload_api(dict(BASE, EMOTORAD_STORE="mongodb", **zoho_env(**changes)), client=client)
+        self.calls = []
+        refusing = functools.partial(DeskHTTP, opener=refusing_opener(self.calls))
+        with mock.patch.object(zoho_wiring, "DeskHTTP", refusing):
+            return reload_api(dict(BASE, EMOTORAD_STORE="mongodb", **zoho_env(**changes)), client=client)
 
     def test_importing_and_reloading_the_api_starts_no_worker(self):
         self.zoho_on_api()
@@ -344,6 +362,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(seen, [(True, 1)])
         self.assertFalse(api.ZOHO.worker.status["running"])
         self.assertEqual(zoho_threads(), [])
+        # Nothing was due, so nothing was asked of Zoho. And what the worker's
+        # client would send goes to the refusing transport, not to a socket.
+        self.assertEqual(self.calls, [])
+        with self.assertRaises(ZohoError):
+            api.ZOHO.worker.client.http.call("GET", "https://desk.zoho.in/api/v1/tickets", {}, write=False)
+        self.assertEqual(self.calls, ["https://desk.zoho.in/api/v1/tickets"])
 
     def test_an_eu_region_keeps_the_mock_and_says_so(self):
         api = self.zoho_on_api(AWS_REGION="eu-central-1")
