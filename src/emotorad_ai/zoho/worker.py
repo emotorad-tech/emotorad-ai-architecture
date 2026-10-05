@@ -152,6 +152,15 @@ class _Dropped(Exception):
     """A save matched nothing: the record was erased, or another worker holds it."""
 
 
+class _Carried:
+    """What the conversation's customer turns say about its files: the turn
+    time of each S3 key a turn carried, and the last customer turn's time."""
+
+    def __init__(self, by_key: Dict[str, Any], last_turn_at: Optional[datetime]) -> None:
+        self.by_key = by_key
+        self.last_turn_at = last_turn_at
+
+
 class _Job:
     """One taken record, as this pass sees it."""
 
@@ -508,7 +517,7 @@ class ZohoWorker:
         posted = set(record.get("posted_media") or [])
         cluster = record.get("cluster_id")
         media = self.conversations.media_of(record["conversation_id"])
-        carried = self._carried(job) if media else {}
+        carried = self._carried(job) if media else _Carried({}, None)
         for item in media:
             key = item["_id"]
             if key in posted or (cluster and item.get("cluster_id") != cluster):
@@ -774,35 +783,47 @@ class ZohoWorker:
             raise _Dropped()
         job.record["ended_at"] = current.get("ended_at")
 
-    def _carried(self, job: _Job) -> Dict[str, Any]:
+    def _carried(self, job: _Job) -> "_Carried":
         """The files the customer's messages in this conversation carried, by
-        S3 key, with the time of the turn that carried each. The API stores a
-        file before its turn runs (api._persist_media), and a new run's start
-        is set inside that turn (a new or expired state, or restart_for), so
-        a file sent with a run's first message is older than the run. Its
-        turn is not. A file whose turn was never recorded is named by none."""
-        carried: Dict[str, Any] = {}
+        S3 key, with the time of the turn that carried each, and the time of
+        the last customer turn recorded. The API stores a file before its turn
+        runs (api._persist_media), and a new run's start is set inside that
+        turn (a new or expired state, or restart_for), so a file sent with a
+        run's first message is older than the run. Its turn is not. A file
+        whose turn was never recorded is named by none."""
+        by_key: Dict[str, Any] = {}
+        last: Optional[datetime] = None
         for turn in self.conversations.transcript(job.record["conversation_id"]):
             if turn.role != "customer":
                 continue
+            at = _moment(turn.at)
+            if at is not None and (last is None or at > last):
+                last = at
             for attachment in turn.attachments or ():
                 url = str((attachment or {}).get("url") or "")
                 if url.startswith(_S3):
-                    carried.setdefault(url[len(_S3):], turn.at)
-        return carried
+                    by_key.setdefault(url[len(_S3):], turn.at)
+        return _Carried(by_key, last)
 
-    def _file_in_run(self, job: _Job, item: Dict[str, Any], carried: Dict[str, Any]) -> bool:
+    def _file_in_run(self, job: _Job, item: Dict[str, Any], carried: "_Carried") -> bool:
         """A file a customer's turn carried belongs to the run that turn is in,
         whatever time it was stored: one sent with a run's first message is
         older than the run, and would otherwise look like the earlier run's
-        when that run is closed at this one's start. Only a file no turn names
-        is judged by the time it was stored."""
+        when that run is closed at this one's start. A file no turn names yet,
+        stored after the last customer turn recorded, waits for a later pass:
+        its turn may still be running, and may be a new run's or a new
+        person's. It is neither posted nor marked posted. Only a file no turn
+        names, stored before the last recorded turn (a request that failed
+        after the file was stored), is judged by the time it was stored."""
         key = item["_id"]
-        if key in carried:
-            return self._in_run(job, carried[key])
+        if key in carried.by_key:
+            return self._in_run(job, carried.by_key[key])
+        stored = _moment(item.get("stored_at"))
+        if stored is None or carried.last_turn_at is None or stored > carried.last_turn_at:
+            return False
         return self._in_run(job, item.get("stored_at"))
 
-    def _still_in_run(self, job: _Job, item: Dict[str, Any], carried: Dict[str, Any]) -> bool:
+    def _still_in_run(self, job: _Job, item: Dict[str, Any], carried: "_Carried") -> bool:
         self._refresh_end(job)
         return self._file_in_run(job, item, carried)
 

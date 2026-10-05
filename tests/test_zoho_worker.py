@@ -1158,6 +1158,48 @@ class RunStartTests(WorkerCase):
         self.send(later)
         self.assertEqual(self.files(later), ["%s-upl_next_runs_opener.jpg" % later])
 
+    def test_a_file_no_turn_names_yet_waits_while_its_turn_is_still_running(self):
+        # The API stores the file before runtime.handle runs and records the
+        # turn naming it afterwards. A pass on the earlier, still outstanding
+        # record in between sees a file no turn names, stored inside the
+        # earlier run's open window. It must wait for its turn, not go on
+        # the earlier record by the time it was stored.
+        earlier = self.record(started_at=self.chat(turns=[("an earlier run's words", "Ok.")]))
+        self.clock.advance(2 * 24 * 3600)
+        self.expire()
+        key = self.photo("upl_turn_still_running", "cluster-1", self.clock())
+        last_turn = self.conversations.transcript("conv-1")[-1].at
+        self.assertGreater(self.conversations.media_of("conv-1")[0]["stored_at"], last_turn)
+        self.send(earlier)
+        self.assertEqual(self.files(earlier), [])
+        self.assertNotIn(key, self.saved(earlier).get("posted_media") or [])
+        self.assertNotIn("upl_turn_still_running", self.text_on(earlier))
+        # The turn ends: it names the file, and the earlier run is closed at
+        # the new run's start. The file goes to the new run's record only.
+        second_started = self.message_with("my battery is swollen", key)
+        self.tickets.close_runs("conv-1", second_started)
+        self.send(earlier)
+        self.assertEqual(self.files(earlier), [])
+        self.assertNotIn(key, self.saved(earlier).get("posted_media") or [])
+        later = self.record(started_at=second_started, kind="safety", category="battery_safety")
+        self.send(later)
+        self.assertEqual(self.files(later), ["%s-upl_turn_still_running.jpg" % later])
+        self.assertEqual(self.saved(later)["posted_media"], [key])
+
+    def test_a_file_no_turn_names_stored_before_the_last_turn_is_still_judged_by_its_time(self):
+        # A message whose turn was never recorded (the request failed after
+        # the file was stored) leaves a file no turn will ever name. Once a
+        # later turn is recorded, it is judged by the time it was stored.
+        started = self.chat(turns=[("first words", "Ok.")])
+        ref = self.record(started_at=started)
+        self.clock.advance(10)
+        key = self.photo("upl_failed_request", "cluster-1", self.clock())
+        self.clock.advance(10)
+        self.chat(turns=[("second words", "Ok.")])
+        self.send(ref)
+        self.assertEqual(self.files(ref), ["%s-upl_failed_request.jpg" % ref])
+        self.assertIn(key, self.saved(ref)["posted_media"])
+
     def test_a_file_named_only_by_a_bot_reply_is_not_carried(self):
         # Only what the customer sent counts as carried. A bot reply's
         # pictures are ours, not theirs.
