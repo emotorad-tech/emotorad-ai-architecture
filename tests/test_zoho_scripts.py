@@ -42,7 +42,7 @@ from emotorad_ai.tickets.record import new_record  # noqa: E402
 from emotorad_ai.tickets.store import InMemoryTicketStore  # noqa: E402
 from emotorad_ai.zoho.auth import ACCOUNTS_URL, TOKEN_URL  # noqa: E402
 from emotorad_ai.zoho.desk import DESK_URL  # noqa: E402
-from emotorad_ai.zoho.errors import ZohoAuthExpired, ZohoRejected  # noqa: E402
+from emotorad_ai.zoho.errors import ZohoAuthExpired, ZohoRejected, ZohoUnavailable, ZohoUnknownOutcome  # noqa: E402
 from emotorad_ai.zoho.payload import ticket_payload  # noqa: E402
 from emotorad_ai.zoho.settings import ENV_NAMES  # noqa: E402
 from tests.fake_zoho import SHAPES as DRAFTS, shape  # noqa: E402
@@ -113,7 +113,10 @@ class FakeAccounts:
     def call(self, method, url, headers, body=None, *, write, timeout=None, classify=True):
         self.calls.append({"method": method, "url": url, "write": write, "classify": classify,
                            "form": dict(urllib.parse.parse_qsl((body or b"").decode("utf-8")))})
-        return self.replies.pop(0)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
 class FakeHTTP:
@@ -204,6 +207,28 @@ class ScopesAndConsentTests(unittest.TestCase):
         [address] = [line for line in screen.lines if line.startswith("https://")]
         self.assertEqual(address, _common.consent_url("1000.TESTCLIENT", REDIRECT))
 
+    def test_the_redirect_address_is_trimmed_and_shown_beside_the_link(self):
+        # A pasted space or line end is the commonest "Invalid Redirect Uri".
+        screen = Screen()
+        rc = load("consent_url").main(["--redirect-uri", "  %s \n" % REDIRECT], ask=answers("1000.TESTCLIENT"),
+                                      out=screen.out)
+        self.assertEqual(rc, 0)
+        [address] = [line for line in screen.lines if line.startswith("https://")]
+        self.assertEqual(address, _common.consent_url("1000.TESTCLIENT", REDIRECT))
+        shown = screen.lines.index("Redirect address: %s" % REDIRECT)
+        self.assertEqual(abs(shown - screen.lines.index(address)), 1)
+        self.assertIn("character for character", screen.text)
+        self.assertIn("Invalid Redirect Uri", screen.text)
+
+    def test_an_empty_redirect_address_is_refused_before_the_client_id_is_asked_for(self):
+        for empty in ("", "   ", "\n"):
+            with self.subTest(empty=empty):
+                screen = Screen()
+                rc = load("consent_url").main(["--redirect-uri", empty], ask=never, out=screen.out)
+                self.assertEqual(rc, 1)
+                self.assertIn("registered on the client, character for character", screen.text)
+                self.assertFalse([line for line in screen.lines if line.startswith("https://")])
+
 
 class ExchangeTests(unittest.TestCase):
     def exchange(self, *replies, argv=("--redirect-uri", REDIRECT)):
@@ -260,6 +285,51 @@ class ExchangeTests(unittest.TestCase):
         rc, _, screen = self.exchange((200, {k: v for k, v in INDIA.items() if k != "refresh_token"}))
         self.assertEqual(rc, 1)
         self.assertIn("access_type=offline", screen.text)
+
+    def test_the_redirect_address_is_trimmed_and_shown_before_the_exchange(self):
+        rc, accounts, screen = self.exchange((200, INDIA), argv=("--redirect-uri", " %s\n" % REDIRECT))
+        self.assertEqual(rc, 0)
+        self.assertEqual(accounts.calls[0]["form"]["redirect_uri"], REDIRECT)
+        self.assertEqual(screen.lines[0], "Redirect address: %s" % REDIRECT)
+
+    def test_an_empty_redirect_address_is_refused_before_any_secret(self):
+        screen = Screen()
+        accounts = FakeAccounts()
+        rc = load("exchange_code").main(["--redirect-uri", "  "], ask=never, http=accounts, out=screen.out)
+        self.assertEqual(rc, 1)
+        self.assertEqual(accounts.calls, [])
+        self.assertIn("registered on the client, character for character", screen.text)
+
+    def test_a_refused_code_says_the_redirect_address_must_match_exactly(self):
+        _, _, screen = self.exchange((200, {"error": "invalid_redirect_uri"}))
+        self.assertIn("error=invalid_redirect_uri", screen.text)
+        self.assertIn("Redirect address: %s" % REDIRECT, screen.text)
+        self.assertIn("registered on the client, character for character", screen.text)
+        # A Self Client has no redirect address, so nothing is said about one.
+        _, _, screen = self.exchange((200, {"error": "invalid_code"}), argv=("--self-client",))
+        self.assertNotIn("redirect", screen.text.lower())
+
+    def test_a_network_error_names_its_class_and_says_to_try_again_not_that_the_code_was_refused(self):
+        for failure in (ZohoUnavailable("Zoho could not be reached (URLError); nothing was sent", error="network"),
+                        ZohoUnknownOutcome("a write to Zoho had no answer (TimeoutError)", error="timeout")):
+            with self.subTest(failure=type(failure).__name__):
+                rc, accounts, screen = self.exchange(failure)
+                self.assertEqual(rc, 1)
+                self.assertEqual(len(accounts.calls), 1)
+                self.assertIn(type(failure).__name__, screen.text)
+                self.assertIn("error=%s" % failure.error, screen.text)
+                self.assertIn("run exchange_code.py again", screen.text)
+                self.assertNotIn("refused", screen.text)
+
+    def test_a_server_error_says_to_try_again_not_that_the_code_was_refused(self):
+        for status, body in ((500, {}), (503, {"error": "Service Unavailable"}), (502, None)):
+            with self.subTest(status=status):
+                rc, _, screen = self.exchange((status, body or {}))
+                self.assertEqual(rc, 1)
+                self.assertIn("Zoho answered %d, a server error" % status, screen.text)
+                self.assertIn("run exchange_code.py again", screen.text)
+                self.assertNotIn("refused", screen.text)
+                self.assertNotIn("India", screen.text)
 
 
 class IndiaAndScopesTests(unittest.TestCase):
@@ -1018,7 +1088,8 @@ class TestTicketRunTests(unittest.TestCase):
         self.assertIn("error=INVALID_DATA", screen.text)
         self.assertIn("cf_product_name, cf_location", screen.text)
         self.assertIn("Zoho enforces the layout's required fields: the support lead must choose a value for "
-                      "each before part C continues.", screen.text)
+                      "each before any further part ships.", screen.text)
+        self.assertNotIn("part C", screen.text)
         # Nothing was made, so nothing is read back, looked up or attached.
         self.assertEqual(len(self.posted(http)), 1)
         self.assertEqual(http.to("GET", "/api/v1/tickets/%s" % TICKET_ID), [])
@@ -1040,6 +1111,29 @@ class TestTicketRunTests(unittest.TestCase):
         self.assertIn("contactId", screen.text)
         self.assertNotIn("Zoho enforces the layout's required fields", screen.text)
         self.assertIn("Nothing was created", screen.text)
+
+    def test_a_create_with_no_answer_says_a_ticket_may_exist_and_how_to_find_it(self):
+        unknown = ZohoUnknownOutcome("a write to Zoho had no answer (TimeoutError)", error="timeout")
+        rc, http, screen = self.run_script(self.routes({("POST", "/api/v1/tickets"): unknown}))
+        self.assertEqual(rc, 1)
+        self.assertIn("error=timeout", screen.text)
+        self.assertIn("may have been created", screen.text)
+        self.assertIn("[stage:EM-TEST-7]", screen.text)
+        self.assertNotIn("#None", screen.text)
+        # Nothing more is sent after a create nobody confirmed.
+        self.assertEqual(len(self.posted(http)), 1)
+        self.assertEqual(http.to("GET", "/api/v1/contacts/%s/tickets" % CONTACT_ID), [])
+
+    def test_a_second_create_with_no_answer_names_the_first_and_the_reference(self):
+        unknown = ZohoUnknownOutcome("a write to Zoho had no answer (TimeoutError)", error="timeout")
+        routes = self.routes({("GET", "/api/v1/contacts/%s/tickets" % CONTACT_ID): (200, {"data": []}),
+                              ("POST", "/api/v1/tickets"): [
+                                  (200, {"id": TICKET_ID, "ticketNumber": "1201", "webUrl": None}), unknown]})
+        rc, _, screen = self.run_script(routes)
+        self.assertEqual(rc, 1)
+        self.assertIn("may have been created", screen.text)
+        self.assertIn("[stage:EM-TEST-7]", screen.text)
+        self.assertIn("#1201", screen.text)
 
     def test_a_failure_after_the_ticket_exists_says_which_one_to_close(self):
         failing = ZohoRejected("x", error="INVALID_DATA", fields=("content",))

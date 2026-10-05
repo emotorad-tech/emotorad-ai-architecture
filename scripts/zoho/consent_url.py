@@ -12,7 +12,9 @@ the client id, every scope the chatbot needs (comma-separated, SCOPES in
 _common.py), the redirect address, access_type=offline and prompt=consent.
 Open it signed in to Zoho as the granting user, approve, and copy the code
 from the address bar (the page itself may show an error). Then run
-exchange_code.py within two minutes.
+exchange_code.py within two minutes. The redirect address is printed beside
+the link, trimmed of spaces: Zoho refuses one that differs by a character
+from the address registered on the client ("Invalid Redirect Uri").
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import argparse
 import getpass
 from typing import Callable, List, Optional
 
-from _common import ask_secret, consent_url
+from _common import REDIRECT_RULE, ask_secret, consent_url, redirect_address
 
 
 def parser() -> argparse.ArgumentParser:
@@ -33,11 +35,18 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.getpass,
          out: Callable[[str], None] = print) -> int:
     args = parser().parse_args(argv)
+    redirect = redirect_address(args.redirect_uri)
+    if redirect is None:
+        out("--redirect-uri is empty. %s Nothing was printed." % REDIRECT_RULE)
+        return 1
     client_id = ask_secret("Zoho client id: ", ask)
     out("Open this address while signed in to Zoho as the granting user, then approve:")
-    out(consent_url(client_id, args.redirect_uri))
+    out("Redirect address: %s" % redirect)
+    out(consent_url(client_id, redirect))
+    out('If Zoho says "Invalid Redirect Uri", the redirect address above is not the one registered on the '
+        "client, character for character. Copy it from the client's settings and rerun.")
     out("Copy the code= value from the address bar (the page may show an error), "
-        "then run exchange_code.py within two minutes.")
+        "then run exchange_code.py within two minutes, with the same redirect address.")
     return 0
 
 

@@ -70,6 +70,19 @@ SHAPES = ROOT / "docs" / "api-shapes"
 _ID = re.compile(r"[0-9]{1,30}")
 
 
+# What the person is told whenever the redirect address may be the problem.
+# Zoho compares it with the client's registered one exactly ("Invalid Redirect
+# Uri" on the consent page), so a pasted space or a missing slash is enough.
+REDIRECT_RULE = "The redirect address must be the one registered on the client, character for character."
+
+
+def redirect_address(value: Optional[str]) -> Optional[str]:
+    """--redirect-uri without the spaces or line end a paste brings. None
+    when nothing is left."""
+    text = (value or "").strip()
+    return text or None
+
+
 def scope_string() -> str:
     """The scopes as Zoho's consent address takes them: comma-separated."""
     return ",".join(SCOPES)

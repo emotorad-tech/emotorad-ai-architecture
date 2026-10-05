@@ -61,7 +61,7 @@ from emotorad_ai.tickets.seam import DeskTicketSystem
 from emotorad_ai.tickets.store import InMemoryTicketStore
 from emotorad_ai.tools.fixtures import WARRANTY_RECORDS
 from emotorad_ai.zoho.desk import find_adoptable
-from emotorad_ai.zoho.errors import ZohoError, ZohoRejected, ZohoTooLarge
+from emotorad_ai.zoho.errors import ZohoError, ZohoRejected, ZohoTooLarge, ZohoUnknownOutcome
 from emotorad_ai.zoho.payload import ticket_payload
 
 # A fixture bike: invented data, so the test ticket names no real frame.
@@ -72,7 +72,7 @@ MB = 1024 * 1024
 
 # What the person is told when Zoho names fields the chatbot does not send.
 ENFORCED = ("Zoho enforces the layout's required fields: the support lead must choose a value for each "
-            "before part C continues.")
+            "before any further part ships.")
 # Zoho may keep the description's newlines, or turn them into HTML. Either is
 # readable. Lines run together into one are not.
 _LINE_BREAKS = ("\n", "<br", "</p>", "</div>", "<li")
@@ -218,6 +218,12 @@ def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.g
         return 1
 
 
+def unconfirmed(exc: ZohoUnknownOutcome, chat_reference: str) -> str:
+    """A create Zoho never answered: it may have made the ticket."""
+    return ("Stopped: error=%s. Zoho did not confirm the ticket, so one may have been created: look in Desk for "
+            "a ticket whose subject ends [%s] and close it." % (exc.error, chat_reference))
+
+
 def save_listing(name: str, answer: Any, source: str, shapes_dir: Path, out: Callable[[str], None],
                  person: bool = False) -> None:
     """A list answer, saved only when it lists something. An empty one (a
@@ -266,6 +272,9 @@ def _run(client: ScriptClient, args: argparse.Namespace, record: Dict[str, Any],
         created.update(client.desk.create_ticket(payload))
     except ZohoRejected as exc:
         return _rejected(exc, payload, source, shapes_dir, out)
+    except ZohoUnknownOutcome as exc:
+        out(unconfirmed(exc, record["chat_reference"]))
+        return 1
     out("Created ticket #%s with chat reference %s." % (created.get("ticketNumber"), record["chat_reference"]))
     ticket_id = zoho_id(created.get("id"))
     if ticket_id is None:
@@ -296,7 +305,11 @@ def _run(client: ScriptClient, args: argparse.Namespace, record: Dict[str, Any],
     elif args.real_department:
         out("The look-up found nothing. No second ticket in the real department. Tell Claude the list lags.")
     else:
-        second = client.desk.create_ticket(payload)
+        try:
+            second = client.desk.create_ticket(payload)
+        except ZohoUnknownOutcome as exc:
+            out("%s Close ticket #%s too." % (unconfirmed(exc, record["chat_reference"]), created.get("ticketNumber")))
+            return 1
         out("The look-up found nothing, so a second ticket was made (#%s): the list lags. Close both."
             % second.get("ticketNumber"))
 

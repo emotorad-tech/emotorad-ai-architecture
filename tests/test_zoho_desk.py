@@ -498,7 +498,8 @@ class ShapeChecks:
         subjects += [item["subject"] for item in self.recorded("zoho-contact-tickets.json")["data"]]
         for subject in subjects:
             with self.subTest(subject=subject):
-                self.assertRegex(subject, r"^(\[Unverified\] )?\[AI chat\] .+ \[(stage|prod):EM-([0-9]{7}|TEST-[0-9]+)\]$")
+                self.assertRegex(subject,
+                                 r"^(\[Unverified\] )?\[AI chat\] .+ \[(stage|prod):EM-([0-9]{7}|TEST-[0-9]+)\]$")
 
     def test_every_error_code_the_client_classifies_is_recorded(self):
         errors = self.recorded("zoho-errors.json")

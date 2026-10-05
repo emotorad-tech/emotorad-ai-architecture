@@ -15,6 +15,10 @@ answer names the India data centre. A token issued anywhere else is revoked at
 once and never shown. Otherwise it prints the refresh token once, with a
 warning. Keep it somewhere safe until it goes into the config store (person
 step 8). Replaces reports/zoho-probe/exchange_code.py.
+
+The redirect address is trimmed of spaces and printed before the exchange.
+A network failure or a server error is not a refusal: it names the error and
+says to run the script again.
 """
 
 from __future__ import annotations
@@ -23,7 +27,10 @@ import argparse
 import getpass
 from typing import Any, Callable, List, Optional
 
-from _common import TOKEN_URL, ask_secret, exchange_form, granted_scopes, post_form, revoke, says_india
+from _common import (
+    REDIRECT_RULE, TOKEN_URL, ask_secret, exchange_form, granted_scopes, post_form, redirect_address, revoke,
+    says_india,
+)
 from emotorad_ai.zoho.errors import ZohoError
 from emotorad_ai.zoho.http import DeskHTTP
 
@@ -32,6 +39,19 @@ WARNING = (
     "(docs/runbooks/config-store.md, section 7) or a password manager. Never paste it into a chat, "
     "a file in a repo or a ticket. Then clear this terminal's scrollback."
 )
+
+
+# The code was neither taken nor turned down, as far as the script can tell.
+TRY_AGAIN = ("Nothing says the code is bad: run exchange_code.py again. A code lasts two minutes and works once, "
+             "so if they have passed, or Zoho then says invalid_code, approve again first and use the new code.")
+
+
+def refused(error: str, redirect: Optional[str]) -> str:
+    """What the person is told when Zoho turns the code down."""
+    text = "Zoho refused the code (error=%s). Codes last two minutes: approve again and rerun." % error
+    if redirect:
+        text += " Redirect address: %s. %s It must be the one given to consent_url.py too." % (redirect, REDIRECT_RULE)
+    return text
 
 
 def parser() -> argparse.ArgumentParser:
@@ -45,18 +65,30 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.getpass, http: Any = None,
          out: Callable[[str], None] = print) -> int:
     args = parser().parse_args(argv)
+    redirect = None
+    if not args.self_client:
+        redirect = redirect_address(args.redirect_uri)
+        if redirect is None:
+            out("--redirect-uri is empty. %s Nothing was sent." % REDIRECT_RULE)
+            return 1
+        out("Redirect address: %s" % redirect)
     client_id = ask_secret("Zoho client id: ", ask)
     client_secret = ask_secret("Zoho client secret: ", ask)
     code = ask_secret("Grant code from the address bar: ", ask)
     http = http if http is not None else DeskHTTP()
-    form = exchange_form(client_id, client_secret, code, None if args.self_client else args.redirect_uri)
+    form = exchange_form(client_id, client_secret, code, redirect)
     try:
-        _, answer = post_form(http, TOKEN_URL, form)
+        status, answer = post_form(http, TOKEN_URL, form)
     except ZohoError as exc:
-        out("Zoho refused the code (error=%s). Codes last two minutes: approve again and rerun." % exc.error)
+        out("Zoho could not be reached or did not answer (%s, error=%s). %s" % (type(exc).__name__, exc.error,
+                                                                               TRY_AGAIN))
         return 1
-    if answer.get("error"):
-        out("Zoho refused the code (error=%s). Codes last two minutes: approve again and rerun." % answer["error"])
+    if status >= 500:
+        out("Zoho answered %d, a server error (error=%s). %s" % (status, answer.get("error") or "http_%d" % status,
+                                                                 TRY_AGAIN))
+        return 1
+    if answer.get("error") or status >= 400:
+        out(refused(str(answer.get("error") or "http_%d" % status), redirect))
         return 1
     refresh_token = answer.get("refresh_token")
     if not says_india(answer):
