@@ -1,0 +1,21 @@
+{
+  "_source": "Not a capture. The bodies are Zoho's own examples and error codes from its published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/Common.json: errorJson, invalidDataErrorResponse, badRequestErrorResponse and the errorCode list). Codes with no example there carry errorCode only. scripts/zoho/probe.py and scripts/zoho/test_ticket.py replace this file with masked captures of the errors they meet (spec 2026-10-05, part 1).",
+  "invalid_data": {
+    "errorCode": "INVALID_DATA",
+    "message": "The data does not comply to the validation restrictions defined.",
+    "errors": [
+      {"fieldName": "/contactId", "errorType": "invalid"},
+      {"fieldName": "/departmentId", "errorType": "invalid"}
+    ]
+  },
+  "bad_request": {"errorCode": "BAD_REQUEST", "message": "You are not authorized to perform this operation."},
+  "invalid_oauth": {"errorCode": "INVALID_OAUTH", "message": "The OauthToken is invalid or has expired."},
+  "forbidden": {"errorCode": "FORBIDDEN", "message": "You are not authorized to access this resource."},
+  "url_not_found": {"errorCode": "URL_NOT_FOUND", "message": "The URL you requested could not be found."},
+  "scope_mismatch": {"errorCode": "SCOPE_MISMATCH"},
+  "oauth_org_mismatch": {"errorCode": "OAUTH_ORG_MISMATCH"},
+  "license_access_limited": {"errorCode": "LICENSE_ACCESS_LIMITED"},
+  "resource_size_exceeded": {"errorCode": "RESOURCE_SIZE_EXCEEDED"},
+  "too_many_requests": {"errorCode": "TOO_MANY_REQUESTS"},
+  "threshold_exceeded": {"errorCode": "THRESHOLD_EXCEEDED"}
+}

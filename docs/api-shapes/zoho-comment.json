@@ -1,0 +1,11 @@
+{
+  "_source": "Not a capture. Built from Zoho's published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/TicketComment.json: createTicketComment takes content (at most 32000), isPublic and contentType plainText or html, and answers 200 with commentResponse, whose example this follows; the list answer wraps comments in data). Every value is fake. scripts/zoho/probe.py and scripts/zoho/test_ticket.py replace this file with a masked capture (spec 2026-10-05, part 1).",
+  "id": "4000000529001",
+  "content": "[stage:EM-1000001 transcript, turns 1-2]",
+  "contentType": "plainText",
+  "isPublic": false,
+  "commentedTime": 1759653060000,
+  "modifiedTime": null,
+  "commenterId": "4000000008692",
+  "attachments": []
+}

@@ -1,0 +1,15 @@
+{
+  "_source": "Not a capture. Built from Zoho's published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/Search.json: searchContacts takes phone or mobile, with * as a wildcard, and answers 200 with a data list or 204 when nothing matches; the contact's properties come from v1.0/Contact.json). Every value is fake: the contact is the test contact of person step 3. scripts/zoho/probe.py and scripts/zoho/test_ticket.py replace this file with a masked capture (spec 2026-10-05, part 1).",
+  "data": [
+    {
+      "id": "4000000000002",
+      "firstName": null,
+      "lastName": "AI chatbot test",
+      "mobile": "+919999999999",
+      "phone": null,
+      "email": null,
+      "webUrl": "https://desk.zoho.in/[masked]/4000000000002",
+      "createdTime": "2026-10-05T08:00:00.000Z"
+    }
+  ]
+}

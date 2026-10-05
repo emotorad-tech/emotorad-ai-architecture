@@ -1,0 +1,25 @@
+{
+  "_source": "Not a capture. Built from Zoho's published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/Ticket.json: getTicketsByContact takes departmentId, sortBy (-createdTime for newest first) and limit, and answers 200 with a data list or 204), with the ticket properties of zoho-ticket.json. Every value is fake; the second ticket is another deployment's with the same EM- number. find_adoptable reads the subject of each ticket in this list, so the list must carry it; scripts/zoho/test_ticket.py checks that on the real answer. scripts/zoho/probe.py and scripts/zoho/test_ticket.py replace this file with a masked capture.",
+  "data": [
+    {
+      "id": "4000000528005",
+      "ticketNumber": "1024",
+      "subject": "[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]",
+      "status": "Open",
+      "departmentId": "4000000000001",
+      "contactId": "4000000000002",
+      "createdTime": "2026-10-05T08:30:00.000Z",
+      "webUrl": "https://desk.zoho.in/[masked]/4000000528005"
+    },
+    {
+      "id": "4000000527001",
+      "ticketNumber": "1023",
+      "subject": "[AI chat] SAFETY - bike not given [prod:EM-1000001]",
+      "status": "Open",
+      "departmentId": "4000000000001",
+      "contactId": "4000000000002",
+      "createdTime": "2026-10-05T07:10:00.000Z",
+      "webUrl": "https://desk.zoho.in/[masked]/4000000527001"
+    }
+  ]
+}

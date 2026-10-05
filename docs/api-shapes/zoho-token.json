@@ -1,0 +1,12 @@
+{
+  "_source": "Not a capture, and not in Zoho Desk's OpenAPI files: the token endpoint belongs to Zoho Accounts. The success keys are the ones the OMS reads in production (em-biz-backend zoho/zoho_api_client.py, get_new_token: access_token, token_type, expires_in). The error bodies are the ones the design names (spec 2026-10-05, section 1: 'Access Denied' with HTTP 200 when throttling, invalid_code, invalid_client, invalid_client_secret). Values are fake. scripts/zoho/probe.py replaces this file with a masked capture (spec 2026-10-05, part 1).",
+  "refresh": {
+    "access_token": "[masked]",
+    "token_type": "Bearer",
+    "expires_in": 3600
+  },
+  "access_denied": {"error": "Access Denied"},
+  "invalid_code": {"error": "invalid_code"},
+  "invalid_client": {"error": "invalid_client"},
+  "invalid_client_secret": {"error": "invalid_client_secret"}
+}
