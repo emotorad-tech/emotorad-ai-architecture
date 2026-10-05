@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from .contract import InboundMessage
 from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState, utc_now_iso
-from .guardrails import REFERENCE_SUFFIX
+from .guardrails import HANDOVER_NOT_RECORDED_MESSAGE, REFERENCE_SUFFIX
 # ascii_digits lives in digits.py so observability.py can use it without an
 # import cycle. It is imported here by name, so `verify_first.ascii_digits`
 # still works for anything that reads it from this module.
@@ -136,7 +136,8 @@ WRONG_CODE = "That code isn't right. You have {left} left. Please check the SMS 
 CODE_EXPIRED = "That code has expired. Say 'resend' and I'll send you a new one."
 # The lock-out's two halves (spec 2026-10-05, section 6). If a cap on
 # unverified tickets refuses the lock-out ticket, the cap's text replaces
-# PASSING_ON, so nothing is promised.
+# PASSING_ON, and so does guardrails.HANDOVER_NOT_RECORDED_MESSAGE when no
+# ticket was recorded with Zoho on, so nothing is promised.
 LOCKED_WHY = "That's too many wrong codes, so I can't confirm it's you here."
 TOO_MANY_WHY = "I can't send any more codes in this chat."
 PASSING_ON = "I'm passing you to our support team, who can verify you another way."
@@ -180,11 +181,12 @@ class GateReply:
 
 
 # Records the lock-out ticket: (message, state, the number to call, the
-# outcome) -> (reference, refusal). Runtime._record_lockout. It answers
-# (None, None) when nothing can be recorded (Zoho off, no number), and
-# (None, text) when a cap on unverified tickets refuses it.
+# outcome) -> (reference, refusal). Runtime._record_lockout. It answers None
+# when tickets are not recorded at all (Zoho off), (None, None) when this one
+# was not (the write failed, or no number to call), and (None, text) when a
+# cap on unverified tickets refuses it.
 LockoutRecorder = Callable[[InboundMessage, ConversationState, Optional[str], str],
-                           Tuple[Optional[str], Optional[str]]]
+                           Optional[Tuple[Optional[str], Optional[str]]]]
 
 
 class VerifyFirst:
@@ -360,17 +362,23 @@ class VerifyFirst:
         found in this message, the pending number, or the last number a code
         went to. Its reference is added to the text. There is one per run:
         every later locked message gets the same ticket back. A cap that
-        refuses it is said instead of the hand-over, and nothing is promised."""
+        refuses it is said instead of the hand-over, and nothing is promised.
+        Nor is anything promised when nothing was recorded (the write failed,
+        or there is no number to call): the hand-over is said only with a
+        ticket behind it (the final review, safety-flow Important 2). With
+        Zoho off the lock-out is as before."""
         text = why + " " + PASSING_ON
-        if self.record_lockout is None:
-            return self._reply(message, state, text, outcome, model_text, escalated=True)
         number = ("+91" + typed) if typed else (
             self.store.pending_phone(message.conversation_id) or state.last_code_phone)
-        reference, refusal = self.record_lockout(message, state, number, outcome)
+        recorded = self.record_lockout(message, state, number, outcome) if self.record_lockout else None
+        if recorded is None:
+            return self._reply(message, state, text, outcome, model_text, escalated=True)
+        reference, refusal = recorded
         if refusal is not None:
             return self._reply(message, state, why + " " + refusal, outcome, model_text)
-        if reference:
-            text += REFERENCE_SUFFIX.format(reference=reference)
+        if not reference:
+            return self._reply(message, state, why + " " + HANDOVER_NOT_RECORDED_MESSAGE, outcome, model_text)
+        text += REFERENCE_SUFFIX.format(reference=reference)
         reply = self._reply(message, state, text, outcome, model_text, escalated=True)
         reply.ticket_id = reference
         return reply

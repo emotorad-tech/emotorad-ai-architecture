@@ -2706,19 +2706,24 @@ class Runtime:
 
     def _record_lockout(
         self, message: InboundMessage, state: ConversationState, phone: Optional[str], outcome: str
-    ) -> Recorded:
+    ) -> Optional[Recorded]:
         """verify_first's lock-out ticket (spec 2026-10-05, section 6).
         VerifyFirst runs only for an anonymous customer, so the ticket is
         always unverified and never has a bike, and the run is the one an
-        anonymous writer has (`resolved` None in _ticket_run_start). Nothing
-        is recorded with Zoho off, or with no number to call.
+        anonymous writer has (`resolved` None in _ticket_run_start).
+
+        None with Zoho off, where no ticket is ever recorded and the lock-out
+        is as before. With Zoho on, no reference when nothing was recorded
+        (no number to call, or the write failed), logged as
+        lockout_ticket_not_recorded with why it was not, and VerifyFirst then
+        promises nothing (the final review, safety-flow Important 2).
 
         A cap that refuses it is kept in `state.transitions`, so the run's
         later locked messages say the same and neither try the store again
         nor sound the alarm again on every message."""
         cid = message.conversation_id
         if self._desk_store() is None:
-            return Recorded(None)
+            return None
         for entry in state.transitions:
             marker, _, cap = entry.partition(":")
             if marker == LOCKOUT_CAPPED and cap in CAP_TEXTS:
@@ -2734,6 +2739,9 @@ class Runtime:
         if recorded.refusal is not None:
             cap = next(name for name, text in CAP_TEXTS.items() if text == recorded.refusal)
             state.transitions.append("%s:%s" % (LOCKOUT_CAPPED, cap))
+        elif recorded.reference is None:
+            # _record_ticket logged the failure's class (ticket_record_failed).
+            self.log.emit("lockout_ticket_not_recorded", cid, why="not_recorded")
         return recorded
 
     def _add_note(self, conversation_id: str, ticket_id: str, text: str) -> bool:

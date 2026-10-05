@@ -18,6 +18,7 @@ from emotorad_ai.conversation import StoreUnavailable
 from emotorad_ai.guardrails import (
     CAP_OVERALL_MESSAGE,
     CAP_PER_NUMBER_MESSAGE,
+    HANDOVER_NOT_RECORDED_MESSAGE,
     HANDOVER_RECORDED_MESSAGE,
     REFERENCE_SUFFIX,
 )
@@ -35,7 +36,7 @@ from emotorad_ai.tickets.record import new_record
 from emotorad_ai.tools.mocks import RAISE_INTAKE_TICKET
 from emotorad_ai.tools.registry import ToolContext
 from emotorad_ai.verify_first import LOCKED, LOCKED_WHY, PASSING_ON, TOO_MANY_CODES, TOO_MANY_WHY
-from tests.test_safety_without_phone import CALL_BACK, FAKE, ONE_BIKE, RIDER, DeskChat
+from tests.test_safety_without_phone import CALL_BACK, FAKE, ONE_BIKE, PROMISES, RIDER, DeskChat
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -164,6 +165,53 @@ class LockoutTests(unittest.TestCase):
             "I can't send any more codes in this chat. I'm passing you to our support team, who can verify "
             "you another way.",
         )
+
+    def assert_nothing_promised(self, chat, reply, why_text):
+        self.assertEqual(reply.text, why_text + " " + HANDOVER_NOT_RECORDED_MESSAGE)
+        for promise in PROMISES:
+            self.assertNotIn(promise, reply.text)
+        self.assertNotIn(PASSING_ON, reply.text)
+        self.assertFalse(reply.escalated)
+        self.assertIsNone(reply.ticket_id)
+        self.assertEqual(chat.events("escalation"), [])
+        self.assertEqual(chat.records(), [])
+
+    def test_a_lockout_whose_record_fails_promises_nothing(self):
+        # The final review, safety-flow Important 2: with Zoho on, a lock-out
+        # that recorded nothing said "I'm passing you to our support team"
+        # and escalated.
+        chat = DeskChat()
+        with mock.patch.object(chat.registry.tickets, "create", side_effect=StoreUnavailable("down")):
+            locked = lock_out(chat)
+        chat.assert_model_never_called()
+        self.assertEqual(locked.handled_by, "verify_first:locked")
+        self.assert_nothing_promised(chat, locked, LOCKED_WHY)
+        (event,) = chat.events("lockout_ticket_not_recorded")
+        self.assertEqual(event["why"], "not_recorded")
+        self.assertEqual([e["error"] for e in chat.events("ticket_record_failed")], ["StoreUnavailable"])
+        # The next locked message tries again, and promises only once recorded.
+        again = chat.say("hello?")
+        self.assertEqual(again.ticket_id, chat.records()[0]["_id"])
+        self.assertTrue(again.escalated)
+
+    def test_a_lockout_with_no_number_to_call_promises_nothing(self):
+        # No number in the message, none pending and none a code went to.
+        chat = DeskChat()
+        chat.say("hi")
+        chat.say("9700000010")
+        chat.say("resend")
+        chat.say("resend")
+        state = chat.conversations.get("c1")
+        state.last_code_phone = None
+        chat.conversations.save(state)
+        with mock.patch.object(chat.store, "pending_phone", return_value=None):
+            reply = chat.say("resend")
+        chat.assert_model_never_called()
+        self.assertEqual(reply.handled_by, "verify_first:too_many_codes")
+        self.assertIsNone(chat.state().last_code_phone)
+        self.assert_nothing_promised(chat, reply, TOO_MANY_WHY)
+        (event,) = chat.events("lockout_ticket_not_recorded")
+        self.assertEqual(event["why"], "no_number")
 
     def test_a_lockout_with_no_number_to_call_records_nothing_and_is_logged(self):
         chat = DeskChat()
