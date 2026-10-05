@@ -201,6 +201,9 @@ class Agent:
             conversation_id=message.conversation_id,
             phone=resolved.identity.phone,
             cluster_id=resolved.cluster_id,
+            # Who this is, for the ticket seam. The run arrives in the facts
+            # (started_at), read when the tool runs.
+            persona=resolved.persona,
             late=self._late_facts(message.conversation_id, facts),
         )
 

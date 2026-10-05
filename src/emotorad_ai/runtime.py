@@ -1007,6 +1007,8 @@ class Runtime:
             conversation_id=message.conversation_id,
             phone=resolved.identity.phone,
             cluster_id=resolved.cluster_id,
+            persona=resolved.persona,
+            started_at=state.started_at,
         )
         prefetched: List[Dict[str, Any]] = []
         for call in chosen.prefetch:
@@ -1226,6 +1228,9 @@ class Runtime:
             # evidence_seen can flip during this very turn when a photo arrives
             # with the message that triggers the order.
             facts={
+                # This run of the conversation. Write receipts and tickets are
+                # scoped by it (tools/registry.py), read when the tool runs.
+                "started_at": lambda: state.started_at,
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
                 # The ticket tool's check on a frame number the rider reads
@@ -1515,6 +1520,8 @@ class Runtime:
                 conversation_id=message.conversation_id,
                 phone=resolved.identity.phone,
                 cluster_id=resolved.cluster_id,
+                persona=resolved.persona,
+                started_at=state.started_at,
                 late=late,
             ),
             run_without_idempotency=True,

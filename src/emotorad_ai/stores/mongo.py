@@ -136,8 +136,10 @@ def ensure_indexes(db: Any) -> Dict[str, List[str]]:
 
 
 def _receipts_of(conversation_id: str) -> Dict[str, Any]:
-    """Idempotency receipts are keyed `<conversation id>:<tool>:<key>` and can
-    hold what a tool returned about the person (a booking's customer id)."""
+    """Idempotency receipts are keyed `<conversation id>:<run start>:<tool>:<key>`,
+    or `<conversation id>:<tool>:<key>` for a call with no run, and can hold
+    what a tool returned about the person (a booking's customer id). Both
+    begin with the conversation id and a colon, which is what this matches."""
     return {"_id": {"$regex": "^%s:" % re.escape(conversation_id)}}
 
 
