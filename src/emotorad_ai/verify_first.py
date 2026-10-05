@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .contract import InboundMessage
 from .conversation import AWAITING_BIKE_SELECTION, AWAITING_ISSUE, ConversationState, utc_now_iso
+from .guardrails import REFERENCE_SUFFIX
 # ascii_digits lives in digits.py so observability.py can use it without an
 # import cycle. It is imported here by name, so `verify_first.ascii_digits`
 # still works for anything that reads it from this module.
@@ -133,19 +134,19 @@ ORDER_NOT_FOUND = "I couldn't find an order with that number. Please check it, o
 ASK_CODE = "Please type the 6-digit code I sent to {masked}. Say 'resend' for a new code, or send a different number."
 WRONG_CODE = "That code isn't right. You have {left} left. Please check the SMS and type it again."
 CODE_EXPIRED = "That code has expired. Say 'resend' and I'll send you a new one."
-LOCKED = (
-    "That's too many wrong codes, so I can't confirm it's you here. I'm passing you to our support "
-    "team, who can verify you another way."
-)
+# The lock-out's two halves (spec 2026-10-05, section 6). If a cap on
+# unverified tickets refuses the lock-out ticket, the cap's text replaces
+# PASSING_ON, so nothing is promised.
+LOCKED_WHY = "That's too many wrong codes, so I can't confirm it's you here."
+TOO_MANY_WHY = "I can't send any more codes in this chat."
+PASSING_ON = "I'm passing you to our support team, who can verify you another way."
+LOCKED = LOCKED_WHY + " " + PASSING_ON
 CONFIRMED = "Thanks, that's confirmed."
 NO_BIKES = "I couldn't find a bike registered on this number. Would you like to register it now?"
 LOOKUP_FAILED = "I can't load your bikes just now. What's happening with the bike?"
 
 
-TOO_MANY_CODES = (
-    "I can't send any more codes in this chat. I'm passing you to our support team, who can verify you "
-    "another way."
-)
+TOO_MANY_CODES = TOO_MANY_WHY + " " + PASSING_ON
 # Codes one conversation may send before the step hands over: the first, and
 # two more (a resend, or another number). Each is an SMS once the OTP service
 # is wired, so the step must not be a way to send them without end.
@@ -174,14 +175,26 @@ class GateReply:
     model_text: str
     escalated: bool = False
     resolved: Optional[ResolvedIdentity] = None
+    # The lock-out ticket's reference, once it is recorded.
+    ticket_id: Optional[str] = None
+
+
+# Records the lock-out ticket: (message, state, the number to call, the
+# outcome) -> (reference, refusal). Runtime._record_lockout. It answers
+# (None, None) when nothing can be recorded (Zoho off, no number), and
+# (None, text) when a cap on unverified tickets refuses it.
+LockoutRecorder = Callable[[InboundMessage, ConversationState, Optional[str], str],
+                           Tuple[Optional[str], Optional[str]]]
 
 
 class VerifyFirst:
-    def __init__(self, registry: ToolRegistry, resolver: IdentityResolver, log: Any) -> None:
+    def __init__(self, registry: ToolRegistry, resolver: IdentityResolver, log: Any,
+                 record_lockout: Optional[LockoutRecorder] = None) -> None:
         self.registry = registry
         self.resolver = resolver
         self.log = log
         self.store = getattr(registry, "verification", None)
+        self.record_lockout = record_lockout
 
     def applies(self, resolved: ResolvedIdentity) -> bool:
         """An anonymous customer, on a registry that can verify them."""
@@ -200,8 +213,12 @@ class VerifyFirst:
         self._keep_topic(message, state)
         if state.verify_step == CODE and self.store.attempts_left(message.conversation_id) <= 0:
             # Locked: the handover stands. No code is sent or tried again,
-            # whatever the message, until the store lets the entry go.
-            return self._reply(message, state, LOCKED, "locked", text, escalated=True)
+            # whatever the message, until the store lets the entry go. A
+            # number in the message is the one the lock-out ticket calls.
+            found = find_phone(text)
+            model_text = redact(text, found[1], "[phone]") if found else text
+            return self._lockout(message, state, LOCKED_WHY, "locked", model_text,
+                                 typed=found[0] if found else None)
         phone = find_phone(text)
 
         if state.verify_step == CODE:
@@ -242,11 +259,12 @@ class VerifyFirst:
         number, span = phone
         model_text = redact(message.message_text, span, "[phone]")
         if state.verify_sends >= MAX_CODES:
-            return self._too_many(message, state, model_text)
+            return self._too_many(message, state, model_text, typed=number)
         envelope = self._call(message, REQUEST_IDENTITY_VERIFICATION, {"phone": number})
         if is_error(envelope):
             return self._reply(message, state, INVALID_NUMBER, "invalid_number", model_text)
         state.verify_sends += 1
+        self._sent_to(message, state)
         state.verify_step = CODE
         state.verify_masked = envelope["data"]["phone_masked"]
         return self._reply(message, state, CODE_SENT.format(masked=state.verify_masked), "code_sent", model_text)
@@ -259,6 +277,7 @@ class VerifyFirst:
             # Nothing pending any more (swept): start again from the number.
             return self._ask_number_again(message, state, text)
         state.verify_sends += 1
+        self._sent_to(message, state)
         state.verify_masked = envelope["data"]["phone_masked"]
         return self._reply(message, state, CODE_RESENT.format(masked=state.verify_masked), "code_resent", text)
 
@@ -273,6 +292,7 @@ class VerifyFirst:
         if is_error(sent):
             return self._reply(message, state, ORDER_NOT_FOUND, "order_not_found", model_text)
         state.verify_sends += 1
+        self._sent_to(message, state)
         state.verify_step = CODE
         state.verify_masked = sent["data"]["phone_masked"]
         return self._reply(message, state, ORDER_CODE_SENT.format(masked=state.verify_masked),
@@ -286,7 +306,7 @@ class VerifyFirst:
         envelope = self._call(message, VERIFY_IDENTITY, {"code": value})
         if is_error(envelope):
             if envelope["error"]["code"] == "verification_locked":
-                return self._reply(message, state, LOCKED, "locked", model_text, escalated=True)
+                return self._lockout(message, state, LOCKED_WHY, "locked", model_text)
             if expired:
                 return self._reply(message, state, CODE_EXPIRED, "code_expired", model_text)
             left = tries(self.store.attempts_left(cid))
@@ -328,8 +348,37 @@ class VerifyFirst:
         reply.resolved = resolved
         return reply
 
-    def _too_many(self, message: InboundMessage, state: ConversationState, model_text: str) -> GateReply:
-        return self._reply(message, state, TOO_MANY_CODES, "too_many_codes", model_text, escalated=True)
+    def _too_many(self, message: InboundMessage, state: ConversationState, model_text: str,
+                  typed: Optional[str] = None) -> GateReply:
+        return self._lockout(message, state, TOO_MANY_WHY, "too_many_codes", model_text, typed=typed)
+
+    def _lockout(self, message: InboundMessage, state: ConversationState, why: str, outcome: str,
+                 model_text: str, typed: Optional[str] = None) -> GateReply:
+        """The lock-out: five wrong codes, or a fourth code asked for (spec
+        2026-10-05, section 6). When the runtime records tickets (Zoho on), a
+        `lockout` ticket is recorded, unverified. Its number is the first one
+        found in this message, the pending number, or the last number a code
+        went to. Its reference is added to the text. There is one per run:
+        every later locked message gets the same ticket back. A cap that
+        refuses it is said instead of the hand-over, and nothing is promised."""
+        text = why + " " + PASSING_ON
+        if self.record_lockout is None:
+            return self._reply(message, state, text, outcome, model_text, escalated=True)
+        number = ("+91" + typed) if typed else (
+            self.store.pending_phone(message.conversation_id) or state.last_code_phone)
+        reference, refusal = self.record_lockout(message, state, number, outcome)
+        if refusal is not None:
+            return self._reply(message, state, why + " " + refusal, outcome, model_text)
+        if reference:
+            text += REFERENCE_SUFFIX.format(reference=reference)
+        reply = self._reply(message, state, text, outcome, model_text, escalated=True)
+        reply.ticket_id = reference
+        return reply
+
+    def _sent_to(self, message: InboundMessage, state: ConversationState) -> None:
+        """Keep the number a code just went to. The lock-out ticket falls back
+        on it when the pending code is gone (spec 2026-10-05, section 6)."""
+        state.last_code_phone = self.store.pending_phone(message.conversation_id) or state.last_code_phone
 
     def _ask_number_again(self, message: InboundMessage, state: ConversationState, text: str) -> GateReply:
         state.verify_step = NUMBER

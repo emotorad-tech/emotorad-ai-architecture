@@ -18,6 +18,8 @@ from ..contract import ASSERTED, VERIFIED
 from ..conversation import address_tokens
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
+from ..tickets.caps import CAP_TEXTS, cap_reached
+from ..tickets.clock import now_iso
 from . import fixtures
 from .verification import VerificationStore, register_verification_tools
 from .registry import ToolError, ToolRegistry, ok
@@ -833,8 +835,20 @@ def build_registry(
                     "number we can call, then raise the ticket again once they have typed it.",
                     remedy="ask_for_callback_number",
                 )
+            source_key = ticket_source_key(conversation_id, started_at, RAISE_INTAKE_TICKET, idempotency_key)
+            # The caps on unverified tickets (spec 2026-10-05, section 6), the
+            # same helper the runtime's gates use. A verified customer's intake
+            # is never capped, and nor is a retry of a recorded one.
+            if identity != "verified" and persona == "customer" and getattr(tickets, "records_real_tickets", False):
+                capped = cap_reached(tickets.store, phone=callback, source_key=source_key, now=now_iso())
+                if capped is not None:
+                    raise ToolError(
+                        "unverified_ticket_capped",
+                        "No ticket was raised. Tell the customer exactly this, and promise no call: %s"
+                        % CAP_TEXTS[capped],
+                    )
             ticket = tickets.create(
-                source_key=ticket_source_key(conversation_id, started_at, RAISE_INTAKE_TICKET, idempotency_key),
+                source_key=source_key,
                 persona=persona,
                 kind="intake",
                 conversation_id=conversation_id,

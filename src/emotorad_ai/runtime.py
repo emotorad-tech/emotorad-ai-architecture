@@ -150,6 +150,7 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
+from .tickets.caps import CAP_TEXTS, cap_reached
 from .tickets.clock import now_iso, parse, plus
 from .tickets.kinds import is_desk_reference, is_urgent
 from .tickets.record import GONE
@@ -290,6 +291,9 @@ def _safety_idempotency_key(conversation_id: str, started_at: Optional[str]) -> 
 PURPOSE_SAFETY = "safety_callback"
 PURPOSE_HANDOVER = "handover"
 PURPOSE_LOCKOUT = "lockout"
+# Added to `state.transitions`, with the cap after a colon, when a cap on
+# unverified tickets refused the run's lock-out ticket (Runtime._record_lockout).
+LOCKOUT_CAPPED = "lockout_capped"
 
 
 class Recorded(NamedTuple):
@@ -469,7 +473,8 @@ class Runtime:
         # Verify first (the person's decision, 2026-09-30): an anonymous
         # customer proves their number and picks a bike before triage or any
         # model. Off unless asked for; the web chat API turns it on.
-        self.verify_gate = VerifyFirst(self.registry, self.resolver, self.log) if verify_first else None
+        self.verify_gate = (VerifyFirst(self.registry, self.resolver, self.log, record_lockout=self._record_lockout)
+                            if verify_first else None)
 
         definitions: Dict[str, AgentDefinition] = {
             BATTERY_SUPPORT: BATTERY_SUPPORT_DEFINITION,
@@ -597,6 +602,11 @@ class Runtime:
             code = str(arguments.get("code", "")).strip()
             if code and code not in state.consumed_codes:
                 state.consumed_codes.append(code)
+        # The intake tool refuses past the caps itself (tickets/caps.py). The
+        # alarmed event is logged here, where there is a log.
+        if (name == RAISE_INTAKE_TICKET and is_error(envelope)
+                and (envelope.get("error") or {}).get("code") == "unverified_ticket_capped"):
+            self.log.emit("unverified_ticket_capped", state.conversation_id, kind="intake", level="error")
 
     @staticmethod
     def _remember_coverage(state: ConversationState, envelope: Dict[str, Any]) -> None:
@@ -1328,11 +1338,11 @@ class Runtime:
             # The verify step answers: a number in this message gets its code now.
             gate = self.verify_gate.handle(message, state)
             if gate.escalated:
-                self.log.escalation(cid, "verification_locked", None)
+                self.log.escalation(cid, "verification_locked", gate.ticket_id)
             shown = replace(message, message_text=gate.model_text)
             return {"reply": self._finish(
                 shown, state, gate.text, "verify_first:" + gate.outcome, escalated=gate.escalated,
-                metadata={"transcript_text": gate.model_text},
+                ticket_id=gate.ticket_id, metadata={"transcript_text": gate.model_text},
             )}
         if resolved.may_disclose:
             # Signed in: the number is the sign-in's, with no code step to redo.
@@ -1591,7 +1601,7 @@ class Runtime:
             return {}
         gate = self.verify_gate.handle(message, state)
         if gate.escalated:
-            self.log.escalation(message.conversation_id, "verification_locked", None)
+            self.log.escalation(message.conversation_id, "verification_locked", gate.ticket_id)
         text = gate.text
         if gate.resolved is not None and state.erasure_step in (erasure_rules.WANTED, erasure_rules.CANCEL_WANTED):
             # Verified for a deletion or a cancel asked before the number:
@@ -1607,7 +1617,7 @@ class Runtime:
         shown = replace(message, message_text=gate.model_text)
         update: Dict[str, Any] = {"reply": self._finish(
             shown, state, text, "verify_first:" + gate.outcome, escalated=gate.escalated,
-            metadata={"transcript_text": gate.model_text},
+            ticket_id=gate.ticket_id, metadata={"transcript_text": gate.model_text},
         )}
         if gate.resolved is not None:
             update["resolved"] = gate.resolved
@@ -2623,6 +2633,10 @@ class Runtime:
         cid = message.conversation_id
         started_at = self._ticket_run_start(message, state, resolved)
         source_key = self._gate_key(cid, started_at, purpose)
+        if not verified and not is_urgent(kind, category):
+            refusal = self._cap_refusal(cid, kind, phone, source_key)
+            if refusal is not None:
+                return Recorded(None, refusal)
         fields: Dict[str, Any] = dict(
             kind=kind, conversation_id=cid, started_at=started_at,
             cluster_id=cluster_id or state.cluster_id, channel=message.channel, phone=phone,
@@ -2645,6 +2659,53 @@ class Runtime:
             return Recorded(None)
         self.log.emit("ticket_recorded", cid, ticket_id=reference, kind=kind, urgent=is_urgent(kind, category))
         return Recorded(reference)
+
+    def _cap_refusal(self, conversation_id: str, kind: str, phone: Optional[str], source_key: str) -> Optional[str]:
+        """The caps on unverified tickets that are not urgent (spec
+        2026-10-05, section 6), through the one helper the intake tool also
+        uses. Returns the text to send instead, or None. A store that cannot
+        answer does not cap: the record then fails or succeeds on its own."""
+        try:
+            cap = cap_reached(self._desk_store(), phone=phone, source_key=source_key, now=now_iso())
+        except StoreUnavailable as exc:
+            self.log.emit("ticket_cap_unchecked", conversation_id, kind=kind, error=type(exc).__name__)
+            return None
+        if cap is None:
+            return None
+        self.log.emit("unverified_ticket_capped", conversation_id, kind=kind, cap=cap, level="error")
+        return CAP_TEXTS[cap]
+
+    def _record_lockout(
+        self, message: InboundMessage, state: ConversationState, phone: Optional[str], outcome: str
+    ) -> Recorded:
+        """verify_first's lock-out ticket (spec 2026-10-05, section 6).
+        VerifyFirst runs only for an anonymous customer, so the ticket is
+        always unverified and never has a bike, and the run is the one an
+        anonymous writer has (`resolved` None in _ticket_run_start). Nothing
+        is recorded with Zoho off, or with no number to call.
+
+        A cap that refuses it is kept in `state.transitions`, so the run's
+        later locked messages say the same and neither try the store again
+        nor sound the alarm again on every message."""
+        cid = message.conversation_id
+        if self._desk_store() is None:
+            return Recorded(None)
+        for entry in state.transitions:
+            marker, _, cap = entry.partition(":")
+            if marker == LOCKOUT_CAPPED and cap in CAP_TEXTS:
+                return Recorded(None, CAP_TEXTS[cap])
+        if phone is None:
+            self.log.emit("lockout_ticket_not_recorded", cid, why="no_number")
+            return Recorded(None)
+        why = "five wrong codes" if outcome == "locked" else "a fourth code was asked for"
+        recorded = self._record_ticket(
+            message, state, None, kind="lockout", purpose=PURPOSE_LOCKOUT, phone=phone, verified=False,
+            description="The customer could not verify their number in the AI chat: %s." % why,
+        )
+        if recorded.refusal is not None:
+            cap = next(name for name, text in CAP_TEXTS.items() if text == recorded.refusal)
+            state.transitions.append("%s:%s" % (LOCKOUT_CAPPED, cap))
+        return recorded
 
     def _add_note(self, conversation_id: str, ticket_id: str, text: str) -> bool:
         """A line on a ticket the run already holds (spec section 2). A failed

@@ -206,7 +206,7 @@ An error comes back as an HTTP status with `{"detail": "<reason>"}` (a `422` car
 
 ## What changes with the Zoho integration
 
-Tickets move from a test system to Zoho Desk, where the support team works them. The request side of this contract does not change; the response keeps every field and may gain new optional ones. The ticket part is built (5 October 2026): each ticket is recorded with our own reference during the reply, and a background worker sends it to Zoho straight after. It goes to a test department on staging until engineering signs off real tickets. The handover wording comes with the next part.
+Tickets move from a test system to Zoho Desk, where the support team works them. The request side of this contract does not change; the response keeps every field and may gain new optional ones. The ticket part is built (5 October 2026): each ticket is recorded with our own reference during the reply, and a background worker sends it to Zoho straight after. It goes to a test department on staging until engineering signs off real tickets. The handover wording is in the table below, as drafts.
 
 | Area | Today | After Zoho | What to build now |
 | --- | --- | --- | --- |
@@ -219,6 +219,7 @@ Tickets move from a test system to Zoho Desk, where the support team works them.
 | Agent replies inside the chat | Not possible | Undecided: replies in the app would need push notifications | Keep the handed-over state open to later messages from "our team" |
 | Response fields | `ticket_id` only | May add an optional `ticket` object (id, status) beside `ticket_id`, which stays | Parse with unknown fields ignored |
 | Safety reports | Raised at once as critical | The same, as a top-priority Zoho ticket | Nothing |
+| Handover wording | "I am connecting you to a member of our support team now", with nothing recorded | A signed-in rider always has a number, so the app gets: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket_id`. On the website without a number, the bot first asks "What mobile number can they reach you on?" with `escalated: false`. Drafts until the support lead confirms them | Show the text as sent. Treat `escalated: false` as a chat still open |
 
 ## Open questions and versioning
 
@@ -230,6 +231,6 @@ The version is in the path, `/amiigo/v1/`. Within v1, changes only add things: n
 | Should a chat opened from one bike's screen name that bike? | Both | An optional `vin` field, so a rider with several bikes is not asked which one |
 | Should a message carry a client id, so a retry after a timeout is answered once? | Chat team | An optional `client_message_id`; the server answers a repeat with the first reply |
 | The rate limit counts messages per network address, and mobile carriers put many riders behind one address. Should the app's limit count per rider? | Chat team | Yes: 20 messages a minute per rider, keyed on the token |
-| After a handover, do agent replies come into the app chat? | Support and product | Decided with the Zoho work (see "What changes with Zoho") |
+| After a handover, do agent replies come into the app chat? | Support and product | Decided with the Zoho work (see "What changes with the Zoho integration") |
 | Should the server return a chat's history? | Both | A `GET` of the transcript, if the app needs history across devices |
 | Where do app developers get staging access and a test token? | Chat team | A staging test rider, plus the `sess-amiigo-test` session until tokens are wired |
