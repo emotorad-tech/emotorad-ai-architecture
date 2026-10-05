@@ -4,7 +4,7 @@ Sep 30, 2026 · @Sagnik Mukherjee
 
 ## Status and scope
 
-The support chat is built and tested for the website; the Amiigo endpoint, the Amiigo token check and Zoho ticketing are not built yet. Build the app against this contract; anything marked **Proposed** can still change before the endpoint ships, and we will tell you before it does.
+The support chat is built and tested for the website; the Amiigo endpoint and the Amiigo token check are not built yet. Zoho ticketing is built and sends to a test department on staging only, until engineering signs off real tickets. Build the app against this contract; anything marked **Proposed** can still change before the endpoint ships, and we will tell you before it does.
 
 | Part | Today | Planned |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ The support chat is built and tested for the website; the Amiigo endpoint, the A
 | Who the rider is | Test session `sess-amiigo-test` only | **Proposed:** the rider's Amiigo access token, checked by the bot |
 | Photos and videos | Built: photos stored in S3; videos by presigned upload | Same |
 | Conversations and memory | Built, in MongoDB | Same |
-| Support tickets | Test tickets (`EM-00001`) | Zoho Desk (see "What changes with Zoho") |
+| Support tickets | Recorded with our own `EM-` reference and sent to a Zoho Desk test department on staging | Zoho Desk's real department, after sign-off (see "What changes with the Zoho integration") |
 | Bike, warranty and service data | Test data | OMS warranty data, and the rider's Amiigo bikes, rides and service history |
 
 Staging gets this build once the current branch is merged and deployed; the chat team will say when.
@@ -206,12 +206,14 @@ An error comes back as an HTTP status with `{"detail": "<reason>"}` (a `422` car
 
 ## What changes with the Zoho integration
 
-Tickets move from a test system to Zoho Desk, where the support team works them. The request side of this contract does not change; the response keeps every field and may gain new optional ones. No date is set for the Zoho work yet.
+Tickets move from a test system to Zoho Desk, where the support team works them. The request side of this contract does not change; the response keeps every field and may gain new optional ones. The ticket part is built (5 October 2026): each ticket is recorded with our own reference during the reply, and a background worker sends it to Zoho straight after. It goes to a test department on staging until engineering signs off real tickets. The handover wording comes with the next part.
 
 | Area | Today | After Zoho | What to build now |
 | --- | --- | --- | --- |
-| `ticket_id` value | Test ids like `EM-00001`, from a counter that restarts with the server | The Zoho Desk ticket number | Treat it as an opaque string: do not parse it or assume a prefix or length |
-| Where a ticket goes | A test store nobody works | Zoho Desk, with the chat transcript and links to the rider's photos and videos attached | Nothing |
+| `ticket_id` value | Test ids like `EM-00001`, from a counter that restarts with the server | Our own reference: `EM-` and seven digits, from `EM-1000001`. Never the Zoho Desk ticket number; the Zoho ticket carries our reference, so support finds it either way | Treat it as an opaque string: do not parse it or assume a prefix or length |
+| Where a ticket goes | A test store nobody works | Zoho Desk, with this chat's transcript, and the rider's photos and videos uploaded to the ticket as files. A file over Zoho's size limit (taken as 20 MB until it is tested) is not attached: the ticket says a photo or video was too large, and the AI team keeps it | Nothing |
+| How support finds a chatbot ticket | Not applicable | The ticket's subject starts with `[AI chat]` and ends with our reference in square brackets, for example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. There is no custom field for it: that prefix is what a Zoho rule or webhook filters on | Nothing |
+| When the ticket reaches Zoho | Not applicable | Shortly after the reply. The reply never waits for Zoho, so `ticket_id` is in the reply at once. Later messages in the chat are added to the same ticket | Nothing: show the reference as soon as it arrives |
 | After a handover (`escalated: true`) | The bot stops; no one follows up, as it is a test | Support contacts the rider from Zoho; by phone or email is not decided | Say "our team will contact you", with no promised channel or time |
 | Ticket status | Not available | **Proposed:** `GET /amiigo/v1/tickets` returns the rider's tickets and their Zoho status, for a "My support requests" screen | Leave room for such a screen; do not build it yet |
 | Agent replies inside the chat | Not possible | Undecided: replies in the app would need push notifications | Keep the handed-over state open to later messages from "our team" |

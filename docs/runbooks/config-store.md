@@ -15,6 +15,21 @@ a flat JSON object. Field names are the environment variables the code reads:
 | `EMOTORAD_AI_PLAYGROUND_PASSWORD` | `api.py` basic auth on `/playground` |
 | `LANGFUSE_PUBLIC_KEY` | `tracing.py`; optional, tracing is off without both Langfuse keys |
 | `LANGFUSE_SECRET_KEY` | `tracing.py`; see `docs/runbooks/tracing.md` |
+| `EMOTORAD_ZOHO_REFRESH_TOKEN` | `zoho/settings.py`. **Secret.** The switch for Zoho Desk tickets: absent means the mock, as before. The chatbot's own refresh token from `scripts/zoho/exchange_code.py`, never the OMS's. See section 7 |
+| `EMOTORAD_ZOHO_CLIENT_ID` | `zoho/settings.py`. **Secret.** The OMS's Zoho OAuth client id |
+| `EMOTORAD_ZOHO_CLIENT_SECRET` | `zoho/settings.py`. **Secret.** The OMS's client secret. When it is rotated in the OMS, update it here the same day, or `/health` says `token refused: invalid_client_secret` |
+| `EMOTORAD_ZOHO_ORG_ID` | `zoho/settings.py`. Not secret; needed with the token. The Desk organisation id |
+| `EMOTORAD_ZOHO_TEST_DEPARTMENT_ID` | `zoho/settings.py`. Not secret; needed with the token. The configured test department (Inkodop technologies Pvt.Ltd), by id, where every test-mode ticket goes |
+| `EMOTORAD_ZOHO_TEST_CONTACT_ID` | `zoho/settings.py`. Not secret; needed with the token. The "AI chatbot test" contact, on every test-mode ticket |
+| `EMOTORAD_ZOHO_DEPARTMENT_ID` | `zoho/settings.py`. Not secret; live only. The real department |
+| `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` | `zoho/settings.py`. Not secret; live only. The "Unverified AI chat" contact, on every ticket for a number nobody proved |
+| `EMOTORAD_ZOHO_LIVE` | `zoho/settings.py`. Not secret; live only. Exactly `yes` sends to the real department; anything else is test mode. Set only after Sachin's sign-off. Refused while `EMOTORAD_AI_DEV_CODES` is on or the OTP sender is the mock |
+| `EMOTORAD_ZOHO_LAYOUT_ID` | `zoho/settings.py`. Optional, not secret: the ticket layout every ticket is made in, from `scripts/zoho/probe.py`, when the department has more than one active layout. Absent means the department's default |
+| `EMOTORAD_ZOHO_PRIORITY_HIGH` | `zoho/settings.py`. Optional, default `High`: Zoho's priority value for urgent tickets, from the probe |
+| `EMOTORAD_ZOHO_PRIORITY_MEDIUM` | `zoho/settings.py`. Optional, default `Medium`: the priority for every other ticket |
+| `EMOTORAD_ZOHO_CHANNEL` | `zoho/settings.py`. Optional, default `Chat`: a system channel from the probe, never an integration channel |
+| `EMOTORAD_ZOHO_CREDITS_FLOOR` | `zoho/settings.py`. Optional, default `1000`: below this many API credits left today, only urgent tickets are sent |
+| `EMOTORAD_ZOHO_ATTACHMENT_LIMIT_MB` | `zoho/settings.py`. Optional, default `20`: a photo or video over this is noted on the ticket, not attached |
 
 ### Note on EMOTORAD_OMS_API_KEY
 
@@ -125,3 +140,84 @@ model id, distinct from the Anthropic path's default of `claude-opus-5`. `EMOTOR
 if set, overrides the default for whichever mode is active, so it must match that path's id
 format: the unprefixed id (`claude-opus-5`, `claude-sonnet-5`, …) for `anthropic`, the
 `anthropic.`-prefixed id for `bedrock`.
+
+## 7. Zoho Desk tickets
+
+Spec: `docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`. Zoho is off while
+`EMOTORAD_ZOHO_REFRESH_TOKEN` is absent: tickets go to the mock and `/health` says
+`"zoho":"not configured"`. `EMOTORAD_AI_ENV` (already on the workflow's `docker run` line) is
+needed too, because it starts every chat reference, for example `stage:EM-1000001`. The
+playground, the CLI and the local chat page never use these settings, even when they are present.
+
+Run every command here in a terminal window outside the Claude app, and clear the scrollback
+afterwards. Never paste a value into a chat session.
+
+**What Zoho rules filter on.** The Desk has no room for custom fields, so none is set. Each
+ticket's subject starts with `[AI chat]` and ends with its chat reference in square brackets, for
+example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. The prefix is what a Zoho
+rule or webhook criterion filters on. The reference at the end is how the worker finds its own
+ticket again after a timeout, so nobody edits a subject in Desk. The description's second line
+says `Source: AI chatbot`.
+
+**The scripts** (`scripts/zoho/`), in the order of the spec's part 1. Each asks for its secrets by
+hidden input and prints names, ids and counts only.
+
+| Script | What it does |
+| --- | --- |
+| `consent_url.py` | Prints the India consent address for the grant |
+| `exchange_code.py` | Swaps the code for the chatbot's refresh token, and shows it once |
+| `probe.py` | Read only. Lists the departments, every active ticket layout (its id, whether it is the default, each field and the required custom ones), the channels and the contacts, and writes masked shapes to `docs/api-shapes/` |
+| `test_ticket.py` | Writes one ticket in the test department and reads it back. It asks for the department's name every time. If Zoho enforces the layout's required fields, it names them and stops |
+| `tickets_report.py` | Waiting, stuck and held tickets, for the support lead |
+| `revoke.py` | Revokes the chatbot's refresh token |
+
+1. **The collection first.** Run `python scripts/mongo_setup.py` against the environment's
+   database, and check that `tickets` lists the `source_key` index. Without it the service
+   refuses Zoho and `/health` says `misconfigured: tickets index missing`.
+2. **The settings.** Add the six fields needed with the token: the three secrets
+   (`EMOTORAD_ZOHO_REFRESH_TOKEN`, `EMOTORAD_ZOHO_CLIENT_ID`, `EMOTORAD_ZOHO_CLIENT_SECRET`),
+   `EMOTORAD_ZOHO_ORG_ID`, `EMOTORAD_ZOHO_TEST_DEPARTMENT_ID` and `EMOTORAD_ZOHO_TEST_CONTACT_ID`.
+   Add `EMOTORAD_ZOHO_LAYOUT_ID` too when the probe shows more than one active layout and the
+   support lead names the one to use. The secret is replaced whole, so start from its current
+   value. Write it to a file, never to the screen:
+
+   ```bash
+   umask 077
+   aws secretsmanager get-secret-value --secret-id /emotorad/stage/ai/app \
+     --query SecretString --output text > ~/app-config.json
+   # Add the Zoho fields to ~/app-config.json in an editor. Keep every existing field.
+   aws secretsmanager put-secret-value --secret-id /emotorad/stage/ai/app \
+     --secret-string file://$HOME/app-config.json
+   rm -P ~/app-config.json
+   ```
+
+   Then check the names only, with the command in section 2.
+3. **Deploy** (section 3). `curl -s https://ai-release-stage.emotorad.com/health` should show
+   `"zoho":"test department"`. Anything else says what is wrong (see the table below).
+4. **The alarms,** once per environment:
+
+   ```bash
+   aws cloudformation deploy --stack-name emotorad-ai-stage-zoho-alarms \
+     --template-file infra/zoho-alarms.yaml \
+     --parameter-overrides LogGroupName=emotorad-ai-stage AlarmEmail=<the person who receives them>
+   ```
+
+   AWS emails that address to confirm the subscription. No alarm reaches it until they confirm.
+5. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
+   verification): add `EMOTORAD_ZOHO_DEPARTMENT_ID`, `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` and
+   `EMOTORAD_ZOHO_LIVE=yes` by step 2, with that environment's own refresh token.
+
+**To stop sending.** First run `python scripts/zoho/tickets_report.py` and give the support lead
+the list: those customers were told someone would be in touch. Then remove
+`EMOTORAD_ZOHO_REFRESH_TOKEN` by step 2 and redeploy. To revoke the token itself, run
+`python scripts/zoho/revoke.py`.
+
+| `/health` `zoho` | Meaning |
+| --- | --- |
+| `not configured` | No refresh token: the mock, as before |
+| `test department` | Sending to the test department |
+| `live` | Sending to the real department |
+| `misconfigured: <reason>` | A start-up check failed: the mock is used and nothing is recorded |
+| `not allowed in this region` | `AWS_REGION` begins with `eu-`: the mock is used |
+| `token refused: <error>` | Zoho refused the refresh token, for example after a secret rotation |
+| `sending failing: <code>` | Zoho refused the calls themselves, for example a missing scope |
