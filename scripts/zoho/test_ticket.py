@@ -34,7 +34,10 @@ fixture frame number), it:
      two minutes, and makes a second ticket only if both find nothing;
   5. adds a private comment, then uploads a small image and files of 19 MB and
      26 MB, to find Zoho's attachment limit;
-  6. saves the masked shapes to docs/api-shapes/zoho-*.json.
+  6. saves the masked shapes to docs/api-shapes/zoho-*.json: the first
+     upload's own answer as zoho-attachment.json and the ticket's list of
+     files as zoho-attachments.json. A list Zoho answers empty is not saved,
+     so the file already there stays for the suite to read.
 The real-department run stops after step 4 and never makes a second ticket.
 Close the ticket (or tickets) in Desk afterwards.
 """
@@ -215,6 +218,16 @@ def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.g
         return 1
 
 
+def save_listing(name: str, answer: Any, source: str, shapes_dir: Path, out: Callable[[str], None],
+                 person: bool = False) -> None:
+    """A list answer, saved only when it lists something. An empty one (a
+    204) would leave the suite nothing to read, so the file already there stays."""
+    if rows(answer):
+        save_shape(name, answer, source, shapes_dir, person=person)
+    else:
+        out("Zoho listed nothing for zoho-%s.json, so the file already there is kept." % name)
+
+
 def _rejected(exc: ZohoRejected, payload: Dict[str, Any], source: str, shapes_dir: Path,
               out: Callable[[str], None]) -> int:
     """Zoho refused the first ticket. Its field names are what the support
@@ -242,8 +255,8 @@ def _run(client: ScriptClient, args: argparse.Namespace, record: Dict[str, Any],
          created: Dict[str, Any], source: str, shapes_dir: Path, sleep: Callable[[float], None],
          out: Callable[[str], None]) -> int:
     last_ten = TEST_PHONE[-10:]
-    save_shape("contact-search", client.get("/api/v1/contacts/search", {"phone": "*" + last_ten, "limit": 10}),
-               source, shapes_dir, person=True)
+    save_listing("contact-search", client.get("/api/v1/contacts/search", {"phone": "*" + last_ten, "limit": 10}),
+                 source, shapes_dir, out, person=True)
     for field in ("phone", "mobile"):
         out("contacts whose %s ends %s: %d" % (field, last_ten[-4:], len(client.desk.search_contacts(field, last_ten))))
 
@@ -272,7 +285,7 @@ def _run(client: ScriptClient, args: argparse.Namespace, record: Dict[str, Any],
     # The worker's own call (zoho/desk.py contact_tickets), read raw for its shape.
     listing = client.get("/api/v1/contacts/%s/tickets" % args.contact_id,
                          {"departmentId": args.department_id, "sortBy": "-createdTime", "limit": 50})
-    save_shape("contact-tickets", listing, source, shapes_dir)
+    save_listing("contact-tickets", listing, source, shapes_dir, out)
     listed = rows(listing)
     out("subjects in the contact's ticket list: %s"
         % ("not known, the list is empty" if not listed else "yes" if all("subject" in t for t in listed) else "NO"))
@@ -296,9 +309,15 @@ def _run(client: ScriptClient, args: argparse.Namespace, record: Dict[str, Any],
     if comment_id:
         save_shape("comment", client.get("/api/v1/tickets/%s/comments/%s" % (ticket_id, comment_id)),
                    source, shapes_dir)
+    attachments = "/api/v1/tickets/%s/attachments" % ticket_id
+    kept_upload = False
     for name, data, mime in uploads(record["_id"]):
         out("upload %-26s %s" % (name, upload(client.desk, ticket_id, name, data, mime)))
-    save_shape("attachment", client.get("/api/v1/tickets/%s/attachments" % ticket_id), source, shapes_dir)
+        # The first upload Zoho takes, by its own answer: the Desk client hands back only the id.
+        if not kept_upload and client.answer("POST", attachments) is not None:
+            save_shape("attachment", client.answer("POST", attachments), source, shapes_dir)
+            kept_upload = True
+    save_shape("attachments", client.get(attachments), source, shapes_dir)
     out("Done. Close ticket #%s in Desk now." % created.get("ticketNumber"))
     return 0
 

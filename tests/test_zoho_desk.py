@@ -121,8 +121,9 @@ class SearchTests(unittest.TestCase):
 
 class ContactTests(unittest.TestCase):
     def test_a_contact_is_made_with_a_last_name_and_a_mobile_and_nothing_else(self):
-        client, fake = desk(Answer(200, shape("zoho-contact-search.json")["data"][0]))
-        self.assertEqual(client.create_contact("AI chat customer", "+919999999999"), TEST_CONTACT)
+        made = shape("zoho-contact-search.json")["data"][0]
+        client, fake = desk(Answer(200, made))
+        self.assertEqual(client.create_contact("AI chat customer", "+919999999999"), made["id"])
         sent = fake.desk_requests[0]
         self.assertEqual((sent["method"], sent["path"]), ("POST", "/api/v1/contacts"))
         self.assertEqual(json.loads(sent["body"]), {"lastName": "AI chat customer", "mobile": "+919999999999"})
@@ -361,10 +362,16 @@ class AdoptTests(unittest.TestCase):
         self.assertIsNone(find_adoptable([self.ticket("[AI chat] x []")], None))
 
     def test_the_recorded_list_can_be_adopted_from(self):
+        # Read from the shape, so a capture (other ids, EM-TEST references)
+        # is held to the same rule as the draft: each subject's reference
+        # adopts the newest ticket carrying it, and a near miss adopts none.
         recorded = shape("zoho-contact-tickets.json")["data"]
-        self.assertEqual(find_adoptable(recorded, "stage:EM-1000001")["id"], TICKET_ID)
-        self.assertEqual(find_adoptable(recorded, "prod:EM-1000001")["id"], "4000000527001")
-        self.assertIsNone(find_adoptable(recorded, "stage:EM-1000002"))
+        for item in recorded:
+            reference = item["subject"].rstrip().rsplit("[", 1)[1].rstrip("]")
+            with self.subTest(reference=reference):
+                newest = next(t for t in recorded if t["subject"].rstrip().endswith("[%s]" % reference))
+                self.assertIs(find_adoptable(recorded, reference), newest)
+                self.assertIsNone(find_adoptable(recorded, reference + "0"))
 
     def test_the_newest_match_is_the_first_in_the_list(self):
         # The list is newest first (contact_tickets), so a repeat is never preferred to the latest.
@@ -424,38 +431,61 @@ class AdoptAgeTests(unittest.TestCase):
         self.assertIs(find_adoptable([old, new], self.WANTED, not_before=self.CREATED), new)
 
 
-class ShapeTests(unittest.TestCase):
+class ShapeChecks:
+    """What the client needs from a folder of recorded shapes: the drafts in
+    docs/api-shapes (ShapeTests), or what part 1's scripts write over them
+    (tests/test_zoho_scripts.py CapturedShapeTests). Not a TestCase on its
+    own, so it runs once per folder."""
+
+    shapes_dir = SHAPES
+
+    def raw(self, name):
+        with open(os.path.join(self.shapes_dir, name), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def recorded(self, name):
+        return shape(name, self.shapes_dir)
+
+    def captured(self, name):
+        return str(self.raw(name).get("_source", "")).startswith("Captured by scripts/zoho/")
+
     def test_every_shape_says_where_it_came_from_and_what_replaces_it(self):
         for name in ZOHO_SHAPES:
             with self.subTest(name=name):
-                with open(os.path.join(SHAPES, name), encoding="utf-8") as handle:
-                    raw = json.load(handle)
-                self.assertIn("scripts/zoho/probe.py", raw["_source"])
-                self.assertTrue("zohodesk-oas" in raw["_source"] or "em-biz-backend" in raw["_source"])
-                self.assertNotIn("_source", shape(name))
+                source = self.raw(name)["_source"]
+                if self.captured(name):
+                    self.assertIn("masked by scripts/zoho/_common.py", source)
+                else:
+                    # A draft says what it was built from and which script's capture replaces it.
+                    self.assertIn("scripts/zoho/", source)
+                    self.assertTrue("zohodesk-oas" in source or "em-biz-backend" in source)
+                self.assertNotIn("_source", self.recorded(name))
 
     def test_no_shape_has_a_custom_field(self):
-        # The Desk's text custom fields are at their limit, so none is sent or read.
+        # The Desk's text custom fields are at their limit, so none is sent or
+        # read. A capture keeps the "cf" object Zoho answers with, its values
+        # masked, as it keeps every key; the client reads none of it.
         for name in ZOHO_SHAPES:
             with self.subTest(name=name):
-                with open(os.path.join(SHAPES, name), encoding="utf-8") as handle:
+                with open(os.path.join(self.shapes_dir, name), encoding="utf-8") as handle:
                     text = handle.read()
-                for banned in ("cf_chat_reference", "cf_source", '"cf"'):
-                    self.assertNotIn(banned, text)
+                banned = ("cf_chat_reference", "cf_source") + (() if self.captured(name) else ('"cf"',))
+                for word in banned:
+                    self.assertNotIn(word, text)
 
     def test_the_client_reads_only_keys_the_shapes_carry(self):
-        ticket = shape("zoho-ticket.json")
+        ticket = self.recorded("zoho-ticket.json")
         for key in ("id", "ticketNumber", "webUrl", "subject", "createdTime", "departmentId", "contactId"):
             self.assertIn(key, ticket)
         for name in ("zoho-contact-search.json", "zoho-contact-tickets.json"):
-            self.assertIsInstance(shape(name)["data"], list)
-            self.assertIn("id", shape(name)["data"][0])
-        for item in shape("zoho-contact-tickets.json")["data"]:
+            self.assertIsInstance(self.recorded(name)["data"], list)
+            self.assertIn("id", self.recorded(name)["data"][0])
+        for item in self.recorded("zoho-contact-tickets.json")["data"]:
             self.assertIn("subject", item)
             self.assertIn("createdTime", item)
-        self.assertIn("id", shape("zoho-comment.json"))
-        self.assertIn("id", shape("zoho-attachment.json"))
-        token = shape("zoho-token.json")
+        self.assertIn("id", self.recorded("zoho-comment.json"))
+        self.assertIn("id", self.recorded("zoho-attachment.json"))
+        token = self.recorded("zoho-token.json")
         self.assertIn("access_token", token["refresh"])
         self.assertIn("expires_in", token["refresh"])
         self.assertEqual(token["access_denied"]["error"], "Access Denied")
@@ -463,14 +493,15 @@ class ShapeTests(unittest.TestCase):
             self.assertEqual(token[name]["error"], name)
 
     def test_the_chat_reference_ends_every_recorded_subject_in_square_brackets(self):
-        subjects = [shape("zoho-ticket.json")["subject"]]
-        subjects += [item["subject"] for item in shape("zoho-contact-tickets.json")["data"]]
+        # test_ticket.py's tickets carry EM-TEST-<n>, which no real record can have.
+        subjects = [self.recorded("zoho-ticket.json")["subject"]]
+        subjects += [item["subject"] for item in self.recorded("zoho-contact-tickets.json")["data"]]
         for subject in subjects:
             with self.subTest(subject=subject):
-                self.assertRegex(subject, r"^\[AI chat\] .+ \[(stage|prod):EM-[0-9]{7}\]$")
+                self.assertRegex(subject, r"^(\[Unverified\] )?\[AI chat\] .+ \[(stage|prod):EM-([0-9]{7}|TEST-[0-9]+)\]$")
 
     def test_every_error_code_the_client_classifies_is_recorded(self):
-        errors = shape("zoho-errors.json")
+        errors = self.recorded("zoho-errors.json")
         codes = {body["errorCode"] for body in errors.values()}
         for code in ("INVALID_OAUTH", "SCOPE_MISMATCH", "OAUTH_ORG_MISMATCH", "FORBIDDEN", "LICENSE_ACCESS_LIMITED",
                      "INVALID_DATA", "URL_NOT_FOUND", "RESOURCE_SIZE_EXCEEDED", "TOO_MANY_REQUESTS",
@@ -478,6 +509,10 @@ class ShapeTests(unittest.TestCase):
             self.assertIn(code, codes)
         self.assertEqual([item["fieldName"] for item in errors["invalid_data"]["errors"]],
                          ["/contactId", "/departmentId"])
+
+
+class ShapeTests(ShapeChecks, unittest.TestCase):
+    """The drafts committed in docs/api-shapes."""
 
 
 if __name__ == "__main__":

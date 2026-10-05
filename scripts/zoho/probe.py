@@ -18,8 +18,9 @@ or accounts is counted, never listed). It sums up each layout's required
 custom fields: whether Zoho enforces them on a ticket made through the API is
 what test_ticket.py settles. It prints the scopes Zoho says it granted and the
 API credits left today. Every answer is masked (scripts/zoho/_common.py) and
-written to docs/api-shapes/zoho-*.json, replacing the drafts taken from Zoho's
-published specification. Claude reviews those files and fills in the settings.
+written to docs/api-shapes/zoho-*.json. The token answer goes under "refresh"
+in zoho-token.json, beside the error bodies already there. Claude reviews
+those files and fills in the settings.
 
 Two token requests per run (one to read the scopes, one by the client). Zoho
 allows ten in ten minutes per refresh token. Replaces the 1 October spike in
@@ -156,7 +157,9 @@ def main(argv: Optional[List[str]] = None, ask: Callable[[str], str] = getpass.g
     if not says_india(answer):
         out("token: Zoho's answer does not name the India data centre. Stopping.")
         return 1
-    save_shape("token", answer, source, shapes_dir)
+    # Under "refresh": the error bodies beside it in that file are what the suite
+    # answers a refused token with, and no probe run meets them.
+    save_shape("token", answer, source, shapes_dir, under="refresh")
     granted = granted_scopes(answer)
     out("scopes granted: %s" % (", ".join(granted) if granted else "not stated in Zoho's answer"))
     missing = [scope for scope in SCOPES if scope not in granted]

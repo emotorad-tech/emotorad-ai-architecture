@@ -176,15 +176,40 @@ def script_settings(*, client_id: str, client_secret: str, refresh_token: str, o
     )
 
 
+class _KeptAnswers:
+    """The scripts' transport. It keeps, in memory, each answer Desk gives,
+    by method and path, so a write's own answer can be saved as a shape: the
+    Desk client hands back only the new id. Answers from the accounts server
+    hold tokens and are never kept."""
+
+    def __init__(self, http: Any) -> None:
+        self.http = http
+        self.answers: Dict[Tuple[str, str], Any] = {}
+
+    def call(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes] = None,
+             **options: Any) -> Tuple[int, Any]:
+        status, answer = self.http.call(method, url, headers, body, **options)
+        if url.startswith(DESK_URL + "/"):
+            self.answers[(method, urllib.parse.urlsplit(url).path)] = answer
+        return status, answer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.http, name)
+
+
 class ScriptClient:
     """The worker's Desk client, plus the reads only the scripts make
     (organisations, departments, layouts, channels, one contact, one ticket)."""
 
     def __init__(self, settings: ZohoSettings, http: Optional[Any] = None) -> None:
         self.settings = settings
-        self.http = http if http is not None else DeskHTTP()
+        self.http = _KeptAnswers(http if http is not None else DeskHTTP())
         self.tokens = TokenSource(settings, self.http)
         self.desk = DeskClient(settings, self.tokens, self.http)
+
+    def answer(self, method: str, path: str) -> Any:
+        """Desk's last answer to `method` on `path`, or None if it gave none."""
+        return self.http.answers.get((method, path))
 
     def get(self, path: str, params: Optional[Dict[str, Any]] = None, *, org: bool = True) -> Any:
         """A read, with the headers the Desk client sends. An expired access
@@ -247,6 +272,11 @@ KEEP_VALUES = frozenset({
 # filter. Ids are not: a Zoho id is a long digit run the filter would hide.
 _TEXT_VALUES = frozenset({"name", "displayLabel", "layoutName", "layoutDisplayName", "companyName",
                           "portalName", "defaultValue"})
+# A subject the chatbot wrote (zoho/payload.py subject): our own text, with no
+# phone and no name, ending with the chat reference the worker adopts by. It
+# is kept, so a captured shape can be adopted from as the drafts are. Any
+# other subject is someone's free text, and becomes its type.
+_OUR_SUBJECT = re.compile(r"(\[Unverified\] )?\[AI chat\] ")
 # Never written, whatever else is kept.
 SECRET_KEYS = frozenset({"access_token", "refresh_token", "client_secret", "authorization"})
 # Objects that describe a person. Inside one, only its id and type are kept.
@@ -255,10 +285,12 @@ PERSON_KEYS = frozenset({"contact", "assignee", "commenter", "author", "creator"
 # A field whose label or API name says its values hold people, dealers or
 # accounts (an account is a customer or a dealer). Its pick list is counted,
 # never written (the 1 October probe's rule: the OMS's "Dealer Principle
-# Name" list names real dealers). "name" is the wide net on purpose: a pick
-# list is read in Desk itself when a value has to be chosen.
+# Name" list names real dealers). "Name" alone is not a person word: B4 needs
+# the "Product Name" list, and "Model Name" lists bikes. A person's name is
+# caught by the word beside it (first, last, full or contact name).
 _PERSONAL_FIELD = re.compile(
-    r"name|dealer|principle|customer|contact|phone|mobile|email|address|owner|agent|franchise|account",
+    r"first[\s_]*name|last[\s_]*name|full[\s_]*name|contact[\s_]*name|person|dealer|principle|customer|"
+    r"account|owner|agent|franchise|technician|mechanic|rider|employee|phone|mobile|email|address",
     re.IGNORECASE)
 
 
@@ -291,6 +323,8 @@ def _mask(value: Any, key: Optional[str], in_person: bool) -> Any:
         return [_mask(item, key, in_person) for item in value]
     if value is None or isinstance(value, bool):
         return value
+    if key == "subject" and not in_person and isinstance(value, str) and _OUR_SUBJECT.match(value):
+        return redact_pii(value)
     if key not in KEEP_VALUES or (in_person and key not in ("id", "type")):
         return "<%s>" % type(value).__name__
     if isinstance(value, str) and key in _TEXT_VALUES:
@@ -319,16 +353,29 @@ def source_note(script: str) -> str:
         script, date.today().isoformat())
 
 
-def save_shape(name: str, answer: Any, source: str, shapes_dir: Path = SHAPES, person: bool = False) -> Path:
+def save_shape(name: str, answer: Any, source: str, shapes_dir: Path = SHAPES, person: bool = False,
+               under: Optional[str] = None) -> Path:
     """Write a masked answer to docs/api-shapes/zoho-<name>.json, with a
-    "_source" note saying where and when it was captured."""
+    "_source" note saying where and when it was captured.
+
+    With `under`, the answer replaces that one key of the file and every other
+    key stays: the probe's token answer goes under "refresh", beside the error
+    bodies the suite also answers from (tests/fake_zoho.py). The note those
+    keys came with is kept as "_source_of_the_rest"."""
     masked = mask(answer, person=person)
-    doc: Dict[str, Any] = {"_source": source}
-    if isinstance(masked, dict):
-        doc.update(masked)
-    else:
-        doc["body"] = masked
     path = Path(shapes_dir) / ("zoho-%s.json" % name)
+    if under is not None:
+        doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if "_source" in doc and "_source_of_the_rest" not in doc:
+            doc["_source_of_the_rest"] = doc["_source"]
+        doc["_source"] = '%s Only "%s" is this capture; the other keys were already in the file.' % (source, under)
+        doc[under] = masked
+    else:
+        doc = {"_source": source}
+        if isinstance(masked, dict):
+            doc.update(masked)
+        else:
+            doc["body"] = masked
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path

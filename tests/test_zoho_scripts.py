@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -44,8 +45,10 @@ from emotorad_ai.zoho.desk import DESK_URL  # noqa: E402
 from emotorad_ai.zoho.errors import ZohoAuthExpired, ZohoRejected  # noqa: E402
 from emotorad_ai.zoho.payload import ticket_payload  # noqa: E402
 from emotorad_ai.zoho.settings import ENV_NAMES  # noqa: E402
+from tests.fake_zoho import SHAPES as DRAFTS, shape  # noqa: E402
+from tests.test_zoho_desk import ShapeChecks  # noqa: E402
 
-SCRIPTS = ("_common", "consent_url", "exchange_code", "probe", "test_ticket", "revoke", "tickets_report")
+SCRIPTS =("_common", "consent_url", "exchange_code", "probe", "test_ticket", "revoke", "tickets_report")
 REDIRECT = "https://example.test/zoho/callback"
 INDIA = {"access_token": "1000.access.value", "refresh_token": "1000.refresh.value",
          "scope": "Desk.tickets.READ Desk.basic.READ", "api_domain": "https://www.zohoapis.in",
@@ -364,11 +367,23 @@ class MaskingTests(unittest.TestCase):
         self.assertEqual(masked["id"], TICKET_ID)
         self.assertEqual(masked["ticketNumber"], "1201")
         self.assertEqual((masked["priority"], masked["channel"], masked["status"]), ("Medium", "Chat", "Open"))
-        self.assertEqual(masked["subject"], "<str>")
+        # The chatbot's own subject is kept: it is how a ticket is adopted.
+        self.assertEqual(masked["subject"], "[AI chat] Battery: charging - EMX Plus [stage:EM-TEST-7]")
         self.assertEqual(masked["contact"]["id"], "1892000000099001")
         self.assertEqual(masked["contact"]["firstName"], "<str>")
         self.assertIsNone(masked["contact"]["type"])
         self.assertEqual(masked["phone"], "<str>")
+
+    def test_only_a_subject_the_chatbot_wrote_is_kept(self):
+        for ours in ("[AI chat] SAFETY - bike not given [stage:EM-1000001]",
+                     "[Unverified] [AI chat] Intake - bike not given [prod:EM-1000002]"):
+            self.assertEqual(_common.mask({"subject": ours}), {"subject": ours})
+        for theirs in ("Call Ananya Rao about her bike", "Re: [AI chat] Battery [stage:EM-1000001]",
+                       " [AI chat] Battery [stage:EM-1000001]"):
+            self.assertEqual(_common.mask({"subject": theirs}), {"subject": "<str>"}, theirs)
+        # Inside a person's object nothing but the id and type is kept.
+        self.assertEqual(_common.mask({"contact": {"subject": "[AI chat] x [stage:EM-1000001]"}}),
+                         {"contact": {"subject": "<str>"}})
 
     def test_a_contact_answer_keeps_only_its_id_and_type(self):
         masked = _common.mask({"id": "5", "type": "END_USER", "name": "Ananya Rao", "firstName": "Ananya"}, person=True)
@@ -389,6 +404,33 @@ class MaskingTests(unittest.TestCase):
         masked = _common.mask(LAYOUT_DETAILS)
         self.assertEqual(field(masked, "cf_account")["allowedValues"]["count"], 1)
         self.assertNotIn("Kumar", json.dumps(masked))
+
+    def test_a_product_or_model_name_pick_list_keeps_its_values(self):
+        # B4: the support lead chooses the bot's value from the probe's list,
+        # and "Product Name" is the first of the required fields.
+        for api_name, label in (("cf_product_name", "Product Name"), ("cf_model_name", "Model Name"),
+                                ("cf_issue_name", "Name of the issue")):
+            with self.subTest(label=label):
+                masked = _common.mask({"apiName": api_name, "displayLabel": label, "type": "Picklist",
+                                       "allowedValues": ["EMX Plus", "T-Rex Air"], "defaultValue": "EMX Plus"})
+                self.assertEqual(masked["allowedValues"], ["EMX Plus", "T-Rex Air"])
+                self.assertEqual(masked["defaultValue"], "EMX Plus")
+
+    def test_a_pick_list_that_names_people_is_still_withheld(self):
+        for api_name, label in (("cf_contact_name", "Contact Name"), ("firstName", "First Name"),
+                                ("lastName", "Last Name"), ("cf_customer_name", "Customer Name"),
+                                ("cf_dealer", "Dealer"), ("cf_franchise", "Franchise"), ("cf_agent", "Agent"),
+                                ("cf_owner", "Owner"), ("cf_account", "Account"), ("cf_mobile", "Mobile"),
+                                ("cf_phone", "Phone"), ("cf_email", "Email"), ("cf_address", "Address"),
+                                ("cf_dealer_principle_name", "Dealer Principle Name"),
+                                ("cf_full_name", "Full Name"), ("cf_contact_person", "Contact Person"),
+                                ("cf_technician_name", "Technician Name"), ("cf_mechanic", "Mechanic"),
+                                ("cf_rider_name", "Rider Name"), ("cf_employee", "Employee")):
+            with self.subTest(label=label):
+                masked = _common.mask({"apiName": api_name, "displayLabel": label, "type": "Picklist",
+                                       "allowedValues": ["Ravi Kumar"], "defaultValue": "Ravi Kumar"})
+                self.assertEqual(masked["allowedValues"]["count"], 1)
+                self.assertEqual(masked["defaultValue"], "<withheld>")
 
     def test_a_layout_keeps_its_id_name_default_flag_and_status(self):
         masked = _common.mask(LAYOUT_DETAILS)[0]
@@ -578,6 +620,14 @@ class ScriptClientTests(unittest.TestCase):
         self.assertEqual(read["headers"]["Authorization"], "Zoho-oauthtoken tok")
         self.assertEqual(read["headers"]["orgId"], "60001234567")
         self.assertIs(read["write"], False)
+
+    def test_desk_answers_are_kept_for_the_shapes_and_token_answers_never(self):
+        client, _ = self.client({("POST", "/oauth/v2/token"): (200, {"access_token": "tok", "expires_in": 3600}),
+                                 ("GET", "/api/v1/departments"): (200, {"data": [{"id": "111"}]})})
+        client.get("/api/v1/departments")
+        self.assertEqual(client.answer("GET", "/api/v1/departments"), {"data": [{"id": "111"}]})
+        self.assertIsNone(client.answer("POST", "/oauth/v2/token"))
+        self.assertIsNone(client.answer("POST", "/api/v1/tickets"))
 
     def test_the_organisation_list_goes_without_an_organisation_id(self):
         client, http = self.client({("POST", "/oauth/v2/token"): (200, {"access_token": "tok", "expires_in": 3600}),
@@ -831,7 +881,7 @@ class TestTicketRunTests(unittest.TestCase):
     def routes(self, replace=None):
         base = {
             ("POST", "/oauth/v2/token"): (200, {"access_token": "tok", "expires_in": 3600}),
-            ("GET", "/api/v1/contacts/search"): (204, None),
+            ("GET", "/api/v1/contacts/search"): (200, {"data": [{"id": CONTACT_ID, "mobile": "+919999999999"}]}),
             ("POST", "/api/v1/tickets"): (200, {"id": TICKET_ID, "ticketNumber": "1201",
                                                 "webUrl": "https://desk.zoho.in/agent/x/tickets/1"}),
             ("GET", "/api/v1/tickets/%s" % TICKET_ID): self.ticket_read_back(),
@@ -902,9 +952,35 @@ class TestTicketRunTests(unittest.TestCase):
         self.assertEqual(len(http.to("POST", "/api/v1/tickets/%s/attachments" % TICKET_ID)), 1)
         saved = sorted(path.name for path in Path(self.shapes.name).iterdir())
         for name in ("zoho-ticket.json", "zoho-contact-tickets.json", "zoho-contact-search.json",
-                     "zoho-comment.json", "zoho-attachment.json"):
+                     "zoho-comment.json", "zoho-attachment.json", "zoho-attachments.json"):
             self.assertIn(name, saved)
         self.assertIn("Close ticket #1201 in Desk now.", screen.text)
+
+    def test_the_first_uploads_own_answer_is_the_attachment_shape(self):
+        routes = self.routes({("POST", "/api/v1/tickets/%s/attachments" % TICKET_ID): (200, {"id": "88", "size": "75"}),
+                              ("GET", "/api/v1/tickets/%s/attachments" % TICKET_ID): (200, {"data": [{"id": "1"}]})})
+        self.run_script(routes)
+        folder = Path(self.shapes.name)
+        attachment = json.loads((folder / "zoho-attachment.json").read_text(encoding="utf-8"))
+        self.assertEqual((attachment["id"], attachment["size"]), ("88", "75"))
+        listed = json.loads((folder / "zoho-attachments.json").read_text(encoding="utf-8"))
+        self.assertEqual(listed["data"], [{"id": "1"}])
+
+    def test_an_empty_list_leaves_the_file_already_there(self):
+        folder = Path(self.shapes.name)
+        for name in ("contact-search", "contact-tickets"):
+            (folder / ("zoho-%s.json" % name)).write_text('{"_source": "the draft"}', encoding="utf-8")
+        routes = self.routes({("GET", "/api/v1/contacts/search"): (204, None),
+                              ("GET", "/api/v1/contacts/%s/tickets" % CONTACT_ID): [
+                                  (204, None), (200, {"data": [zoho_ticket("stage:EM-TEST-7")]})]})
+        rc, _, screen = self.run_script(routes)
+        self.assertEqual(rc, 0)
+        for name in ("contact-search", "contact-tickets"):
+            with self.subTest(name=name):
+                self.assertEqual((folder / ("zoho-%s.json" % name)).read_text(encoding="utf-8"),
+                                 '{"_source": "the draft"}')
+                self.assertIn("Zoho listed nothing for zoho-%s.json, so the file already there is kept." % name,
+                              screen.text)
 
     def test_never_found_makes_a_second_ticket_in_the_test_department(self):
         empty = (200, {"data": []})
@@ -987,6 +1063,100 @@ class TestTicketRunTests(unittest.TestCase):
                              ask=answers("a", "b", "c"), typed=lambda prompt: TEST_DEPARTMENT, http=http,
                              out=Screen().out, sleep=self.sleeps.append, shapes_dir=Path(self.shapes.name))
         self.assertEqual(self.posted(http)[0]["layoutId"], "555")
+
+
+class CapturedShapeTests(ShapeChecks, unittest.TestCase):
+    """Part 1's captures replace the drafts the suite answers from, so they must
+    pass the same checks (the final review, scripts-docs Important 1). probe.py
+    and test_ticket.py run here against a Desk that answers with the committed
+    drafts, writing into a copy of docs/api-shapes, and ShapeChecks runs again
+    on what they wrote. The ticket read back also carries Zoho's "cf" object,
+    as a real answer does, with a value that names a dealer."""
+
+    SCRIPT_WRITES = ("zoho-ticket.json", "zoho-contact-search.json", "zoho-contact-tickets.json",
+                     "zoho-comment.json", "zoho-attachment.json", "zoho-token.json")
+    EARLIER_ATTACHMENT = "4000000008001"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._folder = tempfile.TemporaryDirectory()
+        cls.shapes_dir = cls._folder.name
+        for path in Path(DRAFTS).glob("zoho-*.json"):
+            shutil.copy(path, cls.shapes_dir)
+        token = dict(shape("zoho-token.json")["refresh"], api_domain="https://www.zohoapis.in",
+                     scope=" ".join(_common.SCOPES))
+        routes = probe_routes()
+        routes[("POST", "/oauth/v2/token")] = (200, token)
+        cls.probe_rc = load("probe").main(
+            ["--org-id", "60001234567", "--test-department-id", "111", "--test-contact-id", CONTACT_ID],
+            ask=answers("1000.TESTCLIENT", "test-client-secret", "1000.refresh.value"), http=FakeHTTP(routes),
+            out=Screen().out, shapes_dir=Path(cls.shapes_dir))
+
+        ticket = shape("zoho-ticket.json")
+        comment = shape("zoho-comment.json")
+        attachment = shape("zoho-attachment.json")
+        read_back = dict(ticket, cf={"cf_dealer_principle_name": "Ravi Motors - D001"})
+        on_ticket = "/api/v1/tickets/%s" % ticket["id"]
+        script = load("test_ticket")
+        routes = {
+            ("POST", "/oauth/v2/token"): (200, token),
+            ("GET", "/api/v1/contacts/search"): (200, shape("zoho-contact-search.json")),
+            ("POST", "/api/v1/tickets"): (200, ticket),
+            ("GET", on_ticket): (200, read_back),
+            ("GET", "/api/v1/contacts/%s/tickets" % CONTACT_ID): (200, shape("zoho-contact-tickets.json")),
+            ("POST", on_ticket + "/comments"): (200, comment),
+            ("GET", "%s/comments/%s" % (on_ticket, comment["id"])): (200, comment),
+            ("POST", on_ticket + "/attachments"): (200, attachment),
+            # Another file first, so the list's first entry is not the upload's own answer.
+            ("GET", on_ticket + "/attachments"): (200, {"data": [dict(attachment, id=cls.EARLIER_ATTACHMENT),
+                                                                  attachment]}),
+        }
+        small_only = lambda reference: [("%s-small.png" % reference, script.tiny_png(), "image/png")]  # noqa: E731
+        with mock.patch.object(script, "uploads", small_only):
+            cls.ticket_rc = script.main(
+                TICKET_ARGS + ["--department-id", "111", "--n", "7"],
+                ask=answers("1000.TESTCLIENT", "test-client-secret", "1000.refresh.value"),
+                typed=lambda prompt: TEST_DEPARTMENT, http=FakeHTTP(routes), out=Screen().out,
+                sleep=lambda seconds: None, shapes_dir=Path(cls.shapes_dir))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._folder.cleanup()
+
+    def test_both_scripts_ran_to_the_end(self):
+        self.assertEqual((self.probe_rc, self.ticket_rc), (0, 0))
+
+    def test_every_draft_a_script_replaces_is_now_a_capture_and_the_error_bodies_stay(self):
+        for name in self.SCRIPT_WRITES:
+            with self.subTest(name=name):
+                self.assertTrue(self.captured(name))
+        self.assertFalse(self.captured("zoho-errors.json"))
+        self.assertEqual(self.raw("zoho-errors.json"), json.loads((Path(DRAFTS) / "zoho-errors.json").read_text(
+            encoding="utf-8")))
+
+    def test_the_token_capture_goes_under_refresh_beside_the_error_bodies(self):
+        token = self.recorded("zoho-token.json")
+        self.assertEqual(token["refresh"]["access_token"], "[secret]")
+        self.assertEqual(token["refresh"]["api_domain"], "https://www.zohoapis.in")
+        self.assertEqual(token["invalid_client_secret"], {"error": "invalid_client_secret"})
+        # The error bodies keep the note that says where they came from.
+        self.assertIn("em-biz-backend", self.raw("zoho-token.json")["_source_of_the_rest"])
+
+    def test_the_upload_answer_is_the_attachment_and_the_list_is_kept_apart(self):
+        ours = shape("zoho-attachment.json")["id"]
+        self.assertEqual(self.recorded("zoho-attachment.json")["id"], ours)
+        self.assertEqual([item["id"] for item in self.recorded("zoho-attachments.json")["data"]],
+                         [self.EARLIER_ATTACHMENT, ours])
+
+    def test_our_subject_and_the_ticket_link_are_kept_and_nothing_personal_is(self):
+        ticket = self.recorded("zoho-ticket.json")
+        self.assertEqual(ticket["subject"], shape("zoho-ticket.json")["subject"])
+        self.assertEqual(ticket["webUrl"], shape("zoho-ticket.json")["webUrl"])
+        self.assertEqual(ticket["cf"], {"cf_dealer_principle_name": "<str>"})
+        self.assertEqual(ticket["phone"], "<str>")
+        written = "".join(path.read_text(encoding="utf-8") for path in Path(self.shapes_dir).iterdir())
+        for private in PERSONAL + ("Ravi Motors", "1000.refresh.value", "test-client-secret"):
+            self.assertNotIn(private, written)
 
 
 class TicketsReportTests(unittest.TestCase):

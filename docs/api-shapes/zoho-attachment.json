@@ -1,5 +1,5 @@
 {
-  "_source": "Not a capture. Built from Zoho's published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/TicketAttachment.json: createTicketAttachment takes the multipart field file and the query isPublic, and answers 200 with attachmentResponse; a name is at most 100 characters; the list answer wraps attachments in data, or is 204). Every value is fake. scripts/zoho/probe.py and scripts/zoho/test_ticket.py replace this file with a masked capture (spec 2026-10-05, part 1).",
+  "_source": "Not a capture. Built from Zoho's published OpenAPI files (https://github.com/zoho/zohodesk-oas, v1.0/TicketAttachment.json: createTicketAttachment takes the multipart field file and the query isPublic, and answers 200 with attachmentResponse; a name is at most 100 characters; the list answer wraps attachments in data, or is 204). Every value is fake. scripts/zoho/test_ticket.py replaces this file with a masked capture of its first upload's own answer, and saves the ticket's list of files as zoho-attachments.json (spec 2026-10-05, part 1).",
   "id": "4000000008892",
   "name": "EM-1000001-photo-1.jpg",
   "size": "48213",

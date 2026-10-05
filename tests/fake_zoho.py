@@ -4,8 +4,9 @@ This follows the pattern of tests/test_oms.py: the client under test takes an
 opener, and this one records every request and answers from a script. Bodies
 come from the shapes in docs/api-shapes/zoho-*.json, so the fake answers what
 the shapes say Zoho answers. tests/test_zoho_desk.py ShapeTests holds the
-client to the keys those shapes carry. Part 1's probe replaces the shapes
-with captures.
+client to the keys those shapes carry. Part 1's scripts replace the shapes
+with captures, and tests/test_zoho_scripts.py CapturedShapeTests holds what
+they write to the same checks.
 
 It can answer with any status, a JSON or raw body and headers, including HTTP
 200 throttling bodies from the token endpoint and 204 with no body. It can
@@ -71,9 +72,10 @@ def _without_notes(value: Any) -> Any:
     return value
 
 
-def shape(name: str) -> Any:
-    """A recorded shape without its `_source` note, read fresh each time."""
-    with open(os.path.join(SHAPES, name), encoding="utf-8") as handle:
+def shape(name: str, shapes_dir: str = SHAPES) -> Any:
+    """A recorded shape without its `_source` note, read fresh each time.
+    `shapes_dir` is another folder of them, such as a script's captures."""
+    with open(os.path.join(shapes_dir, name), encoding="utf-8") as handle:
         return _without_notes(json.load(handle))
 
 
