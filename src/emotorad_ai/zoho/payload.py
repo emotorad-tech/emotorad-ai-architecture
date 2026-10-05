@@ -157,8 +157,9 @@ def _claim_lines(claims: Any) -> List[str]:
     return lines
 
 
-def _plus91(phone: Optional[str]) -> Optional[str]:
-    """The number in +91 form, or None for anything but an Indian mobile."""
+def plus91(phone: Optional[str]) -> Optional[str]:
+    """The number in +91 form, or None for anything but an Indian mobile. The
+    worker (zoho/worker.py) searches and makes contacts with the same form."""
     digits = _NOT_DIGITS.sub("", phone or "")
     if len(digits) == 12 and digits.startswith("91"):
         digits = digits[2:]
@@ -250,7 +251,7 @@ def ticket_payload(record: Dict[str, Any], settings: ZohoSettings, contact_id: s
         # Only when the department has more than one layout and the person has
         # chosen one (EMOTORAD_ZOHO_LAYOUT_ID).
         payload["layoutId"] = settings.layout_id
-    phone = _plus91(record.get("phone"))
+    phone = plus91(record.get("phone"))
     if phone:
         payload["phone"] = phone
     return payload
