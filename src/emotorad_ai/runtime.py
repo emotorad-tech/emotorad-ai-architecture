@@ -144,7 +144,7 @@ from .tools.verification import (
     VERIFY_IDENTITY,
     apply_proven_phone,
 )
-from .tickets.clock import now_iso, plus
+from .tickets.clock import now_iso, parse, plus
 from .tickets.kinds import is_desk_reference, is_urgent
 from .tickets.record import GONE
 from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
@@ -372,9 +372,11 @@ _FAULT_AGENTS = (BATTERY_SUPPORT, MOTOR_SUPPORT, NARROW_SUPPORT)
 # Any other failure says nothing about the customer's cover.
 LOOKUP_ERRORS = ("no_warranty_record", "oms_unavailable")
 
-# What a turn reads from the customer or a look-up, carried when the turn
-# loses a save race and changed it (Runtime._merge_onto_fresh).
-TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callback_asks", "last_code_phone")
+# What a turn reads from the customer or a look-up, and the stretch of the run
+# someone else is writing (Runtime._note_speaker), carried when the turn loses
+# a save race and changed it (Runtime._merge_onto_fresh).
+TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callback_asks", "last_code_phone",
+                    "newcomer_started_at", "newcomer_ticket_id")
 
 
 def _ticket_bike(bikes: Sequence[Dict[str, Any]], selected: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -644,8 +646,9 @@ class Runtime:
                 proven = self.phone_resolver(cid)
                 if proven:
                     state.user_key = "PHONE#" + proven
+            owns = self._speaker_owns_run(state, resolved)
+            stretch_ended = self._note_speaker(message, state, reply, owns)
             state.escalated = state.escalated or reply.escalated
-            state.ticket_id = reply.ticket_id or state.ticket_id
             this_turn = list(state.history[history_mark:])  # before the save trims anything
             try:
                 self.conversations.save(state)
@@ -656,7 +659,7 @@ class Runtime:
                     try:
                         state = self._merge_onto_fresh(
                             state, this_turn, reply, looked_up=state.coverage_result != coverage_loaded,
-                            loaded=facts_loaded,
+                            loaded=facts_loaded, owner=owns,
                         )
                     except (ConversationConflict, StoreUnavailable) as exc:
                         return self._store_down(message, exc, reply.ticket_id)
@@ -671,9 +674,10 @@ class Runtime:
                 return self._store_down(message, exc, reply.ticket_id)
         # After the save and before the record: a worker pass in between must
         # never find this run's first turn inside an earlier run's bounds, nor
-        # a newcomer's turn inside the run of the person before them.
+        # a newcomer's turn inside the run of the person before them, nor the
+        # run's own person's turn inside a newcomer's.
         self._close_earlier_runs(state)
-        self._end_run_before_this_turn(message, state, reply, resolved)
+        self._end_run_before_this_turn(state, owns, stretch_ended)
         try:
             recorded, summary = message, self._summary_for(state, resolved)
             if "transcript_text" in reply.metadata:
@@ -688,7 +692,7 @@ class Runtime:
             # The turn happened and the state is saved; only the record of it
             # failed. Said in the log, and the customer still gets the answer.
             self.log.emit("transcript_write_failed", cid, error=str(exc))
-        self._attach_transcript(state, reply, resolved)
+        self._attach_transcript(state, reply, owns)
         return reply
 
     def _close_earlier_runs(self, state: ConversationState) -> None:
@@ -715,9 +719,50 @@ class Runtime:
         proven = self.phone_resolver(state.conversation_id) if self.phone_resolver is not None else None
         return bool(proven) and "PHONE#" + proven == state.user_key
 
-    def _attach_transcript(
-        self, state: ConversationState, reply: Reply, resolved: Optional[ResolvedIdentity]
-    ) -> None:
+    def _speakers_ticket(self, state: ConversationState, resolved: Optional[ResolvedIdentity]) -> Optional[str]:
+        """The ticket of the person writing: the run's, for the run's own
+        person; for anyone else, the one recorded in their own stretch of the
+        run (_note_speaker), never the run's."""
+        if self._speaker_owns_run(state, resolved):
+            return state.ticket_id
+        return state.newcomer_ticket_id
+
+    def _note_speaker(
+        self, message: InboundMessage, state: ConversationState, reply: Reply, owns: bool,
+    ) -> Optional[str]:
+        """Whose stretch of the run this turn is, kept with the state before it
+        is saved (the review of Task 13, Important 1 and 2).
+
+        Someone other than the run's own person: a ticket of theirs is kept
+        apart (`newcomer_ticket_id`), never as the run's `ticket_id`, so the
+        run's own person's turns never wake it and their history never names
+        it. Their stretch keeps the start its first turn set
+        (_newcomer_start), so its keys repeat on every turn of it: one safety
+        ticket holds for them as for anyone, and their own next turn never
+        ends their ticket.
+
+        The run's own person: their ticket is the run's. If someone else wrote
+        since, their stretch ends here. Its start and ticket are cleared, and
+        so is a wait for a number to call about their report, so this
+        person's message is never read as that number. The time the stretch
+        ends, just after its last turn, is returned for
+        _end_run_before_this_turn to end its tickets before this turn is
+        recorded. None when no stretch ends."""
+        if not owns:
+            self._newcomer_start(message, state)
+            state.newcomer_ticket_id = reply.ticket_id or state.newcomer_ticket_id
+            return None
+        state.ticket_id = reply.ticket_id or state.ticket_id
+        began = state.newcomer_started_at
+        if began is None:
+            return None
+        state.newcomer_started_at = state.newcomer_ticket_id = None
+        state.awaiting_callback, state.callback_asks = None, 0
+        # Never at or before the stretch's start, so even a stretch begun and
+        # ended in one turn has an end its tickets fall before.
+        return max(self._after_last_turn(message, state), plus(began, 0.000001), key=parse)
+
+    def _attach_transcript(self, state: ConversationState, reply: Reply, owns: bool) -> None:
         """The run's ticket gets the run's thread, this turn included, on every
         turn of the run, not only the one that raised it, so a person sees
         what was said after the ticket too (spec 2026-10-05, section 2).
@@ -727,13 +772,16 @@ class Runtime:
         (restart_for), never reaches it. And only while the person writing is
         the run's own: once their proof lapses, the next visitor's words reach
         no ticket of theirs (_end_run_before_this_turn has ended its Desk
-        record's run before them)."""
+        record's run before them). The next visitor's own ticket is woken
+        instead (_wake_newcomers_ticket)."""
         tickets = getattr(self.registry, "tickets", None)
-        ticket_id = reply.ticket_id or state.ticket_id
-        if not ticket_id or not hasattr(tickets, "attach_transcript"):
+        if not hasattr(tickets, "attach_transcript"):
             return
-        if not self._speaker_owns_run(state, resolved):
-            self._wake_newcomers_ticket(state, reply, tickets)
+        if not owns:
+            self._wake_newcomers_ticket(state, tickets)
+            return
+        ticket_id = reply.ticket_id or state.ticket_id
+        if not ticket_id:
             return
         cid = state.conversation_id
         try:
@@ -745,51 +793,70 @@ class Runtime:
                 ticket_id=ticket_id, error="%s: %s" % (type(exc).__name__, exc),
             )
 
-    def _end_run_before_this_turn(
-        self, message: InboundMessage, state: ConversationState, reply: Reply, resolved: Optional[ResolvedIdentity],
-    ) -> None:
-        """Someone other than the run's own person is writing, and nobody has
-        proved a number since, so restart_for has not begun a run of theirs.
-        The run's Desk record ends before this turn, so the worker, which
-        posts by time, never sends the newcomer's words or photos to it (spec
-        2026-10-05, section 3, and the plan's cross-check, finding 9). Called
-        after the save and before the turn is recorded, so no worker pass in
-        between finds this turn inside the run (the ruling for Task 13).
+    def _end_run_before_this_turn(self, state: ConversationState, owns: bool, stretch_ended: Optional[str]) -> None:
+        """Where one person's part of the run ends and the next person's
+        begins, set on the Desk records after the save and before the turn is
+        recorded, so no worker pass in between finds this turn inside the
+        wrong person's run (the ruling for Task 13). The worker posts by time,
+        so a record's end is what keeps the next person's words and photos
+        from it. With Zoho off there is no Desk record to end.
 
-        It ends where a newcomer's ticket starts (_newcomer_start). A ticket
-        this turn recorded for the newcomer starts at that same instant, so it
-        is not ended with the run. A record that has an end keeps it."""
-        tickets = getattr(self.registry, "tickets", None)
-        ticket_id = reply.ticket_id or state.ticket_id
-        if (not is_desk_reference(ticket_id) or not hasattr(tickets, "close_runs")
-                or self._speaker_owns_run(state, resolved)):
+        Someone other than the run's own person is writing, and nobody has
+        proved a number since, so restart_for has not begun a run of theirs.
+        The run's Desk records end where their stretch of it starts
+        (_newcomer_start; spec 2026-10-05, section 3, and the plan's
+        cross-check, finding 9). Their own tickets start at that same
+        instant, so no turn of their stretch ever ends them.
+
+        The run's own person writing again after them ends that stretch's
+        records just after its last turn (`stretch_ended`, from
+        _note_speaker), so none of the run's own person's turns reach a
+        ticket of the newcomer's (the review of Task 13, Important 1).
+
+        A record that has an end keeps it."""
+        ended = stretch_ended if owns else state.newcomer_started_at
+        if ended is None or self._desk_store() is None:
             return
         try:
-            tickets.close_runs(state.conversation_id, self._newcomer_start(message, state))
+            self.registry.tickets.close_runs(state.conversation_id, ended)
         except Exception as exc:  # the turn happened; the log says the run stays open
             self.log.emit("close_runs_failed", state.conversation_id, error=type(exc).__name__)
 
     def _newcomer_start(self, message: InboundMessage, state: ConversationState) -> str:
-        """Where a run ends for someone who does not own it, and their own
-        tickets' run begins: just after the run's last turn before this one.
-        Not at this turn: the API records a photo sent with a message before
-        the turn runs (api._persist_media), so that photo is older than the
-        turn and belongs to the newcomer. With no earlier turn of the run on
-        record, when this message arrived.
+        """Where the run ends for someone who does not own it, and their own
+        tickets' run begins: set on the first turn of their stretch of the run
+        (_after_last_turn) and kept with the state, so every later turn of the
+        stretch has the same start, its tickets the same keys and the same
+        bounds (the review of Task 13, Important 2). Whichever comes first in
+        the turn sets it: a gate's ticket (_ticket_run_start) or
+        _note_speaker. The run's own person writing again clears it."""
+        if state.newcomer_started_at is None:
+            state.newcomer_started_at = self._after_last_turn(message, state)
+        return state.newcomer_started_at
 
-        Read before this turn is recorded, so the safety gate and the close
-        after the save see the same transcript and get the same time."""
+    def _after_last_turn(self, message: InboundMessage, state: ConversationState) -> str:
+        """Just after the run's last turn before this one: where one person's
+        stretch of the run ends and the next person's begins. Not at this
+        turn: the API records a photo sent with a message before the turn runs
+        (api._persist_media), so that photo is older than the turn and belongs
+        to the person who sent it. With no earlier turn of the run on record,
+        when this message arrived.
+
+        Read before this turn is recorded, so every caller in the turn sees
+        the same transcript and gets the same time."""
+        cid = state.conversation_id
         this_turn = state.turn_offset + state.turns * 2 - 1  # its customer line (transcript_turns)
         try:
-            before = [turn for turn in self.conversations.transcript(state.conversation_id)
+            before = [turn for turn in self.conversations.transcript(cid)
                       if state.turn_offset < turn.n < this_turn]
             if before:
                 return plus(before[-1].at, 0.000001)
         except Exception as exc:  # the class only; the arrival time stands in
-            self.log.emit("transcript_read_failed", state.conversation_id, error=type(exc).__name__)
+            self.log.emit("transcript_read_failed", cid, error=type(exc).__name__)
         try:
             return plus(message.timestamp, 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:  # the server sets it, so never expected
+            self.log.emit("message_time_unreadable", cid, error=type(exc).__name__)
             return now_iso()
 
     def _ticket_run_start(
@@ -798,47 +865,54 @@ class Runtime:
         """The run a gate's or the safety branch's ticket belongs to, by its
         start (the ruling for Task 13). The run's own start, for the run's own
         person. For someone else writing in it before restart_for (a second
-        person on a shared browser, once the first person's proof lapsed), a
-        start of their own, where the run ends for them (_newcomer_start).
-        Never the first person's start: the worker posts a record's turns by
-        its run's times, and the ticket keys hold the start, so the first
-        person's turns never reach a newcomer's ticket and their tickets are
-        never found by a newcomer's keys."""
+        person on a shared browser, once the first person's proof lapsed), the
+        start of their own stretch of it, where the run ends for them
+        (_newcomer_start). Never the first person's start: the worker posts a
+        record's turns by its run's times, and the ticket keys hold the start,
+        so the first person's turns never reach a newcomer's ticket and their
+        tickets are never found by a newcomer's keys."""
         if self._speaker_owns_run(state, resolved):
             return state.started_at
         return self._newcomer_start(message, state)
 
-    def _wake_newcomers_ticket(self, state: ConversationState, reply: Reply, tickets: Any) -> None:
-        """A ticket this turn recorded for someone who does not own the run
-        has a run of its own (_ticket_run_start). It is woken, so the worker
-        sends it after this reply rather than two minutes on. Desk ignores the
-        text: the worker posts the ticket's own turns by its run's times. The
-        run's own ticket, by its start, is never touched."""
+    def _wake_newcomers_ticket(self, state: ConversationState, tickets: Any) -> None:
+        """The ticket recorded for someone who does not own the run, in their
+        stretch of it (_note_speaker), is woken on every turn of the stretch,
+        as the run's own ticket is on every turn of the run, so the worker
+        sends their latest turn after this reply rather than later. Desk
+        ignores the text: the worker posts the ticket's own turns by its
+        run's times. Only a record whose start is the stretch's own is woken,
+        so the run's own ticket never is."""
+        ticket_id, began = state.newcomer_ticket_id, state.newcomer_started_at
         store = self._desk_store()
-        if store is None or not is_desk_reference(reply.ticket_id):
+        if store is None or not is_desk_reference(ticket_id) or began is None:
             return
         try:
-            record = store.get(reply.ticket_id)
-            if record is not None and record.get("started_at") != state.started_at:
-                tickets.attach_transcript(reply.ticket_id, "")
+            record = store.get(ticket_id)
+            if record is not None and record.get("started_at") == began:
+                tickets.attach_transcript(ticket_id, "")
         except Exception as exc:  # the ticket exists either way; the worker's first pass sends it
             self.log.emit("transcript_attach_failed", state.conversation_id,
-                          ticket_id=reply.ticket_id, error=type(exc).__name__)
+                          ticket_id=ticket_id, error=type(exc).__name__)
 
     def _merge_onto_fresh(
         self, ours: ConversationState, this_turn: List[Dict[str, Any]], reply: Reply, looked_up: bool = False,
-        loaded: Optional[Dict[str, Any]] = None,
+        loaded: Optional[Dict[str, Any]] = None, owner: bool = True,
     ) -> ConversationState:
         """Add a turn that lost the save race, and did something, to the state
         the other server saved. Its words and its ticket are kept; the routing
-        the other server saved stands. One attempt: a second clash hands over."""
+        the other server saved stands. One attempt: a second clash hands over.
+        The ticket is the run's only when the run's own person wrote this turn
+        (`owner`); anyone else's is kept apart with their stretch of the run,
+        among the turn's facts (_note_speaker)."""
         fresh = self.conversations.get(ours.conversation_id)
         fresh.turns += 1
         # The other server's copy gets the same window this turn's did.
         fresh.history[:] = trim_history(fresh.history, HISTORY_TURNS - 1)
         fresh.history.extend(this_turn)
         fresh.escalated = fresh.escalated or ours.escalated
-        fresh.ticket_id = reply.ticket_id or fresh.ticket_id
+        if owner:
+            fresh.ticket_id = reply.ticket_id or fresh.ticket_id
         fresh.evidence_seen = fresh.evidence_seen or ours.evidence_seen
         # This turn's count is the newer one, and a decline stands.
         fresh.evidence_asks = ours.evidence_asks
@@ -2023,8 +2097,11 @@ class Runtime:
         cid = message.conversation_id
         try:
             gate, tool = self._run_safety_records(message, state, resolved)
-        except StoreUnavailable:
-            # The tool decides. A second safety ticket is a lesser harm than none.
+        except StoreUnavailable as exc:
+            # The tool decides: a second safety ticket is a lesser harm than
+            # none. Logged, so a second one has a trace of why (the review of
+            # Task 13, Important 3).
+            self.log.emit("ticket_read_failed", cid, kind="safety", error=type(exc).__name__)
             gate = tool = None
         held = _live(gate, tool)
         if held is not None:
@@ -2041,10 +2118,11 @@ class Runtime:
             # nothing alarming: the safety team needs what the analyser
             # saw, not just "video attached".
             description += " Seen in the customer's photo or video: %s" % " ".join(evidence)
-        # The run's ticket before this report. With the mock (Zoho off),
-        # getting the same id back means its receipt returned the run's safety
+        # The writer's ticket before this report: the run's, or for someone
+        # who does not own the run, their own. With the mock (Zoho off),
+        # getting the same id back means its receipt returned that safety
         # ticket: this is a repeat.
-        before = state.ticket_id
+        before = self._speakers_ticket(state, resolved)
         try:
             ticket_id = self._raise_safety_ticket(message, state, resolved, description)
         except Exception as exc:  # the class only; the customer still gets the steps

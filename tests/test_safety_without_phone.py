@@ -16,7 +16,7 @@ from unittest import mock
 
 from emotorad_ai.config import Settings
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Attachment, Identity, InboundMessage
-from emotorad_ai.conversation import InMemoryConversationStore, StoreUnavailable
+from emotorad_ai.conversation import ConversationState, InMemoryConversationStore, StoreUnavailable
 from emotorad_ai.disclosure import DISCLOSURE_TEXT
 from emotorad_ai.guardrails import (
     CAP_OVERALL_MESSAGE,
@@ -444,6 +444,29 @@ class NotRecordedTests(unittest.TestCase):
         self.assert_no_promise(reply)
         self.assertEqual(len(chat.events("safety_ticket_not_recorded")), 1)
 
+    def test_a_known_phones_ticket_store_that_cannot_be_read_is_logged_and_the_tool_decides(self):
+        # Review of Task 13, Important 3: the look-up of the run's safety
+        # tickets fails, then the store answers again for the tool. The ticket
+        # is raised, and the log says why no earlier one was looked for.
+        chat = DeskChat()
+        read = chat.tickets.by_source_key
+        calls = []
+
+        def down_once(key):
+            calls.append(key)
+            if len(calls) == 1:
+                raise StoreUnavailable("down")
+            return read(key)
+
+        with mock.patch.object(chat.tickets, "by_source_key", side_effect=down_once):
+            reply = chat.say("my battery is swollen", identity=RIDER)
+        self.assertEqual(chat.llm.requests, [])
+        (event,) = chat.events("ticket_read_failed")
+        self.assertEqual((event["error"], event["kind"]), ("StoreUnavailable", "safety"))
+        self.assertTrue(is_desk_reference(reply.ticket_id))
+        self.assertIn(SAFETY_MESSAGE, reply.text)
+        self.assertEqual(len(chat.records()), 1)
+
     def test_a_known_phones_ticket_that_raises_promises_no_call(self):
         chat = DeskChat()
         with mock.patch.object(chat.runtime, "_raise_safety_ticket", side_effect=RuntimeError("boom")):
@@ -619,6 +642,137 @@ class SomeoneElsesRunTests(unittest.TestCase):
         self.assertIsNone(stranger.ticket_id)
         (record,) = chat.records()
         self.assertEqual(record["notes"], [])
+
+    @staticmethod
+    def stranger_with_a_ticket(chat):
+        """The run's own person reports a swollen pack; then someone else on
+        the same browser, with no number known, reports smoke and types a
+        number. Both safety replies."""
+        owner = chat.say("my battery is swollen", identity=RIDER)
+        stranger = chat.say("smoke from my battery, my number is 9999999999")
+        return owner, stranger
+
+    def test_the_runs_ticket_stays_the_first_persons_while_a_stranger_writes(self):
+        # Review of Task 13, Important 1: a stranger's ticket is kept apart, so
+        # the first person's next turn never wakes it and their history never
+        # names it.
+        chat = DeskChat()
+        owner, stranger = self.stranger_with_a_ticket(chat)
+        self.assertEqual(chat.llm.requests, [])
+        state = chat.state()
+        self.assertEqual(state.ticket_id, owner.ticket_id)
+        self.assertEqual(state.newcomer_ticket_id, stranger.ticket_id)
+        self.assertEqual(state.newcomer_started_at, chat.tickets.get(stranger.ticket_id)["started_at"])
+        (summary,) = chat.conversations.recent_summaries("PHONE#" + ONE_BIKE)
+        self.assertEqual(summary.ticket_id, owner.ticket_id)
+
+    def test_the_first_person_coming_back_ends_the_strangers_ticket(self):
+        # Review of Task 13, Important 1 ("and the reverse"): the run's own
+        # person proves the same number again, with no restart_for. None of
+        # their turns may reach the stranger's ticket.
+        chat = DeskChat()
+        owner, stranger = self.stranger_with_a_ticket(chat)
+        woken = chat.tickets.get(stranger.ticket_id)["wake"]
+        back = chat.say("I am back, the battery is still swollen", identity=RIDER)
+        self.assertEqual(chat.llm.requests, [])
+        theirs = chat.tickets.get(stranger.ticket_id)
+        reported = customer_turn(chat, "smoke from my battery, my number is [phone]")
+        returning = customer_turn(chat, "I am back, the battery is still swollen")
+        # The stranger's run ends after their last turn and before the first
+        # person's: the worker posts the one and never the other.
+        self.assertIsNotNone(theirs["ended_at"])
+        self.assertLess(parse(reported.at), parse(theirs["ended_at"]))
+        self.assertLessEqual(parse(theirs["ended_at"]), parse(returning.at))
+        self.assertEqual(theirs["wake"], woken)
+        self.assertEqual(theirs["notes"], [])
+        # The report goes to the run's own ticket, and the stranger's is not named.
+        self.assertEqual(back.ticket_id, owner.ticket_id)
+        self.assertNotIn(stranger.ticket_id, back.text)
+        self.assertEqual(len(chat.tickets.get(owner.ticket_id)["notes"]), 1)
+        state = chat.state()
+        self.assertEqual(state.ticket_id, owner.ticket_id)
+        self.assertEqual((state.newcomer_started_at, state.newcomer_ticket_id), (None, None))
+        (summary,) = chat.conversations.recent_summaries("PHONE#" + ONE_BIKE)
+        self.assertEqual(summary.ticket_id, owner.ticket_id)
+
+    def test_a_strangers_wait_for_a_number_ends_with_their_stretch(self):
+        # The ask was the stranger's: the run's own person's next message is
+        # never read as the number to call about the stranger's report.
+        chat = DeskChat(replies=[say("Thank you. Please keep it outside.")] * 4)
+        chat.say("my battery is swollen", identity=RIDER)
+        chat.say("my battery is smoking")
+        self.assertEqual(chat.state().awaiting_callback, "safety")
+        chat.say("I have moved the bike outside", identity=RIDER)
+        self.assertEqual((chat.state().awaiting_callback, chat.state().callback_asks), (None, 0))
+        self.assertIsNone(chat.state().newcomer_started_at)
+
+    def test_a_strangers_later_reports_stay_on_their_own_ticket(self):
+        # Review of Task 13, Important 2: one safety ticket per run holds for
+        # the stranger too (decision 11). Their start does not move, so their
+        # keys repeat, and their own next turn never ends their ticket.
+        chat = DeskChat()
+        owner, stranger = self.stranger_with_a_ticket(chat)
+        again = chat.say("it is still smoking")
+        third = chat.say("smoke again, call me on 9999999999")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual((again.ticket_id, third.ticket_id), (stranger.ticket_id, stranger.ticket_id))
+        self.assertIn(SAFETY_ADDED_MESSAGE.format(reference=stranger.ticket_id), again.text)
+        self.assertNotIn("mobile number", again.text)
+        self.assertNotIn(owner.ticket_id, again.text + third.text)
+        self.assertEqual(len(chat.records()), 2)
+        theirs, first = chat.tickets.get(stranger.ticket_id), chat.tickets.get(owner.ticket_id)
+        self.assertIsNone(theirs["ended_at"])
+        self.assertEqual(len(theirs["notes"]), 2)
+        self.assertEqual(first["notes"], [])
+        self.assertEqual(first["ended_at"], theirs["started_at"])
+        for text in ("it is still smoking", "smoke again, call me on [phone]"):
+            self.assertLessEqual(parse(theirs["started_at"]), parse(customer_turn(chat, text).at))
+        self.assertEqual(chat.state().ticket_id, owner.ticket_id)
+
+    def test_a_strangers_later_turn_wakes_their_ticket_and_never_the_runs(self):
+        chat = DeskChat()
+        owner, stranger = self.stranger_with_a_ticket(chat)
+        theirs, first = chat.tickets.get(stranger.ticket_id)["wake"], chat.tickets.get(owner.ticket_id)["wake"]
+        chat.say("hello? is anyone there")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual(chat.tickets.get(stranger.ticket_id)["wake"], theirs + 1)
+        self.assertEqual(chat.tickets.get(owner.ticket_id)["wake"], first)
+
+    def test_a_strangers_ticket_on_a_later_turn_takes_in_their_first_report(self):
+        # The start is set on the stranger's first turn, not on the turn that
+        # records: the report that asked for a number is in their run.
+        chat = DeskChat()
+        chat.say("my battery is swollen", identity=RIDER)
+        asked = chat.say("my battery is smoking")
+        recorded = chat.say("the smoke is getting worse, call me on 9999999999")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertIn(SAFETY_NO_CONTACT_MESSAGE, asked.text)
+        record = chat.tickets.get(recorded.ticket_id)
+        self.assertLessEqual(parse(record["started_at"]), parse(customer_turn(chat, "my battery is smoking").at))
+        self.assertLess(parse(customer_turn(chat, "my battery is swollen").at), parse(record["started_at"]))
+
+    def test_a_save_conflict_on_a_strangers_turn_keeps_their_ticket_apart(self):
+        store = ConflictedStore()
+        chat = DeskChat(conversations=store)
+        owner = chat.say("my battery is swollen", identity=RIDER)
+        store.conflicts = 1
+        stranger = chat.say("smoke from my battery, my number is 9999999999")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual(len(chat.events("conversation_merged")), 1)
+        state = chat.state()
+        self.assertEqual(state.ticket_id, owner.ticket_id)
+        self.assertEqual(state.newcomer_ticket_id, stranger.ticket_id)
+        self.assertEqual(state.newcomer_started_at, chat.tickets.get(stranger.ticket_id)["started_at"])
+
+    def test_the_strangers_stretch_is_kept_with_the_state_and_goes_with_restart_for(self):
+        state = ConversationState("c1", turns=3, user_key="PHONE#" + ONE_BIKE,
+                                  newcomer_started_at="2026-10-05T10:00:00.000000+00:00",
+                                  newcomer_ticket_id="EM-1000002")
+        self.assertEqual(ConversationState.from_json(state.to_json()), state)
+        old = ConversationState.from_json('{"conversation_id": "c1"}')
+        self.assertEqual((old.newcomer_started_at, old.newcomer_ticket_id), (None, None))
+        state.restart_for("PHONE#" + TWO_BIKES, "2026-10-05T11:00:00.000000+00:00")
+        self.assertEqual((state.newcomer_started_at, state.newcomer_ticket_id), (None, None))
 
 
 class TextsTests(unittest.TestCase):

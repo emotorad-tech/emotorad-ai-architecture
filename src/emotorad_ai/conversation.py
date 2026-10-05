@@ -159,6 +159,15 @@ class ConversationState:
     callback_asks: int = 0
     # The last number a verification code was sent to, for a lock-out ticket.
     last_code_phone: Optional[str] = None
+    # Someone other than the run's own person writing in it before
+    # restart_for (a second person on a shared browser, once the first
+    # person's proof lapsed): where their stretch of the run began
+    # (Runtime._newcomer_start) and the ticket recorded for them in it. Their
+    # tickets take this start, never the run's, and `ticket_id` stays the
+    # run's own person's. Both are cleared when the run's own person writes
+    # again, which ends the stretch's tickets (Runtime._note_speaker).
+    newcomer_started_at: Optional[str] = None
+    newcomer_ticket_id: Optional[str] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None
