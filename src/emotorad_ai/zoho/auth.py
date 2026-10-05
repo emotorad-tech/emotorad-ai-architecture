@@ -6,12 +6,14 @@ status:
 
 - "Access Denied" is Zoho's throttle (10 requests in 10 minutes per refresh
   token), sent with HTTP 200. No token request is made for 10 minutes.
-- Any other error the endpoint names is a refusal: invalid_code,
-  invalid_client, invalid_client_secret, invalid_grant, unauthorized_client
-  and the rest. invalid_client_secret is what rotating the OMS's secret
-  without updating ours gives. Retrying one would only trip the throttle.
-  `state` says "token refused: <name>" for /health, and no token request is
-  made for an hour.
+- Any other error the endpoint names with a status below 500 is a refusal:
+  invalid_code, invalid_client, invalid_client_secret, invalid_grant,
+  unauthorized_client and the rest. invalid_client_secret is what rotating
+  the OMS's secret without updating ours gives. Retrying one would only trip
+  the throttle. `state` says "token refused: <name>" for /health, and no
+  token request is made for an hour.
+- A named error sent with a 5xx is a server fault, not a refusal: it is
+  unavailable, on the 30-second schedule, and `state` is left alone.
 
 The refresh token and the client secret go in the form body, never the
 address. They are never logged, stored or put in an exception message, and
@@ -110,6 +112,13 @@ class TokenSource:
             self._quiet_until = now + THROTTLE_WAIT_SECONDS
             self.state = "throttled"
             raise ZohoTokenThrottled("Zoho is throttling token requests (HTTP %d); none for ten minutes" % status)
+        if isinstance(error, str) and error.strip() and status >= 500:
+            # A server fault that names an error is transient: the 30-second
+            # schedule, not an hour's pause on every ticket, safety ones too.
+            raise ZohoUnavailable(
+                "Zoho's token endpoint failed (HTTP %d, %s)" % (status, safe_code(error, "no code")),
+                error="http_%d" % status,
+            )
         if isinstance(error, str) and error.strip():
             # Named by its code. Text that is no code is not passed on.
             named = safe_code(error, ZohoTokenRefused.error)

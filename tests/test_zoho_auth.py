@@ -165,6 +165,29 @@ class RefusalTests(unittest.TestCase):
                 clock.now += 1
                 self.assertEqual(tokens.token(), "tok-1")
 
+    def test_a_named_error_behind_a_5xx_is_unavailable_not_a_refusal(self):
+        # A refusal pauses every ticket, safety ones included, for an hour.
+        # A server fault that happens to name an error is transient: the
+        # 30-second schedule, and /health keeps "ok".
+        for name, status in (("invalid_grant", 500), ("invalid_client_secret", 502), ("server_error", 503)):
+            with self.subTest(name=name, status=status):
+                tokens, fake, _ = source(Answer(status, {"error": name}), Answer(200, token_answer(1)))
+                with self.assertRaises(ZohoUnavailable) as caught:
+                    tokens.token()
+                self.assertNotIsInstance(caught.exception, ZohoTokenRefused)
+                self.assertEqual(caught.exception.error, "http_%d" % status)
+                self.assertEqual(tokens.state, "ok")
+                self.assertEqual(tokens.token(), "tok-1")
+                self.assertEqual(len(fake.requests), 2)
+
+    def test_a_named_error_below_500_is_still_a_refusal(self):
+        for status in (200, 400, 401, 499):
+            with self.subTest(status=status):
+                tokens, _, _ = source(Answer(status, {"error": "invalid_grant"}))
+                with self.assertRaises(ZohoTokenRefused):
+                    tokens.token()
+                self.assertEqual(tokens.state, "token refused: invalid_grant")
+
     def test_an_error_that_is_not_a_code_is_a_refusal_that_shows_no_text(self):
         tokens, _, _ = source(Answer(400, {"error": "call me on +919999999999"}))
         with self.assertRaises(ZohoTokenRefused) as caught:
