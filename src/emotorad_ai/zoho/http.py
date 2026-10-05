@@ -119,6 +119,10 @@ def _failure(status: int, payload: Any, headers: Any, write: bool) -> ZohoError:
         text = said + (" naming %s" % ", ".join(fields) if fields else "")
         return ZohoRejected(text, error=named, fields=fields)
     if status == 404:
+        if code == "URL_NOT_FOUND":
+            # Zoho's answer for a path it does not recognise. A moved
+            # endpoint is ours to fix, and must not mark every ticket gone.
+            return ZohoConfigError(said, error=named)
         return ZohoGone(said, error=named)
     if status == 408:
         # The server gave up before it had the whole request.

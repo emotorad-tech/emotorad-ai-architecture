@@ -127,10 +127,22 @@ class AnswerTests(unittest.TestCase):
                 self.assertIn("contactId", str(caught.exception))
 
     def test_404_is_gone(self):
-        transport, _ = http_with(Answer(404, zoho_error("url_not_found")))
-        with self.assertRaises(ZohoGone) as caught:
-            transport.call("GET", URL + "/4000000528005", HEADERS, write=False)
-        self.assertEqual(caught.exception.error, "URL_NOT_FOUND")
+        for body in ({"errorCode": "RESOURCE_NOT_FOUND"}, b""):
+            with self.subTest(body=body):
+                transport, _ = http_with(Answer(404, body))
+                with self.assertRaises(ZohoGone):
+                    transport.call("GET", URL + "/4000000528005", HEADERS, write=False)
+
+    def test_a_404_that_says_the_url_is_not_found_is_ours_to_fix_not_a_deleted_ticket(self):
+        # Zoho's answer for a path it does not recognise. If an endpoint
+        # moved, every record with a ticket would otherwise be marked gone.
+        for write in (False, True):
+            with self.subTest(write=write):
+                transport, _ = http_with(Answer(404, zoho_error("url_not_found")))
+                with self.assertRaises(ZohoConfigError) as caught:
+                    transport.call("GET", URL + "/4000000528005", HEADERS, write=write)
+                self.assertEqual(caught.exception.error, "URL_NOT_FOUND")
+                self.assertNotIsInstance(caught.exception, ZohoGone)
 
     def test_413_is_too_large(self):
         transport, _ = http_with(Answer(413, zoho_error("resource_size_exceeded")))

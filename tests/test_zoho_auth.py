@@ -146,6 +146,33 @@ class RefusalTests(unittest.TestCase):
                     tokens.token()
                 self.assertEqual(tokens.state, "token refused: %s" % name)
 
+    def test_any_other_error_the_endpoint_names_is_a_refusal_too(self):
+        # Zoho's token endpoint answers more than the three the design names.
+        # Each used to go on the 30-second schedule, ask again every time and
+        # trip the throttle, and /health never said the token was refused.
+        for name, status in (("invalid_grant", 400), ("unauthorized_client", 400), ("invalid_request", 400),
+                             ("invalid_scope", 200)):
+            with self.subTest(name=name):
+                tokens, fake, clock = source(Answer(status, {"error": name}), Answer(200, token_answer(1)))
+                with self.assertRaises(ZohoTokenRefused) as caught:
+                    tokens.token()
+                self.assertEqual(caught.exception.error, name)
+                self.assertEqual(tokens.state, "token refused: %s" % name)
+                clock.now += REFUSED_WAIT_SECONDS - 1
+                with self.assertRaises(ZohoTokenRefused):
+                    tokens.token()
+                self.assertEqual(len(fake.requests), 1)
+                clock.now += 1
+                self.assertEqual(tokens.token(), "tok-1")
+
+    def test_an_error_that_is_not_a_code_is_a_refusal_that_shows_no_text(self):
+        tokens, _, _ = source(Answer(400, {"error": "call me on +919999999999"}))
+        with self.assertRaises(ZohoTokenRefused) as caught:
+            tokens.token()
+        self.assertEqual(caught.exception.error, ZohoTokenRefused.error)
+        self.assertEqual(tokens.state, "token refused: token_refused")
+        self.assertNotIn("9999999999", str(caught.exception) + repr(caught.exception) + tokens.state)
+
 
 class FailureTests(unittest.TestCase):
     def test_a_network_failure_is_unavailable_and_leaves_the_state_alone(self):
@@ -157,7 +184,7 @@ class FailureTests(unittest.TestCase):
 
     def test_an_answer_without_a_token_is_unavailable(self):
         answers = (Answer(200, {}), Answer(200, {"token_type": "Bearer"}), Answer(200, {"access_token": ""}),
-                   Answer(400, {"error": "invalid_request"}), Answer(200, {"error": {"nested": True}}),
+                   Answer(200, {"error": ""}), Answer(200, {"error": {"nested": True}}),
                    Answer(502, b""), Answer(200, b"<html></html>"))
         for answer in answers:
             with self.subTest(answer=answer):

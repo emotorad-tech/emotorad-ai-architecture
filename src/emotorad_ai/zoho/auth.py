@@ -6,8 +6,10 @@ status:
 
 - "Access Denied" is Zoho's throttle (10 requests in 10 minutes per refresh
   token), sent with HTTP 200. No token request is made for 10 minutes.
-- invalid_code, invalid_client or invalid_client_secret is a refusal. The
-  last is what rotating the OMS's secret without updating ours gives.
+- Any other error the endpoint names is a refusal: invalid_code,
+  invalid_client, invalid_client_secret, invalid_grant, unauthorized_client
+  and the rest. invalid_client_secret is what rotating the OMS's secret
+  without updating ours gives. Retrying one would only trip the throttle.
   `state` says "token refused: <name>" for /health, and no token request is
   made for an hour.
 
@@ -37,7 +39,6 @@ THROTTLE_WAIT_SECONDS = 600.0
 REFUSED_WAIT_SECONDS = 3600.0
 DEFAULT_LIFETIME_SECONDS = 3600.0
 THROTTLED = "Access Denied"
-REFUSALS = frozenset({"invalid_code", "invalid_client", "invalid_client_secret"})
 
 
 def _lifetime(value: Any) -> float:
@@ -109,12 +110,14 @@ class TokenSource:
             self._quiet_until = now + THROTTLE_WAIT_SECONDS
             self.state = "throttled"
             raise ZohoTokenThrottled("Zoho is throttling token requests (HTTP %d); none for ten minutes" % status)
-        if isinstance(error, str) and error in REFUSALS:
+        if isinstance(error, str) and error.strip():
+            # Named by its code. Text that is no code is not passed on.
+            named = safe_code(error, ZohoTokenRefused.error)
             self._token = None
-            self._refused = error
+            self._refused = named
             self._quiet_until = now + REFUSED_WAIT_SECONDS
-            self.state = "token refused: %s" % error
-            raise ZohoTokenRefused("Zoho refused the token request: %s (HTTP %d)" % (error, status), error=error)
+            self.state = "token refused: %s" % named
+            raise ZohoTokenRefused("Zoho refused the token request: %s (HTTP %d)" % (named, status), error=named)
         token = body.get("access_token")
         if error is not None or not isinstance(token, str) or not token.strip():
             raise ZohoUnavailable(
