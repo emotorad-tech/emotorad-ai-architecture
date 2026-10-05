@@ -181,6 +181,49 @@ permanent transcript never keeps an inline photo or a signed link.
 Still not built: real integrations behind the mocks, and a vector index — retrieval is still keyword
 scoring over the authored records (`_score` is the single seam).
 
+**Zoho Desk tickets, parts 1 to 4, 2026-10-05.** 3,022 tests (one known `test_video` failure). Spec
+`docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`, plan
+`docs/superpowers/plans/2026-10-05-zoho-desk-tickets.md`, runbook `docs/runbooks/config-store.md` §7.
+Zoho is off by default: without `EMOTORAD_ZOHO_REFRESH_TOKEN` every ticket goes to the mock, as
+before.
+
+- Part 1, the scripts a person runs (`scripts/zoho/`): the consent address, the code exchange
+  (India only), the read-only probe, one test ticket, the tickets report and the revoke. Their
+  masked captures replace the drafts in `docs/api-shapes/`.
+- Part 2, the ticket record: our own reference (`EM-` and seven digits, from `counters`), one
+  `tickets` record per ticket with a unique `source_key`, receipts scoped to the conversation's
+  run, and run bounds, so a second person on the same browser takes none of the first person's
+  turns or photos.
+- Part 3, the worker, in the API's lifespan only: after the reply it sends each record to Desk
+  (contact, ticket, transcript comments, files), adopts the ticket an unanswered create made by
+  the chat reference at the end of its subject, and logs stuck, late and refused records for the
+  alarms in `infra/zoho-alarms.yaml`.
+- Part 4, the conversation: the handover and lock-out tickets, the call-back number gate, safety
+  with no known number, the safety reply while the store is down, and the caps on unverified
+  tickets. Every text is a draft for person step 10. Erasure (spec section 11) is deferred, so
+  ticket records are removed by hand.
+
+The bugs the build surfaced, each fixed with a test:
+
+- **The capture format collided with the suite.** The probe and `test_ticket.py` wrote over the
+  shapes the fake Zoho answers from: `zoho-token.json` lost its `refresh` key, the subjects were
+  masked, and `zoho-attachment.json` became a list. Committing part 1's captures would have
+  turned CI red. The token answer now goes under `refresh`, the chatbot's own subject is kept,
+  and the first upload's own answer is the attachment shape.
+- **"Invalid Redirect Uri" in use.** The person's consent step failed on a redirect address that
+  did not match the client's, and no script showed the address it used. Both now trim it, print
+  it, and say it must match character for character.
+- **The owner's run start after a stranger.** When the run's own person came back after a
+  stranger used the same chat, a ticket recorded for them began at the run's start and took the
+  stranger's turns. The owner now gets a stretch of their own (`owner_started_at`).
+- **A photo on the first message of a new run.** A file is stored before its turn runs, so by
+  when it was stored it fell inside the previous run, whose record could still be outstanding,
+  and it could go on the previous person's Zoho ticket. A file a turn carried is now judged by
+  that turn alone.
+- **A lock-out that promised a hand-over with nothing recorded.** With Zoho on, a lock-out with
+  no number, or whose ticket failed, still said "I'm passing you to our support team". It now
+  says it could not pass this on, with `escalated: false`, and logs `lockout_ticket_not_recorded`.
+
 ## How to work in this repo
 
 1. Read this file and `docs/Emotorad_Platform_Build_Plan.md` before writing code.

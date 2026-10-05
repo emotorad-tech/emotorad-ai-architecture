@@ -148,16 +148,21 @@ Spec: `docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`. Zoho is o
 `"zoho":"not configured"`. `EMOTORAD_AI_ENV` (already on the workflow's `docker run` line) is
 needed too, because it starts every chat reference, for example `stage:EM-1000001`. The
 playground, the CLI and the local chat page never use these settings, even when they are present.
+The entrypoint exports every field to the Streamlit child too (see the note on
+`EMOTORAD_OMS_API_KEY`), so the playground inherits the Zoho settings, but it keeps the mock: only
+the API's lifespan starts Zoho.
 
 Run every command here in a terminal window outside the Claude app, and clear the scrollback
 afterwards. Never paste a value into a chat session.
 
 **What Zoho rules filter on.** The Desk has no room for custom fields, so none is set. Each
-ticket's subject starts with `[AI chat]` and ends with its chat reference in square brackets, for
-example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. The prefix is what a Zoho
-rule or webhook criterion filters on. The reference at the end is how the worker finds its own
-ticket again after a timeout, so nobody edits a subject in Desk. The description's second line
-says `Source: AI chatbot`.
+ticket's subject contains `[AI chat]` and ends with its chat reference in square brackets, for
+example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. A ticket for a number nobody
+proved puts `[Unverified]` first: `[Unverified] [AI chat] Unverified customer - bike not given [stage:EM-1000002]`.
+So a Zoho rule or webhook criterion filters on the subject containing `[AI chat]`. One written as
+"starts with" misses every unverified ticket. The reference at the end is how the worker finds
+its own ticket again after a timeout, so nobody edits a subject in Desk. The description's
+second line says `Source: AI chatbot`.
 
 **The scripts** (`scripts/zoho/`), in the order of the spec's part 1. Each asks for its secrets by
 hidden input and prints names, ids and counts only.
@@ -188,7 +193,8 @@ hidden input and prints names, ids and counts only.
    # Add the Zoho fields to ~/app-config.json in an editor. Keep every existing field.
    aws secretsmanager put-secret-value --secret-id /emotorad/stage/ai/app \
      --secret-string file://$HOME/app-config.json
-   rm -P ~/app-config.json
+   rm -P ~/app-config.json        # macOS
+   # shred -u ~/app-config.json   # Linux, instead of the line above
    ```
 
    Then check the names only, with the command in section 2.
@@ -197,8 +203,8 @@ hidden input and prints names, ids and counts only.
 4. **The alarms,** once per environment:
 
    ```bash
-   aws cloudformation deploy --stack-name emotorad-ai-stage-zoho-alarms \
-     --template-file infra/zoho-alarms.yaml \
+   aws cloudformation deploy --profile emotorad-staging --region ap-south-1 \
+     --stack-name emotorad-ai-stage-zoho-alarms --template-file infra/zoho-alarms.yaml \
      --parameter-overrides LogGroupName=emotorad-ai-stage AlarmEmail=<the person who receives them>
    ```
 
@@ -206,6 +212,31 @@ hidden input and prints names, ids and counts only.
 5. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
    verification): add `EMOTORAD_ZOHO_DEPARTMENT_ID`, `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` and
    `EMOTORAD_ZOHO_LIVE=yes` by step 2, with that environment's own refresh token.
+
+**Erasing someone's ticket records, by hand until spec section 11 ships.** `erasure_admin` and
+`scripts/delete_person.py` neither list nor remove `tickets` records (spec 2026-10-05, the
+5 October decision to defer section 11). So a person erasing someone also removes their ticket
+records by hand, in `mongosh` against the environment's database, from a terminal outside the
+Claude app. A Claude session never runs these commands: they read and delete customer records.
+Find the records by each of the person's conversation ids (`erasure_admin show` lists them) and
+by their phone, matched on its last ten digits, whatever form it was stored in:
+
+```javascript
+use emotorad_ai
+db.tickets.find({conversation_id: "<conversation id>"}, {_id: 1, state: 1, lease_until: 1, "zoho.ticket_number": 1})
+db.tickets.find({phone: {$regex: "<last ten digits>$"}}, {_id: 1, conversation_id: 1, state: 1, lease_until: 1, "zoho.ticket_number": 1})
+```
+
+Then delete each one by its `_id`, once its `lease_until` is empty or past (the worker holds a
+record five minutes at a time):
+
+```javascript
+db.tickets.deleteOne({_id: "<reference, for example EM-1000001>"})
+```
+
+The worker drops a record deleted under it (`zoho_record_dropped`) and sends nothing more. A
+ticket already in Desk (`zoho.ticket_number`) keeps its copy of the chat and the photos: what
+happens to it is section 11's open decision, so tell Sachin which ones.
 
 **To stop sending.** First run `python scripts/zoho/tickets_report.py` and give the support lead
 the list: those customers were told someone would be in touch. Then remove

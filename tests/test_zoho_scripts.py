@@ -1358,6 +1358,65 @@ class DocsTests(unittest.TestCase):
         self.assertIn("## What changes with the Zoho integration", self.contract)
         self.assertIn('see "What changes with the Zoho integration"', self.contract)
 
+    def zoho_section(self):
+        return self.runbook[self.runbook.index("## 7. Zoho Desk tickets"):]
+
+    def test_a_filter_on_the_subject_is_on_it_containing_ai_chat(self):
+        # The final review, tickets-worker Important 2: an unverified ticket's
+        # subject puts "[Unverified] " first, so "starts with" misses them.
+        for name, text in (("runbook", self.runbook), ("contract", self.contract)):
+            with self.subTest(document=name):
+                self.assertIn("contains `[AI chat]`", text)
+                self.assertIn("`[Unverified] [AI chat]", text)
+                self.assertNotIn("starts with `[AI chat]`", text)
+
+    def test_erasing_someones_ticket_records_is_written_down_as_a_manual_step(self):
+        # The final review, scripts-docs Important 5: erasure_admin does not reach `tickets` yet.
+        media = (ROOT / "docs" / "runbooks" / "media.md").read_text(encoding="utf-8")
+        media_six = media[media.index("## 6. "):media.index("## 7. ")]
+        for name, text in (("config-store section 7", self.zoho_section()), ("media section 6", media_six)):
+            text = " ".join(text.split())
+            with self.subTest(document=name):
+                for needle in ("section 11", "erasure_admin", "mongosh", "db.tickets.find({conversation_id:",
+                               "db.tickets.find({phone:", "db.tickets.deleteOne({_id:",
+                               "A Claude session never runs"):
+                    self.assertIn(needle, text)
+
+    def test_the_runbook_gives_both_shred_forms_the_alarm_profile_and_the_playground_rule(self):
+        section = self.zoho_section()
+        self.assertIn("rm -P ~/app-config.json", section)
+        self.assertIn("shred -u ~/app-config.json", section)
+        deploy = section[section.index("aws cloudformation deploy"):]
+        deploy = deploy[:deploy.index("```")]
+        self.assertIn("--profile emotorad-staging", deploy)
+        self.assertIn("--region ap-south-1", deploy)
+        self.assertIn("Streamlit", section)
+
+    def test_the_rulebook_has_a_zoho_paragraph_and_the_manual_ticket_erasure(self):
+        rulebook = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        [zoho] = [line for line in rulebook.splitlines() if line.startswith("- **Zoho Desk tickets**")]
+        for needle in ("`EMOTORAD_ZOHO_REFRESH_TOKEN`", "`EMOTORAD_ZOHO_LIVE=yes`", "lifespan", "`scripts/zoho/*`",
+                       "`tickets` and `counters`", "section 11", "`docs/runbooks/config-store.md` §7"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, zoho)
+        [erasure] = [line for line in rulebook.splitlines() if line.startswith("- **Delete my data")]
+        self.assertIn("`tickets`", erasure)
+
+    def test_register_row_7_3_says_what_the_backstop_does_with_zoho_off(self):
+        register = (ROOT / "docs" / "Emotorad_Edge_Case_Register.md").read_text(encoding="utf-8")
+        [row] = [line for line in register.splitlines() if line.startswith("| 7.3 |")]
+        self.assertIn("With Zoho off", row)
+        self.assertIn("`why: backstop_no_contact`", row)
+
+    def test_the_build_log_has_the_zoho_build(self):
+        log = (ROOT / "docs" / "Emotorad_Build_Log.md").read_text(encoding="utf-8")
+        entry = log[log.index("**Zoho Desk tickets, parts 1 to 4, 2026-10-05.**"):]
+        entry = entry[:entry.index("\n## ")]
+        for needle in ("Invalid Redirect Uri", "zoho-token.json", "stranger", "first message", "lock-out",
+                       "off by default"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, entry)
+
 
 # The events the spec alarms on (section 8), and those it logs without an alarm.
 ALARMED = ("zoho_misconfigured", "zoho_token_refused", "zoho_worker_error", "zoho_ticket_stuck",

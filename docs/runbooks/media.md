@@ -134,6 +134,24 @@ through `scripts/delete_person.py`, which removes a person's conversation record
 (working state, transcript turns, summaries, idempotency receipts) and their media:
 the `media` records in MongoDB and the matching S3 objects, every version.
 
+**Ticket records are removed by hand until spec section 11 ships.** Neither
+`delete_person.py` nor `erasure_admin` lists or removes the person's `tickets` records
+(spec 2026-10-05, section 11, deferred on 5 October). So a person erasing someone also
+removes them in `mongosh`, from a terminal outside the Claude app. A Claude session never
+runs these commands: they read and delete customer records. Find the records by each of
+the person's conversation ids and by their phone's last ten digits, then delete each by
+its `_id` once its `lease_until` is empty or past:
+
+```javascript
+use emotorad_ai
+db.tickets.find({conversation_id: "<conversation id>"}, {_id: 1, state: 1, lease_until: 1, "zoho.ticket_number": 1})
+db.tickets.find({phone: {$regex: "<last ten digits>$"}}, {_id: 1, conversation_id: 1, state: 1, lease_until: 1, "zoho.ticket_number": 1})
+db.tickets.deleteOne({_id: "<reference, for example EM-1000001>"})
+```
+
+A ticket already in Desk keeps its copy of the chat and the photos; see
+`docs/runbooks/config-store.md` §7 for what to do about it.
+
 **Open question, decide before deploying.** Removing the expiry also keeps objects
 that are nobody's evidence: an upload that was presigned and PUT but never claimed by
 a message has no `media` record, and playground attachments (`customers/playground/`)
