@@ -240,6 +240,10 @@ class ZohoWorker:
                 self.status["last_pass_at"] = self._clock()
             except Exception as exc:
                 self._worker_error(exc)
+            # stop() sets the flag before the wake. A stop that came just
+            # before the clear above lost its wake, but not its flag.
+            if self._stop.is_set():
+                break
             self._wake.wait(self.pass_seconds)
 
     def _worker_error(self, exc: BaseException) -> None:

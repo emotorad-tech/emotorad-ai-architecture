@@ -1337,6 +1337,24 @@ class LoopTests(WorkerCase):
         self.assertIsNotNone(self.worker.status["last_pass_at"])
         self.assertFalse([t for t in threading.enumerate() if t.name == THREAD_NAME and t.is_alive()])
 
+    def test_a_stop_that_lands_just_before_the_pass_still_ends_the_loop(self):
+        # stop() between the loop's check and its clear of the wake: the clear
+        # loses the wake, so the loop must see the flag before it sleeps, or
+        # the thread outlives stop() and the lifespan by a whole pass.
+        worker = self.worker
+        real_clear = worker._wake.clear
+
+        def stop_arrives_first():
+            worker._stop.set()
+            worker._wake.set()
+            real_clear()
+
+        worker.pass_seconds = 2.0
+        worker._wake.clear = stop_arrives_first
+        started = time.monotonic()
+        worker._loop()
+        self.assertLess(time.monotonic() - started, 1.0)
+
     def test_a_pass_that_fails_is_logged_by_class_and_the_loop_carries_on(self):
         class Broken(Exception):
             pass

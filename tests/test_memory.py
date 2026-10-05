@@ -5,8 +5,11 @@ from emotorad_ai.conversation import ConversationSummaryItem, InMemoryConversati
 from emotorad_ai.enrichment import summarise_past
 from emotorad_ai.llm import say
 from emotorad_ai.runtime import Runtime
+from emotorad_ai.tickets.seam import DeskTicketSystem, TicketRouter
+from emotorad_ai.tickets.store import InMemoryTicketStore
+from emotorad_ai.tools.mocks import MockTicketSystem, build_registry
 from tests.store_contract import inbound, reply
-from tests.test_runtime_persistence import runtime_on, send
+from tests.test_runtime_persistence import TODAY, runtime_on, send
 
 
 def item(cid, day, **fields):
@@ -29,6 +32,21 @@ class SummariseTests(unittest.TestCase):
 
     def test_nothing_to_say_is_none(self):
         self.assertIsNone(summarise_past([]))
+
+    def test_with_real_tickets_an_old_mock_number_is_left_out(self):
+        # Spec 2026-10-05 section 3: once Zoho is on, an EM-00012 exists
+        # nowhere, so the bot must never quote it. A Desk reference stays.
+        text = summarise_past([
+            item("b", 20, title="Battery will not charge", outcome="escalated", ticket_id="EM-00012"),
+            item("a", 2, title="Motor is making a noise", outcome="escalated", ticket_id="EM-1000001"),
+        ], drop_mock_tickets=True)
+        self.assertEqual(text, "20 Sep: Battery will not charge, escalated\n"
+                               "02 Sep: Motor is making a noise, escalated, ticket EM-1000001")
+
+    def test_the_mock_pattern_reads_ascii_digits_only(self):
+        # Five Devanagari digits are not a mock number the code ever issued.
+        text = summarise_past([item("b", 20, title="Battery issue", ticket_id="EM-०००१२")], drop_mock_tickets=True)
+        self.assertEqual(text, "20 Sep: Battery issue, ticket EM-०००१२")
 
 
 class RuntimeMemoryTests(unittest.TestCase):
@@ -54,6 +72,40 @@ class RuntimeMemoryTests(unittest.TestCase):
         runtime = runtime_on(store, [say("Ok.")])
         send(runtime, "my battery won't charge", cid="only")
         self.assertNotIn("Last contact:", runtime.llm.requests[0]["system"])
+
+    def test_with_zoho_on_an_old_mock_number_never_reaches_the_model(self):
+        store = InMemoryConversationStore()
+        earlier = store.get("earlier")
+        earlier.user_key = "PHONE#+919876543210"
+        store.record_turn(earlier, inbound("hi", cid="earlier"), reply("Ok.", cid="earlier"),
+                          item("earlier", 20, title="Battery issue", outcome="escalated", ticket_id="EM-00012"))
+        router = TicketRouter(DeskTicketSystem(InMemoryTicketStore(), "test", "stage"), MockTicketSystem())
+        runtime = runtime_on(store, [say("Welcome back.")], registry=build_registry(today=TODAY, ticket_system=router))
+        send(runtime, "my battery won't charge", cid="second")
+        system = runtime.llm.requests[0]["system"]
+        self.assertIn("Last contact:", system)
+        self.assertIn("20 Sep: Battery issue, escalated\n", system)
+        self.assertNotIn("EM-00012", system)
+
+    def test_with_zoho_off_an_old_mock_number_is_still_quoted(self):
+        # The mock's numbers are the only ones there are while Zoho is off.
+        store = InMemoryConversationStore()
+        earlier = store.get("earlier")
+        earlier.user_key = "PHONE#+919876543210"
+        store.record_turn(earlier, inbound("hi", cid="earlier"), reply("Ok.", cid="earlier"),
+                          item("earlier", 20, title="Battery issue", outcome="escalated", ticket_id="EM-00012"))
+        runtime = runtime_on(store, [say("Welcome back.")])
+        send(runtime, "my battery won't charge", cid="second")
+        self.assertIn("20 Sep: Battery issue, escalated, ticket EM-00012", runtime.llm.requests[0]["system"])
+
+    def test_only_a_ticket_system_that_says_so_records_real_tickets(self):
+        router = TicketRouter(DeskTicketSystem(InMemoryTicketStore(), "test", "stage"), MockTicketSystem())
+        self.assertTrue(runtime_on(InMemoryConversationStore(), [],
+                                   registry=build_registry(today=TODAY, ticket_system=router))._records_real_tickets())
+        self.assertFalse(runtime_on(InMemoryConversationStore(), [])._records_real_tickets())
+        # A double whose every attribute is truthy is not Zoho.
+        double = build_registry(today=TODAY, ticket_system=SimpleNamespace(records_real_tickets="yes"))
+        self.assertFalse(runtime_on(InMemoryConversationStore(), [], registry=double)._records_real_tickets())
 
     def test_what_the_customer_typed_never_reaches_memory(self):
         store = InMemoryConversationStore()

@@ -782,8 +782,13 @@ class Runtime:
             last_contact = None
             if state.user_key:
                 try:
-                    last_contact = summarise_past(self.conversations.recent_summaries(
-                        state.user_key, limit=3, exclude=summary_key(state.conversation_id, state.started_at)))
+                    last_contact = summarise_past(
+                        self.conversations.recent_summaries(
+                            state.user_key, limit=3, exclude=summary_key(state.conversation_id, state.started_at)),
+                        # With Zoho on, an old mock number exists nowhere,
+                        # so it never reaches the model (spec 2026-10-05).
+                        drop_mock_tickets=self._records_real_tickets(),
+                    )
                 except StoreUnavailable as exc:
                     # Memory is a nicety; the conversation goes on without it.
                     self.log.emit("memory_unavailable", message.conversation_id, error=str(exc))
@@ -1302,6 +1307,14 @@ class Runtime:
         if resolved.persona == "customer" and identity.may_disclose and identity.phone:
             return "PHONE#" + identity.phone
         return None
+
+    def _records_real_tickets(self) -> bool:
+        """Whether customer tickets go to Zoho Desk (api.py wired a
+        TicketRouter) rather than the mock. The only "is Zoho on" check.
+        `is True`, so a test double whose attributes are all truthy never
+        counts."""
+        tickets = getattr(self.registry, "tickets", None)
+        return getattr(tickets, "records_real_tickets", False) is True
 
     def _summary_for(
         self, state: ConversationState, resolved: Optional[ResolvedIdentity]

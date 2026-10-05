@@ -103,12 +103,21 @@ def summarise_signals(signals: Sequence[str]) -> Optional[str]:
     return "Intent signals: " + ", ".join(named)
 
 
-def summarise_past(summaries: Sequence[Any]) -> Optional[str]:
+# An old mock ticket number (tools/mocks.py, "EM-%05d"). Desk references have
+# seven digits from EM-1000001, so they never match this. ASCII digits only:
+# the mock never wrote any other kind.
+_MOCK_TICKET = re.compile(r"EM-[0-9]{5}")
+
+
+def summarise_past(summaries: Sequence[Any], drop_mock_tickets: bool = False) -> Optional[str]:
     """Earlier conversations, one line each, newest first, at most three.
 
     Built only from fields code wrote (a record title or a fixed label, the
     bike, the outcome, the ticket), never from what the customer typed, so a
     past message cannot steer a future prompt.
+
+    With `drop_mock_tickets` (Zoho on, spec 2026-10-05 section 3), an old mock
+    number is left out: it exists nowhere, and the bot must never quote it.
     """
     lines: List[str] = []
     for item in list(summaries)[:3]:
@@ -123,7 +132,7 @@ def summarise_past(summaries: Sequence[Any]) -> Optional[str]:
             line += " (…%s)" % item.frame_number[-4:]
         if item.outcome == "escalated":
             line += ", escalated"
-        if item.ticket_id:
+        if item.ticket_id and not (drop_mock_tickets and _MOCK_TICKET.fullmatch(item.ticket_id)):
             line += ", ticket %s" % item.ticket_id
         lines.append(line)
     return "\n".join(lines) if lines else None

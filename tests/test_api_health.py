@@ -8,6 +8,8 @@ import os
 import unittest
 from unittest import mock
 
+from emotorad_ai.zoho.settings import ENV_NAMES
+
 
 def fresh_api(env):
     with mock.patch.dict(os.environ, env, clear=False):
@@ -16,19 +18,29 @@ def fresh_api(env):
         return importlib.reload(api)
 
 
+def zoho_blank():
+    """Every Zoho setting (spec 2026-10-05 section 9) blank, together with any
+    other EMOTORAD_ZOHO_* name on this machine, so a laptop with the staging
+    secret loaded still sees Zoho off where /health is pinned."""
+    names = set(ENV_NAMES) | {name for name in os.environ if name.startswith("EMOTORAD_ZOHO_")}
+    return {name: "" for name in names}
+
+
 class HealthTests(unittest.TestCase):
     def test_offline_reports_no_secret(self):
         # Both video keys blanked, so the frames fallback is what is reported on
-        # any machine, including one with a real key in its environment.
-        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
-                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
-                         "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"})
+        # any machine, including one with a real key in its environment. Zoho
+        # blanked for the same reason: off, it is the mock, and no ticket
+        # counts appear while nothing is waiting.
+        api = fresh_api(dict({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
+                              "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
+                              "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"}, **zoho_blank()))
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
-             "photo_check": "off"},
+             "photo_check": "off", "zoho": "not configured"},
         )
 
     def test_health_names_the_commit_it_was_built_from(self):
@@ -147,7 +159,7 @@ class HealthTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
+        fresh_api(dict({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""}, **zoho_blank()))
 
 
 if __name__ == "__main__":

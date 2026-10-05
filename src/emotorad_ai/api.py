@@ -78,6 +78,7 @@ from .storage.keys import KeyValidationError, cluster_of, is_customer_key, is_va
 from .storage.s3 import StorageError, store_from_env
 from . import tracing
 from .storage.uploads import UploadError, UploadRegistry
+from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
 from .tools import fixtures
 from .tools.mocks import build_registry
@@ -85,6 +86,7 @@ from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity
 from .video_summary import VideoSummaryError, summariser_from_env
 from .wiring import build_models, build_stores
+from .zoho.wiring import build_zoho, ticket_health, zoho_status
 
 # Set by docker/start.py's loader to the number of names it exported (as a
 # string), after load_into_environ() succeeds. Reported by /health so a
@@ -151,6 +153,21 @@ OTP_SENDER = MockOtpSender()
 # config store exports it from the staging secret. None: behaviour as before.
 AMIGO = amigo_tools.from_env()
 
+# Zoho Desk tickets (spec 2026-10-05). Decided here, once, and nowhere else:
+# the CLI, the playground and the live evaluation keep the mock. Zoho is off
+# without EMOTORAD_ZOHO_REFRESH_TOKEN. A failed start-up check also keeps
+# the mock, says why on /health and logs zoho_misconfigured. The worker is
+# built here, but only the lifespan starts it, never the import.
+ZOHO = build_zoho(
+    os.environ,
+    ticket_store=stores.tickets,
+    store_kind=settings.store,
+    conversations=stores.conversations,
+    media_reader=MEDIA_STORE,
+    log=log,
+    otp_is_mock=isinstance(OTP_SENDER, MockOtpSender),
+)
+
 # The guide photos and clips the agent may show. Loaded once: it is authored
 # content in the repo, not per-request state. load_catalogue() raises on a
 # malformed catalogue, and that is deliberate: a broken catalogue should fail
@@ -190,9 +207,12 @@ def _build_registry():
     that belongs to nobody. With it, a phone number reaches the live purchase
     table and the bikes, frame numbers and purchase dates are the customer's own.
 
-    Ticketing stays mocked either way. That combination is worth knowing about:
-    real bike details followed by a ticket number that exists nowhere is more
-    convincing, and therefore worse, than fixtures all the way through.
+    Tickets do not follow this switch. With Zoho on (ZOHO, above), a
+    customer's ticket is recorded for Zoho Desk and a dealer's stays on the
+    mock. With Zoho off, every ticket is the mock's, and its number exists
+    nowhere. That combination is worth knowing about: real bike details
+    followed by a ticket number that exists nowhere is more convincing, and
+    therefore worse, than fixtures all the way through.
     """
     if not os.environ.get("EMOTORAD_OMS_API_KEY"):
         return build_registry(
@@ -212,6 +232,8 @@ def _build_registry():
             approval_mode=settings.approval_mode,
             location_sharing=True,
             idempotency=stores.idempotency,
+            # None while Zoho is off: build_registry then makes the mock.
+            ticket_system=ZOHO.router,
         )
     client = OMSClient()
     return build_registry(
@@ -228,6 +250,7 @@ def _build_registry():
         approval_mode=settings.approval_mode,
         location_sharing=True,
         idempotency=stores.idempotency,
+        ticket_system=ZOHO.router,
     )
 
 
@@ -289,7 +312,13 @@ _ATTACHMENT_KIND = {"images": "image", "videos": "video", "docs": "document"}
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    # The Zoho worker runs only in a process that is serving. It starts here,
+    # never at import, so the tests, a reload and the playground start nothing.
+    if ZOHO.worker is not None:
+        ZOHO.worker.start()
     yield
+    if ZOHO.worker is not None:
+        ZOHO.worker.stop()
     # The SDK batches in a background thread; a container stopped mid-batch
     # would otherwise lose the last turns of every open conversation.
     if TRACING is not None:
@@ -445,7 +474,7 @@ BUILD = os.environ.get("EMOTORAD_AI_BUILD") or "unknown"
 
 @app.get("/health")
 def health() -> dict:
-    return {
+    report = {
         "status": "ok",
         "mode": MODE,
         "store": settings.store,
@@ -459,7 +488,13 @@ def health() -> dict:
         "amigo": "configured" if AMIGO is not None else "not configured",
         "build": BUILD,
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
+        # Zoho Desk: on, off, or why not (zoho/wiring.py).
+        "zoho": zoho_status(ZOHO),
     }
+    # Tickets waiting, stuck and held, and the worker's state. Shown while
+    # Zoho is on, or while any record is outstanding.
+    report.update(ticket_health(ZOHO, now_iso()))
+    return report
 
 
 def _require_media() -> None:
