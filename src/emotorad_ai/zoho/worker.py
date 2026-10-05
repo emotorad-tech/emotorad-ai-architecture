@@ -278,9 +278,10 @@ class ZohoWorker:
         self.log.emit("zoho_worker_error", "zoho", level="error", error=type(exc).__name__)
 
     def _store_unavailable(self) -> None:
-        # An Atlas blip is not the worker's fault, so it is not the alarmed
-        # zoho_worker_error. The store's own alarms cover a long outage, and
-        # the next pass tries again.
+        # An Atlas blip is not the worker's fault, so it is not
+        # zoho_worker_error, and the next pass tries again. A long outage
+        # alarms: infra/zoho-alarms.yaml emails when this is logged in each of
+        # three consecutive five-minute periods.
         self.log.emit("zoho_worker_store_unavailable", "zoho", level="warning")
 
     # -- one record ---------------------------------------------------------

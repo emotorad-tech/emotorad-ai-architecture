@@ -236,6 +236,18 @@ and counts only. With the token shared, the person's steps start at the probe.
    ```
 
    AWS emails that address to confirm the subscription. No alarm reaches it until they confirm.
+   The stack emails on eight events, each named in the alarm:
+
+   | Event | What it means |
+   | --- | --- |
+   | `zoho_misconfigured` | Zoho is switched on but a start-up check failed: the mock is used. `/health` says why |
+   | `zoho_token_refused` | Zoho refused the refresh token: nothing reaches Desk until it is fixed |
+   | `zoho_worker_error` | The worker hit an unexpected error in a pass. It carries on; the line names the error class |
+   | `zoho_worker_store_unavailable` | The worker could not reach MongoDB Atlas in each of three consecutive five-minute periods: no ticket reaches Desk until it can. A single blip is logged and not emailed |
+   | `zoho_ticket_stuck` | A ticket has waited 24 hours: run `tickets_report.py` and tell the support lead |
+   | `safety_ticket_late` | A safety ticket has waited 10 minutes: ask the support lead to call the customer now |
+   | `safety_ticket_not_recorded` | A safety report has no ticket: read the conversation and reach the customer |
+   | `unverified_ticket_capped` | The daily cap on unverified tickets refused one: check for abuse, or whether the cap is too low |
 7. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
    verification): add `EMOTORAD_ZOHO_DEPARTMENT_ID`, `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` and
    `EMOTORAD_ZOHO_LIVE=yes` by step 4, with the OMS's refresh token as on staging. That makes a

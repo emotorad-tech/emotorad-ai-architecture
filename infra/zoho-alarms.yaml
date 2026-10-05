@@ -16,8 +16,11 @@
 # writes to the log group. So each filter matches the line's "event" field.
 # An alarm fires on one event in its period. The worker logs a stuck or late
 # record once an hour, so a stuck record means one email an hour until it is sent.
+# The one exception is zoho_worker_store_unavailable: the worker logs it on each
+# pass MongoDB Atlas cannot be reached, and a blip is not worth an email, so it
+# alarms only when it is logged in each of three consecutive five-minute periods.
 #
-# Seven events are alarmed. Every other ticket event the code logs is an end
+# Eight events are alarmed. Every other ticket event the code logs is an end
 # state, or is followed by an alarmed event when it matters. Each is listed
 # with its reason in NOT_ALARMED in tests/test_zoho_scripts.py, which keeps
 # that list, this template and the code's events in step.
@@ -223,6 +226,33 @@ Resources:
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoWorkerStoreUnavailableFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_worker_store_unavailable" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_worker_store_unavailable
+          MetricValue: "1"
+
+  ZohoWorkerStoreUnavailableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_worker_store_unavailable"
+      AlarmDescription: "The Zoho worker could not reach MongoDB Atlas for 15 minutes. No ticket reaches Desk, safety ones included, until it can. Check Atlas and the service's connection."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_worker_store_unavailable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching

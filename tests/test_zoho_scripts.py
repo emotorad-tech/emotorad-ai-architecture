@@ -1498,10 +1498,14 @@ class DocsTests(unittest.TestCase):
 
 # The events the spec alarms on (section 8), and those it logs without an alarm.
 ALARMED = ("zoho_misconfigured", "zoho_token_refused", "zoho_worker_error", "zoho_ticket_stuck",
-           "safety_ticket_late", "safety_ticket_not_recorded", "unverified_ticket_capped")
+           "safety_ticket_late", "safety_ticket_not_recorded", "unverified_ticket_capped",
+           "zoho_worker_store_unavailable")
+# An Atlas blip is not worth an email; an outage is. These alarm only when the
+# event is logged in each of three consecutive five-minute periods.
+PERSISTENT = ("zoho_worker_store_unavailable",)
 # Every other ticket event the code logs, with the reason it has no alarm: an
 # end state, or an event another alarm already covers when it matters.
-STORE_ALARMS = "a store blip; the store's own alarms cover a long outage"
+STORE_ALARMS = "a store blip; a long outage alarms as zoho_worker_store_unavailable"
 NOT_ALARMED = {
     "zoho_ticket_sent": "an end state: the ticket is in Desk",
     "zoho_retry": "the record is tried again; one that never gets through alarms as zoho_ticket_stuck or "
@@ -1512,7 +1516,6 @@ NOT_ALARMED = {
     "zoho_ticket_adopted": "an end state: the ticket an unanswered create made was found",
     "zoho_record_dropped": "an end state: the record was erased, or another worker holds it",
     "safety_ticket_failed": "followed by safety_ticket_not_recorded, which alarms",
-    "zoho_worker_store_unavailable": "an Atlas blip; the store's own alarms cover a long outage",
     "ticket_recorded": "an end state: the record is made, and the worker sends it",
     "ticket_note_added": "an end state: the line is on the record",
     "ticket_note_failed": "the ticket stands without the line, and the reply promises nothing on it",
@@ -1598,6 +1601,27 @@ class AlarmStackTests(unittest.TestCase):
         for properties in alarms.values():
             self.assertEqual(properties["AlarmActions"], [{"Ref": "AlarmTopic"}])
             self.assertEqual(properties["TreatMissingData"], "notBreaching")
+
+    def test_a_store_outage_alarms_only_when_it_lasts_three_five_minute_periods(self):
+        # The worker logs zoho_worker_store_unavailable on each pass Atlas
+        # fails. One blip is not worth an email; fifteen minutes of them is.
+        resources = yaml.load(self.text, Loader=_CloudFormationLoader)["Resources"]
+        alarms = {res["Properties"]["MetricName"]: res["Properties"] for res in resources.values()
+                  if res["Type"] == "AWS::CloudWatch::Alarm"}
+        for event, properties in alarms.items():
+            with self.subTest(event=event):
+                periods = 3 if event in PERSISTENT else 1
+                self.assertEqual(properties["EvaluationPeriods"], periods)
+                self.assertEqual(properties.get("DatapointsToAlarm", 1), periods)
+                self.assertEqual((properties["Statistic"], properties["Threshold"]), ("Sum", 1))
+                self.assertEqual(properties["ComparisonOperator"], "GreaterThanOrEqualToThreshold")
+                if event in PERSISTENT:
+                    self.assertEqual(properties["Period"], 300)
+
+    def test_the_store_outage_alarm_comes_from_the_worker(self):
+        worker = (ROOT / "src" / "emotorad_ai" / "zoho" / "worker.py").read_text(encoding="utf-8")
+        self.assertIn("zoho_worker_store_unavailable", _EMITTED.findall(worker))
+        self.assertNotIn("store's own alarms", worker)
 
     def test_no_event_is_both_alarmed_and_not(self):
         self.assertEqual(set(ALARMED) & set(NOT_ALARMED), set())
