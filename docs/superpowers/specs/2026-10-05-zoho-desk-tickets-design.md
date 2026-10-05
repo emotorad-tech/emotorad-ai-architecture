@@ -73,6 +73,19 @@ The person's decisions (5 October 2026):
   `test_ticket.py` settles it by creating one ticket without them. If Zoho
   enforces them, the support lead decides the bot's value for each before any
   further part ships, and the probe's recorded pick-list values are used.
+- **The OMS's token is shared (5 October 2026, Sachin's decision).** The
+  chatbot uses the OMS's client id, client secret and refresh token. No grant
+  is made: `consent_url.py` and `exchange_code.py` leave the setup (kept for a
+  client of our own), and the person's steps start at the probe. Zoho's limits
+  (10 active access tokens per refresh token, 10 token requests in 10 minutes)
+  hold with the OMS and the worker each refreshing about hourly. Rollback is
+  removing `EMOTORAD_ZOHO_REFRESH_TOKEN` and redeploying, never revoking, which
+  stops the OMS's ticketing and AFS dispatch. An OMS secret rotation is copied
+  to `/emotorad/stage/ai/app` the same day. The OMS's config asks for neither
+  `Desk.basic.READ` nor `Desk.settings.READ`, which only the probe uses; the
+  probe shows whether the token has them. This overrides later mentions of the
+  chatbot's own token, a second grant or `revoke.py`
+  (`docs/runbooks/config-store.md` §7).
 
 ## What exists today
 

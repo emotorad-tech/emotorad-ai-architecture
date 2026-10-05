@@ -238,6 +238,11 @@ class ExchangeTests(unittest.TestCase):
         rc = load("exchange_code").main(list(argv), ask=ask, http=accounts, out=screen.out)
         return rc, accounts, screen
 
+    def test_the_docstring_says_it_is_not_part_of_the_setup_while_the_token_is_shared(self):
+        doc = " ".join((load("exchange_code").__doc__ or "").split())
+        self.assertIn("Not part of the setup while the chatbot shares the OMS's Zoho token", doc)
+        self.assertIn("a future client of our own", doc)
+
     def test_server_based_sends_the_redirect_address(self):
         rc, accounts, _ = self.exchange((200, INDIA))
         self.assertEqual(rc, 0)
@@ -359,10 +364,32 @@ class AskSecretTests(unittest.TestCase):
 
 
 class RevokeTests(unittest.TestCase):
+    """The chatbot shares the OMS's refresh token (Sachin's decision, 5 October
+    2026), so revoking it would stop the OMS's ticketing and AFS dispatch. The
+    script refuses unless told the token is a client of our own's."""
+
+    def test_without_own_client_it_says_why_and_asks_for_nothing_and_posts_nothing(self):
+        accounts = FakeAccounts()
+        screen = Screen()
+        rc = load("revoke").main([], ask=never, typed=never, http=accounts, out=screen.out)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(accounts.calls, [])
+        text = " ".join(screen.text.split())
+        for needle in ("shares the OMS's", "AFS dispatch", "EMOTORAD_ZOHO_REFRESH_TOKEN",
+                       "docs/runbooks/config-store.md, section 7", "--own-client"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+    def test_the_docstring_says_it_refuses_without_own_client(self):
+        doc = " ".join((load("revoke").__doc__ or "").split())
+        self.assertIn("--own-client", doc)
+        self.assertIn("shares the OMS's", doc)
+        self.assertIn("never revoke", doc.lower())
+
     def test_the_token_goes_as_a_form_field_to_indias_revoke_address(self):
         accounts = FakeAccounts((200, {"status": "success"}))
         screen = Screen()
-        rc = load("revoke").main([], ask=answers("1000.refresh.value"), typed=lambda prompt: "REVOKE",
+        rc = load("revoke").main(["--own-client"], ask=answers("1000.refresh.value"), typed=lambda prompt: "REVOKE",
                                  http=accounts, out=screen.out)
         self.assertEqual(rc, 0)
         [call] = accounts.calls
@@ -374,14 +401,14 @@ class RevokeTests(unittest.TestCase):
 
     def test_nothing_is_revoked_without_typing_revoke(self):
         accounts = FakeAccounts()
-        rc = load("revoke").main([], ask=answers("1000.refresh.value"), typed=lambda prompt: "yes",
+        rc = load("revoke").main(["--own-client"], ask=answers("1000.refresh.value"), typed=lambda prompt: "yes",
                                  http=accounts, out=Screen().out)
         self.assertEqual(rc, 1)
         self.assertEqual(accounts.calls, [])
 
     def test_a_refusal_names_the_error(self):
         screen = Screen()
-        rc = load("revoke").main([], ask=answers("1000.refresh.value"), typed=lambda prompt: "REVOKE",
+        rc = load("revoke").main(["--own-client"], ask=answers("1000.refresh.value"), typed=lambda prompt: "REVOKE",
                                  http=FakeAccounts((200, {"error": "invalid_token"})), out=screen.out)
         self.assertEqual(rc, 1)
         self.assertIn("invalid_token", screen.text)
@@ -1346,6 +1373,54 @@ class DocsTests(unittest.TestCase):
         for status in ("not configured", "test department", "token refused: <error>", "sending failing: <code>"):
             self.assertIn("`%s`" % status, self.runbook)
 
+    def test_the_runbook_says_the_token_is_the_omss_and_the_rollback_never_revokes(self):
+        # Sachin's decision of 5 October 2026: the chatbot shares the OMS's
+        # client and refresh token. Revoking it stops the OMS's ticketing.
+        section = " ".join(self.zoho_section().split())
+        for needle in ("**Shared with the OMS.**", "OMS's own Zoho client id, client secret and refresh token",
+                       "10 active access tokens per refresh token", "the oldest invalidated when an eleventh",
+                       "10 access-token requests in 10 minutes", "20 refresh tokens per client per user",
+                       "about two refreshes an hour", "the same day", "`token refused: <error>`",
+                       "`zoho_token_refused`", "`Desk.basic.READ`", "`Desk.settings.READ`", "the probe shows",
+                       "AFS dispatch", "Connected Apps page"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        stop = section[section.index("**To stop sending.**"):]
+        stop = stop[:stop.index("| `/health` `zoho` |")]
+        self.assertIn("remove `EMOTORAD_ZOHO_REFRESH_TOKEN`", stop)
+        self.assertIn("Never revoke it.", stop)
+        self.assertIn("refuses without `--own-client`", stop)
+        self.assertNotIn("To revoke the token itself", self.runbook)
+        [row] = [line for line in self.runbook.splitlines() if line.startswith("| `EMOTORAD_ZOHO_REFRESH_TOKEN`")]
+        self.assertIn("The OMS's own refresh token", row)
+        self.assertNotIn("never the OMS's", row)
+
+    def test_the_runbooks_steps_start_at_the_probe_and_the_grant_is_for_a_client_of_our_own(self):
+        section = self.zoho_section()
+        [first] = [line for line in section.splitlines() if line.startswith("1. ")][:1]
+        self.assertIn("**The probe.**", first)
+        future = section.index("**For a future client of our own.**")
+        steps = section[:future]
+        for script in ("python scripts/zoho/consent_url.py", "python scripts/zoho/exchange_code.py"):
+            with self.subTest(script=script):
+                self.assertNotIn(script, steps)
+                self.assertIn(script, section[future:])
+        self.assertLess(steps.index("**The probe.**"), steps.index("**The test ticket.**"))
+        self.assertLess(steps.index("**The test ticket.**"), steps.index("**The settings.**"))
+        self.assertIn("python scripts/zoho/revoke.py --own-client", section[future:])
+
+    def test_the_spec_records_the_shared_token_with_the_5_october_decisions(self):
+        spec = (ROOT / "docs" / "superpowers" / "specs" / "2026-10-05-zoho-desk-tickets-design.md").read_text(
+            encoding="utf-8")
+        decisions = spec[spec.index("The person's decisions (5 October 2026):"):spec.index("## What exists today")]
+        decision = decisions[decisions.index("- **The OMS's token is shared (5 October 2026, Sachin's decision).**"):]
+        decision = " ".join(decision.split())
+        for needle in ("`consent_url.py` and `exchange_code.py` leave the setup", "start at the probe",
+                       "10 active access tokens per refresh token", "never revoking", "AFS dispatch",
+                       "the same day", "`Desk.settings.READ`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, decision)
+
     def test_the_contract_says_ticket_id_is_our_reference_and_what_zoho_rules_filter_on(self):
         self.assertIn("`EM-` and seven digits, from `EM-1000001`", self.contract)
         self.assertIn("Never the Zoho Desk ticket number", self.contract)
@@ -1397,7 +1472,9 @@ class DocsTests(unittest.TestCase):
         rulebook = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         [zoho] = [line for line in rulebook.splitlines() if line.startswith("- **Zoho Desk tickets**")]
         for needle in ("`EMOTORAD_ZOHO_REFRESH_TOKEN`", "`EMOTORAD_ZOHO_LIVE=yes`", "lifespan", "`scripts/zoho/*`",
-                       "`tickets` and `counters`", "section 11", "`docs/runbooks/config-store.md` §7"):
+                       "`tickets` and `counters`", "section 11", "`docs/runbooks/config-store.md` §7",
+                       "The token is the OMS's", "shared by Sachin's decision", "must never be revoked",
+                       "AFS dispatch"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, zoho)
         [erasure] = [line for line in rulebook.splitlines() if line.startswith("- **Delete my data")]

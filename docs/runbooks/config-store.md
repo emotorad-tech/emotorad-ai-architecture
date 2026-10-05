@@ -15,7 +15,7 @@ a flat JSON object. Field names are the environment variables the code reads:
 | `EMOTORAD_AI_PLAYGROUND_PASSWORD` | `api.py` basic auth on `/playground` |
 | `LANGFUSE_PUBLIC_KEY` | `tracing.py`; optional, tracing is off without both Langfuse keys |
 | `LANGFUSE_SECRET_KEY` | `tracing.py`; see `docs/runbooks/tracing.md` |
-| `EMOTORAD_ZOHO_REFRESH_TOKEN` | `zoho/settings.py`. **Secret.** The switch for Zoho Desk tickets: absent means the mock, as before. The chatbot's own refresh token from `scripts/zoho/exchange_code.py`, never the OMS's. See section 7 |
+| `EMOTORAD_ZOHO_REFRESH_TOKEN` | `zoho/settings.py`. **Secret.** The switch for Zoho Desk tickets: absent means the mock, as before. The OMS's own refresh token, shared by Sachin's decision of 5 October 2026. Never revoke it: removing this field is the rollback. See section 7 |
 | `EMOTORAD_ZOHO_CLIENT_ID` | `zoho/settings.py`. **Secret.** The OMS's Zoho OAuth client id |
 | `EMOTORAD_ZOHO_CLIENT_SECRET` | `zoho/settings.py`. **Secret.** The OMS's client secret. When it is rotated in the OMS, update it here the same day, or `/health` says `token refused: invalid_client_secret` |
 | `EMOTORAD_ZOHO_ORG_ID` | `zoho/settings.py`. Not secret; needed with the token. The Desk organisation id |
@@ -155,6 +155,28 @@ the API's lifespan starts Zoho.
 Run every command here in a terminal window outside the Claude app, and clear the scrollback
 afterwards. Never paste a value into a chat session.
 
+**Shared with the OMS.** The chatbot uses the OMS's own Zoho client id, client secret and refresh
+token (Sachin's decision, 5 October 2026). No grant is made for it, so `consent_url.py` and
+`exchange_code.py` are not part of the setup (see "For a future client of our own" below).
+
+- **Zoho's limits** (`zoho.com/accounts/protocol/oauth/token-limits.html`, checked 5 October): at most
+  10 active access tokens per refresh token, the oldest invalidated when an eleventh is made; at most
+  10 access-token requests in 10 minutes; at most 20 refresh tokens per client per user. The OMS
+  (`em-biz-backend`, `zoho/zoho_api_client.py`, `get_token`) keeps its access token in Postgres and
+  refreshes it when it is more than an hour old. The chatbot's worker keeps its own for the hour too.
+  Together that is about two refreshes an hour on the one refresh token. `probe.py` and
+  `test_ticket.py` ask for tokens on it as well, so run each once, not in a loop.
+- **A rotation of the OMS's client secret** must be copied to `/emotorad/stage/ai/app`
+  (`EMOTORAD_ZOHO_CLIENT_SECRET`, by step 4 below) the same day. Until then `/health` says
+  `token refused: <error>` and `zoho_token_refused` raises its alarm.
+- **Scopes.** The OMS's config asks for `Desk.tickets.ALL Desk.tickets.READ Desk.tickets.WRITE
+  Desk.tickets.UPDATE Desk.tickets.CREATE Desk.contacts.READ Desk.contacts.WRITE Desk.contacts.UPDATE
+  Desk.contacts.CREATE Desk.search.READ Desk.basic.CREATE`. It does not ask for `Desk.basic.READ` or
+  `Desk.settings.READ`, which only `probe.py` uses (departments and layouts). Whether the token
+  really lacks them, the probe shows (step 1).
+- **Never revoke the token,** with `revoke.py` or on Zoho's Connected Apps page: it stops the OMS's
+  ticketing and AFS dispatch. Rollback is removing `EMOTORAD_ZOHO_REFRESH_TOKEN` (below).
+
 **What Zoho rules filter on.** The Desk has no room for custom fields, so none is set. Each
 ticket's subject contains `[AI chat]` and ends with its chat reference in square brackets, for
 example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. A ticket for a number nobody
@@ -164,22 +186,27 @@ So a Zoho rule or webhook criterion filters on the subject containing `[AI chat]
 its own ticket again after a timeout, so nobody edits a subject in Desk. The description's
 second line says `Source: AI chatbot`.
 
-**The scripts** (`scripts/zoho/`), in the order of the spec's part 1. Each asks for its secrets by
-hidden input and prints names, ids and counts only.
+**The scripts** (`scripts/zoho/`). Each asks for its secrets by hidden input and prints names, ids
+and counts only. With the token shared, the person's steps start at the probe.
 
 | Script | What it does |
 | --- | --- |
-| `consent_url.py` | Prints the India consent address for the grant |
-| `exchange_code.py` | Swaps the code for the chatbot's refresh token, and shows it once |
 | `probe.py` | Read only. Lists the departments, every active ticket layout (its id, whether it is the default, each field and the required custom ones), the channels and the contacts, and writes masked shapes to `docs/api-shapes/` |
 | `test_ticket.py` | Writes one ticket in the test department and reads it back. It asks for the department's name every time. If Zoho enforces the layout's required fields, it names them and stops |
 | `tickets_report.py` | Waiting, stuck and held tickets, for the support lead |
-| `revoke.py` | Revokes the chatbot's refresh token |
+| `revoke.py` | Refuses, and says why: the token is the OMS's. Only with `--own-client` does it revoke, and only a token of a client of our own |
+| `consent_url.py`, `exchange_code.py` | Not part of the setup while the token is shared. Kept for a future client of our own (below) |
 
-1. **The collection first.** Run `python scripts/mongo_setup.py` against the environment's
+1. **The probe.** Run `python scripts/zoho/probe.py --org-id <org id> --test-department-id <id>
+   --test-contact-id <id>`. It asks for the OMS's client id, client secret and refresh token by
+   hidden input. Claude reviews the masked shapes it writes and fills in the settings. It prints the
+   scopes Zoho says it granted (see the scope note above).
+2. **The test ticket.** Run `python scripts/zoho/test_ticket.py` with the ids the probe confirmed,
+   then close the ticket in Desk.
+3. **The collection.** Run `python scripts/mongo_setup.py` against the environment's
    database, and check that `tickets` lists the `source_key` index. Without it the service
    refuses Zoho and `/health` says `misconfigured: tickets index missing`.
-2. **The settings.** Add the six fields needed with the token: the three secrets
+4. **The settings.** Add the six fields needed with the token: the three secrets, all the OMS's
    (`EMOTORAD_ZOHO_REFRESH_TOKEN`, `EMOTORAD_ZOHO_CLIENT_ID`, `EMOTORAD_ZOHO_CLIENT_SECRET`),
    `EMOTORAD_ZOHO_ORG_ID`, `EMOTORAD_ZOHO_TEST_DEPARTMENT_ID` and `EMOTORAD_ZOHO_TEST_CONTACT_ID`.
    Add `EMOTORAD_ZOHO_LAYOUT_ID` too when the probe shows more than one active layout and the
@@ -198,9 +225,9 @@ hidden input and prints names, ids and counts only.
    ```
 
    Then check the names only, with the command in section 2.
-3. **Deploy** (section 3). `curl -s https://ai-release-stage.emotorad.com/health` should show
+5. **Deploy** (section 3). `curl -s https://ai-release-stage.emotorad.com/health` should show
    `"zoho":"test department"`. Anything else says what is wrong (see the table below).
-4. **The alarms,** once per environment:
+6. **The alarms,** once per environment:
 
    ```bash
    aws cloudformation deploy --profile emotorad-staging --region ap-south-1 \
@@ -209,9 +236,23 @@ hidden input and prints names, ids and counts only.
    ```
 
    AWS emails that address to confirm the subscription. No alarm reaches it until they confirm.
-5. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
+7. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
    verification): add `EMOTORAD_ZOHO_DEPARTMENT_ID`, `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` and
-   `EMOTORAD_ZOHO_LIVE=yes` by step 2, with that environment's own refresh token.
+   `EMOTORAD_ZOHO_LIVE=yes` by step 4, with the OMS's refresh token as on staging. That makes a
+   third refresher on it, about three refreshes an hour, still inside Zoho's limits above.
+
+**For a future client of our own.** Not part of the setup while the chatbot shares the OMS's token.
+If the chatbot is ever given a Zoho client of its own, its refresh token comes from these two
+scripts, and then goes into the config store by step 4:
+
+1. **Consent.** Run `python scripts/zoho/consent_url.py --redirect-uri <the address registered on
+   the client>` and open the address it prints while signed in to Zoho as the granting user.
+   Approve, and copy the code from the address bar (the page itself may show an error).
+2. **Exchange.** Within two minutes, run `python scripts/zoho/exchange_code.py --redirect-uri <the
+   same address>`. It refuses unless Zoho's answer names the India data centre, and shows the
+   refresh token once.
+
+Only a token made this way may ever be revoked, with `python scripts/zoho/revoke.py --own-client`.
 
 **Erasing someone's ticket records, by hand until spec section 11 ships.** `erasure_admin` and
 `scripts/delete_person.py` neither list nor remove `tickets` records (spec 2026-10-05, the
@@ -240,8 +281,10 @@ happens to it is section 11's open decision, so tell Sachin which ones.
 
 **To stop sending.** First run `python scripts/zoho/tickets_report.py` and give the support lead
 the list: those customers were told someone would be in touch. Then remove
-`EMOTORAD_ZOHO_REFRESH_TOKEN` by step 2 and redeploy. To revoke the token itself, run
-`python scripts/zoho/revoke.py`.
+`EMOTORAD_ZOHO_REFRESH_TOKEN` by step 4 and redeploy. That is the whole rollback: the OMS keeps its
+token. Never revoke it. `python scripts/zoho/revoke.py` refuses without `--own-client`, and Zoho's
+Connected Apps page is never used for it either: revoking the shared token stops the OMS's
+ticketing and AFS dispatch.
 
 | `/health` `zoho` | Meaning |
 | --- | --- |
@@ -250,5 +293,5 @@ the list: those customers were told someone would be in touch. Then remove
 | `live` | Sending to the real department |
 | `misconfigured: <reason>` | A start-up check failed: the mock is used and nothing is recorded |
 | `not allowed in this region` | `AWS_REGION` begins with `eu-`: the mock is used |
-| `token refused: <error>` | Zoho refused the refresh token, for example after a secret rotation |
+| `token refused: <error>` | Zoho refused the refresh token, for example after the OMS's client secret was rotated and not copied here the same day |
 | `sending failing: <code>` | Zoho refused the calls themselves, for example a missing scope |

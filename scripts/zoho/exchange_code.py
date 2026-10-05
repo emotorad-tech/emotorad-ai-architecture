@@ -3,6 +3,9 @@
     python scripts/zoho/exchange_code.py --redirect-uri <the same address as consent_url.py>
     python scripts/zoho/exchange_code.py --self-client
 
+Not part of the setup while the chatbot shares the OMS's Zoho token (Sachin's
+decision, 5 October 2026): kept for a future client of our own.
+
 Run by a person, never by a Claude session, in a terminal window outside the
 Claude app (its Terminal panel can be read by the session), within two minutes
 of approving. Clear the scrollback afterwards.
