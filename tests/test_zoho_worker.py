@@ -709,6 +709,76 @@ class TicketTests(WorkerCase):
         saved = self.saved(ref)
         self.assertEqual((saved["attempts"], saved["next_attempt_at"]), (2, plus(self.clock(), 120)))
 
+    def assert_held_until_the_look(self, ref, created, before):
+        """Taken and put back with nothing else done: no Zoho call, no attempt
+        counted, no state, intent or /health change, no log line."""
+        calls, events = len(self.desk.calls), len(self.log.events)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(len(self.desk.calls), calls)
+        self.assertEqual(len(self.log.events), events)
+        saved = self.saved(ref)
+        self.assertEqual(saved["next_attempt_at"], plus(created, 120))
+        self.assertEqual((saved["lease_until"], saved["lease_token"]), (None, None))
+        for field in ("state", "attempts", "intent", "last_error", "zoho", "wake"):
+            self.assertEqual(saved[field], before[field], field)
+        self.assertIsNone(self.worker.status["failing"])
+
+    def test_a_wake_inside_the_two_minutes_does_not_bring_the_look_forward(self):
+        # Fixer B's concern 1 in the final fix wave: a later turn sets
+        # next_attempt_at to now, and a look at a contact list that lags
+        # behind the create would make a second ticket.
+        ref = self.record(started_at=self.chat())
+        self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)
+        self.send(ref)
+        created = self.saved(ref)["intent"]["at"]
+        self.clock.advance(10)
+        self.wake(ref)
+        self.assertEqual(self.saved(ref)["next_attempt_at"], self.clock())
+        self.assert_held_until_the_look(ref, created, before=self.saved(ref))
+        self.assertEqual(self.calls("contact_tickets"), [])
+        self.clock.advance(110)  # 120 s after the create: the look is due
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(len(self.calls("contact_tickets")), 1)
+        self.assertEqual(len(self.calls("create_ticket")), 1)
+        [ticket_id] = self.desk.tickets
+        self.assertEqual((self.ticket_of(ref), self.saved(ref)["state"]), (ticket_id, "sent"))
+        self.assertEqual(len(self.events("zoho_ticket_adopted")), 1)
+
+    def test_a_note_and_a_second_wake_inside_the_two_minutes_are_held_too_and_the_look_at_121_s_adopts(self):
+        ref = self.record(started_at=self.chat())
+        self.desk.fail("create_ticket", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)
+        self.send(ref)
+        created = self.saved(ref)["intent"]["at"]
+        self.clock.advance(10)
+        self.tickets.add_note(ref, "The customer sent a second message.", self.clock())
+        self.assert_held_until_the_look(ref, created, before=self.saved(ref))
+        self.clock.advance(100)
+        self.wake(ref)
+        self.assert_held_until_the_look(ref, created, before=self.saved(ref))
+        self.clock.advance(11)  # 121 s after the create
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual([c[0] for c in self.desk.calls if c[0] in ("contact_tickets", "create_ticket")],
+                         ["create_ticket", "contact_tickets"])
+        [ticket_id] = self.desk.tickets
+        self.assertEqual((self.ticket_of(ref), self.saved(ref)["state"]), (ticket_id, "sent"))
+        self.assertIn("The customer sent a second message.", self.text_on(ref))
+
+    def test_a_create_zoho_turned_away_is_not_held_for_two_minutes_by_the_look(self):
+        # A 429 or an unreachable Zoho made no ticket, so there is nothing to
+        # wait for: the spec's 30 seconds stand, and a wake sends it now.
+        for exc in (zoho_error(errors.ZohoBusy, "TOO_MANY_REQUESTS"), zoho_error(errors.ZohoUnavailable, "network")):
+            with self.subTest(error=type(exc).__name__):
+                self.setUp()
+                ref = self.record(started_at=self.chat())
+                self.desk.fail("create_ticket", exc)
+                self.send(ref)
+                self.assertEqual(self.saved(ref)["intent"]["step"], "ticket")
+                self.clock.advance(10)
+                self.wake(ref)
+                self.assertTrue(self.worker.run_once())
+                self.assertEqual(len(self.desk.tickets), 1)
+                self.assertEqual(self.saved(ref)["state"], "sent")
+
     def test_an_unknown_outcome_on_a_comment_keeps_the_plain_schedule(self):
         ref = self.record(started_at=self.chat())
         self.desk.fail("add_comment", zoho_error(errors.ZohoUnknownOutcome, "timeout"), after=True)

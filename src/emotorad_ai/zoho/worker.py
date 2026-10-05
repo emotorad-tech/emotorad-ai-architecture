@@ -12,6 +12,8 @@ sends nothing if that save fails. A later pass that finds an intent with no
 result checks Zoho before it writes again: the contact's tickets for a
 ticket, the ticket's comments for a comment, its attachments for a file. This
 is how a timeout after Zoho made the ticket still ends in one ticket, not two.
+The contact's ticket list can lag, so that look waits two minutes from the
+create, and a record a wake makes due sooner is put back until then.
 
 Only the run's own turns and files go on its ticket: at or after the run's
 start, before its end. A file a customer's turn carried is judged by that
@@ -71,7 +73,8 @@ LEASE_SECONDS = 300.0
 RETRY_WAITS = (30, 60, 120, 300, 600, 1800)
 HOURLY = 3600
 # The least wait after a ticket create of unknown outcome, before the look at
-# the contact's ticket list.
+# the contact's ticket list. Counted from the create (its intent's `at`), so a
+# wake inside it does not bring the look forward (_look_not_before).
 TICKET_LOOKUP_WAIT = 120
 # Zoho's 429 TOO_MANY_REQUESTS is about calls in flight, not the day's credits.
 BUSY_WAIT = 30
@@ -112,6 +115,12 @@ def _moment(text: Any) -> Optional[datetime]:
         return parse(str(text))
     except ValueError:
         return None
+
+
+def _unknown_outcome(last_error: Any) -> bool:
+    """Whether a record's last failure was a write that may have landed:
+    `last_error` is _error_name's "<class>" or "<class>:<code>"."""
+    return str(last_error or "").split(":", 1)[0] == ZohoUnknownOutcome.__name__
 
 
 def _folded(name: Any) -> str:
@@ -291,7 +300,10 @@ class ZohoWorker:
             return False
         job = _Job(record, token)
         try:
-            if not job.record.get("urgent") and self._credits_low():
+            look_at = self._look_not_before(job, now)
+            if look_at is not None:
+                self._hold_until(job, look_at)
+            elif not job.record.get("urgent") and self._credits_low():
                 self._defer_for_credits(job)
             else:
                 self._send(job)
@@ -655,6 +667,35 @@ class ZohoWorker:
             self.log.emit("zoho_record_dropped", cid, reference=job.ref)
             return
         self.log.emit("zoho_retry", cid, reference=job.ref, error=error, attempts=attempts, wait_seconds=wait)
+
+    # -- the look after a create of unknown outcome --------------------------------
+
+    def _look_not_before(self, job: _Job, now: str) -> Optional[str]:
+        """When the look at the contact's tickets may first run, if that is
+        still to come. _failed puts a ticket create of unknown outcome
+        TICKET_LOOKUP_WAIT ahead, but a wake (a later turn, a note) makes the
+        record due now, and a contact list that lags behind the create would
+        then show nothing and a second ticket would be made (Fixer B's
+        concern 1 in the final fix wave). So the wait is counted from the
+        create, its intent's `at`. A create Zoho turned away (429, or Zoho
+        not reached) made no ticket and is not held: its retry keeps the
+        spec's schedule. None when the record may be sent now."""
+        intent = job.intent
+        if intent.get("step") != "ticket" or not _unknown_outcome(job.record.get("last_error")):
+            return None
+        created, current = _moment(intent.get("at")), _moment(now)
+        if created is None or current is None:
+            return None
+        look_at = plus(intent["at"], TICKET_LOOKUP_WAIT)
+        return look_at if current < parse(look_at) else None
+
+    def _hold_until(self, job: _Job, look_at: str) -> None:
+        """Put the record back, due at `look_at`, and do nothing else: no
+        Zoho call, no attempt counted, its state, intent and /health as they
+        were, and no log line."""
+        held = {"next_attempt_at": look_at, "lease_until": None, "lease_token": None}
+        if not self.store.save(job.ref, job.token, held):
+            raise _Dropped()
 
     def _credits(self) -> Optional[int]:
         return getattr(getattr(self.client, "http", None), "last_credits_remaining", None)
