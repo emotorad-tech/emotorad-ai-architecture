@@ -181,7 +181,7 @@ permanent transcript never keeps an inline photo or a signed link.
 Still not built: real integrations behind the mocks, and a vector index — retrieval is still keyword
 scoring over the authored records (`_score` is the single seam).
 
-**Zoho Desk tickets, parts 1 to 4, 2026-10-05.** 3,022 tests (one known `test_video` failure). Spec
+**Zoho Desk tickets, parts 1 to 4, 2026-10-05.** 3,062 tests (one known `test_video` failure). Spec
 `docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`, plan
 `docs/superpowers/plans/2026-10-05-zoho-desk-tickets.md`, runbook `docs/runbooks/config-store.md` §7.
 Zoho is off by default: without `EMOTORAD_ZOHO_REFRESH_TOKEN` every ticket goes to the mock, as
@@ -202,6 +202,10 @@ before.
   with no known number, the safety reply while the store is down, and the caps on unverified
   tickets. Every text is a draft for person step 10. Erasure (spec section 11) is deferred, so
   ticket records are removed by hand.
+
+The chatbot shares the OMS's Zoho client and refresh token (Sachin's decision, 5 October), so the
+consent and exchange scripts are left out of the setup, and rollback removes
+`EMOTORAD_ZOHO_REFRESH_TOKEN` and never revokes the token, which the OMS's ticketing needs.
 
 The bugs the build surfaced, each fixed with a test:
 

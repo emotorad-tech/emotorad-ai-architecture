@@ -52,7 +52,7 @@ from emotorad_ai.zoho.http import DeskHTTP  # noqa: E402
 from tests.fake_zoho import SHAPES as DRAFTS, RoutedZoho, shape  # noqa: E402
 from tests.test_zoho_desk import ShapeChecks  # noqa: E402
 
-SCRIPTS =("_common", "consent_url", "exchange_code", "probe", "test_ticket", "revoke", "tickets_report")
+SCRIPTS = ("_common", "consent_url", "exchange_code", "probe", "test_ticket", "revoke", "tickets_report")
 REDIRECT = "https://example.test/zoho/callback"
 INDIA = {"access_token": "1000.access.value", "refresh_token": "1000.refresh.value",
          "scope": "Desk.tickets.READ Desk.basic.READ", "api_domain": "https://www.zohoapis.in",
@@ -1698,6 +1698,19 @@ class DocsTests(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, probe)
 
+    def test_the_runbook_names_both_region_variables_and_the_store_outage_alarm(self):
+        section = self.zoho_section()
+        [region] = [line for line in section.splitlines() if line.startswith("| `not allowed in this region` |")]
+        self.assertIn("`AWS_REGION`", region)
+        self.assertIn("`AWS_DEFAULT_REGION`", region)
+        self.assertIn("`zoho_worker_store_unavailable`", section)
+
+    def test_the_spec_says_a_store_blip_is_not_a_worker_error(self):
+        spec = (ROOT / "docs" / "superpowers" / "specs" / "2026-10-05-zoho-desk-tickets-design.md").read_text(
+            encoding="utf-8")
+        life = " ".join(spec[spec.index("### 4. The worker"):spec.index("**When a record is due.**")].split())
+        self.assertIn("a store that cannot be reached logs `zoho_worker_store_unavailable`", life)
+
     def test_the_rulebook_has_a_zoho_paragraph_and_the_manual_ticket_erasure(self):
         rulebook = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         [zoho] = [line for line in rulebook.splitlines() if line.startswith("- **Zoho Desk tickets**")]
@@ -1721,7 +1734,7 @@ class DocsTests(unittest.TestCase):
         entry = log[log.index("**Zoho Desk tickets, parts 1 to 4, 2026-10-05.**"):]
         entry = entry[:entry.index("\n## ")]
         for needle in ("Invalid Redirect Uri", "zoho-token.json", "stranger", "first message", "lock-out",
-                       "off by default"):
+                       "off by default", "the OMS's Zoho client", "left out of the setup", "never revokes"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, entry)
 

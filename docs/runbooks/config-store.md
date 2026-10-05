@@ -327,6 +327,6 @@ ticketing and AFS dispatch.
 | `test department` | Sending to the test department |
 | `live` | Sending to the real department |
 | `misconfigured: <reason>` | A start-up check failed: the mock is used and nothing is recorded |
-| `not allowed in this region` | `AWS_REGION` begins with `eu-`: the mock is used |
+| `not allowed in this region` | The region begins with `eu-`: the mock is used. The guard reads `AWS_REGION`, then `AWS_DEFAULT_REGION` when the first is unset |
 | `token refused: <error>` | Zoho refused the refresh token, for example after the OMS's client secret was rotated and not copied here the same day |
 | `sending failing: <code>` | Zoho refused the calls themselves, for example a missing scope |

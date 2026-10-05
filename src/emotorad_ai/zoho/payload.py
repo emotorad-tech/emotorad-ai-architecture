@@ -39,7 +39,9 @@ CLAIM_LIMIT = 500
 SOURCE = "AI chatbot"
 STATUS = "Open"
 NO_BIKE = "bike not given"
-# What every subject starts with. A Zoho rule or webhook criterion filters on it.
+# Every subject contains this. An unverified ticket's subject puts
+# UNVERIFIED_PREFIX before it, so a Zoho rule or webhook criterion filters on
+# the subject containing "[AI chat]", never on "starts with".
 SUBJECT_PREFIX = "[AI chat] "
 UNVERIFIED_PREFIX = "[Unverified] "
 

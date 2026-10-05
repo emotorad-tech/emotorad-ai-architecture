@@ -214,9 +214,13 @@ class VerifyFirst:
         text = message.message_text
         self._keep_topic(message, state)
         if state.verify_step == CODE and self.store.attempts_left(message.conversation_id) <= 0:
-            # Locked: the handover stands. No code is sent or tried again,
-            # whatever the message, until the store lets the entry go. A
-            # number in the message is the one the lock-out ticket calls.
+            # Locked. No code is sent or tried again, whatever the message,
+            # until the store lets the entry go. With Zoho off the hand-over
+            # stands. With Zoho on, the lock-out ticket is the hand-over; if
+            # nothing could be recorded (the write failed, or there is no
+            # number to call), the reply says it was not passed on, promises
+            # nothing and is not escalated (_lockout). A number in the
+            # message is the one the lock-out ticket calls.
             found = find_phone(text)
             model_text = redact(text, found[1], "[phone]") if found else text
             return self._lockout(message, state, LOCKED_WHY, "locked", model_text,

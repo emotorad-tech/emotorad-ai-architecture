@@ -365,8 +365,10 @@ nowhere (`enrichment.py:126-127`, `runtime.py:235-241`).
   on. Never at import. A stop flag is set on shutdown.
 - Never started by the playground, the CLI, the live evaluation, the local chat
   page (which withholds the keys) or the tests.
-- Each loop pass catches every exception, logs `zoho_worker_error` with its class
-  (alarmed), waits 30 seconds and carries on.
+- Each loop pass catches every exception, waits 30 seconds and carries on: a store
+  that cannot be reached logs `zoho_worker_store_unavailable` (alarmed only when it
+  is logged in each of three consecutive five-minute periods), and anything else
+  logs `zoho_worker_error` with its class (alarmed).
 - `/health` shows whether it is running, its last pass, and the age of the oldest
   due record.
 
