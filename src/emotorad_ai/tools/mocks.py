@@ -399,15 +399,29 @@ def _owned_bike(
 
 
 class MockTicketSystem:
-    """Stands in for Zoho Desk (confirmed for dealer-side W1; customer side is an open item)."""
+    """Stands in for Zoho Desk: in tests, the playground, the CLI and the live
+    evaluation, and for every persona but the customer's when Zoho is on
+    (tickets/seam.py). Its EM-00001 numbers exist nowhere else."""
+
+    # Nothing it records reaches a person (TicketRouter says True).
+    records_real_tickets = False
 
     def __init__(self) -> None:
         self._counter = itertools.count(1)
         self.tickets: Dict[str, Dict[str, Any]] = {}
+        # source_key -> ticket id: the same key always returns the same ticket.
+        self._by_source_key: Dict[str, str] = {}
 
-    def create(self, **payload: Any) -> Dict[str, Any]:
+    def create(self, source_key: Optional[str] = None, persona: Optional[str] = None, **payload: Any) -> Dict[str, Any]:
+        if source_key and source_key in self._by_source_key:
+            return self.tickets[self._by_source_key[source_key]]
         ticket_id = "EM-%05d" % next(self._counter)
         ticket = dict(payload, ticket_id=ticket_id, status="open")
+        if source_key:
+            ticket["source_key"] = source_key
+            self._by_source_key[source_key] = ticket_id
+        if persona is not None:
+            ticket["persona"] = persona
         self.tickets[ticket_id] = ticket
         return ticket
 
@@ -417,6 +431,15 @@ class MockTicketSystem:
         if ticket_id not in self.tickets:
             raise KeyError("no ticket %s" % ticket_id)
         self.tickets[ticket_id]["transcript"] = transcript
+
+    def add_note(self, ticket_id: str, text: str) -> None:
+        """A short line for the ticket, kept with it."""
+        if ticket_id not in self.tickets:
+            raise KeyError("no ticket %s" % ticket_id)
+        self.tickets[ticket_id].setdefault("notes", []).append(text)
+
+    def close_runs(self, conversation_id: str, new_started_at: str) -> None:
+        """Nothing to mark: the mock sends nothing anywhere."""
 
 
 class MockOrderSystem:
@@ -454,7 +477,8 @@ class MockBookingSystem:
 
 def build_registry(
     knowledge_base: Optional[BatteryKnowledgeBase] = None,
-    ticket_system: Optional[MockTicketSystem] = None,
+    # A MockTicketSystem, or the TicketRouter (tickets/seam.py) when Zoho is on.
+    ticket_system: Optional[Any] = None,
     booking_system: Optional[MockBookingSystem] = None,
     order_system: Optional["MockOrderSystem"] = None,
     diagnostics_available: bool = False,
@@ -518,7 +542,7 @@ def build_registry(
     """
 
     kb = knowledge_base or BatteryKnowledgeBase()
-    tickets = ticket_system or MockTicketSystem()
+    tickets = ticket_system if ticket_system is not None else MockTicketSystem()
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
     registry = ToolRegistry(idempotency=idempotency) if idempotency is not None else ToolRegistry()
