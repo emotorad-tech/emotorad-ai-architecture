@@ -10,6 +10,7 @@ from pymongo.errors import ServerSelectionTimeoutError
 from emotorad_ai.conversation import ConversationConflict, ConversationState, StoreUnavailable
 from emotorad_ai.observability import EventLog
 from emotorad_ai.stores.mongo import INDEXES, MONGO_URI_ENV, MongoConversationStore, connect, ensure_indexes
+from tests.clock import mongomock_clock_at
 from tests.store_contract import StoreContract, inbound, reply, summary
 
 NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
@@ -17,7 +18,7 @@ NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 # mongomock expires TTL documents against the real clock, and these stores run
 # on NOW: once the real date passed NOW + 48 hours (1 October 2026, 10:00 UTC),
 # every saved conversation counted as expired. mongomock's clock is pinned too.
-_MONGOMOCK_CLOCK = mock.patch("mongomock.utcnow", lambda: NOW.replace(tzinfo=None))
+_MONGOMOCK_CLOCK = mongomock_clock_at(NOW)
 
 
 def setUpModule():
