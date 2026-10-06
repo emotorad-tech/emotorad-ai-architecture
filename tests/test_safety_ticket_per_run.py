@@ -17,9 +17,11 @@ import mongomock
 
 from emotorad_ai.stores.mongo import MongoConversationStore, MongoIdempotencyStore, ensure_indexes
 from emotorad_ai.tools.mocks import build_registry
+from tests.clock import mongomock_clock_at
 from tests.test_runtime_persistence import runtime_on, send
 
 TODAY = date(2026, 7, 28)
+NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 
 
 def ticking_clock():
@@ -30,11 +32,17 @@ def ticking_clock():
 
 class SafetyTicketPerRunTests(unittest.TestCase):
     def setUp(self):
+        # Both stores and mongomock's TTL clock run on NOW, so the first run's
+        # receipts are still stored when the repeat or the new run comes, as
+        # they are for a week in production.
+        clock = mongomock_clock_at(NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.db = mongomock.MongoClient()["emotorad_ai"]
         ensure_indexes(self.db)
-        receipts = MongoIdempotencyStore(self.db, now=lambda: datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc))
+        receipts = MongoIdempotencyStore(self.db, now=lambda: NOW)
         self.registry = build_registry(today=TODAY, idempotency=receipts)
-        self.store = MongoConversationStore(self.db, clock=ticking_clock())
+        self.store = MongoConversationStore(self.db, clock=ticking_clock(), now=lambda: NOW)
 
     def hazard(self, text):
         return send(runtime_on(self.store, [], registry=self.registry), text, cid="wa-thread")

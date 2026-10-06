@@ -13,8 +13,20 @@ import mongomock
 
 from emotorad_ai.stores.mongo import MongoIdempotencyStore, ensure_indexes
 from emotorad_ai.tools.registry import CLAIM_LEASE_SECONDS, IdempotencyStore
+from tests.clock import mongomock_clock_at
 
 START = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+
+# Receipts expire START + 7 days, so mongomock's TTL clock runs on START too.
+_MONGOMOCK_CLOCK = mongomock_clock_at(START)
+
+
+def setUpModule():
+    _MONGOMOCK_CLOCK.start()
+
+
+def tearDownModule():
+    _MONGOMOCK_CLOCK.stop()
 
 
 class Clock:
