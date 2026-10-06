@@ -8,6 +8,9 @@ deadline, and the verdict reaches the turn in entry_metadata the way
 faked; no network, no AWS.
 """
 
+import base64
+import os
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -15,8 +18,9 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from emotorad_ai.contract import Reply
-from emotorad_ai.evidence_check import INLINE_LIMIT, EvidenceCheckError, EvidenceVerdict
+from emotorad_ai.evidence_check import INLINE_LIMIT, EvidenceCheckError, EvidenceVerdict, OpenRouterEvidenceChecker
 from tests.test_api_media_persistence import jpeg_data_url
+from tests.test_evidence_shrink import FFMPEG, FakeTransport, make_clip, probe, stream
 from tests.test_api_photo_check import FakeChecker as FakePhotoChecker
 from tests.test_api_uploads import _Store, _Summariser, fresh_api
 
@@ -183,10 +187,24 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertEqual(self.checker.calls[0]["media"], [(len(b"\x89PNG fake"), "image/png")])
         self.assertIn(image["key"], self.store.fetched)
 
-    def test_a_video_too_large_to_send_is_not_checked_or_fetched(self):
+    def test_a_video_over_the_limit_goes_to_the_checker_to_be_shrunk(self):
+        # Round 2 (the person's decision): a clip over the inline limit is
+        # no longer refused here; the checker sends a smaller copy of it.
         self.route()
         video = self.upload(size=INLINE_LIMIT + 1)
         message = self.post(attachments=[{"upload_id": video["upload_id"]}])
+        (call,) = self.checker.calls
+        self.assertEqual([mime for _, mime in call["media"]], ["video/mp4"])
+        self.assertEqual(self.store.fetched, [video["key"]])
+        self.assertEqual(self.verdict(message)["passed"], True)
+
+    def test_photos_too_large_to_send_are_not_checked_or_fetched(self):
+        # A photo is never shrunk, so photos over the limit together are
+        # refused before anything is fetched, as before.
+        self.route()
+        first, second = self.upload(mime="image/jpeg", size=INLINE_LIMIT // 2 + 1), \
+            self.upload(mime="image/jpeg", size=INLINE_LIMIT // 2 + 1)
+        message = self.post(attachments=[{"upload_id": first["upload_id"]}, {"upload_id": second["upload_id"]}])
         self.assertEqual(self.checker.calls, [])
         self.assertEqual(self.store.fetched, [])
         self.assertEqual(self.verdict(message), {"error": "too_large"})
@@ -346,6 +364,110 @@ class SafetyDoesNotWaitTests(unittest.TestCase):
         video = self.upload()
         message, _ = self.post("here is the video", [{"upload_id": video["upload_id"]}])
         self.assertEqual(message.entry_metadata["evidence_verdict"]["passed"], True)
+
+
+class _ClipStore(_Store):
+    """The fake bucket, holding real bytes for the clips put in it."""
+
+    def __init__(self):
+        super().__init__()
+        self.data, self.puts = {}, []
+
+    def get_bytes(self, key):
+        self.fetched.append(key)
+        return self.data.get(key, b"\x89PNG fake")
+
+    def put_bytes(self, key, data, mime):
+        self.puts.append((key, len(data), mime))
+        super().put_bytes(key, data, mime)
+
+
+@unittest.skipUnless(FFMPEG, "the bundled ffmpeg (imageio-ffmpeg) is not installed")
+class ShrinkAtIngestTests(unittest.TestCase):
+    """The real checker with a fake transport and a lowered limit: a big clip
+    is checked as a smaller copy, and the customer's original is what the
+    bucket keeps, what the turn attaches (so what Zoho is sent) and what the
+    media record describes. The copy reaches no log and no store."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.folder = tempfile.TemporaryDirectory()
+        cls.clip = make_clip(cls.folder.name, "big.mp4")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.folder.cleanup()
+
+    def setUp(self):
+        self.store = _ClipStore()
+        self.api = fresh_api(self.store)
+        self.addCleanup(lambda: fresh_api(None))
+        self.client = TestClient(self.api.app)
+        self.api.VIDEO_SUMMARISER = None
+        self.api.PHOTO_CHECKER = None
+        self.transport = FakeTransport()
+        self.api.runtime.evidence_check = True
+        self.seen = []
+        scripted = Reply(conversation_id="c1", text="ok", handled_by="test")
+        patch = mock.patch.object(self.api.runtime, "handle", side_effect=lambda m: self.seen.append(m) or scripted)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.api.stores.conversations.get("c1").route_to("motor_support")
+
+    def send_clip(self, **checker):
+        self.api.EVIDENCE_CHECKER = OpenRouterEvidenceChecker(
+            transport=self.transport, inline_limit=len(self.clip) // 4, **checker)
+        body = self.client.post("/uploads", json={
+            "session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers",
+            "mime_type": "video/mp4", "size_bytes": len(self.clip),
+        }).json()
+        self.store.objects[body["key"]] = {"size": len(self.clip), "mime": "video/mp4"}
+        self.store.data[body["key"]] = self.clip
+        r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya",
+                                               "text": "listen to the grinding",
+                                               "attachments": [{"upload_id": body["upload_id"]}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        return self.seen[-1], body["key"]
+
+    def test_the_check_gets_the_copy_and_everything_else_keeps_the_original(self):
+        message, key = self.send_clip()
+        self.assertEqual(message.entry_metadata["evidence_verdict"]["passed"], True)
+        [(sent, mime)] = self.transport.sent()
+        self.assertLess(len(sent), len(self.clip) // 4)
+        self.assertIn("aac", stream(probe(sent), "Audio"))
+        # The bucket: the original only, untouched, and nothing written.
+        self.assertEqual(self.store.data, {key: self.clip})
+        self.assertEqual(self.store.objects[key]["size"], len(self.clip))
+        self.assertEqual(self.store.puts, [])
+        # The turn attaches the original's key, which the Zoho worker reads.
+        self.assertEqual([a.url for a in message.attachments], ["s3://" + key])
+        # The permanent media record describes the original.
+        [record] = self.api.stores.conversations.media_of("c1")
+        self.assertEqual((record["key"], record["size_bytes"]), (key, len(self.clip)))
+        # No log line carries the copy or its size.
+        logged = repr(self.api.log.events)
+        self.assertNotIn(base64.b64encode(sent[:60]).decode()[:40], logged)
+        self.assertNotIn(str(len(sent)), logged)
+
+    def test_a_shrink_that_fails_reaches_the_turn_as_not_checked(self):
+        failing = os.path.join(self.folder.name, "ffmpeg-fails")
+        with open(failing, "w") as handle:
+            handle.write("#!/bin/sh\nexit 1\n")
+        os.chmod(failing, 0o755)
+        message, _ = self.send_clip(ffmpeg=failing)
+        self.assertEqual(message.entry_metadata["evidence_verdict"], {"error": "transcode_failed"})
+        self.assertEqual(self.transport.posts, [])
+
+    def test_a_shrink_that_runs_too_long_reaches_the_turn_as_not_checked(self):
+        hang = os.path.join(self.folder.name, "ffmpeg-hangs")
+        with open(hang, "w") as handle:
+            handle.write("#!/bin/sh\nexec sleep 10\n")
+        os.chmod(hang, 0o755)
+        started = time.monotonic()
+        message, _ = self.send_clip(ffmpeg=hang, shrink_seconds=0.3)
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertEqual(message.entry_metadata["evidence_verdict"], {"error": "transcode_timeout"})
+        self.assertEqual(self.transport.posts, [])
 
 
 class RuntimeKeepsItTests(unittest.TestCase):

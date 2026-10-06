@@ -17,6 +17,11 @@ The client follows photo_check.py and video_summary.py: an injected
 transport, a fixed prompt, strict JSON, and a stable code for every failure,
 raised `from None` so no provider text reaches a log. Off unless
 EMOTORAD_EVIDENCE_CHECK is `on` and the OpenRouter key is set.
+
+A clip too big to send inline (most phone videos) is checked as a smaller
+copy with its sound, made with the bundled ffmpeg inside the check's deadline
+(fit_inline, round 2 of 6 October 2026). The copy lives only in the request:
+the customer's original is what is stored and attached to Zoho.
 """
 
 from __future__ import annotations
@@ -25,8 +30,11 @@ import base64
 import json
 import os
 import re
+import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .guardrails import check_coverage_claim, check_safety_in_description, claims_deletion, claims_ticket
 from .observability import redact_pii
@@ -45,8 +53,20 @@ DEFAULT_MODEL = OPENROUTER_PHOTO_MODEL
 # check or the video summary (api._evidence_deadline), whichever applies.
 DEADLINE_SECONDS = float(VIDEO_TIMEOUT_SECONDS)
 # Everything goes inline, in one request, as the video summary sends a clip:
-# the raw bytes of all the media together stay under the limit it uses.
+# the raw bytes of all the media together stay under the limit it uses. A
+# clip over it goes as a smaller copy (fit_inline, below).
 INLINE_LIMIT = VIDEO_INLINE_LIMIT
+# A clip too big to send inline is sent as a smaller copy (the person's
+# decision, 6 October 2026): a 30-second phone video is 15 to 60 MB. Each
+# step: the shorter side at most this many pixels, the x264 quality, its
+# bitrate cap and buffer. The second runs only when the first is still over
+# the limit. The sound is kept (AAC mono, 64 kbps): a noise is often the fault.
+SHRINK_STEPS: Tuple[Tuple[int, int, str, str], ...] = ((480, 32, "700k", "1400k"), (360, 34, "350k", "700k"))
+# Both steps together, never more than half the check's deadline (90 s with
+# a clip, the video summary's), so the request keeps the rest and the turn
+# waits no longer than it does today. ffmpeg is stopped at the limit.
+SHRINK_SECONDS = 45.0
+SHRUNK_MIME = "video/mp4"
 # What Gemini says it saw, and what a better video would need, as stored,
 # logged, shown or put on a ticket: redacted first, then cut.
 TEXT_LIMIT = 200
@@ -199,6 +219,96 @@ def complaint_from(texts: Sequence[Any]) -> str:
     return joined[:half].rstrip() + " … " + joined[-half:].lstrip()
 
 
+def shrink_args(exe: str, source: str, target: str, step: Tuple[int, int, str, str]) -> List[str]:
+    """The ffmpeg command for one smaller copy. ffmpeg turns a phone's
+    rotated picture upright first (autorotate, its default), so the scale
+    sees the picture as it is watched: the shorter side is cut to the step's
+    size, never enlarged, both sides kept even for H.264. 8-bit 4:2:0 and
+    BT.709 tags, so a 10-bit HDR iPhone clip becomes an ordinary one (colour
+    accuracy is not needed). The first picture and the first sound only, and
+    no metadata: a phone writes where the clip was taken."""
+    short_side, crf, maxrate, bufsize = step
+    scale = ("scale=w='trunc(iw*min(1,{s}/min(iw,ih))/2)*2':h='trunc(ih*min(1,{s}/min(iw,ih))/2)*2',"
+             "format=yuv420p").format(s=int(short_side))
+    return [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source,
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
+            "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-maxrate", maxrate, "-bufsize", bufsize, "-pix_fmt", "yuv420p",
+            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-c:a", "aac", "-ac", "1", "-b:a", "64k", "-movflags", "+faststart", "-f", "mp4", target]
+
+
+def shrink_video(data: bytes, step: Tuple[int, int, str, str], *, timeout: float,
+                 ffmpeg: Optional[str] = None, suffix: str = ".mp4") -> bytes:
+    """A smaller copy of a clip, made in a temporary folder that is deleted
+    afterwards, whatever happens. The original is only read. A copy that
+    cannot be made is `transcode_failed`, one that takes longer than
+    `timeout` is stopped and is `transcode_timeout`: either way a check
+    error, never a pass. ffmpeg's own words are never kept (they name files)."""
+    from . import video
+
+    exe = ffmpeg or video.ffmpeg_exe()
+    if not exe:
+        raise EvidenceCheckError("transcode_failed")
+    if timeout <= 0:
+        raise EvidenceCheckError("transcode_timeout")
+    try:
+        with tempfile.TemporaryDirectory(prefix="evidence-") as folder:
+            source = os.path.join(folder, "clip" + suffix)
+            target = os.path.join(folder, "copy.mp4")
+            with open(source, "wb") as handle:
+                handle.write(data)
+            # Stopped (killed) at the timeout, before the folder goes.
+            result = subprocess.run(shrink_args(exe, source, target, step), capture_output=True, timeout=timeout)
+            if result.returncode != 0 or not os.path.exists(target):
+                raise EvidenceCheckError("transcode_failed")
+            with open(target, "rb") as handle:
+                copy = handle.read()
+    except subprocess.TimeoutExpired:
+        raise EvidenceCheckError("transcode_timeout") from None
+    except OSError:
+        raise EvidenceCheckError("transcode_failed") from None
+    if not copy:
+        raise EvidenceCheckError("transcode_failed")
+    return copy
+
+
+def _suffix(mime: str) -> str:
+    return {"video/quicktime": ".mov", "video/webm": ".webm"}.get(mime, ".mp4")
+
+
+def fit_inline(media: Sequence[Tuple[bytes, str, str]], limit: int, *, budget: float,
+               ffmpeg: Optional[str] = None) -> Tuple[List[Tuple[bytes, str, str]], bool]:
+    """The media as one request sends it, and whether a clip was shrunk.
+
+    Within the limit, everything goes as it is. Over it, every clip goes as a
+    smaller copy at the first step, then at the second (made from the first
+    copy: decoding the phone's original again is the slow part); still over,
+    `too_large`. A photo is never changed (the chat page already sends them at
+    1280 px), so photos alone over the limit are `too_large` at once. A copy
+    no smaller than its clip is not used. Every copy shares one `budget` of
+    seconds."""
+    media = list(media)
+    if sum(len(data) for data, _, _ in media) <= limit:
+        return media, False
+    clips = [n for n, (_, mime, _) in enumerate(media) if mime.startswith("video/")]
+    if not clips or sum(len(data) for n, (data, _, _) in enumerate(media) if n not in clips) > limit:
+        raise EvidenceCheckError("too_large")
+    started = time.monotonic()
+    sent = media
+    for step in SHRINK_STEPS:
+        sent = list(sent)
+        for n in clips:
+            data, mime, name = sent[n]
+            copy = shrink_video(data, step, timeout=budget - (time.monotonic() - started), ffmpeg=ffmpeg,
+                                suffix=_suffix(mime))
+            if len(copy) < len(data):
+                sent[n] = (copy, SHRUNK_MIME, name)
+        if sum(len(data) for data, _, _ in sent) <= limit:
+            return sent, True
+    raise EvidenceCheckError("too_large")
+
+
 class OpenRouterEvidenceChecker:
     provider = "openrouter"
 
@@ -210,6 +320,9 @@ class OpenRouterEvidenceChecker:
         deadline_seconds: float = DEADLINE_SECONDS,
         zdr: bool = True,
         base_url: str = "https://openrouter.ai/api",
+        inline_limit: int = INLINE_LIMIT,
+        shrink_seconds: float = SHRINK_SECONDS,
+        ffmpeg: Optional[str] = None,
     ) -> None:
         if transport is None:
             from .openrouter import OpenRouterTransport
@@ -219,6 +332,11 @@ class OpenRouterEvidenceChecker:
         self.model = model
         self.zdr = zdr
         self.deadline_seconds = deadline_seconds
+        self.inline_limit = inline_limit
+        # Inside the deadline: at most half of it, so the request keeps the rest.
+        self.shrink_budget = min(shrink_seconds, deadline_seconds / 2)
+        # None: the bundled one (video.ffmpeg_exe), looked up when needed.
+        self.ffmpeg = ffmpeg
         self._transport = transport
         # The billed usage of the last check, for the caller to log.
         self.last_usage: Optional[Dict[str, Any]] = None
@@ -228,12 +346,19 @@ class OpenRouterEvidenceChecker:
         from .llm import from_openai_response
         from .openrouter import CHAT_PATH, OpenRouterError
 
+        started = time.monotonic()
         if component not in COMPONENTS:
             raise EvidenceCheckError("bad_component")
         if not media:
             raise EvidenceCheckError("no_media")
-        if sum(len(data) for data, _, _ in media) > INLINE_LIMIT:
-            raise EvidenceCheckError("too_large")
+        # A clip over the limit goes as a smaller copy, which lives only in
+        # this request: the customer's original is what is stored and sent
+        # to Zoho, and the copy is never logged or kept.
+        media, shrunk = fit_inline(media, self.inline_limit, budget=self.shrink_budget, ffmpeg=self.ffmpeg)
+        # After a shrink, the request has what is left of the deadline.
+        timeout = self.deadline_seconds
+        if shrunk:
+            timeout = max(1.0, self.deadline_seconds - (time.monotonic() - started))
         # Angle brackets go, so the complaint cannot close its own tag.
         said = complaint_from([complaint]).replace("<", "(").replace(">", ")")
         content: list = [
@@ -255,7 +380,7 @@ class OpenRouterEvidenceChecker:
         if self.zdr:
             body["provider"] = {"zdr": True, "data_collection": "deny"}
         try:
-            response = from_openai_response(self._transport.post(CHAT_PATH, body, timeout=self.deadline_seconds))
+            response = from_openai_response(self._transport.post(CHAT_PATH, body, timeout=timeout))
         except OpenRouterError as exc:
             raise EvidenceCheckError(exc.code) from None
         self.last_usage = response.usage

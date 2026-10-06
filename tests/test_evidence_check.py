@@ -147,8 +147,10 @@ class ErrorTests(unittest.TestCase):
         self.assertIsNone(raised.exception.__cause__)
 
     def test_media_too_large_to_send_is_refused_before_any_request(self):
+        # A photo: a clip over the limit is sent as a smaller copy instead
+        # (round 2, tests/test_evidence_shrink.py).
         transport = FakeTransport()
-        big = (b"x" * (INLINE_LIMIT + 1), "video/mp4", "big.mp4")
+        big = (b"x" * (INLINE_LIMIT + 1), "image/jpeg", "big.jpg")
         with self.assertRaises(EvidenceCheckError) as raised:
             checker(transport).check([big], COMPLAINT, "battery")
         self.assertEqual((str(raised.exception), transport.posts), ("too_large", []))

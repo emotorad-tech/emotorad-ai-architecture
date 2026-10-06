@@ -885,9 +885,13 @@ def _start_evidence_check(
     if EVIDENCE_CHECKER is None:
         return _done({"error": "not_configured"}), 0.0
     complaint, component = subject
-    sizes = [size for _, _, _, _, size in jobs if size is not None]
-    if sum(sizes) > evidence_check.INLINE_LIMIT:
-        # Refused before anything is fetched, as the checker would refuse it.
+    # A clip over the inline limit is fetched: the checker sends a smaller
+    # copy of it (evidence_check.fit_inline). A photo is never shrunk, so
+    # photos over the limit by themselves are refused before anything is
+    # fetched, as the checker would refuse them.
+    limit = getattr(EVIDENCE_CHECKER, "inline_limit", evidence_check.INLINE_LIMIT)
+    photo_sizes = [size for _, _, mime, _, size in jobs if size is not None and not mime.startswith("video/")]
+    if sum(photo_sizes) > limit:
         return _done({"error": "too_large"}), 0.0
     has_video = any(mime.startswith("video/") for _, _, mime, _, _ in jobs)
     wait_for = VIDEO_SUMMARY_SECONDS if has_video else PHOTO_CHECK_DEADLINE_SECONDS
