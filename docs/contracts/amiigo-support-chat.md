@@ -73,7 +73,7 @@ Authorization: Bearer <Amiigo access token>
 - Never put the token in a URL or a query string. The server never stores it.
 - Native WebSocket clients on Android and iOS can send headers on the handshake (in Flutter, `IOWebSocketChannel.connect(uri, headers: {...})`).
 - A socket lives no longer than its token: when the token expires, the server closes the socket with code `4401` and reason `token_expired`. Refresh the token with Amiigo and reconnect.
-- A rider's chats are every chat in which their phone number was verified (see "Which chats are in the history").
+- A rider's chats are the Amiigo app chats they had while signed in with this phone number (see "Which chats are in the history").
 
 ## The chat socket: `/amiigo/v1/chat`
 
@@ -255,9 +255,8 @@ A photo or video counts as the evidence the bot needs before it raises a fault t
 
 ### Which chats are in the history
 
-- Chats in the Amiigo app, and chats on the EMotorad website in which the rider proved this phone number with a one-time code. Each chat says where it happened in `channel`: `amiigo_app` or `website_chat` (later also `whatsapp`).
-- To show only chats from the app, pass `channel=amiigo_app`.
-- Not included: a website chat in which this number was never verified, and anything deleted through "Delete my conversation data".
+- The rider's chats in the Amiigo app, while signed in with this phone number. Each chat says where it happened in `channel`, which in v1 is always `amiigo_app`; later versions may add other places.
+- Not included in v1: chats on the EMotorad website, even ones in which the rider proved this phone number with a one-time code, and anything deleted through "Delete my conversation data".
 
 ### GET /amiigo/v1/conversations
 
@@ -267,7 +266,7 @@ The rider's chats, most recent activity first.
 | --- | --- | --- | --- |
 | `limit` | integer, 1 to 50 | 20 | Chats per page |
 | `cursor` | string | none | `next_cursor` from the previous page. Leave out for the first page. |
-| `channel` | `amiigo_app` or `website_chat` | all | Only chats from that place |
+| `channel` | `amiigo_app` | all | Only chats from that place. In v1 every chat is from the app, so this changes nothing; any other value is a `422` |
 
 **Response 200**
 
@@ -294,7 +293,7 @@ The rider's chats, most recent activity first.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `conversation_id` | string | The chat's id |
-| `channel` | string | `amiigo_app` or `website_chat` |
+| `channel` | string | Where the chat happened: `amiigo_app` in v1 |
 | `title` | string | What the chat was about, written by the server: the problem the bot worked through, for example "Battery charges very slowly" or "Range has dropped", or a general one: "Battery issue", "Motor issue", "Warranty registration" or "General question". Show as it is. |
 | `started_at`, `last_message_at` | string | ISO 8601 times in UTC |
 | `bike` | object or `null` | The bike the chat was about; `null` when no bike was chosen |
@@ -362,7 +361,6 @@ One chat's messages. Three ways to call it:
 Text comes back as the server stored it, which is not always exactly what the rider typed.
 
 - Phone numbers and email addresses typed in a message show as `[phone]` and `[email]`.
-- A one-time code or an order number typed while signing in on the website shows as `[code]` or `[order number]`.
 - The bot's first reply in a chat starts with the line saying it is EMotorad's virtual assistant, as the rider saw it.
 - Replies written by a person on the support team are not part of the chat yet.
 
@@ -393,7 +391,7 @@ The server sends no quick-reply chips of its own. Chips the app offers at the st
 
 | Area | What the server sends | What the app should do |
 | --- | --- | --- |
-| Handover wording | A signed-in rider always has a number on record, so the reply is: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket`. A chat with no number on record first gets "I can pass you to our support team. What mobile number can they reach you on?" with `escalated: false`; a signed-in rider is never asked, so this is written down only so that a website chat read from the history makes sense. | Show the text as sent. Treat `escalated: false` as a chat still open. |
+| Handover wording | A signed-in rider always has a number on record, so the reply is: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket`. A chat with no number on record first gets "I can pass you to our support team. What mobile number can they reach you on?" with `escalated: false`; a signed-in rider is never asked, so this is written down only because the same engine serves the website chat. | Show the text as sent. Treat `escalated: false` as a chat still open. |
 | Who contacts the rider | Support, from Zoho Desk; by phone or email is not decided | Promise no channel or time: say "our team will contact you" |
 
 **Evidence before a fault ticket.** For a fault with the bike (battery or motor), the bot raises a ticket, or hands the chat to a person, only after a video or photo shows the fault. It asks for a short video first, and a photo if the rider can't take one. After three asks with nothing that shows the fault, it raises no ticket and gives EMotorad's customer care contact instead. Safety reports, delivery and order questions, and warranty registration never wait for evidence.
@@ -461,7 +459,7 @@ The version is in the path, `/amiigo/v1/`, and in `ready.protocol`. Within v1, c
 
 | Question | Who answers | Our proposal |
 | --- | --- | --- |
-| Should the app show website chats? | App team | They are returned with `channel`; filter with `channel=amiigo_app` if not |
+| Should website chats, where the rider verified their number with a code, appear in the app later? | App and product | Yes, once each message records whether the verified rider wrote it |
 | Should a closed ticket also send a push notification when the app is closed? | App and product | Not in v1: the app sees it on its next `GET` |
 | Should replies from the support team appear in the chat? | Support and product | Later, with Zoho two-way chat; they would arrive as a new `sender` |
 | When a rider writes again after their ticket closed and needs help again, does the same ticket reopen or a new one start? | Support lead | A new ticket, with the old reference noted on it |

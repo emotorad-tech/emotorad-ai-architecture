@@ -7,16 +7,23 @@ conversation (`runs_of`, grouped here into one chat), the transcript turns
 Desk, written by the ticket closure). Text is returned as stored, masked as
 it was recorded.
 
-A chat is the rider's when every run of it is theirs (`owner_of`). Anything
-else, including a web chat a second person took over on a shared browser, is
-`conversation_not_found` and never listed: nothing of another person's chat
-is read out.
+In v1 the history holds the rider's Amiigo app chats only (the plan's
+Ruling 6): a chat is listed, and read, only when every run of it is an
+`amiigo_app` run and every summarised run is the rider's (`owner_of`). The
+runs are the summaries and, for a run that wrote none (someone who never
+proved a number), the record of where the run came from (`origins_of`,
+written for every run). Anything else, a website chat even where the rider
+proved this number, or one in which someone else wrote, is
+`conversation_not_found` and never listed: nothing of another person's
+words is read out.
 
-Cursors are opaque base64url JSON, issued here and scoped to the rider (and,
-for messages, the chat). The list pages by keyset on (last message time,
-conversation id); the messages page back from the oldest message of the page
-before, by its id. So a turn recorded between two requests is neither
-skipped nor repeated: new messages only ever come after the ones already read.
+Cursors are opaque base64url JSON, issued here. They carry positions only,
+nothing taken from the phone (Ruling 7): every read is by the rider's user
+key, so a cursor can only ever move through the rider's own chats. The list
+pages by keyset on (last message time, conversation id); the messages page
+back from the oldest message of the page before, by its id, within the chat
+the cursor names. So a turn recorded between two requests is neither skipped
+nor repeated: new messages only ever come after the ones already read.
 
 Times are compared as times, never as text: `utc_now_iso` drops the
 microseconds when they are zero. They are written as the contract writes
@@ -48,6 +55,8 @@ LINK_SECONDS = 900
 GENERAL_TITLE = "General question"
 HANDED_TO_SUPPORT = "handed_to_support"
 OPEN = "open"
+# The one channel the v1 history holds (Ruling 6).
+APP_CHANNEL = "amiigo_app"
 S3_SCHEME = "s3://"
 # What a time that cannot be read sorts as: before everything.
 _NEVER = datetime.min.replace(tzinfo=timezone.utc)
@@ -65,7 +74,7 @@ Signer = Callable[[Optional[str]], Tuple[Optional[str], Optional[str]]]
 
 
 class CursorInvalid(Exception):
-    """A `cursor`, `before` or `after` this server did not issue for this rider and chat."""
+    """A `cursor`, `before` or `after` this server did not issue, or not for this chat."""
 
 
 class ConversationNotFound(Exception):
@@ -102,13 +111,14 @@ def _shown(text: Any) -> Any:
 # -- cursors -------------------------------------------------------------------
 
 
-def _encode(kind: str, rider: Rider, **fields: Any) -> str:
-    payload = dict(fields, v=CURSOR_VERSION, k=kind, r=rider.rider_hash)
+def _encode(kind: str, **fields: Any) -> str:
+    """A position, and nothing about who asked: no phone, no hash of one."""
+    payload = dict(fields, v=CURSOR_VERSION, k=kind)
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _decode(text: str, kind: str, rider: Rider) -> Dict[str, Any]:
+def _decode(text: str, kind: str) -> Dict[str, Any]:
     if not _CURSOR.fullmatch(text) or len(text) % 4 == 1:
         raise CursorInvalid()
     try:
@@ -116,8 +126,7 @@ def _decode(text: str, kind: str, rider: Rider) -> Dict[str, Any]:
     except (ValueError, binascii.Error):
         # Not base64, not UTF-8, or not JSON.
         raise CursorInvalid() from None
-    if (not isinstance(payload, dict) or payload.get("v") != CURSOR_VERSION or payload.get("k") != kind
-            or payload.get("r") != rider.rider_hash):
+    if not isinstance(payload, dict) or payload.get("v") != CURSOR_VERSION or payload.get("k") != kind:
         raise CursorInvalid()
     return payload
 
@@ -239,11 +248,11 @@ def list_messages(stores: Any, rider: Rider, conversation_id: str, *, limit: int
     `older_cursor`): the page before. `after` (a message id): the messages
     after it, with `more_after`. Each page oldest first."""
     conversations = stores.conversations
-    if conversations.owner_of(conversation_id) != rider.user_key:
+    if not is_riders_app_chat(stores, rider, conversation_id):
         raise ConversationNotFound()
     anchor = None
     if before:
-        cursor = _decode(before, MESSAGES, rider)
+        cursor = _decode(before, MESSAGES)
         anchor = cursor.get("m")
         if cursor.get("c") != conversation_id or not isinstance(anchor, str):
             raise CursorInvalid()
@@ -263,7 +272,7 @@ def list_messages(stores: Any, rider: Rider, conversation_id: str, *, limit: int
         start = max(0, end - limit)
         page = items[start:end]
         if start > 0:
-            older_cursor = _encode(MESSAGES, rider, c=conversation_id, m=message_id(page[0]))
+            older_cursor = _encode(MESSAGES, c=conversation_id, m=message_id(page[0]))
     return {
         "conversation_id": conversation_id,
         "messages": [message_view(item, signer, now) for item in page],
@@ -280,10 +289,31 @@ class _Chat:
     """The runs of one conversation, as one chat."""
 
     conversation_id: str
+    runs: Tuple[ConversationSummaryItem, ...]
     latest: ConversationSummaryItem
     started_at: str
     last_at: str
     last: datetime
+
+
+def _app_chat_of(conversations: Any, rider: Rider, conversation_id: str,
+                 runs: Sequence[ConversationSummaryItem]) -> bool:
+    """Ruling 6: the rider's summarised runs of the chat (`runs`) are all app
+    runs, nobody else has one (`owner_of`), and no run that wrote no summary
+    came from anywhere but the app (`origins_of`)."""
+    if not runs or any(run.channel != APP_CHANNEL for run in runs):
+        return False
+    if conversations.owner_of(conversation_id) != rider.user_key:
+        return False
+    return all(origin.get("channel") == APP_CHANNEL for origin in conversations.origins_of(conversation_id))
+
+
+def is_riders_app_chat(stores: Any, rider: Rider, conversation_id: str) -> bool:
+    """Whether this chat is in the rider's history: an Amiigo app chat whose
+    every run is theirs. Anything else is `conversation_not_found`."""
+    conversations = stores.conversations
+    runs = [run for run in conversations.runs_of(rider.user_key) if run.conversation_id == conversation_id]
+    return _app_chat_of(conversations, rider, conversation_id, runs)
 
 
 def _chats(runs: Sequence[ConversationSummaryItem]) -> List[_Chat]:
@@ -298,7 +328,7 @@ def _chats(runs: Sequence[ConversationSummaryItem]) -> List[_Chat]:
         latest = max(mine, key=lambda r: (_moment(r.started_at) or _NEVER, _moment(r.last_at) or _NEVER))
         first = min(mine, key=lambda r: _moment(r.started_at) or _moment(r.last_at) or _NEVER)
         last = max(mine, key=lambda r: _moment(r.last_at) or _NEVER)
-        chats.append(_Chat(conversation_id, latest, first.started_at or first.last_at, last.last_at,
+        chats.append(_Chat(conversation_id, tuple(mine), latest, first.started_at or first.last_at, last.last_at,
                            _moment(last.last_at) or _NEVER))
     chats.sort(key=lambda c: c.conversation_id)
     chats.sort(key=lambda c: c.last, reverse=True)  # stable: ties stay by id
@@ -338,11 +368,12 @@ def _chat_view(stores: Any, chat: _Chat, now: datetime) -> Dict[str, Any]:
 
 def list_conversations(stores: Any, rider: Rider, *, limit: int, cursor: Optional[str], channel: Optional[str],
                        now: datetime) -> Dict[str, Any]:
-    """GET /amiigo/v1/conversations: the rider's chats, most recent activity
-    first, `limit` a page, from `cursor` (a `next_cursor`) when given."""
+    """GET /amiigo/v1/conversations: the rider's app chats, most recent
+    activity first, `limit` a page, from `cursor` (a `next_cursor`) when
+    given. `channel` can only narrow: every chat listed is an app chat."""
     since: Optional[Tuple[datetime, str]] = None
     if cursor:
-        fields = _decode(cursor, CHATS, rider)
+        fields = _decode(cursor, CHATS)
         moment, conversation_id = _moment(fields.get("t")), fields.get("c")
         if moment is None or not isinstance(conversation_id, str):
             raise CursorInvalid()
@@ -350,16 +381,18 @@ def list_conversations(stores: Any, rider: Rider, *, limit: int, cursor: Optiona
     conversations = stores.conversations
     page: List[_Chat] = []
     more = False
-    for chat in _chats(conversations.runs_of(rider.user_key, channel=channel)):
+    if channel not in (None, APP_CHANNEL):
+        return {"conversations": [], "next_cursor": None}
+    # Every run, whatever its channel: a chat with any website run is left out.
+    for chat in _chats(conversations.runs_of(rider.user_key)):
         if since is not None and not (chat.last < since[0] or (chat.last == since[0]
                                                                and chat.conversation_id > since[1])):
             continue
-        if conversations.owner_of(chat.conversation_id) != rider.user_key:
-            continue  # someone else's runs are in it too
+        if not _app_chat_of(conversations, rider, chat.conversation_id, chat.runs):
+            continue
         if len(page) == limit:
             more = True
             break
         page.append(chat)
-    next_cursor = (_encode(CHATS, rider, t=page[-1].last.isoformat(), c=page[-1].conversation_id)
-                   if more else None)
+    next_cursor = _encode(CHATS, t=page[-1].last.isoformat(), c=page[-1].conversation_id) if more else None
     return {"conversations": [_chat_view(stores, chat, now) for chat in page], "next_cursor": next_cursor}

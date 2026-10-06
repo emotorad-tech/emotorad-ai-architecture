@@ -28,6 +28,7 @@ from emotorad_ai.conversation import (
     InMemoryConversationStore,
     StoreUnavailable,
     TranscriptTurn,
+    summary_key,
 )
 from emotorad_ai.observability import EventLog
 from emotorad_ai.storage.s3 import S3Store
@@ -146,10 +147,19 @@ class StoreKinds:
 
     def exchange(self, cid, at, user_key=RIDER_KEY, customer="My battery is not charging",
                  bot="Is the battery switched on?", run_started=None, channel="amiigo_app", title="Battery issue",
-                 frame=None, product=None, outcome="open", ticket_id=None, customer_files=(), bot_files=()):
+                 frame=None, product=None, outcome="open", ticket_id=None, customer_files=(), bot_files=(),
+                 origin=True):
         """One rider message and its reply, recorded as the runtime records a
-        turn: the transcript pair and the run's summary."""
+        turn: the transcript pair, the run's summary (only with a user key,
+        as the runtime writes one) and where the run came from (every run,
+        anonymous ones too: Runtime._note_origin; `origin=False` is a write
+        of it that failed, which the runtime only logs)."""
         self.clock.now = at
+        if origin:
+            self.conversations.record_origin({
+                "_id": summary_key(cid, iso(run_started or at)), "conversation_id": cid,
+                "started_at": iso(run_started or at), "channel": channel, "user_key": user_key, "country": "IN",
+                "region": None, "city": None, "source": "phone", "db": None})
         state = self.conversations.get(cid)
         state.user_key, state.channel = user_key, channel
         state.turns += 1
@@ -480,14 +490,62 @@ class HistoryApiContract:
         (chat,) = self.chats()["conversations"]
         self.assertEqual((chat["bike"], chat["ticket"], chat["status"]), (None, None, "open"))
 
-    def test_only_chats_from_one_place(self):
+    def assertNotInHistory(self, cid, words, token=None):
+        """Neither listed nor readable, and nothing of it in either answer."""
+        listed = self.get("/conversations", token=token)
+        self.assertEqual(listed.status_code, 200)
+        self.assertNotIn(cid, [c["conversation_id"] for c in listed.json()["conversations"]])
+        read = self.get("/conversations/%s/messages" % cid, token=token)
+        self.refused(read, 404, "conversation_not_found")
+        for said in words:
+            self.assertNotIn(said, listed.text + read.text)
+
+    def test_only_app_chats_are_in_the_history(self):
+        # Ruling 6: in v1 the app's history holds Amiigo app chats only, even
+        # where the rider proved the same number in a website chat.
         self.exchange(CID_A, NOW - timedelta(hours=1))
-        self.exchange(CID_B, NOW, channel="website_chat")
+        self.exchange(CID_B, NOW, channel="website_chat", customer="typed on the website")
+        self.assertEqual([(c["conversation_id"], c["channel"]) for c in self.chats()["conversations"]],
+                         [(CID_A, "amiigo_app")])
         self.assertEqual([c["conversation_id"] for c in self.chats(channel="amiigo_app")["conversations"]], [CID_A])
-        self.assertEqual([(c["conversation_id"], c["channel"]) for c in self.chats(channel="website_chat")["conversations"]],
-                         [(CID_B, "website_chat")])
-        r = self.get("/conversations", channel="telegram")
-        self.assertEqual(r.status_code, 422)
+        self.assertNotInHistory(CID_B, ["typed on the website"])
+        for channel in ("website_chat", "whatsapp", "telegram"):
+            with self.subTest(channel=channel):
+                r = self.get("/conversations", channel=channel)
+                self.assertEqual((r.status_code, r.json()["detail"][0]["loc"]), (422, ["query", "channel"]))
+                self.assertEqual(r.headers.get("cache-control"), "no-store")
+
+    def test_a_chat_with_any_website_run_is_not_in_the_history(self):
+        self.exchange(CID_A, NOW - timedelta(hours=3), channel="website_chat", customer="on the website")
+        self.exchange(CID_A, NOW - timedelta(hours=1), run_started=NOW - timedelta(hours=1))
+        self.exchange(CID_B, NOW)
+        self.assertEqual([c["conversation_id"] for c in self.chats()["conversations"]], [CID_B])
+        self.assertNotInHistory(CID_A, ["on the website"])
+
+    def test_a_website_run_whose_origin_was_not_recorded_still_hides_the_chat(self):
+        # The summary's channel is the backstop when the origin write failed.
+        self.exchange(CID_A, NOW - timedelta(hours=3), channel="website_chat", customer="on the website",
+                      origin=False)
+        self.exchange(CID_A, NOW - timedelta(hours=1), run_started=NOW - timedelta(hours=1))
+        self.assertNotInHistory(CID_A, ["on the website"])
+
+    def test_someone_who_never_verified_in_the_riders_website_chat_is_never_shown(self):
+        # The review's case 1: the rider verified in a website chat, their
+        # working state expired, and the next person on that browser wrote
+        # without verifying. Their turns are recorded with no summary.
+        self.exchange(CID_A, NOW - timedelta(hours=60), channel="website_chat", customer="the rider's words")
+        self.exchange(CID_A, NOW - timedelta(hours=1), user_key=None, run_started=NOW - timedelta(hours=1),
+                      channel="website_chat", customer="a stranger's words")
+        self.assertEqual(self.conversations.owner_of(CID_A), RIDER_KEY)  # the summaries alone name the rider
+        self.assertNotInHistory(CID_A, ["a stranger's words", "the rider's words"])
+
+    def test_an_anonymous_run_under_an_app_chats_id_hides_the_chat(self):
+        # A run with no summary still records where it came from: a website
+        # message sent under the id of an app chat is never read out to the rider.
+        self.exchange(CID_A, NOW - timedelta(hours=60))
+        self.exchange(CID_A, NOW - timedelta(hours=1), user_key=None, run_started=NOW - timedelta(hours=1),
+                      channel="website_chat", customer="a stranger's words")
+        self.assertNotInHistory(CID_A, ["a stranger's words"])
 
     def test_limits_outside_the_range_are_422_with_the_field_list(self):
         for path, limit in (("/conversations", 0), ("/conversations", 51),
@@ -520,12 +578,48 @@ class HistoryApiContract:
         self.exchange(CID_B, NOW - timedelta(hours=1))
         self.exchange(CID_C, NOW, user_key=OTHER_KEY)
         self.exchange(CID_D, NOW - timedelta(hours=1), user_key=OTHER_KEY)
-        theirs = self.chats(token=self.other_token, limit=1)["next_cursor"]
-        self.assertIsNotNone(theirs)
-        for cursor in ("not-a-cursor!", b64(b"hello"), b64(b"[1, 2]"), b64(json.dumps({"v": 1}).encode()), theirs,
+        for cursor in ("not-a-cursor!", b64(b"hello"), b64(b"[1, 2]"), b64(json.dumps({"v": 1}).encode()),
                        "x" * 2000):
             with self.subTest(cursor=cursor[:20]):
                 self.refused(self.get("/conversations", cursor=cursor), 400, "cursor_invalid")
+
+    def test_a_cursor_holds_nothing_from_the_phone(self):
+        # Ruling 7: a short unsalted hash of PHONE#... can be brute-forced
+        # back to the number, and cursors end up in app logs.
+        for i in range(3):
+            self.exchange((CID_A, CID_B, CID_C)[i], NOW - timedelta(hours=i))
+        self.five_exchanges(CID_D)
+        cursors = [self.chats(limit=1)["next_cursor"], self.messages(CID_D, limit=2)["older_cursor"]]
+        for cursor in cursors:
+            with self.subTest(cursor=cursor[:12]):
+                decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
+                for derived in (auth_module.rider_hash_of(RIDER_KEY), RIDER_PHONE, RIDER_PHONE[3:], RIDER_KEY):
+                    self.assertNotIn(derived, decoded)
+                self.assertNotIn('"r"', decoded)
+
+    def test_another_riders_cursor_reads_only_this_riders_chats(self):
+        # Ruling 7: the cursor positions; the query by user key scopes.
+        for i, cid in enumerate((CID_A, CID_B, CID_C)):
+            self.exchange(cid, NOW - timedelta(hours=2 * i))
+        for i, cid in enumerate((CID_D, CID_E)):
+            self.exchange(cid, NOW - timedelta(hours=2 * i + 1), user_key=OTHER_KEY)
+        theirs = self.chats(token=self.other_token, limit=1)["next_cursor"]
+        r = self.get("/conversations", cursor=theirs)
+        if r.status_code == 200:
+            listed = [c["conversation_id"] for c in r.json()["conversations"]]
+            self.assertTrue(set(listed) <= {CID_A, CID_B, CID_C}, listed)
+            self.assertEqual(listed, [CID_B, CID_C])  # after the other rider's position, NOW - 1 h
+        else:
+            self.refused(r, 400, "cursor_invalid")
+        mine = self.chats(limit=1)["next_cursor"]
+        r = self.get("/conversations", token=self.other_token, cursor=mine)
+        self.assertNotIn(CID_B, r.text)
+        self.assertNotIn(CID_C, r.text)
+        # A messages cursor of this rider's chat, used by the other rider: not found, never read.
+        self.five_exchanges(CID_A)
+        older = self.messages(CID_A, limit=2)["older_cursor"]
+        self.refused(self.get("/conversations/%s/messages" % CID_A, token=self.other_token, before=older),
+                     404, "conversation_not_found")
 
     def test_another_riders_chats_are_never_listed(self):
         self.exchange(CID_A, NOW)

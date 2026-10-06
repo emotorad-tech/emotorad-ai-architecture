@@ -35,8 +35,9 @@ from .common import (
 
 router = APIRouter(prefix=PREFIX)
 
-# The places a chat happens ("Which chats are in the history").
-Channel = Literal["amiigo_app", "website_chat"]
+# The places a chat in the history happens ("Which chats are in the
+# history"): the app only in v1 (the plan's Ruling 6). Anything else is 422.
+Channel = Literal["amiigo_app"]
 
 
 def history_rider(request: Request, rider: Rider = Depends(require_rider)) -> Rider:
