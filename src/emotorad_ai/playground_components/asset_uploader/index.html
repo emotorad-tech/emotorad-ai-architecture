@@ -181,6 +181,11 @@
   });
   send("streamlit:componentReady", { apiVersion: 1 });
   height();
+  // The form sits in a collapsed expander, so the first render happens while
+  // the iframe is hidden and the body measures 0: the frame was 4px tall until
+  // some later rerun. Re-send the height whenever the body is actually laid
+  // out, which includes the moment the expander opens.
+  if (window.ResizeObserver) new ResizeObserver(height).observe(document.body);
 })();
 </script>
 </body>

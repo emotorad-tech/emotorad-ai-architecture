@@ -46,6 +46,7 @@ from emotorad_ai.tools.verification import (
     proved_owner,
 )
 from emotorad_ai.wiring import SESSIONS_INDEX_UNREADABLE, SESSIONS_TTL_MISSING, build_stores
+from tests.clock import mongomock_clock_at
 from tests.test_api_health import fresh_api
 from tests.test_verify_first import ONE_BIKE, Chat
 
@@ -57,7 +58,7 @@ OWNER = "PHONE#" + PHONE
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 # mongomock expires TTL documents against the real clock; these tests run on NOW.
-_MONGOMOCK_CLOCK = mock.patch("mongomock.utcnow", lambda: NOW.replace(tzinfo=None))
+_MONGOMOCK_CLOCK = mongomock_clock_at(NOW)
 
 
 def setUpModule():
@@ -514,6 +515,8 @@ class MongoSessionsTests(unittest.TestCase):
     def test_an_expired_document_is_absent_before_the_ttl_monitor_removes_it(self):
         self.sessions.save("c1", PHONE, NOW.isoformat(), NOW + timedelta(hours=12))
         self.now[0] = NOW + timedelta(hours=12)
+        # Still stored (mongomock's TTL clock is pinned to NOW), so the store's own check is what hides it.
+        self.assertIsNotNone(self.db[VERIFICATION_SESSIONS].find_one({"_id": "c1"}))
         self.assertIsNone(self.sessions.get("c1"))
 
     def test_the_ttl_index_and_the_person_index_are_there_after_setup(self):
