@@ -445,8 +445,13 @@ class BackendFailureTests(unittest.TestCase):
         self.assertEqual(store.verified_phone("c1"), PHONE)
         [failure] = self.failures()
         self.assertEqual((failure["operation"], failure["error"]), ("save", "StoreUnavailable"))
+        # The whole number anywhere; its last three digits only outside the
+        # event's time (`ts`), whose microseconds can hold "033" (the final
+        # review's Minor 11: this flaked).
+        untimed = [{name: value for name, value in event.items() if name != "ts"} for event in self.log.events]
+        self.assertNotIn("9700000033", repr(self.log.events))
         for digits in ("9700000033", "033"):
-            self.assertNotIn(digits, repr(self.log.events))
+            self.assertNotIn(digits, repr(untimed))
             self.assertNotIn(digits, "\n".join(logged.output))
 
     def test_a_failed_delete_never_lets_the_old_session_back_in_this_process(self):
