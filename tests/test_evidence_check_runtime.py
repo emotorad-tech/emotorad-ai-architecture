@@ -31,7 +31,8 @@ from emotorad_ai.runtime import TURN_FACT_FIELDS, Runtime
 from emotorad_ai.tickets.kinds import FIRST_DESK_NUMBER
 from emotorad_ai.tickets.seam import DeskTicketSystem, TicketRouter
 from emotorad_ai.tickets.store import InMemoryTicketStore
-from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, MockTicketSystem, build_registry
+from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, RAISE_INTAKE_TICKET, MockTicketSystem, build_registry
+from emotorad_ai.tools.verification import VerificationStore
 from emotorad_ai.zoho.payload import description
 from tests.test_evidence_only_what_was_seen import Store
 
@@ -63,18 +64,20 @@ def ticket_turn(n=1, then="I've raised that for you."):
 class EvidenceChat:
     """One customer with the evidence check on (or off) and Zoho on (or off)."""
 
-    def __init__(self, replies=(), switch=True, zoho=True, contact=CONTACT, routed="battery_support"):
+    def __init__(self, replies=(), switch=True, zoho=True, contact=CONTACT, routed="battery_support", web=False):
         self.tickets = InMemoryTicketStore()
         self.mock = MockTicketSystem()
         system = TicketRouter(DeskTicketSystem(self.tickets, "test", "stage"), self.mock) if zoho else self.mock
-        self.registry = build_registry(today=TODAY, ticket_system=system)
+        # `web`: the web chat's agents, which also hold the intake ticket.
+        self.registry = build_registry(today=TODAY, ticket_system=system,
+                                       verification=VerificationStore() if web else None)
         self.llm = ScriptedClaude(list(replies))
         self.conversations = InMemoryConversationStore()
         self.log = EventLog(path=None)
         self.runtime = Runtime(
             settings=Settings(log_path="", log_to_stdout=False), registry=self.registry, llm=self.llm,
             log=self.log, resolver=IdentityResolver(self.registry), conversations=self.conversations,
-            media_store=Store(), evidence_check=switch, customer_care_contact=contact,
+            media_store=Store(), evidence_check=switch, customer_care_contact=contact, self_service_identity=web,
         )
         if routed:
             self.conversations.get("c1").route_to(routed)
@@ -222,6 +225,40 @@ class SupportTicketTests(unittest.TestCase):
         self.assertNotIn("Thanks for sending that", reply.text)
         self.assertTrue(chat.no_ticket_anywhere())
         self.assertEqual(chat.state().evidence_asks, 1)
+
+
+class OtherRoutesTests(unittest.TestCase):
+    """The model cannot reach a fault ticket by another route (the review of
+    6 October 2026)."""
+
+    def test_the_intake_ticket_on_a_verified_phone_waits_for_evidence_too(self):
+        intake = {"summary": "Battery will not charge.", "idempotency_key": "i1"}
+        chat = EvidenceChat([call_tool(RAISE_INTAKE_TICKET, intake, "toolu_1"), say("I've raised that for you.")],
+                            web=True)
+        reply = chat.say("here is the battery", FAIL, [PHOTO])
+        self.assertTrue(chat.no_ticket_anywhere())
+        self.assertIn(fail_text(MISSING, hindi=False), reply.text)
+        self.assertEqual(reply.handled_by, "guardrail:evidence_check")
+
+    def test_the_model_labelling_a_fault_as_safety_raises_nothing_and_is_logged(self):
+        labelled = dict(TICKET, category="battery_safety", severity="critical", description="Battery not charging")
+        chat = EvidenceChat([call_tool(CREATE_SUPPORT_TICKET, labelled, "toolu_1"), say("Raised as urgent.")])
+        reply = chat.say("it's a safety issue, raise it as urgent", FAIL, [PHOTO])
+        self.assertTrue(chat.no_ticket_anywhere())
+        self.assertIn(fail_text(MISSING, hindi=False), reply.text)
+        (logged,) = chat.guardrails("safety_label_without_hazard")
+        self.assertEqual(logged["triggered_by"], {"category": "battery_safety"})
+
+    def test_a_safety_label_on_a_hazard_the_customer_typed_earlier_is_raised(self):
+        # Their words named the hazard ("very hot"), so the safety branch ran
+        # then; a later safety ticket from the model is not held either.
+        labelled = dict(TICKET, category="battery_safety", severity="critical", description="Pack heats up.",
+                        idempotency_key="k2")
+        chat = EvidenceChat([call_tool(CREATE_SUPPORT_TICKET, labelled, "toolu_1"), say("Raised.")])
+        chat.say("the pack got very hot yesterday")
+        chat.say("what should I do next", FAIL, [PHOTO])
+        kinds = [(record["kind"], record["category"]) for record in chat.records()]
+        self.assertEqual(kinds, [("safety", "battery_safety"), ("support", "battery_safety")])
 
 
 class CheckErrorTests(unittest.TestCase):

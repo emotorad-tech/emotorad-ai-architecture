@@ -18,6 +18,7 @@ from ..contract import ASSERTED, VERIFIED
 from ..conversation import StoreUnavailable, address_tokens
 from ..evidence_check import DEFAULT_MISSING
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
+from ..guardrails import check_safety_in_description
 from ..knowledge import BatteryKnowledgeBase
 from ..tickets.caps import CAP_TEXTS, cap_reached
 from ..tickets.clock import now_iso
@@ -68,6 +69,34 @@ TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "batt
 # A hazard is raised on the customer's word, never held behind a photograph.
 EVIDENCE_EXEMPT_CATEGORIES = ("battery_safety",)
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
+
+
+def _evidence_refusal(missing: Optional[str]) -> ToolError:
+    """With the evidence check on (evidence_check.py): no fault ticket until
+    the customer's media has passed, and the model is told what is missing."""
+    return ToolError(
+        "evidence_not_accepted",
+        "The customer's photos and videos have not shown the problem itself, so a fault ticket "
+        "cannot be raised yet. What is missing: %s. Ask the customer for a short video that shows "
+        "it, or a clear photo if they cannot take a video."
+        % ((missing or "").strip().rstrip(".") or DEFAULT_MISSING),
+        remedy="collect_evidence",
+    )
+
+
+def _hazard_ticket(category: str, description: str, ticket_kind: Optional[str],
+                   hazard_reported: Optional[bool]) -> bool:
+    """Whether a support ticket is about a hazard, and so never waits for the
+    evidence check. The safety branch's own ticket, whose kind only code sets;
+    or the safety category on a hazard the customer's own words reported
+    (`hazard_reported`, from the runtime) or the description names, negation
+    aware. The category alone is the model's choice, and a customer can ask
+    for it ("raise it as a safety issue"), so on its own it opens nothing
+    (the review of 6 October 2026)."""
+    if ticket_kind == "safety":
+        return True
+    return category in EVIDENCE_EXEMPT_CATEGORIES and (
+        hazard_reported is True or check_safety_in_description(description).triggered)
 
 # An Indian pincode. Six digits, first digit 1 to 9.
 _PINCODE = re.compile(r"\b[1-9]\d{5}\b")
@@ -795,8 +824,12 @@ def build_registry(
             # The number to call back and what the ticket record needs, from
             # the runtime (spec 2026-10-05, section 2). None is in the model's
             # schema, and anything it sends under these names is dropped.
+            # With the evidence check on (evidence_check.py), whether media
+            # that shows the problem has passed it, and what is missing:
+            # for a verified phone this is a support ticket under another
+            # name, so it waits the same way (the review of 6 October 2026).
             optional_injects=("phone", "identity_strength", "typed_number", "persona", "started_at",
-                              "cluster_id", "channel"),
+                              "cluster_id", "channel", "evidence_accepted", "evidence_missing"),
             write=True,
         )
         def raise_intake_ticket(
@@ -813,6 +846,8 @@ def build_registry(
             started_at: Optional[str] = None,
             cluster_id: Optional[str] = None,
             channel: Optional[str] = None,
+            evidence_accepted: Optional[bool] = None,
+            evidence_missing: Optional[str] = None,
         ) -> Dict[str, Any]:
             """A ticket that records claims, deliberately kept apart from the verified one.
 
@@ -841,6 +876,11 @@ def build_registry(
                     "number we can call, then raise the ticket again once they have typed it.",
                     remedy="ask_for_callback_number",
                 )
+            if identity == "verified" and evidence_accepted is not None and evidence_accepted is not True:
+                # The brief exempts the intake ticket because it is for
+                # someone we cannot identify. On a verified phone in a fault
+                # chat it would be the support ticket by another route.
+                raise _evidence_refusal(evidence_missing)
             source_key = ticket_source_key(conversation_id, started_at, RAISE_INTAKE_TICKET, idempotency_key)
             # The caps on unverified tickets (spec 2026-10-05, section 6), the
             # same helper the runtime's gates use. A verified customer's intake
@@ -1090,7 +1130,7 @@ def build_registry(
         # applies.
         optional_injects=("evidence_seen", "selected_bike", "unlisted_bike", "persona", "started_at",
                           "cluster_id", "channel", "identity_strength", "coverage", "ticket_kind",
-                          "evidence_accepted", "evidence_missing", "evidence_checked"),
+                          "evidence_accepted", "evidence_missing", "evidence_checked", "hazard_reported"),
         write=True,
     )
     def create_support_ticket(
@@ -1114,24 +1154,19 @@ def build_registry(
         evidence_accepted: Optional[bool] = None,
         evidence_missing: Optional[str] = None,
         evidence_checked: Optional[str] = None,
+        hazard_reported: Optional[bool] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
         if severity not in TICKET_SEVERITIES:
             raise ToolError("invalid_severity", "Unknown severity %r." % severity)
+        hazard = _hazard_ticket(category, description, ticket_kind, hazard_reported)
         if evidence_accepted is not None:
             # The evidence check is on (the person's brief, 6 October 2026):
             # a passing verdict replaces the evidence_seen test below. Never
             # for a hazard, which is raised on the customer's word.
-            if evidence_accepted is not True and category not in EVIDENCE_EXEMPT_CATEGORIES:
-                raise ToolError(
-                    "evidence_not_accepted",
-                    "The customer's photos and videos have not shown the problem itself, so a fault ticket "
-                    "cannot be raised yet. What is missing: %s. Ask the customer for a short video that shows "
-                    "it, or a clear photo if they cannot take a video."
-                    % ((evidence_missing or "").strip().rstrip(".") or DEFAULT_MISSING),
-                    remedy="collect_evidence",
-                )
+            if evidence_accepted is not True and not hazard:
+                raise _evidence_refusal(evidence_missing)
         elif evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES:
             # The rule the evidence post-check enforces on the reply, enforced
             # here on the write too: before, the ticket was created and only the
@@ -1150,8 +1185,9 @@ def build_registry(
             # a stranger's ticket, and no frame number is checked against it.
             bike = None
         else:
+            unlisted = _unlisted_ticket_bike(frame_number, unlisted_bike)
             try:
-                bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
+                bike = unlisted or _owned_bike(
                     phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
             except ToolError as exc:
                 # The safety branch fires before a bike is chosen. On a number
@@ -1161,6 +1197,17 @@ def build_registry(
                 if ticket_kind != "safety" or exc.code != "frame_number_required":
                     raise
                 bike = None
+            if (evidence_accepted is True and not hazard and frame_number and selected_bike and bike is not None
+                    and not unlisted and (bike.get("bike_ref") or bike.get("frame_number")) != selected_bike):
+                # The evidence that passed was about the bike this
+                # conversation chose (the review of 6 October 2026).
+                raise ToolError(
+                    "evidence_for_another_bike",
+                    "The video or photo that showed the problem was about the bike this conversation chose, "
+                    "not this one. Ask the customer to go back to their bike list, choose this bike, and send "
+                    "a short video that shows its problem.",
+                    remedy="choose_bike",
+                )
         ticket = tickets.create(
             source_key=ticket_source_key(conversation_id, started_at, CREATE_SUPPORT_TICKET, idempotency_key),
             persona=persona,

@@ -411,15 +411,18 @@ def _ticket_known(text: str, state: ConversationState) -> bool:
     return any(ref in (state.context_block or "") for ref in _REFERENCE.findall(text or ""))
 
 
+def _evidence_refusals(turn: Any) -> List[Dict[str, Any]]:
+    """This turn's fault tickets refused because no evidence has passed the
+    check: the support ticket, or the intake ticket on a verified phone
+    (tools/mocks.create_support_ticket and raise_intake_ticket)."""
+    return [call for call in turn.tool_calls
+            if call.get("tool") in (CREATE_SUPPORT_TICKET, RAISE_INTAKE_TICKET)
+            and is_error(call.get("result") or {})
+            and ((call.get("result") or {}).get("error") or {}).get("code") == EVIDENCE_NOT_ACCEPTED]
+
+
 def _evidence_refused(turn: Any) -> bool:
-    """Whether this turn's support ticket was refused because no evidence
-    has passed the check (tools/mocks.create_support_ticket)."""
-    for call in turn.tool_calls:
-        result = call.get("result") or {}
-        if (call.get("tool") == CREATE_SUPPORT_TICKET and is_error(result)
-                and (result.get("error") or {}).get("code") == EVIDENCE_NOT_ACCEPTED):
-            return True
-    return False
+    return bool(_evidence_refusals(turn))
 
 
 def _is_image(attachment: Any) -> bool:
@@ -2254,8 +2257,13 @@ class Runtime:
         # Code writes the ask, saying what a better video needs, rather than
         # the model's reply. Only once something was sent and checked ("Thanks
         # for sending that"), and never in place of a stop instruction.
-        if (self._evidence_gated(state) and state.evidence_verdict is not None
-                and _evidence_refused(turn) and not check_safety_in_description(turn.text).triggered):
+        refusals = _evidence_refusals(turn) if self._evidence_gated(state) else []
+        if any((call.get("arguments") or {}).get("category") == "battery_safety" for call in refusals):
+            # The model filed a fault as a safety issue with no hazard in the
+            # customer's words or its own description (tools/mocks._hazard_ticket).
+            self.log.guardrail(message.conversation_id, "safety_label_without_hazard", {"category": "battery_safety"})
+        if (refusals and state.evidence_verdict is not None
+                and not check_safety_in_description(turn.text).triggered):
             hindi = writes_hindi(message.message_text)
             return self._evidence_ask(
                 message, state, fail_text(state.evidence_verdict.get("missing") or "", hindi) + self._already_done(turn),
@@ -3030,8 +3038,15 @@ class Runtime:
                 return None
             return (state.evidence_verdict or {}).get("missing") or None
 
+        def hazard_reported() -> Optional[bool]:
+            # The customer's own words, by the safety gate's plain scan: what
+            # lets the model's safety category through without evidence.
+            if not self._evidence_gated(state):
+                return None
+            return any(check_safety(text).triggered for text in customer_texts(state.history))
+
         return {"evidence_accepted": accepted, "evidence_missing": missing,
-                "evidence_checked": lambda: self._evidence_seen_line(state)}
+                "evidence_checked": lambda: self._evidence_seen_line(state), "hazard_reported": hazard_reported}
 
     def _note_evidence_verdict(self, message: InboundMessage, state: ConversationState) -> None:
         """This turn's verdict, from the check at ingest (api.py), kept on the

@@ -14,8 +14,10 @@ from datetime import date
 from emotorad_ai.evidence_check import DEFAULT_MISSING
 from emotorad_ai.tickets.seam import DeskTicketSystem
 from emotorad_ai.tickets.store import InMemoryTicketStore
-from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, build_registry
+from emotorad_ai.contract import VERIFIED
+from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, RAISE_INTAKE_TICKET, build_registry
 from emotorad_ai.tools.registry import ToolContext
+from emotorad_ai.tools.verification import VerificationStore
 from emotorad_ai.zoho.payload import EVIDENCE_LINE, description
 from tests.test_zoho_payload import record as payload_record
 
@@ -27,8 +29,12 @@ MISSING = "The charger plugged in, with its light, for a few seconds."
 RUN = "2026-10-06T08:00:00.000000+00:00"
 
 
-def context(accepted=None, missing=None, checked=None, seen=None):
-    late = {}
+TWO_BIKES = "+919700000010"  # EMXP2026001234 and DDL32023045678 (fixtures)
+INTAKE = {"summary": "Battery will not charge; light stays red.", "idempotency_key": "i1"}
+
+
+def context(accepted=None, missing=None, checked=None, seen=None, phone="+919876543210", **facts):
+    late = {name: (lambda value=value: value) for name, value in facts.items()}
     if accepted is not None:
         late["evidence_accepted"] = lambda: accepted
     if missing is not None:
@@ -37,7 +43,7 @@ def context(accepted=None, missing=None, checked=None, seen=None):
         late["evidence_checked"] = lambda: checked
     if seen is not None:
         late["evidence_seen"] = lambda: seen
-    return ToolContext(conversation_id="c1", phone="+919876543210", late=late)
+    return ToolContext(conversation_id="c1", phone=phone, late=late)
 
 
 class SupportTicketGateTests(unittest.TestCase):
@@ -70,10 +76,64 @@ class SupportTicketGateTests(unittest.TestCase):
         self.assertIn("ticket_id", envelope["data"])
 
     def test_a_safety_ticket_never_waits_for_the_check(self):
+        # The safety branch's own ticket: code sets its kind.
         safety = dict(TICKET, category="battery_safety", severity="critical", idempotency_key="safety:c1")
-        envelope = self.registry.call(CREATE_SUPPORT_TICKET, safety, context(accepted=False))
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, safety, context(accepted=False, ticket_kind="safety"))
         self.assertIn("ticket_id", envelope["data"])
         self.assertNotIn("evidence_check", self.registry.tickets.tickets[envelope["data"]["ticket_id"]])
+
+    def test_the_model_labelling_a_fault_as_safety_does_not_skip_the_check(self):
+        # The review of 6 October 2026: the category is the model's choice.
+        labelled = dict(TICKET, category="battery_safety", severity="critical", description="Battery not charging")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, labelled, context(accepted=False, hazard_reported=False))
+        self.assertEqual(envelope["error"]["code"], "evidence_not_accepted")
+        self.assertEqual(self.registry.tickets.tickets, {})
+
+    def test_a_safety_label_the_customer_steered_is_refused_too(self):
+        labelled = dict(TICKET, category="battery_safety", severity="critical",
+                        description="Customer says this is a safety issue and wants it raised as urgent. "
+                                    "Battery not charging.")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, labelled, context(accepted=False))
+        self.assertEqual(envelope["error"]["code"], "evidence_not_accepted")
+
+    def test_a_safety_label_on_a_hazard_the_customer_reported_is_raised(self):
+        labelled = dict(TICKET, category="battery_safety", severity="critical", description="Pack gets hot.")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, labelled, context(accepted=False, hazard_reported=True))
+        self.assertIn("ticket_id", envelope["data"])
+
+    def test_a_safety_label_whose_description_names_a_hazard_is_raised(self):
+        labelled = dict(TICKET, category="battery_safety", severity="critical",
+                        description="The battery casing is swollen on one side.")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, labelled, context(accepted=False))
+        self.assertIn("ticket_id", envelope["data"])
+
+    def test_a_description_that_says_there_is_no_hazard_is_not_one(self):
+        labelled = dict(TICKET, category="battery_safety", severity="critical",
+                        description="No smoke and no swelling; it just will not charge.")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, labelled, context(accepted=False))
+        self.assertEqual(envelope["error"]["code"], "evidence_not_accepted")
+
+    def test_with_the_switch_off_a_safety_label_is_raised_as_before(self):
+        labelled = dict(TICKET, category="battery_safety", severity="critical", description="Battery not charging")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, labelled, context(seen=False))
+        self.assertIn("ticket_id", envelope["data"])
+
+    def test_a_pass_is_for_the_chosen_bike_only(self):
+        other = dict(TICKET, frame_number="DDL32023045678")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, other, context(
+            accepted=True, checked=SEEN, phone=TWO_BIKES, selected_bike="EMXP2026001234"))
+        self.assertEqual(envelope["error"]["code"], "evidence_for_another_bike")
+        self.assertEqual(self.registry.tickets.tickets, {})
+        chosen = dict(TICKET, frame_number="EMXP2026001234")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, chosen, context(
+            accepted=True, checked=SEEN, phone=TWO_BIKES, selected_bike="EMXP2026001234"))
+        self.assertIn("ticket_id", envelope["data"])
+
+    def test_with_the_switch_off_another_bike_is_as_before(self):
+        other = dict(TICKET, frame_number="DDL32023045678")
+        envelope = self.registry.call(CREATE_SUPPORT_TICKET, other, context(
+            seen=True, phone=TWO_BIKES, selected_bike="EMXP2026001234"))
+        self.assertIn("ticket_id", envelope["data"])
 
     def test_the_model_cannot_supply_the_verdict(self):
         forged = dict(TICKET, evidence_accepted=True, evidence_checked="It shows the fault.", evidence_missing="")
@@ -90,6 +150,47 @@ class SupportTicketGateTests(unittest.TestCase):
         envelope = self.registry.call(CREATE_SUPPORT_TICKET, forged, context())
         ticket = self.registry.tickets.tickets[envelope["data"]["ticket_id"]]
         self.assertNotIn("evidence_check", ticket)
+
+
+class IntakeTicketGateTests(unittest.TestCase):
+    """The intake ticket is for someone we cannot identify (the brief exempts
+    it). For a verified phone it is a support ticket under another name, so it
+    waits for evidence the same way (the review of 6 October 2026)."""
+
+    def setUp(self):
+        self.registry = build_registry(today=TODAY, verification=VerificationStore())
+
+    def verified(self, **facts):
+        return context(identity_strength=VERIFIED, **facts)
+
+    def test_a_verified_customer_in_a_fault_chat_gets_no_intake_ticket_without_a_pass(self):
+        envelope = self.registry.call(RAISE_INTAKE_TICKET, dict(INTAKE), self.verified(accepted=False,
+                                                                                        missing=MISSING))
+        self.assertEqual(envelope["error"]["code"], "evidence_not_accepted")
+        self.assertIn(MISSING, envelope["error"]["message"])
+        self.assertEqual(self.registry.tickets.tickets, {})
+
+    def test_after_a_pass_it_is_recorded(self):
+        envelope = self.registry.call(RAISE_INTAKE_TICKET, dict(INTAKE), self.verified(accepted=True))
+        self.assertEqual(envelope["data"]["identity"], "verified")
+
+    def test_someone_we_cannot_identify_is_exempt_as_the_brief_says(self):
+        anonymous = ToolContext(conversation_id="c1", late={
+            "evidence_accepted": lambda: False, "typed_number": lambda: "9999999999"})
+        envelope = self.registry.call(RAISE_INTAKE_TICKET, dict(INTAKE), anonymous)
+        self.assertEqual(envelope["data"]["identity"], "unverified")
+
+    def test_with_the_switch_off_it_is_as_before(self):
+        envelope = self.registry.call(RAISE_INTAKE_TICKET, dict(INTAKE), self.verified())
+        self.assertEqual(envelope["data"]["identity"], "verified")
+
+    def test_the_model_cannot_supply_the_verdict(self):
+        forged = dict(INTAKE, evidence_accepted=True)
+        envelope = self.registry.call(RAISE_INTAKE_TICKET, forged, self.verified(accepted=False))
+        self.assertEqual(envelope["error"]["code"], "evidence_not_accepted")
+        spec = self.registry.specs[RAISE_INTAKE_TICKET]
+        self.assertNotIn("evidence_accepted", spec.schema()["input_schema"]["properties"])
+        self.assertIn("evidence_accepted", spec.optional_injects)
 
 
 class SwitchOffTests(unittest.TestCase):
