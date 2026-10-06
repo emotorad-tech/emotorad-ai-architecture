@@ -83,7 +83,7 @@ from emotorad_ai.playground_version import CHANGELOG, PLAYGROUND_VERSION
 from emotorad_ai import media
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.storage import keys as storage_keys
-from emotorad_ai.storage.assets import upload_asset, yaml_snippet
+from emotorad_ai.storage.assets import yaml_snippet
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import (
     LOOKUP_ERROR_CODE,
@@ -1176,64 +1176,92 @@ _PAGE_CSS = """
 """
 
 
+# The admin upload is a browser component, not st.file_uploader: Streamlit's
+# uploader posts the file to its own server first, through nginx (1 MB default
+# body cap, the 413 on the first clip) and the FastAPI proxy. The component
+# does what the chat page does: presign, PUT straight to S3, then
+# POST /uploads/<id>/finish for the derivatives. See storage/assets.py.
+ASSET_UPLOADER_DIR = str(Path(__file__).resolve().parent / "playground_components" / "asset_uploader")
+_asset_uploader_component: Any = None
+
+
+def _asset_uploader() -> Any:
+    """Declared once per process, and only when the form renders: declaring a
+    component needs no Streamlit runtime, but tests that import this module
+    should not register one either."""
+    global _asset_uploader_component
+    if _asset_uploader_component is None:
+        import streamlit.components.v1 as components
+
+        _asset_uploader_component = components.declare_component("asset_uploader", path=ASSET_UPLOADER_DIR)
+    return _asset_uploader_component
+
+
+def _asset_upload_record(outcome: Any, previous: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Turn the component's answer into the preview record, once. The
+    component returns the same value on every rerun until the next upload,
+    so a record is built only for a success with a new upload id; nothing,
+    or a failure (which the component itself shows), keeps what was there."""
+    if not isinstance(outcome, dict) or not outcome.get("ok") or not isinstance(outcome.get("result"), dict):
+        return previous
+    if previous is not None and previous.get("upload_id") == outcome.get("upload_id"):
+        return previous
+    result = outcome["result"]
+    ext = str(result.get("id", "")).rsplit(".", 1)[-1].lower()
+    return {
+        "upload_id": outcome.get("upload_id"),
+        "result": result,
+        # video for a clip id, else image — the only two `media.resolve` kinds.
+        "kind_word": "video" if ext in storage_keys.VIDEO_EXTENSIONS else "image",
+        "ext": ext,
+    }
+
+
 def _media_upload_form() -> None:
-    """Admin-only: load a guide photo, clip or PDF straight from the
-    playground, no terminal and no AWS profile. Delegates to
-    storage.assets.upload_asset — the same code scripts/upload_asset.py runs
-    from the command line, so there is one implementation either way."""
+    """Load a guide photo, clip or PDF into the media bucket and get the
+    `media:` lines to paste into a knowledge record. The bytes go from the
+    browser to S3 directly; the server only presigns and makes derivatives,
+    so a 100 MB clip never crosses nginx or Streamlit."""
     with st.expander("Media upload (admin)"):
         store = media.store_for_resolve()
         if store is None:
             st.info("Set EMOTORAD_AI_MEDIA_BUCKET to enable uploads.")
             return
 
-        uploaded = st.file_uploader("Image, clip or PDF", type=["png", "jpg", "jpeg", "webp", "mp4", "pdf"])
         programme = st.selectbox("Programme", storage_keys.PROGRAMMES)
         category = st.text_input("Category", "battery")
         kind = st.selectbox("Kind", storage_keys.ASSET_KINDS)
         slug = st.text_input("Slug", help="lowercase letters, digits and hyphens, e.g. soc-button")
         caption = st.text_input("Caption", help="What the customer reads under the picture")
+        st.caption("Image, clip or PDF. Photos up to 10 MB, clips up to 100 MB; the file goes straight to S3.")
 
-        if st.button("Upload to media bucket"):
-            if uploaded is None:
-                st.error("Choose a file first.")
-            else:
-                mime = uploaded.type or mimetypes.guess_type(uploaded.name)[0] or ""
-                try:
-                    result = upload_asset(store, uploaded.getvalue(), mime, programme, category.strip(), kind, slug.strip())
-                except storage_keys.KeyValidationError as exc:
-                    st.error(str(exc))
-                except Exception as exc:
-                    # Never the traceback or the bytes on screen — just what kind of thing failed.
-                    st.error("Upload failed: %s" % type(exc).__name__)
-                else:
-                    # video for a .mp4 id, else image — the only two `media.resolve` kinds.
-                    ext = result["id"].rsplit(".", 1)[-1].lower()
-                    kind_word = "video" if ext == "mp4" else "image"
-                    # Session state, not a local, so the preview below survives the
-                    # rerun that every later widget interaction on this page triggers.
-                    st.session_state["last_asset_upload"] = {
-                        "result": result,
-                        "kind_word": kind_word,
-                        "ext": ext,
-                        "caption": caption,
-                    }
+        outcome = _asset_uploader()(
+            programme=programme,
+            category=category.strip(),
+            kind=kind,
+            slug=slug.strip(),
+            accept=".png,.jpg,.jpeg,.webp,.mp4,.mov,.3gp,.pdf",
+            key="asset_uploader",
+            default=None,
+        )
+        # Session state, not a local, so the preview below survives the
+        # rerun that every later widget interaction on this page triggers.
+        last = _asset_upload_record(outcome, st.session_state.get("last_asset_upload"))
+        st.session_state["last_asset_upload"] = last
 
-        last = st.session_state.get("last_asset_upload")
         if last:
-            result, kind_word, ext, saved_caption = last["result"], last["kind_word"], last["ext"], last["caption"]
+            result, kind_word, ext = last["result"], last["kind_word"], last["ext"]
             st.success("Uploaded")
             st.code("id: %s" % result["id"], language="yaml")
-            st.code(yaml_snippet(result["id"], kind_word, saved_caption), language="yaml")
+            st.code(yaml_snippet(result["id"], kind_word, caption), language="yaml")
             st.caption("Paste into the record's media: list (or the catalogue) and open a PR")
-            resolved = media.resolve({"id": result["id"], "kind": kind_word, "caption": saved_caption})
+            resolved = media.resolve({"id": result["id"], "kind": kind_word, "caption": caption})
             if ext == "pdf":
                 st.markdown("[Open PDF](%s)" % resolved["url"])
-            elif ext == "mp4":
+            elif kind_word == "video":
                 st.video(resolved["url"])
             else:
                 st.image(resolved["url"])
-
 
 def main() -> None:
     st.set_page_config(page_title="Emotorad AI — prompt playground", layout="wide")

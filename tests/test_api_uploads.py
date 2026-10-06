@@ -111,6 +111,45 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["key"], "assets/afs/battery/photos/soc-button.png")
 
+    # -- the playground's admin upload: presign, PUT from the browser, finish --
+
+    ASSET = {"tree": "assets", "mime_type": "image/png", "size_bytes": 9, "path": {"programme": "afs", "category": "battery", "kind": "photos", "slug": "soc-button"}}
+
+    def test_finish_claims_the_asset_and_writes_its_derivatives(self):
+        presign = self.client.post("/uploads", json=self.ASSET, headers=AUTH).json()
+        # The browser PUT the bytes straight to S3; the fake store sees them as a head.
+        self.store.objects[presign["key"]] = {"size": 9, "mime": "image/png"}
+        with mock.patch("emotorad_ai.storage.assets.image_w900_webp", return_value=b"webp"):
+            r = self.client.post("/uploads/%s/finish" % presign["upload_id"], headers=AUTH)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["id"], "afs/battery/photos/soc-button.png")
+        self.assertEqual(r.json()["w900"], "assets/afs/battery/photos/soc-button.w900.webp")
+        self.assertEqual(self.store.fetched, [presign["key"]])
+        self.assertEqual(self.store.objects["assets/afs/battery/photos/soc-button.w900.webp"]["mime"], "image/webp")
+        # Claimed once: a second finish is a 404, not a second set of derivatives.
+        self.assertEqual(self.client.post("/uploads/%s/finish" % presign["upload_id"], headers=AUTH).status_code, 404)
+
+    def test_finish_needs_playground_auth_and_a_completed_put(self):
+        presign = self.client.post("/uploads", json=self.ASSET, headers=AUTH).json()
+        self.assertEqual(self.client.post("/uploads/%s/finish" % presign["upload_id"]).status_code, 401)
+        # Nothing in the bucket yet: the PUT has not happened or failed.
+        r = self.client.post("/uploads/%s/finish" % presign["upload_id"], headers=AUTH)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(self.client.post("/uploads/upl_nope/finish", headers=AUTH).status_code, 404)
+
+    def test_finish_refuses_a_customer_upload(self):
+        presign = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "image/png", "size_bytes": 9}).json()
+        self.store.objects[presign["key"]] = {"size": 9, "mime": "image/png"}
+        r = self.client.post("/uploads/%s/finish" % presign["upload_id"], headers=AUTH)
+        self.assertEqual(r.status_code, 403, r.text)
+        # Not consumed: the customer's message can still claim it.
+        self.assertIsNotNone(self.api.UPLOADS.peek(presign["upload_id"]))
+
+    def test_finish_without_media_is_503(self):
+        with mock.patch.dict(os.environ, {"EMOTORAD_AI_PLAYGROUND_USER": "dev", "EMOTORAD_AI_PLAYGROUND_PASSWORD": "dev"}):
+            api = fresh_api(None)
+        self.assertEqual(TestClient(api.app).post("/uploads/upl_x/finish", headers=AUTH).status_code, 503)
+
     def test_media_redirects_to_a_presigned_get_for_the_owner_only(self):
         body = self.client.post("/uploads", json={"session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers", "mime_type": "image/png", "size_bytes": 9}).json()
         r = self.client.get("/media/" + body["key"], params={"session_token": "sess-ananya"}, follow_redirects=False)
@@ -304,6 +343,32 @@ class PlaygroundProxyMethodsTests(unittest.TestCase):
                 self.assertLessEqual(wanted, set(route.methods), route.path)
                 checked += 1
         self.assertEqual(checked, 2)
+
+
+class PlaygroundProxyEncodingTests(unittest.TestCase):
+    """Streamlit gzips the files it serves for a custom component. The proxy
+    drops Content-Encoding (a hop-by-hop header here) and must then hand the
+    browser the decoded bytes, not the gzip stream: the admin uploader's
+    index.html was rendered as binary noise when it forwarded them raw."""
+
+    def test_a_gzipped_upstream_body_reaches_the_browser_decoded(self):
+        import gzip
+
+        import httpx
+
+        with mock.patch.dict(os.environ, {"EMOTORAD_AI_PLAYGROUND_USER": "dev", "EMOTORAD_AI_PLAYGROUND_PASSWORD": "dev"}):
+            api = fresh_api(None)
+
+        def upstream(request):
+            self.assertEqual(request.url.path, "/playground/component/x/index.html")
+            # A stream, as a live upstream is: the proxy reads it with stream=True.
+            return httpx.Response(200, stream=httpx.ByteStream(gzip.compress(b"<html>uploader</html>")), headers={"Content-Encoding": "gzip", "Content-Type": "text/html"})
+
+        with mock.patch.object(api, "_playground_client", httpx.AsyncClient(transport=httpx.MockTransport(upstream), base_url="http://upstream")):
+            r = TestClient(api.app).get("/playground/component/x/index.html", headers=AUTH)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, b"<html>uploader</html>")
+        self.assertNotIn("content-encoding", {k.lower() for k in r.headers})
 
 
 class _Summariser:
