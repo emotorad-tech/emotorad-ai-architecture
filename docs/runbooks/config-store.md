@@ -115,6 +115,12 @@ Expected: `{"status":"ok","mode":"anthropic","secrets":"loaded",...,"tracing":"o
 not read the secret does not start; its reason is one line in the CloudWatch log group
 `emotorad-ai-stage` beginning `startup config:`.
 
+A release that adds a MongoDB collection needs a person to rerun `python scripts/mongo_setup.py`
+against the environment's database. The first deploy after 2026-10-06 adds `verification_sessions`
+(the number each web chat proved, kept 12 hours so a restart does not ask for it again): check that
+it is listed as `expires` with `expires_at_ttl (TTL 0s)`. Until then the service still treats a
+session as over after 12 hours, but nothing removes the document, and it holds a phone number.
+
 ## 4. After the first successful deploy
 
 Delete the two GitHub Actions secrets the workflow no longer reads:

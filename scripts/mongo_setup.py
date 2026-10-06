@@ -9,7 +9,11 @@ shared database from one.
 
 Prints every collection and index so the output can be checked, and fails if
 the permanent record (transcripts, summaries, media, tickets and the counter
-behind their references) has picked up an expiry index.
+behind their references) has picked up an expiry index. The collections that
+expire are listed as such: `conversations` (48 hours), `idempotency_keys`
+(7 days) and `verification_sessions` (12 hours, the number each web chat
+proved, so a restart does not ask for it again). Rerun it whenever a
+collection is added: its TTL index exists only once this has run.
 """
 
 import os

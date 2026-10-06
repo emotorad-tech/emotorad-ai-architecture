@@ -142,7 +142,11 @@ _logger = logging.getLogger(__name__)
 # store is module-level. Without one, `build_registry` does not register
 # `request_identity_verification` or `verify_identity` at all, and an anonymous
 # visitor asked for their number has no way to prove it — the flow dead-ends.
-verification_store = VerificationStore()
+# Proved numbers are also saved with the stores (MongoDB `verification_sessions`
+# with EMOTORAD_STORE=mongodb), so a deploy does not make every verified chat
+# anonymous and ask for the number and the bike again (staging, 2026-10-06).
+# Codes in transit stay in this process's memory.
+verification_store = VerificationStore(sessions=stores.verified_sessions, log=log)
 
 # Sends the one-time code. A stand-in until the OTP service is wired (the
 # person, 2026-09-30): it sends nothing and logs the masked number; the code

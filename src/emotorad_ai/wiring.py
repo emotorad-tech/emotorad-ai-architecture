@@ -45,6 +45,9 @@ class Stores:
     # The ticket record (tickets/store.py, stores/mongo.py). Written only when
     # Zoho Desk is on; the mock ticket system never touches it.
     tickets: Any = None
+    # The numbers web chats have proved (tools/verification.py), so a restart
+    # does not make a verified chat anonymous.
+    verified_sessions: Any = None
 
 
 def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Stores:
@@ -57,16 +60,20 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
     if settings.store == "memory":
         from .conversation import InMemoryConversationStore
         from .tools.registry import IdempotencyStore
+        from .tools.verification import InMemoryVerifiedSessions
 
         from .tickets.store import InMemoryTicketStore
 
         return Stores(conversations=InMemoryConversationStore(), idempotency=IdempotencyStore(),
-                      tickets=InMemoryTicketStore())
-    from .stores.mongo import MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, connect
+                      tickets=InMemoryTicketStore(), verified_sessions=InMemoryVerifiedSessions())
+    from .stores.mongo import (
+        MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, MongoVerifiedSessions, connect,
+    )
 
     db = connect(db_name=settings.mongo_db, client=client)
     return Stores(
         conversations=MongoConversationStore(db, state_ttl_hours=settings.state_ttl_hours, log=log),
         idempotency=MongoIdempotencyStore(db, ttl_days=settings.idempotency_ttl_days),
         tickets=MongoTicketStore(db),
+        verified_sessions=MongoVerifiedSessions(db),
     )

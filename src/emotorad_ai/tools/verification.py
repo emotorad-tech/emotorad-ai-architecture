@@ -36,8 +36,8 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 from ..contract import VERIFIED, InboundMessage
 from .oms import OMSConfigError, normalise_mobile
@@ -83,6 +83,73 @@ VERIFIED_TTL_SECONDS = 12 * 60 * 60
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _session_expiry(verified_on: str) -> datetime:
+    """When a session proved at `verified_on` (the store's wall-clock ISO
+    string) stops being proof: VERIFIED_TTL_SECONDS later."""
+    try:
+        at = datetime.fromisoformat(verified_on)
+    except (TypeError, ValueError):
+        at = _utc_now()
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at + timedelta(seconds=VERIFIED_TTL_SECONDS)
+
+
+class VerifiedSessions(Protocol):
+    """Where a proved number is kept, so it outlives the process that proved it.
+
+    A deploy restarts the container; with the proof in process memory only,
+    every chat in progress became anonymous and was asked for its number, then
+    its bike, again (staging, 2026-10-06). With several servers it would happen
+    on any message that reached another one. `get` answers None for a session
+    past `expires_at`, by the wall clock, whatever the backend's own expiry has
+    or has not removed yet. Implementations: InMemoryVerifiedSessions below,
+    MongoVerifiedSessions in stores/mongo.py (`verification_sessions`).
+    """
+
+    def save(self, conversation_id: str, phone: str, verified_on: str, expires_at: datetime) -> None: ...
+
+    def get(self, conversation_id: str) -> Optional[Tuple[str, str]]: ...
+
+    def delete(self, conversation_id: str) -> None: ...
+
+
+class InMemoryVerifiedSessions:
+    """One process's saved sessions: what the memory store is built with, and
+    what tests share between two VerificationStores to stand in for a restart."""
+
+    def __init__(self, now: Callable[[], datetime] = _utc_now) -> None:
+        self._now = now
+        self._sessions: Dict[str, Tuple[str, str, datetime]] = {}
+        self._lock = threading.Lock()
+
+    def save(self, conversation_id: str, phone: str, verified_on: str, expires_at: datetime) -> None:
+        with self._lock:
+            now = self._now()
+            # Expired sessions go on every save, the only moment this grows.
+            for cid in [c for c, s in self._sessions.items() if s[2] <= now]:
+                del self._sessions[cid]
+            self._sessions[conversation_id] = (phone, verified_on, expires_at)
+
+    def get(self, conversation_id: str) -> Optional[Tuple[str, str]]:
+        with self._lock:
+            session = self._sessions.get(conversation_id)
+            if session is None:
+                return None
+            if session[2] <= self._now():
+                del self._sessions[conversation_id]
+                return None
+            return session[0], session[1]
+
+    def delete(self, conversation_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(conversation_id, None)
 
 
 @dataclass
@@ -133,10 +200,22 @@ class _Candidate:
 class VerificationStore:
     """Conversation id -> the number being proved, and whether it has been.
 
-    In-memory, like IdempotencyStore. Back it with the real session store before
-    this is anything but a harness: a verified identity that evaporates on
-    restart is an annoyance here and a security question in production, where
-    "verified" has to mean the same thing on every node.
+    Codes live in memory only: a restart while a code is outstanding means the
+    customer asks for a new one, which costs them a message, not their proof.
+    A proved number is also saved to `sessions` (VerifiedSessions) when one is
+    given, for VERIFIED_TTL_SECONDS, so a deploy or another server does not
+    make a verified chat anonymous (staging, 2026-10-06). Without `sessions`
+    it is memory only, as before.
+
+    Memory answers first. The saved session is read only when this process
+    holds no proof for the conversation, and every place memory ends a proof
+    (a new code, reset, the sweep of a lapsed session) deletes the saved one
+    too, so a session can never outlive what memory would allow. Cancelling
+    a code leaves a proved number alone, here as in memory.
+
+    A backend failure never fails a turn: the conversation counts as not
+    verified for that call, and `verification_session_unavailable` is logged
+    with the operation and the error's class, never the phone or the message.
     """
 
     _pending: Dict[str, _Pending] = field(default_factory=dict)
@@ -145,18 +224,33 @@ class VerificationStore:
     # Injected so expiry can be tested by elapsing time rather than sleeping.
     clock: Callable[[], float] = time.monotonic
     wall_clock: Callable[[], str] = _utc_now_iso
+    # Where proved numbers are saved (VerifiedSessions), or None.
+    sessions: Optional[Any] = None
+    # The EventLog, for verification_session_unavailable. Optional.
+    log: Optional[Any] = None
+    # Held while memory changes and the saved session follows, so two
+    # requests on one conversation leave both in the same order.
+    _write_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Conversations whose saved session could not be deleted: never read back
+    # by this process until a new proof is saved or a delete succeeds.
+    _unended: Set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._pending)
 
-    def _sweep(self, now: float) -> None:
+    def _sweep(self, now: float) -> List[str]:
         """Drop entries nothing can use again. Called on issue, which is the
         only moment the store grows, so expiry doubles as the eviction this
-        store never had."""
+        store never had. Returns the conversations whose proof it dropped, for
+        their saved sessions to go too (an unproved code has none: its issue
+        already deleted it)."""
+        proofs = []
         for conversation_id in [c for c, p in self._pending.items() if p.dead(now)]:
-            self._pending.pop(conversation_id, None)
+            if self._pending.pop(conversation_id).verified:
+                proofs.append(conversation_id)
             self._candidates.pop(conversation_id, None)
+        return proofs
 
     def remember_candidate(self, conversation_id: str, phone: str) -> None:
         with self._lock:
@@ -168,58 +262,74 @@ class VerificationStore:
             return candidate.phone if candidate else None
 
     def issue(self, conversation_id: str, phone: str, code: str) -> None:
-        with self._lock:
-            now = self.clock()
-            self._sweep(now)
-            previous = self._pending.get(conversation_id)
-            # Attempts survive a re-request on purpose; see MAX_ATTEMPTS. They do
-            # not survive the code expiring: attempts spent against a code that
-            # could no longer have worked would lock out a customer who simply
-            # came back late.
-            attempts = 0
-            if previous and not previous.code_expired(now):
-                attempts = previous.attempts
-            self._pending[conversation_id] = _Pending(
-                phone=phone, code=code, attempts=attempts, issued_at=now
-            )
+        with self._write_lock:
+            with self._lock:
+                now = self.clock()
+                swept = self._sweep(now)
+                previous = self._pending.get(conversation_id)
+                # Attempts survive a re-request on purpose; see MAX_ATTEMPTS. They do
+                # not survive the code expiring: attempts spent against a code that
+                # could no longer have worked would lock out a customer who simply
+                # came back late.
+                attempts = 0
+                if previous and not previous.code_expired(now):
+                    attempts = previous.attempts
+                # A new code replaces any proof this conversation held.
+                self._pending[conversation_id] = _Pending(
+                    phone=phone, code=code, attempts=attempts, issued_at=now
+                )
+            self._end_sessions([conversation_id] + [c for c in swept if c != conversation_id])
 
     def check(self, conversation_id: str, code: str) -> bool:
-        with self._lock:
-            pending = self._pending.get(conversation_id)
-            if pending is None or pending.cancelled or pending.attempts >= MAX_ATTEMPTS:
-                return False
-            # An expired code fails without costing an attempt: the customer has
-            # done nothing wrong, and they need a fresh code, not a lockout.
-            if pending.code_expired(self.clock()):
-                return False
-            pending.attempts += 1
-            # The comparison is here, in code. Not in the prompt, and not in the
-            # model's judgement.
-            if (code or "").strip() != pending.code:
-                return False
-            pending.verified = True
-            pending.verified_at = self.clock()
-            pending.verified_on = self.wall_clock()
+        with self._write_lock:
+            with self._lock:
+                pending = self._pending.get(conversation_id)
+                if pending is None or pending.cancelled or pending.attempts >= MAX_ATTEMPTS:
+                    return False
+                # An expired code fails without costing an attempt: the customer has
+                # done nothing wrong, and they need a fresh code, not a lockout.
+                if pending.code_expired(self.clock()):
+                    return False
+                pending.attempts += 1
+                # The comparison is here, in code. Not in the prompt, and not in the
+                # model's judgement.
+                if (code or "").strip() != pending.code:
+                    return False
+                pending.verified = True
+                pending.verified_at = self.clock()
+                pending.verified_on = self.wall_clock()
+                phone, verified_on = pending.phone, pending.verified_on
+            self._save_session(conversation_id, phone, verified_on)
             return True
 
     def verified_phone(self, conversation_id: str) -> Optional[str]:
         """The number this conversation has proved, or None."""
-        with self._lock:
-            pending = self._pending.get(conversation_id)
-            if pending is None or not pending.verified:
-                return None
-            if pending.session_expired(self.clock()):
-                return None
-            return pending.phone
+        session = self._session(conversation_id)
+        return session[0] if session else None
 
     def verified_on(self, conversation_id: str) -> Optional[str]:
         """When this conversation proved its number, as an ISO time of day, or
         None under the same conditions as verified_phone."""
+        session = self._session(conversation_id)
+        return (session[1] or None) if session else None
+
+    def _session(self, conversation_id: str) -> Optional[Tuple[str, str]]:
+        """(phone, verified_on) from memory, else from the saved sessions."""
         with self._lock:
             pending = self._pending.get(conversation_id)
-            if pending is None or not pending.verified or pending.session_expired(self.clock()):
+            if pending is not None and pending.verified:
+                # Memory's verdict stands, lapsed or not: a saved session is
+                # never read back over a proof memory has let go.
+                if pending.session_expired(self.clock()):
+                    return None
+                return pending.phone, pending.verified_on
+            if self.sessions is None or conversation_id in self._unended:
                 return None
-            return pending.verified_on or None
+        try:
+            return self.sessions.get(conversation_id)
+        except Exception as exc:
+            self._unavailable("get", conversation_id, exc)
+            return None
 
     def pending_code(self, conversation_id: str) -> Optional[str]:
         """The outstanding code — for the harness to display. Never for the model."""
@@ -253,15 +363,54 @@ class VerificationStore:
         """The outstanding code, voided: it can no longer be used or resent.
         The attempts stay, as they do on a re-request (MAX_ATTEMPTS), so asking
         for another number is not a way to buy more guesses (the final review,
-        2026-10-02). A proved number is left alone: reset() forgets that."""
+        2026-10-02). A proved number is left alone: reset() forgets that, and
+        the saved session is left alone with it."""
         with self._lock:
             pending = self._pending.get(conversation_id)
             if pending is not None and not pending.verified:
                 pending.cancelled = True
 
     def reset(self, conversation_id: str) -> None:
+        with self._write_lock:
+            with self._lock:
+                self._pending.pop(conversation_id, None)
+            self._end_sessions([conversation_id])
+
+    # -- the saved sessions ---------------------------------------------------
+
+    def _save_session(self, conversation_id: str, phone: str, verified_on: str) -> None:
+        if self.sessions is None:
+            return
+        try:
+            self.sessions.save(conversation_id, phone, verified_on, _session_expiry(verified_on))
+        except Exception as exc:
+            # Verified in this process all the same; a restart forgets it, as
+            # before the sessions were saved.
+            self._unavailable("save", conversation_id, exc)
+            return
         with self._lock:
-            self._pending.pop(conversation_id, None)
+            self._unended.discard(conversation_id)
+
+    def _end_sessions(self, conversation_ids: List[str]) -> None:
+        if self.sessions is None:
+            return
+        for conversation_id in conversation_ids:
+            try:
+                self.sessions.delete(conversation_id)
+            except Exception as exc:
+                self._unavailable("delete", conversation_id, exc)
+                with self._lock:
+                    self._unended.add(conversation_id)
+            else:
+                with self._lock:
+                    self._unended.discard(conversation_id)
+
+    def _unavailable(self, operation: str, conversation_id: str, exc: Exception) -> None:
+        # The class only: a driver's message can carry a host or a value.
+        error = type(exc).__name__
+        _logger.warning("verification_session_unavailable: %s failed (%s)", operation, error)
+        if self.log is not None:
+            self.log.emit("verification_session_unavailable", conversation_id, operation=operation, error=error)
 
 
 def _six_digits() -> str:

@@ -2,12 +2,14 @@
 
 Spec: docs/superpowers/specs/2026-09-29-mongodb-conversation-store-design.md.
 
-Ten collections. `transcript_turns`, `conversation_summaries` and `media`
+Eleven collections. `transcript_turns`, `conversation_summaries` and `media`
 are the conversation record and are kept permanently: no TTL index, and
 deletion on request through `delete_person` or `delete_conversation`.
-`conversations` (working state) and `idempotency_keys` expire through TTL
-indexes. `conversation_origins` (where each run came from), `erasure_requests`
-and `erasure_log` are described beside their names below.
+`conversations` (working state), `idempotency_keys` and
+`verification_sessions` (the number each web chat proved, twelve hours)
+expire through TTL indexes. `conversation_origins` (where each run came
+from), `erasure_requests` and `erasure_log` are described beside their names
+below.
 
 `tickets` (the Zoho Desk ticket record, tickets/record.py) and `counters`
 (the number behind each reference) are permanent too. Erasure does not reach
@@ -75,6 +77,10 @@ TICKETS = "tickets"
 COUNTERS = "counters"
 # The counters document behind EM-1000001, EM-1000002, ...
 TICKET_COUNTER = "ticket_reference"
+# Which number each web chat has proved (tools/verification.py), so a restart
+# or another server does not make a verified chat anonymous. Expires with the
+# proof after twelve hours, and is erased with the person or the conversation.
+VERIFICATION_SESSIONS = "verification_sessions"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
 INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
@@ -125,6 +131,10 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     ],
     # One small document per sequence, found by its _id: no index of its own.
     COUNTERS: [],
+    VERIFICATION_SESSIONS: [
+        ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
+        ([("user_key", 1)], {"name": "user_key"}),
+    ],
 }
 
 
@@ -452,7 +462,8 @@ class MongoConversationStore:
         """Every conversation id tied to one person, in any collection."""
         found = set()
         for name, field in ((CONVERSATIONS, "_id"), (TRANSCRIPT_TURNS, "conversation_id"),
-                            (CONVERSATION_SUMMARIES, "conversation_id"), (CONVERSATION_ORIGINS, "conversation_id")):
+                            (CONVERSATION_SUMMARIES, "conversation_id"), (CONVERSATION_ORIGINS, "conversation_id"),
+                            (VERIFICATION_SESSIONS, "_id")):
             collection = self._collection(name)
             found.update(self._guard("distinct", lambda: collection.distinct(field, {"user_key": user_key})))
         return sorted(found)
@@ -462,11 +473,12 @@ class MongoConversationStore:
 
         Every conversation that is theirs, whole: turns recorded before they
         signed in carry no user key, so conversations are found by any record
-        that does, then removed by id. Their idempotency receipts go too.
-        With `dry_run`, counts what would go and deletes nothing.
+        that does, then removed by id. Their idempotency receipts go too, and
+        their verified sessions: found by the phone, removed with each
+        conversation. With `dry_run`, counts what would go and deletes nothing.
         """
         counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA,
-                                       CONVERSATION_ORIGINS)}
+                                       CONVERSATION_ORIGINS, VERIFICATION_SESSIONS)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -482,6 +494,7 @@ class MongoConversationStore:
             IDEMPOTENCY_KEYS: self._remove(IDEMPOTENCY_KEYS, _receipts_of(conversation_id), dry_run),
             MEDIA: self._remove(MEDIA, {"conversation_id": conversation_id}, dry_run),
             CONVERSATION_ORIGINS: self._remove(CONVERSATION_ORIGINS, {"conversation_id": conversation_id}, dry_run),
+            VERIFICATION_SESSIONS: self._remove(VERIFICATION_SESSIONS, {"_id": conversation_id}, dry_run),
         }
 
     def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:
@@ -548,6 +561,46 @@ class MongoIdempotencyStore:
     def release(self, key: str) -> None:
         # Only a pending claim is released; a finished receipt is never undone.
         self._guard("delete_one", lambda: self._receipts.delete_one({"_id": key, "status": "pending"}))
+
+
+class MongoVerifiedSessions:
+    """The proved numbers of web chats (VerifiedSessions in tools/verification.py).
+
+    One document per conversation: `_id` the conversation id, the phone, its
+    `user_key` for erasure, `verified_on` (the wall-clock time it was proved,
+    for an erasure request's proof) and `expires_at`, behind a TTL index.
+    `get` checks `expires_at` itself, since the TTL monitor runs about once a
+    minute and a lapsed proof must not count in between.
+    """
+
+    def __init__(self, db: Any, now: Callable[[], datetime] = _utc_now) -> None:
+        self._sessions = db[VERIFICATION_SESSIONS]
+        self._now = now
+
+    def _guard(self, operation: str, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except PyMongoError as exc:
+            raise StoreUnavailable("MongoDB %s failed (%s)" % (operation, type(exc).__name__)) from None
+
+    def save(self, conversation_id: str, phone: str, verified_on: str, expires_at: datetime) -> None:
+        doc = {"_id": conversation_id, "phone": phone, "user_key": "PHONE#" + phone,
+               "verified_on": verified_on, "expires_at": expires_at}
+        self._guard("replace_one", lambda: self._sessions.replace_one({"_id": conversation_id}, doc, upsert=True))
+
+    def get(self, conversation_id: str) -> Optional[Tuple[str, str]]:
+        doc = self._guard("find_one", lambda: self._sessions.find_one({"_id": conversation_id}))
+        if not doc:
+            return None
+        expires_at = doc["expires_at"]
+        if expires_at.tzinfo is None:  # the driver hands back naive UTC
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= self._now():
+            return None
+        return doc["phone"], doc.get("verified_on") or ""
+
+    def delete(self, conversation_id: str) -> None:
+        self._guard("delete_one", lambda: self._sessions.delete_one({"_id": conversation_id}))
 
 
 class MongoTicketStore:

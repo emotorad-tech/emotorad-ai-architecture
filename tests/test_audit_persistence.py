@@ -303,7 +303,8 @@ class ErasureTests(unittest.TestCase):
         self.assertEqual({name: db[name].count_documents({}) for name in COLLECTIONS}, before)
         real = store.delete_person(USER)
         self.assertEqual(real, {"conversations": 1, "transcript_turns": 4, "conversation_summaries": 1,
-                                "idempotency_keys": 1, "media": 0, "conversation_origins": 1})
+                                "idempotency_keys": 1, "media": 0, "conversation_origins": 1,
+                                "verification_sessions": 0})
         self.assertEqual(dry, real)
 
     def test_a_conversation_with_no_summary_yet_is_still_erased(self):
