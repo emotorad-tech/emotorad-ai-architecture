@@ -30,7 +30,8 @@ a flat JSON object. Field names are the environment variables the code reads:
 | `EMOTORAD_ZOHO_CHANNEL` | `zoho/settings.py`. Optional, default `Chat`: a system channel from the probe, never an integration channel |
 | `EMOTORAD_ZOHO_CREDITS_FLOOR` | `zoho/settings.py`. Optional, default `1000`: below this many API credits left today, only urgent tickets are sent |
 | `EMOTORAD_ZOHO_ATTACHMENT_LIMIT_MB` | `zoho/settings.py`. Optional, default `20`: a photo or video over this is noted on the ticket, not attached |
-| `EMOTORAD_ZOHO_WEBHOOK_SECRET` | `amiigo/webhooks.py`. **Secret.** Optional: the Zoho Desk webhook's secret, which tells the rider a ticket closed. 32 to 256 letters, digits, `-` or `_` (`secrets.token_urlsafe(32)` makes one), and the last segment of the address the webhook is set up with in Zoho Desk, `https://<host>/webhooks/zoho/tickets/<secret>`: Zoho Desk's webhooks send no header of ours. Absent or refused, the webhook answers 503 and `/health` says `"zoho_webhook":"not configured"` or why; tickets are sent either way. The API's access log writes the path without the secret; nginx's does not, unless that location's `access_log` is off |
+| `EMOTORAD_ZOHO_WEBHOOK_SECRET` | `amiigo/webhooks.py`. **Secret.** Optional: the Zoho Desk webhook's secret, which tells the rider a ticket closed. 32 to 256 letters, digits, `-` or `_` (`secrets.token_urlsafe(32)` makes one), and the last segment of the address the webhook is set up with in Zoho Desk, `https://<host>/webhooks/zoho/tickets/<secret>`: Zoho Desk's webhooks send no header of ours. Absent or refused, the webhook answers 503 and `/health` says `"zoho_webhook":"not configured"` or why; tickets are sent either way. The API's access log writes the path without the secret; nginx's does not, unless that location's `access_log` is off. A person sets it, never a Claude session; what it is and how to rotate it are in section 8 |
+| `EMOTORAD_AMIIGO_PUBLIC_KEY` | `amiigo/auth.py`. Not secret, but set by a person. The Amiigo app's PASETO v4 public key, 64 hexadecimal characters, which our server checks the app's access tokens with. It comes from the owner of the Amiigo backend (Sachin). It is the public key only: Amiigo's secret signing key is never copied anywhere. Absent or not 64 hex characters, no token is accepted: the app's calls answer 503, the chat socket closes 1011 before `ready`, and `/health` says `"amiigo_tokens":"not configured"`. See section 8 |
 | `EMOTORAD_EVIDENCE_CHECK` | `evidence_check.py`, `api.py`. Not secret, and set on the `docker run` line in `deploy-staging.yml` (`on` there), not in the secret: the environment wins. Exactly `on` turns on the evidence check before a ticket: in a battery or motor chat, Gemini (through `OPENROUTER_API_KEY`) must see the fault in the customer's video or photo before a support or handover ticket is recorded. Anything else is off, as before. On without the OpenRouter key, nothing can pass and no fault ticket is recorded; `/health` then says `"evidence_check":"on, no checker: nothing can pass"` |
 | `EMOTORAD_EVIDENCE_MODEL` | `evidence_check.py`. Optional, not secret: the OpenRouter model the evidence check asks. Default `google/gemini-3.8-flash`, the photo check's |
 | `EMOTORAD_CUSTOMER_CARE_CONTACT` | `evidence_check.py`, `runtime.py`. Optional, not secret: EMotorad's customer care contact, given instead of a ticket when the evidence never passes. Unset, the bot says "Please contact EMotorad customer care." with no number |
@@ -126,7 +127,8 @@ it is listed as `expires` with `expires_at_ttl (TTL 0s)`. Until that index exist
 nothing there: it keeps proofs in memory as before, logs `verification_sessions_ttl_missing` at
 error level, and `/health` shows `"verification_sessions":"memory: TTL index missing, run
 scripts/mongo_setup.py"`. Run the script, then restart the container (`sudo docker restart
-emotorad-ai`) and check that `/health` shows `"verification_sessions":"mongodb"`.
+emotorad-ai`) and check that `/health` shows `"verification_sessions":"mongodb"`. The Amiigo support
+chat adds more collections and indexes the same way: see section 8, step 3.
 
 ## 4. After the first successful deploy
 
@@ -284,7 +286,7 @@ and counts only. With the token shared, the person's steps start at the probe.
    | `safety_ticket_late` | A safety ticket has waited 10 minutes: ask the support lead to call the customer now |
    | `safety_ticket_not_recorded` | A safety report has no ticket: read the conversation and reach the customer |
    | `unverified_ticket_capped` | The daily cap on unverified tickets refused one: check for abuse, or whether the cap is too low |
-   | `zoho_webhook_store_unavailable` | Support closed a ticket in Zoho Desk and MongoDB could not record it. Zoho documents no retry, so the rider may still see it as open: tell the support lead, and check Atlas |
+   | `zoho_webhook_store_unavailable` | One closure is lost. Support closed a ticket in Zoho Desk and MongoDB could not record it, and Zoho documents no retry, so it will not come again: the rider still sees the ticket as open. Check Atlas, then find the ticket and close the chat's record by hand (section 8, "A lost closure"). The line's `ticket_hash` is the first 12 hex characters of the SHA-256 of Zoho's ticket id: for an id you already have, `python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])" <Zoho ticket id>` prints the hash to match against |
 7. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
    verification): add `EMOTORAD_ZOHO_DEPARTMENT_ID`, `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` and
    `EMOTORAD_ZOHO_LIVE=yes` by step 4, with the OMS's refresh token as on staging. That makes a
@@ -344,3 +346,69 @@ ticketing and AFS dispatch.
 | `not allowed in this region` | The region begins with `eu-`: the mock is used. The guard reads `AWS_REGION`, then `AWS_DEFAULT_REGION` when the first is unset |
 | `token refused: <error>` | Zoho refused the refresh token, for example after the OMS's client secret was rotated and not copied here the same day |
 | `sending failing: <code>` | Zoho refused the calls themselves, for example a missing scope |
+
+## 8. The Amiigo support chat: tokens, the socket and ticket closure
+
+Contract: `docs/contracts/amiigo-support-chat.md`. Two fields of the config store switch it on. A person sets both, in a terminal outside the Claude app, and clears the scrollback afterwards. A Claude session never sets either, and neither value goes into a repo, a commit, a chat or a log. This section never states a value.
+
+**`EMOTORAD_AMIIGO_PUBLIC_KEY`.**
+
+- What it is: Amiigo's PASETO v4 public key, 64 hexadecimal characters. Our server uses it to check the access token the app sends and to read the rider's phone number from it. It cannot make a token.
+- Who sets it: the owner of the Amiigo backend (Sachin) gives it to the person who sets the config store.
+- It is the public key only. Amiigo's secret signing key is never copied anywhere: not into the config store, a file, a chat, a ticket or a test.
+- With it, `/health` shows `"amiigo_tokens":"on"`. Without it, or when it is not 64 hex characters, `/health` shows `"amiigo_tokens":"not configured"`, `amiigo_tokens_not_configured` is logged once, and the app's calls answer 503 until it is set.
+- The first time, try it with a real staging token: Amiigo's token format was read from its code and checked with tokens made for our tests.
+
+**`EMOTORAD_ZOHO_WEBHOOK_SECRET`.**
+
+- What it is: the secret in the address Zoho Desk calls when support closes a ticket, `https://ai-release-stage.emotorad.com/webhooks/zoho/tickets/<secret>`. Zoho Desk webhooks cannot send a header of ours, so the secret is the last part of the path. It is 32 to 256 of `A-Z a-z 0-9 - _`.
+- Who sets it: a person with write access to the config store, who makes it with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` and enters it in two places that must match: the config store, and the webhook's address in Zoho Desk.
+- With a usable value, `/health` shows `"zoho_webhook":"on"`. Without one, the webhook answers 503 `not_configured` and `/health` shows `"zoho_webhook":"not configured"`. With a value of the wrong shape, `/health` shows `misconfigured: secret must be 32 to 256 letters, digits, - or _`, and the log says `zoho_webhook_misconfigured`. Tickets are sent to Zoho Desk either way.
+- To rotate it: make a new one, put it in the config store (section 5) and redeploy, and change the webhook's address in Zoho Desk to the new secret, all in the same hour. While the two differ, every closure is a 401 (`zoho_webhook outcome=secret_invalid`), and Zoho documents no retry, so a closure in that gap is lost. Afterwards, ask the support lead which tickets were closed in the gap and treat each as in "A lost closure" below.
+- A mismatch at any other time does the same. A run of `secret_invalid` lines right after a rotation is the old secret still in Zoho Desk.
+
+**Setting up the webhook, in this order.** Zoho Desk validates the address when the webhook is created, so the order matters.
+
+1. **nginx first.** Set `access_log off;` for the `/webhooks/zoho/` location on the host, before the webhook exists in Zoho Desk. The secret is in the path, and nginx writes the path to its access log. The nginx config lives on the host, not in this repo, so a person with access to the host changes it and reloads nginx. Our API's own access log already writes the path as `/webhooks/zoho/tickets/[secret]`.
+2. **The secret.** Set `EMOTORAD_ZOHO_WEBHOOK_SECRET` as above, and redeploy (section 3).
+3. **The collections and indexes.** Rerun `python scripts/mongo_setup.py` against the environment's database, then restart the container (`sudo docker restart emotorad-ai`): the receipts check for their indexes only when the container starts. Check that the output lists:
+   - `conversation_notices` as `permanent`, with `conversation_at` and `one_notice_per_text`;
+   - `amiigo_receipts` as `expires`, with `expires_at_ttl (TTL 0s)`, `one_processing_per_conversation`, `user_key` and `conversation_at`;
+   - `tickets` with `zoho_ticket`.
+
+   Without `zoho_ticket`, each closure scans `tickets`, which is small. Without `one_notice_per_text`, two servers racing could write two notices; staging runs one. Without the receipts indexes, see "If the indexes are missing" below.
+4. **Check `/health`.** `curl -s https://ai-release-stage.emotorad.com/health` shows `"amiigo_tokens":"on"` and `"zoho_webhook":"on"`.
+5. **Create the webhook in Zoho Desk,** with the secret already in its address. Zoho's documentation says it checks the address with a GET and then a POST. Ours answers the GET 405 and the POST 200, whatever the body. This has not been seen against Zoho yet: if creation fails at this step, tell the engineer, because a GET that answers 200 behind the secret may be needed.
+6. **Subscribe to `Ticket_Update`** with `departmentIds` (the test department on staging) and `fields: ["status"]`, plus the criterion that the subject contains `[AI chat]` (never "starts with": see "What Zoho rules filter on" in section 7). Without these filters every ticket update in the organisation reaches us. Each is answered quickly and logged, as one line.
+7. **The live check.** Close a ticket in the test department that the chatbot raised from a test chat in the app, with a socket open for that rider. The log shows `zoho_webhook outcome=closed`, and the socket gets a `ticket_update`. (A ticket made by hand in Desk, or by `scripts/zoho/test_ticket.py`, has no record of ours, so its outcome is `not_ours`.)
+8. **Replace the fixture.** `docs/api-shapes/zoho-webhook-ticket-update.json` comes from Zoho's documentation, not from a live call. After step 7 a person captures one real delivery, masks it, and replaces the file as its `_source` asks. This never comes from a Claude session: a capture holds a real ticket.
+
+Two more things to check before the app team connects. First, the alarm stack (section 7, step 6) must be redeployed with this release's `infra/zoho-alarms.yaml`: the `zoho_webhook_store_unavailable` alarm exists only once it is. Second, nginx must pass WebSocket upgrades to `/amiigo/v1/chat` (the playground's Streamlit needs the same). The nginx config is not in this repo, so connect once with a staging token and see `ready`.
+
+**A lost closure.** The `zoho_webhook_store_unavailable` alarm means one closure was lost: Zoho documents no retry, so it will not come again, and the rider still sees the ticket as open. There is no tool for this yet, so this is the step:
+
+1. Check that Atlas is reachable again.
+2. Find the ticket in Zoho Desk. The log line carries `ticket_hash`, the first 12 hex characters of the SHA-256 of Zoho's ticket id. For each ticket closed around the alarm's time, print its hash with the command in the alarm table in section 7, and match it. Zoho's ticket id is the long number (the sample in `docs/api-shapes/zoho-webhook-ticket-update.json` has `31138000011967402`), not the short ticket number.
+3. Close the chat's record by hand, in `mongosh` against the environment's database, from a terminal outside the Claude app. A Claude session never runs these commands: they change customer records.
+
+   ```javascript
+   use emotorad_ai
+   db.tickets.find({"zoho.ticket_id": "<Zoho ticket id>"}, {_id: 1, conversation_id: 1, support_status: 1, closed_at: 1})
+   db.tickets.updateOne({"zoho.ticket_id": "<Zoho ticket id>", support_status: {$ne: "closed"}}, {$set: {support_status: "closed", closed_at: "<the closing time, ISO 8601 in UTC, for example 2026-10-07T11:02:10+00:00>"}})
+   ```
+
+   That sets the same two fields a closure sets. The rider's history then shows the ticket as closed, with no notice message and no `ticket_update`. If the notice matters, ask the support lead to reopen the ticket in Desk and close it again: the event arrives again, and the closure finishes whatever is missing (the record, the notice and the push).
+
+**Things to know.**
+
+- **Noise.** The webhook's address is public, so a caller without the secret can fill the log with `zoho_webhook outcome=secret_invalid` lines. This is not alarmed, by design.
+- **Erasure.** `delete_person` and `delete_conversation` remove a person's `conversation_notices` and `amiigo_receipts`, and `erasure_admin delete` refuses when a notice arrived after `show`. But a closure that lands while a delete is running can leave a notice behind. After a delete, check `conversation_notices` for that person's chats, in `mongosh` from a terminal outside the Claude app, and remove what is left:
+
+  ```javascript
+  use emotorad_ai
+  db.conversation_notices.find({conversation_id: "<conversation id>"})
+  db.conversation_notices.deleteMany({conversation_id: "<conversation id>"})
+  ```
+- **What the receipts keep.** `amiigo_receipts` holds one document per message a rider sent on the chat socket, for 24 hours, so a message sent again is answered once. Its `_id` names the rider's user key, which contains their phone number, and it keeps the bot's reply as sent, unmasked, for those 24 hours. It is erased with the person.
+- **If the indexes are missing.** Until `mongo_setup.py` has made the two receipts indexes and the container has restarted, receipts stay in the API process's memory. A restart then forgets which messages were answered, and `amiigo_receipts_ttl_missing` is logged at error level (`reason` is `indexes_missing`, or `index_unreadable` when the indexes could not be read). `/health` does not show it, and nothing is alarmed on it, so look for it in the log after a deploy. With MongoDB conversations but receipts in memory, `erasure_admin` cannot reach the API process's receipts, because it runs in its own process. They expire within 24 hours.
+- **One container.** A `ticket_update` is pushed only to sockets on the container that took Zoho's call. Staging runs one. More than one needs a shared channel between them first.

@@ -8,12 +8,17 @@ database only. A Claude session never runs this: org rules forbid writing to a
 shared database from one.
 
 Prints every collection and index so the output can be checked, and fails if
-the permanent record (transcripts, summaries, media, tickets and the counter
-behind their references) has picked up an expiry index. The collections that
-expire are listed as such: `conversations` (48 hours), `idempotency_keys`
-(7 days) and `verification_sessions` (12 hours, the number each web chat
-proved, so a restart does not ask for it again). Rerun it whenever a
-collection is added: its TTL index exists only once this has run.
+the permanent record (transcripts, summaries, media, tickets, the counter
+behind their references, and the notices in a chat such as a ticket closed in
+Zoho Desk) has picked up an expiry index. The collections that expire are
+listed as such: `conversations` (48 hours), `idempotency_keys` (7 days),
+`verification_sessions` (12 hours, the number each web chat proved, so a
+restart does not ask for it again) and `amiigo_receipts` (24 hours, each
+message a rider sent on the Amiigo chat socket, so a message sent again is
+answered once). Rerun it whenever a collection is added: its TTL index exists
+only once this has run, and the service keeps `verification_sessions` and
+`amiigo_receipts` in memory until it does (docs/runbooks/config-store.md,
+sections 3 and 8).
 """
 
 import os
@@ -25,12 +30,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src")]
 
 from emotorad_ai.stores.mongo import (  # noqa: E402
-    CONVERSATION_SUMMARIES, COUNTERS, MEDIA, MONGO_URI_ENV, TICKETS, TRANSCRIPT_TURNS, connect, ensure_indexes,
+    CONVERSATION_NOTICES, CONVERSATION_SUMMARIES, COUNTERS, MEDIA, MONGO_URI_ENV, TICKETS, TRANSCRIPT_TURNS, connect,
+    ensure_indexes,
 )
 
 # Tickets are permanent like the transcript, and so is the counter that
-# numbers them: a counter that expired would hand out EM-1000001 again.
-PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA, TICKETS, COUNTERS)
+# numbers them: a counter that expired would hand out EM-1000001 again. The
+# notices in a chat (a ticket closed in Zoho Desk) are part of the chat.
+PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA, TICKETS, COUNTERS, CONVERSATION_NOTICES)
 
 
 def main() -> int:
