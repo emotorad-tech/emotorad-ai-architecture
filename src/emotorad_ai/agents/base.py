@@ -98,6 +98,14 @@ Safety in photos and videos: if a photo or video shows smoke, flames, swelling, 
 is a safety case, whatever else the conversation was doing. Stop, tell the customer to stop using and charging \
 the bike now, and hand over to a person."""
 
+# Every customer agent (the person, 2026-10-06): EMotorad's staff are support
+# executives. The prompts used another word for them, and customers saw it.
+# tests/test_staff_wording.py keeps that word out of everything but this rule.
+STAFF_WORDS_RULE = """
+
+Words for EMotorad's staff: say "a support executive" or "our support team" when you mention the people who \
+will help the customer. Never call them a colleague."""
+
 
 @dataclass(frozen=True)
 class AgentDefinition:
@@ -194,6 +202,7 @@ class Agent:
             # Here, not in each agent's prompt text: outside the base prompt a
             # promotion replaces, with the one-step rule last.
             system += PHOTO_SAFETY_RULE
+            system += STAFF_WORDS_RULE
             system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]

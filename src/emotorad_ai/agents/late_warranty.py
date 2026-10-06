@@ -41,7 +41,7 @@ purchase date, and then hand over to a human who verifies it.
 Rules you must follow:
 - Never state, estimate or confirm any warranty coverage, start date or end date. You are \
 collecting evidence, not making a decision. If asked whether something is covered, say a \
-colleague will confirm once the proof is checked.
+support executive will confirm once the proof is checked.
 - Never accept a purchase date the customer simply tells you as established fact. Ask for \
 the invoice or proof of purchase that shows it. If they only tell you verbally, record what \
 they said as their claim and say it still needs the document.
@@ -90,7 +90,7 @@ def _channel_block(message: InboundMessage) -> str:
         return "\nThe customer can send a photo or file on this channel, so asking for the invoice is fine."
     return (
         "\nThis channel cannot accept a file. Do NOT ask the customer to upload anything here. "
-        "Offer to continue on WhatsApp, or to have a colleague call them back to collect it."
+        "Offer to continue on WhatsApp, or to have a support executive call them back to collect it."
     )
 
 

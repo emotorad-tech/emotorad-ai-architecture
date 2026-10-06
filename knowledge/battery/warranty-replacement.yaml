@@ -80,7 +80,7 @@ steps:
     THE TERM IS PROVISIONAL AND YOU SAY SO WHEN IT IS LOAD-BEARING. Coverage here is
     computed from the purchase date, not read from a field, and the 24-month term is a
     working assumption rather than a published one. Well inside it, that changes nothing
-    worth saying. Near the edge, say the date you are working from and that a colleague
+    worth saying. Near the edge, say the date you are working from and that a support executive
     confirms it before the replacement is booked. Never announce a free replacement on a
     date you inferred.
   - >-
@@ -107,7 +107,7 @@ steps:
     A REPLACEMENT IS PLACED, NOT PROPOSED. For a part the customer can fit, confirm the
     delivery address and call `place_replacement_order`; the order it returns is the only
     one you may name. If it comes back approved, the part is on its way and you say so, with
-    the order id. If it comes back pending approval, say a colleague confirms it before it
+    the order id. If it comes back pending approval, say a support executive confirms it before it
     ships, and give the order id anyway. Never say "on its way" for an order the tool did
     not return as approved, and never send a covered customer to a service centre for a
     part they can fit themselves: a customer told to wait for a service centre when a
@@ -118,7 +118,7 @@ escalate_when: >-
   chargeable even inside the warranty, said plainly and early, cost confirmed by the
   service centre. Out of warranty — chargeable. No age rule inside the warranty period.
   Covered on known dates — replacement ticket raised in the same message, evidence
-  attached, part named. Near the edge of the computed term — same, and say a colleague
+  attached, part named. Near the edge of the computed term — same, and say a support executive
   confirms the date before it is booked. Purchase date missing — ticket raised pending the
   invoice, and a person verifies the date. No warranty record — ticket raised with the
   diagnosis, registration handled separately, and never described as out of warranty. OMS

@@ -1205,7 +1205,7 @@ def build_registry(
         SUBMIT_WARRANTY_PROOF,
         "Submit a customer's warranty registration or proof of purchase for a human to verify. "
         "Use this once you have what they can give you. This does NOT register the warranty or "
-        "set any coverage — it queues the evidence for a colleague to check.",
+        "set any coverage — it queues the evidence for a support executive to check.",
         parameters={
             "frame_number": {
                 "type": "string",
