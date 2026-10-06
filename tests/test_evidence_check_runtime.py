@@ -552,6 +552,75 @@ class FaultChatForTheRunTests(unittest.TestCase):
         self.assertNotEqual(reply.metadata.get("handover"), "evidence_needed")
 
 
+class VerdictBelongsRuntimeTests(unittest.TestCase):
+    """A pass is kept with its run, bike and fault (the review of 6 October 2026)."""
+
+    def test_a_battery_pass_does_not_open_a_motor_ticket(self):
+        chat = EvidenceChat([say("I can see the red light.")] + ticket_turn(1))
+        chat.say("here is a video", PASS, [VIDEO])
+        state = chat.state()
+        state.hand_back("battery_fine")
+        state.route_to("motor_support")
+        chat.say("the motor is noisy too, please raise it")
+        self.assertTrue(chat.no_ticket_anywhere())
+
+    def test_the_verdict_says_where_it_was_made(self):
+        chat = EvidenceChat([say("Thanks.")])
+        chat.say("here is a video", PASS, [VIDEO])
+        verdict = chat.state().evidence_verdict
+        self.assertEqual((verdict["component"], verdict["started_at"]), ("battery", chat.state().started_at))
+
+    def test_the_component_the_api_checked_for_is_kept(self):
+        chat = EvidenceChat([say("Thanks.")])
+        chat.say("here is a video", dict(PASS, component="motor"), [VIDEO])
+        self.assertEqual(chat.state().evidence_verdict["component"], "motor")
+        self.assertFalse(chat.runtime._evidence_seen_line(chat.state()))
+
+
+class MergeBelongsTests(unittest.TestCase):
+    def merge(self, chat, ours, fresh_loaded=True):
+        fresh = chat.conversations.peek("c1")
+        loaded = {name: getattr(fresh, name) for name in TURN_FACT_FIELDS} if fresh_loaded else None
+        return chat.runtime._merge_onto_fresh(
+            ours, [], Reply(conversation_id="c1", text="ok", handled_by="battery_support"), loaded=loaded)
+
+    def passed_on(self, frame, started_at):
+        return {"passed": True, "seen": SEEN, "missing": "", "error": None, "at": "T", "frame": frame,
+                "started_at": started_at, "component": "battery"}
+
+    def test_our_pass_is_not_carried_into_another_run(self):
+        chat = EvidenceChat()
+        fresh = chat.conversations.get("c1")
+        ours = ConversationState.from_json(fresh.to_json())
+        ours.evidence_verdict = self.passed_on(None, ours.started_at)
+        fresh.started_at = "2026-10-06T10:00:00+00:00"  # restart_for on the other server
+        merged = self.merge(chat, ours)
+        self.assertIsNone(merged.evidence_verdict)
+
+    def test_our_pass_is_not_carried_onto_another_bike(self):
+        chat = EvidenceChat()
+        fresh = chat.conversations.get("c1")
+        fresh.selected_frame = "F2"
+        ours = ConversationState.from_json(fresh.to_json())
+        ours.selected_frame = "F1"
+        ours.evidence_verdict = self.passed_on("F1", ours.started_at)
+        merged = self.merge(chat, ours)
+        self.assertIsNone(merged.evidence_verdict)
+
+    def test_their_pass_is_restored_only_where_it_belongs(self):
+        chat = EvidenceChat()
+        fresh = chat.conversations.get("c1")
+        fresh.selected_frame = "F1"
+        fresh.evidence_verdict = self.passed_on("F1", fresh.started_at)
+        ours = ConversationState.from_json(fresh.to_json())
+        ours.select_bike("F2")
+        self.assertIsNone(ours.evidence_verdict)
+        merged = self.merge(chat, ours)
+        # The other server's routing stands (F1), so its pass about F1 does.
+        self.assertEqual(merged.selected_frame, "F1")
+        self.assertTrue(merged.evidence_verdict["passed"])
+
+
 class AnonymousTests(unittest.TestCase):
     def test_an_anonymous_handover_in_a_fault_chat_asks_for_evidence_not_a_number(self):
         chat = EvidenceChat()

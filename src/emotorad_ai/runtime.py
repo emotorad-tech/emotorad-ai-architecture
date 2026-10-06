@@ -132,7 +132,9 @@ from .evidence_check import (
     EVIDENCE_HANDOVER_TEXT_HI,
     fail_text,
     final_text,
+    fault_component,
     is_fault_chat,
+    verdict_belongs,
     verdict_passed,
     verdict_record,
     writes_hindi,
@@ -1063,9 +1065,15 @@ class Runtime:
         for name in TURN_FACT_FIELDS:
             if loaded is None or getattr(ours, name) != loaded.get(name):
                 setattr(fresh, name, getattr(ours, name))
-        if verdict_passed(theirs) and not verdict_passed(fresh.evidence_verdict):
-            # Evidence that passed on the other server stands: a later photo
-            # that fails never takes a pass back (evidence_check.py).
+        ours_verdict = fresh.evidence_verdict
+        if ours_verdict is not theirs and ours_verdict is not None and not verdict_belongs(ours_verdict, fresh):
+            # This turn's verdict was about another run or another bike than
+            # the state the other server saved, whose routing stands: it is not
+            # carried (the review of 6 October 2026).
+            fresh.evidence_verdict = theirs
+        if verdict_passed(theirs, fresh) and not verdict_passed(fresh.evidence_verdict, fresh):
+            # Evidence that passed on the other server, about its own run and
+            # bike, stands: a later photo that fails never takes a pass back.
             fresh.evidence_verdict = theirs
         for name in ("user_key", "channel", "context_block", "cluster_id"):
             if getattr(fresh, name) is None:
@@ -2994,7 +3002,7 @@ class Runtime:
 
     def _needs_evidence(self, state: ConversationState) -> bool:
         """A fault chat with the check on and nothing that passed it."""
-        return self._evidence_gated(state) and not verdict_passed(state.evidence_verdict)
+        return self._evidence_gated(state) and not verdict_passed(state.evidence_verdict, state)
 
     def _handover_needs_evidence(self, message: InboundMessage, state: ConversationState) -> bool:
         """Whether "talk to a person" (or the number it waited for) must wait
@@ -3020,7 +3028,7 @@ class Runtime:
 
     def _evidence_seen_line(self, state: ConversationState) -> Optional[str]:
         """What Gemini saw, for a fault chat's ticket raised after a pass."""
-        if not self._evidence_gated(state) or not verdict_passed(state.evidence_verdict):
+        if not self._evidence_gated(state) or not verdict_passed(state.evidence_verdict, state):
             return None
         return state.evidence_verdict.get("seen") or None
 
@@ -3031,7 +3039,7 @@ class Runtime:
             return {}
 
         def accepted() -> Optional[bool]:
-            return verdict_passed(state.evidence_verdict) if self._evidence_gated(state) else None
+            return verdict_passed(state.evidence_verdict, state) if self._evidence_gated(state) else None
 
         def missing() -> Optional[str]:
             if not self._evidence_gated(state):
@@ -3056,7 +3064,10 @@ class Runtime:
         raw = message.entry_metadata.get("evidence_verdict")
         if not self.evidence_check or not isinstance(raw, dict):
             return
-        record = verdict_record(raw, at=utc_now_iso())
+        # Where it was made: the bike, the run and the fault the API checked
+        # it for, or failing that the chat's (verdict_belongs).
+        record = verdict_record(raw, at=utc_now_iso(), frame=state.selected_frame, started_at=state.started_at,
+                                component=raw.get("component") or fault_component(state))
         if record["error"]:
             state.evidence_check_errors += 1
         self.log.emit("evidence_check", message.conversation_id, passed=record["passed"],
@@ -3064,7 +3075,7 @@ class Runtime:
         if record["passed"]:
             state.evidence_verdict = record
             state.evidence_asks = 0
-        elif not verdict_passed(state.evidence_verdict):
+        elif not verdict_passed(state.evidence_verdict, state):
             state.evidence_verdict = record
 
     def _evidence_ask(

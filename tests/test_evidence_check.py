@@ -255,8 +255,10 @@ class CleaningTests(unittest.TestCase):
 
 class VerdictRecordTests(unittest.TestCase):
     def test_a_passing_verdict_as_the_conversation_keeps_it(self):
-        record = verdict_record({"passed": True, "seen": "A red light.", "missing": "ignored"}, at="T")
-        self.assertEqual(record, {"passed": True, "seen": "A red light.", "missing": "", "error": None, "at": "T"})
+        record = verdict_record({"passed": True, "seen": "A red light.", "missing": "ignored"}, at="T",
+                                frame="F1", started_at="R1", component="battery")
+        self.assertEqual(record, {"passed": True, "seen": "A red light.", "missing": "", "error": None, "at": "T",
+                                  "frame": "F1", "started_at": "R1", "component": "battery"})
         self.assertTrue(verdict_passed(record))
 
     def test_an_error_never_passes(self):
@@ -275,6 +277,44 @@ class VerdictRecordTests(unittest.TestCase):
         record = verdict_record({"passed": False, "seen": "call 9999999999", "missing": "m" * 500}, at="T")
         self.assertNotIn("9999999999", record["seen"])
         self.assertLessEqual(len(record["missing"]), TEXT_LIMIT)
+
+
+class VerdictBelongsTests(unittest.TestCase):
+    """A pass is about one run, one bike and one fault (the review of 6
+    October 2026): a save race, a bike named on the ticket or a turn to the
+    other component never carries it somewhere else."""
+
+    def state(self, agent="battery_support", frame="F1", started_at="R1"):
+        state = ConversationState(conversation_id="c1", selected_frame=frame, started_at=started_at)
+        state.route_to(agent)
+        return state
+
+    def record(self, **where):
+        fields = dict(frame="F1", started_at="R1", component="battery")
+        fields.update(where)
+        return verdict_record({"passed": True, "seen": "A red light."}, at="T", **fields)
+
+    def test_a_pass_holds_where_it_was_made(self):
+        self.assertTrue(verdict_passed(self.record(), self.state()))
+
+    def test_not_in_another_run(self):
+        self.assertFalse(verdict_passed(self.record(), self.state(started_at="R2")))
+
+    def test_not_on_another_bike(self):
+        self.assertFalse(verdict_passed(self.record(), self.state(frame="F2")))
+
+    def test_not_for_the_other_component(self):
+        self.assertFalse(verdict_passed(self.record(), self.state(agent="motor_support")))
+
+    def test_a_pass_made_before_a_bike_was_chosen_holds_for_the_one_chosen(self):
+        self.assertTrue(verdict_passed(self.record(frame=None), self.state(frame="F1")))
+
+    def test_without_a_state_only_the_pass_is_read(self):
+        self.assertTrue(verdict_passed(self.record()))
+        self.assertFalse(verdict_passed(verdict_record({"passed": False}, at="T"), self.state()))
+
+    def test_an_unknown_component_is_not_kept(self):
+        self.assertIsNone(self.record(component="brakes")["component"])
 
 
 class FaultChatTests(unittest.TestCase):

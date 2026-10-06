@@ -239,18 +239,44 @@ def _verdict(text: str) -> EvidenceVerdict:
     )
 
 
-def verdict_record(raw: Mapping[str, Any], at: str) -> Dict[str, Any]:
+def verdict_record(
+    raw: Mapping[str, Any], at: str, *, frame: Optional[str] = None, started_at: Optional[str] = None,
+    component: Optional[str] = None,
+) -> Dict[str, Any]:
     """A turn's verdict as the conversation keeps it (ConversationState.
-    evidence_verdict): passed, seen, missing, error and when. An error never
-    passes, and the text is cleaned again whoever wrote it."""
+    evidence_verdict): passed, seen, missing, error and when, and where it
+    was made: the chosen bike (None before one is chosen), the run and the
+    fault it was checked for. An error never passes, and the text is cleaned
+    again whoever wrote it."""
     error = (clean_sentence(raw.get("error")) or "unknown") if raw.get("error") else None
     passed = raw.get("passed") is True and error is None
     return {"passed": passed, "seen": clean_sentence(raw.get("seen")),
-            "missing": "" if passed else clean_sentence(raw.get("missing")), "error": error, "at": at}
+            "missing": "" if passed else clean_sentence(raw.get("missing")), "error": error, "at": at,
+            "frame": frame, "started_at": started_at, "component": component if component in COMPONENTS else None}
 
 
-def verdict_passed(verdict: Optional[Mapping[str, Any]]) -> bool:
-    return isinstance(verdict, Mapping) and verdict.get("passed") is True and not verdict.get("error")
+def verdict_belongs(verdict: Optional[Mapping[str, Any]], state: Any) -> bool:
+    """Whether a verdict is about this state: its run, its chosen bike and its
+    fault (the review of 6 October 2026). One made before a bike was chosen
+    holds for the first one chosen; a change of bike clears it
+    (ConversationState.select_bike)."""
+    if not isinstance(verdict, Mapping):
+        return False
+    started_at = verdict.get("started_at")
+    if started_at and started_at != getattr(state, "started_at", None):
+        return False
+    frame = verdict.get("frame")
+    if frame and frame != getattr(state, "selected_frame", None):
+        return False
+    component = verdict.get("component")
+    return not component or component == fault_component(state)
+
+
+def verdict_passed(verdict: Optional[Mapping[str, Any]], state: Any = None) -> bool:
+    """A pass; given the conversation, a pass about it (verdict_belongs)."""
+    if not (isinstance(verdict, Mapping) and verdict.get("passed") is True and not verdict.get("error")):
+        return False
+    return state is None or verdict_belongs(verdict, state)
 
 
 def fault_component(state: Any) -> Optional[str]:

@@ -884,7 +884,8 @@ def _done(result: Dict[str, Any]) -> Any:
 def _check_evidence(jobs: Sequence[Tuple[int, Callable[[], bytes], str, str, Optional[int]]], complaint: str,
                     component: str) -> Dict[str, Any]:
     media = [(load(), mime, name) for _, load, mime, name, _ in jobs]
-    return EVIDENCE_CHECKER.check(media, complaint, component).as_dict()
+    # With the fault it was checked for: the runtime keeps a pass to it.
+    return dict(EVIDENCE_CHECKER.check(media, complaint, component).as_dict(), component=component)
 
 
 def _evidence_verdict(started: Optional[Tuple[Any, float]], conversation_id: str) -> Optional[Dict[str, Any]]:

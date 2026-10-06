@@ -97,7 +97,8 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertEqual(call["component"], "battery")
         self.assertEqual([mime for _, mime in call["media"]], ["image/jpeg"])
         self.assertIn("here is the charger light", call["complaint"])
-        self.assertEqual(self.verdict(message), PASS.as_dict())
+        # With the fault it was checked for, so the runtime keeps a pass to it.
+        self.assertEqual(self.verdict(message), dict(PASS.as_dict(), component="battery"))
 
     def test_the_complaint_is_the_customers_own_words_redacted(self):
         self.route(said=["my battery won't charge since Monday"])
