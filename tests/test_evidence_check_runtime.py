@@ -204,6 +204,14 @@ class SupportTicketTests(unittest.TestCase):
         self.assertEqual(chat.llm.requests[1]["messages"][-1]["content"][0]["is_error"], True)
         self.assertIn("evidence_not_accepted", chat.llm.requests[1]["messages"][-1]["content"][0]["content"])
 
+    def test_a_stop_instruction_is_never_replaced_by_the_ask(self):
+        hazard = ("Please stop using the bike and stop charging the battery now; a bulge in the casing can be a "
+                  "hazard. Could you send a photo of the side of the pack?")
+        chat = EvidenceChat(ticket_turn(1, hazard))
+        reply = chat.say("the case looks uneven", FAIL, [PHOTO])
+        self.assertIn("stop charging", reply.text)
+        self.assertNotIn("Thanks for sending that", reply.text)
+
     def test_with_no_media_ever_the_model_asks_in_its_own_words(self):
         # Nothing was sent, so "Thanks for sending that" would be untrue.
         chat = EvidenceChat(ticket_turn(1, VIDEO_ASK))
@@ -297,6 +305,14 @@ class HandoverTests(unittest.TestCase):
         self.assertNotIn("evidence_check", record)
         self.assertTrue(reply.escalated)
         self.assertFalse(is_fault_chat(chat.state()))
+
+    def test_a_first_message_that_only_asks_for_a_person_is_not_a_fault_chat(self):
+        chat = EvidenceChat(routed=None)
+        reply = chat.say("talk to a person")
+        (record,) = chat.records()
+        self.assertEqual(record["kind"], "handover")
+        self.assertTrue(reply.escalated)
+        self.assertEqual(chat.llm.requests, [])
 
     def test_a_late_registration_chat_is_not_a_fault_chat(self):
         chat = EvidenceChat(routed="late_warranty")
