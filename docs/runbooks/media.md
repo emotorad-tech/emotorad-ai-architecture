@@ -394,3 +394,34 @@ chosen before any model runs. `verify-by-order-number` uses the test order numbe
 (2026-09-29): a signed-in customer whose photo alone shows a hazard is handed to a
 person; an anonymous visitor who types a hazard is not promised a call on a number
 the bot does not have. They fail until that behaviour is fixed.
+
+## 10. Turn on the melt ask
+
+The melt ask (`src/emotorad_ai/melt_ask.py`, 6 October 2026) answers a customer who says
+something melted with one fixed message asking for all three items at once: a photo of the
+battery's serial sticker, a photo of the controller's label, and a short video of both
+ends. A reference picture for each goes with it. It is off until the battery serial
+sticker photo exists, and `/health` says why (`"melt_ask": "off: missing
+melt_battery_serial"`).
+
+1. Upload the photo as `assets/afs/battery/photos/battery-serial-label.jpg`, with its
+   `.w900.webp` copy, by either route in §3 (slug `battery-serial-label`, kind `photos`).
+   `scripts/upload_asset.py` writes both.
+2. Add the catalogue entry to `knowledge/_media/catalogue.yaml`, with `code_only: true`
+   so the model is never offered it, and open a PR:
+
+   ```yaml
+   melt_battery_serial:
+     id: afs/battery/photos/battery-serial-label.jpg
+     kind: image
+     caption: "Example: the serial number sticker on the battery"
+     code_only: true
+   ```
+
+3. Add `-e EMOTORAD_MELT_ASK=on` to the `docker run` line in
+   `.github/workflows/deploy-staging.yml` (only exactly `on` turns it on), and deploy.
+4. Check `/health`: `"melt_ask": "on"`. Anything else names the key that is missing, not
+   code-only or would not resolve.
+
+To turn it off, remove `-e EMOTORAD_MELT_ASK=on` and deploy. The Hindi text is a draft:
+a Hindi speaker checks it before real customer traffic.
