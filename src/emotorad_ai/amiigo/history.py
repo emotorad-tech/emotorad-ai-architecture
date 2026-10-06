@@ -15,7 +15,9 @@ record of where the run came from (`origins_of`, written for every run,
 which must name the rider too: Ruling 10). Anything else, a website chat even where the rider
 proved this number, or one in which someone else wrote, is
 `conversation_not_found` and never listed: nothing of another person's
-words is read out.
+words is read out. A chat of the rider's whose summary was never written
+(a record that failed, the final review's Important 1) is read by its id,
+and written in, but listed only once a later turn writes its summary.
 
 Cursors are opaque base64url JSON, issued here. They carry positions only,
 nothing taken from the phone (Ruling 7): every read is by the rider's user
@@ -313,9 +315,12 @@ def _app_chat_of(conversations: Any, user_key: str, conversation_id: str,
 
 
 def is_riders_app_chat(stores: Any, rider: Rider, conversation_id: str) -> bool:
-    """Whether this chat is in the rider's history: an Amiigo app chat whose
-    every run is theirs. Anything else is `conversation_not_found`."""
-    return is_app_chat_of(stores, rider.user_key, conversation_id)
+    """Whether this chat is the rider's to read and write in: an Amiigo app
+    chat whose every run is theirs, or one whose summary was never written
+    (`_unsummarised_app_chat_of`). Anything else is `conversation_not_found`."""
+    if is_app_chat_of(stores, rider.user_key, conversation_id):
+        return True
+    return _unsummarised_app_chat_of(stores.conversations, rider.user_key, conversation_id)
 
 
 def is_app_chat_of(stores: Any, user_key: str, conversation_id: str) -> bool:
@@ -325,6 +330,29 @@ def is_app_chat_of(stores: Any, user_key: str, conversation_id: str) -> bool:
     conversations = stores.conversations
     runs = [run for run in conversations.runs_of(user_key) if run.conversation_id == conversation_id]
     return _app_chat_of(conversations, user_key, conversation_id, runs)
+
+
+def _unsummarised_app_chat_of(conversations: Any, user_key: str, conversation_id: str) -> bool:
+    """The rider's own app chat whose summary was never written (the final
+    review's Important 1). The runtime records where a run came from before
+    the turn (Runtime._note_origin) and its working state before the record,
+    so a record that failed leaves an origin and a state and no summary; one
+    that failed half way leaves the turns too. Theirs when no summary names
+    anyone (`owner_of`), every run's origin names this rider on the app (a
+    run with no origin, or another's, is someone else's: Ruling 10), and
+    the working state, if any, is this rider's app run.
+
+    Not listed (the list is made from the summaries: such a chat has no
+    title, bike or status to show) until the rider's next recorded message
+    writes its summary; read and written by its id meanwhile."""
+    if conversations.owner_of(conversation_id) is not None:
+        return False
+    origins = conversations.origins_of(conversation_id)
+    if not origins or not all(origin.get("channel") == APP_CHANNEL and origin.get("user_key") == user_key
+                              for origin in origins):
+        return False
+    state = conversations.peek(conversation_id)
+    return state is None or (state.user_key == user_key and state.channel == APP_CHANNEL)
 
 
 def is_new_conversation(conversations: Any, conversation_id: str) -> bool:
@@ -359,7 +387,8 @@ def is_app_chat(conversations: Any, conversation_id: str) -> bool:
 
 def rider_may_use(stores: Any, rider: Rider, conversation_id: str) -> bool:
     """Whether the rider may add to this chat: a new one, or their own app
-    chat. Anything else is `conversation_not_found`, as in the history.
+    chat, summarised or not (`is_riders_app_chat`). Anything else is
+    `conversation_not_found`, as in the history.
 
     A chat with nothing recorded may still have a working state, from a
     turn whose records failed to write, and that state holds what was said.

@@ -721,8 +721,14 @@ class ChatSocket:
         return TurnResult(frames=tuple(answer_frames(frame, ack, answer, recorded, signer, now)))
 
     def _replay(self, frame: MessageFrame, receipt: Dict[str, Any]) -> TurnResult:
-        """The answer a receipt holds, built again with fresh links. Blocking."""
+        """The answer a receipt holds, built again with fresh links, while
+        the chat is still one the rider may use (the final review's Minor 5:
+        someone else's run under the same id since is `conversation_not_found`).
+        That look fails open like the admission's (Ruling 13): the receipt is
+        the rider's own, keyed by their user key. Blocking."""
         context = self.context
+        if not self._may_use(frame.conversation_id):
+            return TurnResult(error=CONVERSATION_NOT_FOUND)
         ack, answer = receipt["ack"], receipt["reply"]
         turns: Optional[Tuple[TranscriptTurn, TranscriptTurn]] = None
         if "role" not in ack:

@@ -962,6 +962,26 @@ class OneAtATimeTests(SocketCase):
         self.assertEqual([e["conversation_id"] for e in self.events("amiigo_message")
                           if e["outcome"] == "not_found"], ["amiigo"])
 
+    def test_a_receipt_is_replayed_only_while_the_chat_is_still_the_riders(self):
+        # The final review's Minor 5: the replay looks at whose chat it is
+        # again, recorded turn or not.
+        for n, record in ((1, True), (2, False)):
+            with self.subTest(recorded=record):
+                cid = CID if record else CID_2
+                self.turns.record = record
+                with self.socket() as ws:
+                    self.exchange(ws, message(n=n, cid=cid, text="the rider's words"))
+                # Another person's run under the same id since.
+                self.their_chat(user_key=OTHER_KEY, cid=cid, text="their words")
+                with self.socket() as ws:
+                    error = self.refused(ws, message(n=n, cid=cid, text="the rider's words"),
+                                         "conversation_not_found")
+                    quiet(ws)
+                self.assertNotIn("their words", json.dumps(error))
+        self.assertEqual(len(self.turns.calls), 2)
+        self.assertEqual([e["conversation_id"] for e in self.events("amiigo_message")
+                          if e["outcome"] == "not_found"], ["amiigo", "amiigo"])
+
     def test_the_same_id_for_another_chat_is_bad_frame(self):
         with self.socket() as ws:
             self.exchange(ws, message())
@@ -1330,6 +1350,128 @@ class EndToEndTests(SocketCase):
         self.assertEqual(bot_said, dict(reply["message"], text=redact_pii(reply["message"]["text"])))
         state = self.api.runtime.conversations.peek(CID)
         self.assertEqual((state.channel, state.user_key), ("amiigo_app", RIDER_KEY))
+
+
+class FailedRecordTests(SocketCase):
+    """The final review's Important 1: the runtime writes where a run came
+    from before the turn, so a turn whose record then failed left an origin
+    and a working state but no summary, and the rider's next message was
+    `conversation_not_found`. Through the real runtime."""
+
+    use_fake_turns = False
+    with_media = False
+
+    def first_record(self, how):
+        """record_turn as the store does it, except its first call: `failed`
+        writes nothing, `no_summary` writes the turns and not the summary."""
+        conversations = self.conversations
+        real = conversations.record_turn
+        calls = []
+
+        def record(state, inbound, reply, summary=None):
+            calls.append(inbound.conversation_id)
+            if len(calls) == 1:
+                if how == "failed":
+                    raise StoreUnavailable("MongoDB replace_one failed")
+                return real(state, inbound, reply, None)
+            return real(state, inbound, reply, summary)
+
+        patch = mock.patch.object(conversations, "record_turn", side_effect=record)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def listed(self, token=None):
+        answer = self.client.get("/amiigo/v1/conversations", headers=self.auth(token))
+        self.assertEqual(answer.status_code, 200, answer.text)
+        return [chat["conversation_id"] for chat in answer.json()["conversations"]]
+
+    def read(self, token=None):
+        return self.client.get("/amiigo/v1/conversations/%s/messages" % CID, headers=self.auth(token))
+
+    def test_after_a_record_that_failed_the_riders_next_message_goes_through(self):
+        # The reviewer's probe (probe_lockout.py), as a test.
+        self.first_record("failed")
+        with self.socket() as ws:
+            _, first, _ = self.exchange(ws, message(n=1, text="my battery isn't charging"))
+            self.assertIn("#unsaved-", first["message"]["id"])
+            self.assertEqual(self.conversations.count_turns(CID), 0)
+            self.assertIsNone(self.conversations.owner_of(CID))
+            self.assertTrue(self.conversations.origins_of(CID))
+            _, second, reply = self.exchange(ws, message(n=2, text="it is switched on"))
+        self.assertRegex(second["message"]["id"], _ID)
+        self.assertEqual(reply["in_reply_to"], cmid(2))
+        self.assertEqual(self.conversations.owner_of(CID), RIDER_KEY)
+        self.assertEqual(self.listed(), [CID])
+
+    def test_turns_recorded_without_their_summary_do_not_lock_the_rider_out(self):
+        self.first_record("no_summary")
+        with self.socket() as ws:
+            _, first, _ = self.exchange(ws, message(n=1, text="my battery isn't charging"))
+            self.assertRegex(first["message"]["id"], _ID)
+            self.assertEqual(self.conversations.count_turns(CID), 2)
+            self.assertIsNone(self.conversations.owner_of(CID))
+            self.exchange(ws, message(n=2, text="it is switched on"))
+        self.assertEqual(self.conversations.count_turns(CID), 4)
+        self.assertEqual(self.listed(), [CID])
+
+    def assert_another_rider_is_refused(self, how):
+        self.first_record(how)
+        with self.socket() as ws:
+            self.exchange(ws, message(n=1, text="the rider's own words"))
+        before = self.conversations.count_turns(CID)
+        with self.socket(token=self.other_token) as theirs:
+            error = self.refused(theirs, message(n=7, text="let me in"), "conversation_not_found")
+            quiet(theirs)
+        self.assertNotIn("the rider's own words", json.dumps(error))
+        self.assertEqual(self.conversations.count_turns(CID), before)
+        answer = self.read(self.other_token)
+        self.assertEqual((answer.status_code, answer.json()), (404, {"detail": "conversation_not_found"}))
+        self.assertEqual(self.listed(self.other_token), [])
+
+    def test_another_rider_is_still_refused_a_chat_whose_record_failed(self):
+        self.assert_another_rider_is_refused("failed")
+
+    def test_another_rider_is_still_refused_a_chat_with_turns_and_no_summary(self):
+        self.assert_another_rider_is_refused("no_summary")
+
+    def test_such_a_chat_is_not_listed_until_a_turn_writes_its_summary_but_reads_by_its_id(self):
+        # The choice: the list is made from the summaries, so a chat with
+        # none has no title, bike or status to show, and is left out until
+        # the rider's next recorded message writes one. Its messages read by
+        # its id, so an app that holds the chat catches up instead of
+        # dropping it.
+        self.first_record("no_summary")
+        with self.socket() as ws:
+            _, ack, reply = self.exchange(ws, message(n=1, text="my battery isn't charging"))
+        self.assertEqual(self.listed(), [])
+        answer = self.read()
+        self.assertEqual(answer.status_code, 200, answer.text)
+        self.assertEqual([m["id"] for m in answer.json()["messages"]], [ack["message"]["id"], reply["message"]["id"]])
+
+    def test_a_working_state_that_is_not_the_riders_still_refuses_such_a_chat(self):
+        # The origins name the rider, but the working state is another
+        # person's: never continued.
+        self.first_record("failed")
+        with self.socket() as ws:
+            self.exchange(ws, message(n=1))
+        state = self.conversations.peek(CID)
+        state.user_key = OTHER_KEY
+        self.conversations.save(state)
+        with self.socket() as ws:
+            self.refused(ws, message(n=2), "conversation_not_found")
+        self.assertEqual(self.read().status_code, 404)
+
+    def test_an_origin_that_is_not_the_riders_still_refuses_such_a_chat(self):
+        self.first_record("failed")
+        with self.socket() as ws:
+            self.exchange(ws, message(n=1))
+        self.conversations.record_origin({
+            "_id": summary_key(CID, "2026-10-06T08:00:00+00:00"), "conversation_id": CID,
+            "started_at": "2026-10-06T08:00:00+00:00", "channel": "website_chat", "user_key": None,
+            "country": "IN", "region": None, "city": None, "source": "ip", "db": None})
+        with self.socket() as ws:
+            self.refused(ws, message(n=2), "conversation_not_found")
+        self.assertEqual(self.read().status_code, 404)
 
 
 # -- the receipts, on both stores --------------------------------------------------
