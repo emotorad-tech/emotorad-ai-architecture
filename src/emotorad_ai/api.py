@@ -39,12 +39,13 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, wait
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import IO, Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import httpx
 import websockets
@@ -692,9 +693,10 @@ def _inbound_attachments(
     ]
     # The evidence check's media, in the order the customer sent it: each
     # item's position, how to read it, its type, name and size (None for an
-    # inline photo, already within its 4 MB limit).
+    # inline photo, already within its 4 MB limit). A photo is read; a clip
+    # is handed over still in the bucket (evidence_check.StoredClip).
     position = {id(item): n for n, item in enumerate(items)}
-    evidence_jobs: List[Tuple[int, Callable[[], bytes], str, str, Optional[int]]] = [
+    evidence_jobs: List[_EvidenceJob] = [
         (position[id(raw_item)], (lambda data=item["data"]: base64.b64decode(data)), item["media_type"], "photo",
          None)
         for raw_item, item in zip(inline, validated) if item["media_type"].startswith("image/")
@@ -785,15 +787,46 @@ def _inbound_attachments(
                 if claimed.kind == "images":
                     photo_jobs.append(
                         (("upload", upload_id), (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)), claimed.mime))
-                if claimed.kind in ("images", "videos"):
                     evidence_jobs.append((position[id(item)], (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)),
+                                          claimed.mime, claimed.key.rsplit("/", 1)[-1], claimed.size))
+                if claimed.kind == "videos":
+                    # Up to 100 MB: streamed by the checker into the file
+                    # ffmpeg reads when it is shrunk, never read whole here.
+                    evidence_jobs.append((position[id(item)], (lambda key=claimed.key, size=claimed.size:
+                                                               _stored_clip(key, size)),
                                           claimed.mime, claimed.key.rsplit("/", 1)[-1], claimed.size))
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
     # The evidence check starts now, and runs while the clips are described
-    # and the photos safety-checked below.
+    # and the photos safety-checked below. A turn that fails before it reads
+    # the verdict tells the check to stop.
     evidence = _start_evidence_check(body, conversation_id, sorted(evidence_jobs, key=lambda job: job[0]))
+    try:
+        attachments, unchecked, hazard_seen = _described(items, claims, stored, videos, photo_jobs,
+                                                         conversation_id)
+    except BaseException:
+        if evidence is not None:
+            evidence.cancel.set()
+        raise
+    if evidence is not None and hazard_seen:
+        # A safety report is immediate and never needs evidence: the turn
+        # does not wait for the check (the review of 6 October 2026), and the
+        # check stops: no transcode, nothing sent (the re-review).
+        log.emit("evidence_check_skipped", conversation_id, error="safety")
+        evidence.cancel.set()
+        evidence = None
+    return attachments, unchecked, _evidence_verdict(evidence, conversation_id)
+
+
+def _described(
+    items: List[Dict[str, Any]], claims: Dict[str, Dict[str, Any]], stored: Dict[int, Dict[str, Any]],
+    videos: List[Tuple[str, str, str]], photo_jobs: List[Tuple[Tuple[str, Any], Callable[[], bytes], str]],
+    conversation_id: str,
+) -> Tuple[List[Dict[str, Any]], int, bool]:
+    """The turn's attachments, each clip described and each photo safety-
+    checked; how many photos the safety check could not answer; and whether
+    any of them shows a live hazard."""
     for upload_id, key, mime in videos:
         summary = _summarise_video(key, mime)
         if summary is not None:
@@ -817,11 +850,6 @@ def _inbound_attachments(
     notes, unchecked = _check_photos(photo_jobs, conversation_id)
     hazard_seen = bool(notes) or any(
         check_safety_in_description(claim.get("summary") or "").triggered for claim in claims.values())
-    if evidence is not None and hazard_seen:
-        # A safety report is immediate and never needs evidence: the turn
-        # does not wait for the check (the review of 6 October 2026).
-        log.emit("evidence_check_skipped", conversation_id, error="safety")
-        evidence = None
     for (where, key), note in notes.items():
         if where == "upload":
             claims[key]["summary"] = note
@@ -834,7 +862,7 @@ def _inbound_attachments(
         note = notes.get(("inline", id(item)))
         # A copy: the customer's own item is never changed.
         attachments.append(dict(base, summary=note) if note else base)
-    return attachments, unchecked, _evidence_verdict(evidence, conversation_id)
+    return attachments, unchecked, hazard_seen
 
 
 def _evidence_subject(body: MessageIn, conversation_id: str) -> Optional[Tuple[str, str]]:
@@ -864,14 +892,48 @@ def _evidence_subject(body: MessageIn, conversation_id: str) -> Optional[Tuple[s
     return evidence_check.complaint_from(said + [body.text or ""]), component
 
 
+# One item for the evidence check: its position in the message, how to get
+# it (a photo's bytes, or a clip still in the bucket), its type, name and
+# size (None for an inline photo).
+_EvidenceJob = Tuple[int, Callable[[], evidence_check.Media], str, str, Optional[int]]
+
+
+class _EvidenceRun(NamedTuple):
+    """A check under way: its future, the moment the turn stops waiting
+    (time.monotonic()), and the event the turn sets when it stops waiting
+    (its deadline, a safety report, or a failure), so the check's thread
+    stops too: no transcode and no request once nobody is waiting."""
+
+    future: Any
+    deadline: float
+    cancel: threading.Event
+
+
+def _stored_clip(key: str, size: int) -> evidence_check.StoredClip:
+    """An uploaded clip as the evidence check takes it: still in the bucket."""
+    return evidence_check.StoredClip(size, lambda handle: _copy_object(key, handle))
+
+
+def _copy_object(key: str, handle: IO[bytes]) -> None:
+    """A stored clip written into an open file a part at a time
+    (S3Store.copy_to); a store that cannot stream (the local test page's)
+    reads it whole, one clip at a time."""
+    copy_to = getattr(MEDIA_STORE, "copy_to", None)
+    if copy_to is None:
+        handle.write(MEDIA_STORE.get_bytes(key))
+    else:
+        copy_to(key, handle)
+
+
 def _start_evidence_check(
-    body: MessageIn, conversation_id: str, jobs: Sequence[Tuple[int, Callable[[], bytes], str, str, Optional[int]]],
-) -> Optional[Tuple[Any, float]]:
+    body: MessageIn, conversation_id: str, jobs: Sequence[_EvidenceJob],
+) -> Optional[_EvidenceRun]:
     """The check, started on its own thread, and the moment the turn stops
     waiting for it: the photo check's deadline, or the video summary's when a
     clip is among the media, so a turn waits no longer than it does today.
-    None when nothing is checked: the switch off, no photo or video, or a
-    chat that is not about a bike fault."""
+    The checker is given that moment, which is taken before any clip is read
+    from the bucket, and the cancel. None when nothing is checked: the switch
+    off, no photo or video, or a chat that is not about a bike fault."""
     if not runtime.evidence_check or not jobs:
         return None
     if check_safety(body.text or "").triggered:
@@ -883,7 +945,7 @@ def _start_evidence_check(
     if subject is None:
         return None
     if EVIDENCE_CHECKER is None:
-        return _done({"error": "not_configured"}), 0.0
+        return _EvidenceRun(_done({"error": "not_configured"}), 0.0, threading.Event())
     complaint, component = subject
     # A clip over the inline limit is fetched: the checker sends a smaller
     # copy of it (evidence_check.fit_inline). A photo is never shrunk, so
@@ -892,14 +954,16 @@ def _start_evidence_check(
     limit = getattr(EVIDENCE_CHECKER, "inline_limit", evidence_check.INLINE_LIMIT)
     photo_sizes = [size for _, _, mime, _, size in jobs if size is not None and not mime.startswith("video/")]
     if sum(photo_sizes) > limit:
-        return _done({"error": "too_large"}), 0.0
+        return _EvidenceRun(_done({"error": "too_large"}), 0.0, threading.Event())
     has_video = any(mime.startswith("video/") for _, _, mime, _, _ in jobs)
     wait_for = VIDEO_SUMMARY_SECONDS if has_video else PHOTO_CHECK_DEADLINE_SECONDS
+    deadline, cancel = time.monotonic() + wait_for, threading.Event()
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence-check")
-    future = pool.submit(_check_evidence, list(jobs), complaint, component)
-    # A check still running at the deadline is abandoned, not waited for.
+    future = pool.submit(_check_evidence, list(jobs), complaint, component, deadline, cancel)
+    # A check still running at the deadline is abandoned, not waited for,
+    # and told to stop (_evidence_verdict).
     pool.shutdown(wait=False)
-    return future, time.monotonic() + wait_for
+    return _EvidenceRun(future, deadline, cancel)
 
 
 def _done(result: Dict[str, Any]) -> Any:
@@ -911,24 +975,29 @@ def _done(result: Dict[str, Any]) -> Any:
     return future
 
 
-def _check_evidence(jobs: Sequence[Tuple[int, Callable[[], bytes], str, str, Optional[int]]], complaint: str,
-                    component: str) -> Dict[str, Any]:
+def _check_evidence(jobs: Sequence[_EvidenceJob], complaint: str, component: str, deadline: float,
+                    cancel: threading.Event) -> Dict[str, Any]:
+    # Photos are read here (14 MiB at most together, or refused above); a
+    # clip stays in the bucket until the checker streams or reads it.
     media = [(load(), mime, name) for _, load, mime, name, _ in jobs]
+    verdict = EVIDENCE_CHECKER.check(media, complaint, component, deadline_at=deadline, cancel=cancel)
     # With the fault it was checked for: the runtime keeps a pass to it.
-    return dict(EVIDENCE_CHECKER.check(media, complaint, component).as_dict(), component=component)
+    return dict(verdict.as_dict(), component=component)
 
 
-def _evidence_verdict(started: Optional[Tuple[Any, float]], conversation_id: str) -> Optional[Dict[str, Any]]:
+def _evidence_verdict(started: Optional[_EvidenceRun], conversation_id: str) -> Optional[Dict[str, Any]]:
     """The verdict as the turn carries it, or {"error": code} when the check
     could not be made: never a pass. Logged by outcome and code only; what
     Gemini wrote is customer content and never reaches the log."""
     if started is None:
         return None
-    future, deadline = started
-    done, _ = wait([future], timeout=max(0.0, deadline - time.monotonic()))
+    done, _ = wait([started.future], timeout=max(0.0, started.deadline - time.monotonic()))
     if not done:
+        # Nobody reads it now: no transcode and no request after this.
+        started.cancel.set()
         log.emit("evidence_check_skipped", conversation_id, error="timeout")
         return {"error": "timeout"}
+    future = started.future
     try:
         verdict = future.result()
     except evidence_check.EvidenceCheckError as exc:

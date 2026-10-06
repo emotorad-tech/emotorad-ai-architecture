@@ -61,6 +61,50 @@ class ObjectTests(unittest.TestCase):
         with self.assertRaises(StorageError):
             S3Store("b", client=c).head(KEY)
 
+    def test_copy_to_streams_the_object_into_a_file_in_parts(self):
+        # A 100 MB clip goes from the bucket to ffmpeg's file without being
+        # held in memory whole (the re-review of 6 October 2026).
+        import io
+
+        class Handle:
+            def __init__(self):
+                self.parts = []
+
+            def write(self, data):
+                self.parts.append(bytes(data))
+
+        c = client()
+        stub = Stubber(c)
+        stub.add_response("get_object", {"Body": io.BytesIO(b"abcdefghij" * 25)}, {"Bucket": "b", "Key": KEY})
+        stub.activate()
+        handle = Handle()
+        with mock.patch("emotorad_ai.storage.s3.COPY_CHUNK", 100):
+            written = S3Store("b", client=c).copy_to(KEY, handle)
+        self.assertEqual(written, 250)
+        self.assertEqual([len(part) for part in handle.parts], [100, 100, 50])
+        self.assertEqual(b"".join(handle.parts), b"abcdefghij" * 25)
+        stub.assert_no_pending_responses()
+
+    def test_copy_to_failing_is_a_storage_error_with_no_cause(self):
+        c = client()
+        stub = Stubber(c)
+        stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403,
+                              expected_params={"Bucket": "b", "Key": KEY})
+        stub.activate()
+        with self.assertRaises(StorageError) as raised:
+            S3Store("b", client=c).copy_to(KEY, mock.Mock())
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_copy_to_failing_mid_read_is_a_storage_error(self):
+        c = client()
+        body = mock.Mock()
+        body.read.side_effect = [b"abc", ConnectionResetError("reset by peer")]
+        with mock.patch.object(c, "get_object", return_value={"Body": body}):
+            with self.assertRaises(StorageError) as raised:
+                S3Store("b", client=c).copy_to(KEY, mock.Mock())
+        self.assertIsNone(raised.exception.__cause__)
+        body.close.assert_called_once_with()
+
     def test_get_and_put_bytes(self):
         import io
 

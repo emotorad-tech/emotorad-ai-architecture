@@ -22,19 +22,29 @@ A clip too big to send inline (most phone videos) is checked as a smaller
 copy with its sound, made with the bundled ffmpeg inside the check's deadline
 (fit_inline, round 2 of 6 October 2026). The copy lives only in the request:
 the customer's original is what is stored and attached to Zoho.
+
+The check stays inside the turn's wait and inside the server (the re-review
+of 6 October 2026): the API hands it the moment the turn stops waiting
+(`deadline_at`), and a `cancel` it sets when it gives up, so neither ffmpeg
+nor the request runs once nobody is waiting; at most TRANSCODE_SLOTS copies
+are made at a time, each ffmpeg on TRANSCODE_THREADS threads; and a clip
+still in the bucket (StoredClip) is streamed into ffmpeg's file, never held
+in memory whole.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import IO, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .guardrails import check_coverage_claim, check_safety_in_description, claims_deletion, claims_ticket
 from .observability import redact_pii
@@ -67,6 +77,19 @@ SHRINK_STEPS: Tuple[Tuple[int, int, str, str], ...] = ((480, 32, "700k", "1400k"
 # waits no longer than it does today. ffmpeg is stopped at the limit.
 SHRINK_SECONDS = 45.0
 SHRUNK_MIME = "video/mp4"
+# Less than this left of the turn's wait, and the request is not sent: no
+# answer comes back in time, and the customer's media would reach OpenRouter
+# for nobody to read.
+MIN_REQUEST_SECONDS = 1.0
+# Copies made at the same time across the server, and ffmpeg's threads for
+# each (decoding, the scale and encoding): a few customers sending phone
+# videos together must not stall every other chat or exhaust the container.
+# A turn that gets no slot within its shrink budget is `transcode_timeout`.
+TRANSCODE_SLOTS = 2
+TRANSCODE_THREADS = 2
+_TRANSCODE_SLOTS = threading.BoundedSemaphore(TRANSCODE_SLOTS)
+# How often a wait (for a slot, or for ffmpeg) looks at `cancel`.
+_POLL_SECONDS = 0.05
 # What Gemini says it saw, and what a better video would need, as stored,
 # logged, shown or put on a ticket: redacted first, then cut.
 TEXT_LIMIT = 200
@@ -171,6 +194,41 @@ class EvidenceVerdict:
                 "matches_complaint": self.matches_complaint, "seen": self.seen, "missing": self.missing}
 
 
+@dataclass(frozen=True)
+class StoredClip:
+    """A clip still in the media bucket: its size, and how to copy it into an
+    open file (S3Store.copy_to). A clip over the inline limit is streamed
+    straight into the file ffmpeg reads, so a 100 MB phone video is never
+    held in memory whole; one within the limit is read as it is sent."""
+
+    size: int
+    copy_to: Callable[[IO[bytes]], Any]
+
+
+# What a check is given for each photo or video: the bytes, or a clip still
+# in the bucket.
+Media = Union[bytes, StoredClip]
+
+
+def media_size(data: Media) -> int:
+    return data.size if isinstance(data, StoredClip) else len(data)
+
+
+def read_media(data: Media) -> bytes:
+    """The bytes, reading a clip still in the bucket."""
+    if isinstance(data, StoredClip):
+        buffer = io.BytesIO()
+        data.copy_to(buffer)
+        return buffer.getvalue()
+    return data
+
+
+def _stop_if(cancel: Optional[threading.Event]) -> None:
+    """The turn stopped waiting: nothing more is done for it."""
+    if cancel is not None and cancel.is_set():
+        raise EvidenceCheckError("cancelled")
+
+
 def clean_sentence(text: Any) -> str:
     """One line, redacted, then cut: before anything stores, logs or shows it."""
     if not isinstance(text, str):
@@ -226,27 +284,55 @@ def shrink_args(exe: str, source: str, target: str, step: Tuple[int, int, str, s
     size, never enlarged, both sides kept even for H.264. 8-bit 4:2:0 and
     BT.709 tags, so a 10-bit HDR iPhone clip becomes an ordinary one (colour
     accuracy is not needed). The first picture and the first sound only, and
-    no metadata: a phone writes where the clip was taken."""
+    no metadata: a phone writes where the clip was taken. Decoding, the scale
+    and encoding each on TRANSCODE_THREADS threads, not one per core."""
     short_side, crf, maxrate, bufsize = step
     scale = ("scale=w='trunc(iw*min(1,{s}/min(iw,ih))/2)*2':h='trunc(ih*min(1,{s}/min(iw,ih))/2)*2',"
              "format=yuv420p").format(s=int(short_side))
-    return [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source,
+    threads = str(TRANSCODE_THREADS)
+    return [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-filter_threads", threads,
+            "-threads", threads, "-i", source,
             "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
-            "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-vf", scale, "-threads", threads, "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-maxrate", maxrate, "-bufsize", bufsize, "-pix_fmt", "yuv420p",
             "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
             "-c:a", "aac", "-ac", "1", "-b:a", "64k", "-movflags", "+faststart", "-f", "mp4", target]
 
 
-def shrink_video(data: bytes, step: Tuple[int, int, str, str], *, timeout: float,
-                 ffmpeg: Optional[str] = None, suffix: str = ".mp4") -> bytes:
+def _run_ffmpeg(args: List[str], until: float, cancel: Optional[threading.Event]) -> int:
+    """ffmpeg's exit code. Killed, and the wait over, when `until` passes
+    (`transcode_timeout`) or the turn stops waiting (`cancelled`). Nothing it
+    prints is kept: its words name files."""
+    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        while True:
+            try:
+                return process.wait(timeout=max(0.0, min(_POLL_SECONDS, until - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
+            _stop_if(cancel)
+            if time.monotonic() >= until:
+                raise EvidenceCheckError("transcode_timeout")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def shrink_video(data: Media, step: Tuple[int, int, str, str], *, timeout: float,
+                 ffmpeg: Optional[str] = None, suffix: str = ".mp4",
+                 cancel: Optional[threading.Event] = None) -> bytes:
     """A smaller copy of a clip, made in a temporary folder that is deleted
-    afterwards, whatever happens. The original is only read. A copy that
+    afterwards, whatever happens. The original is only read; a clip still in
+    the bucket is streamed into the folder, never held in memory. A copy that
     cannot be made is `transcode_failed`, one that takes longer than
-    `timeout` is stopped and is `transcode_timeout`: either way a check
-    error, never a pass. ffmpeg's own words are never kept (they name files)."""
+    `timeout` (the copy into the folder included) is stopped and is
+    `transcode_timeout`, and one the turn stopped waiting for is `cancelled`:
+    each a check error, never a pass."""
     from . import video
 
+    until = time.monotonic() + timeout
     exe = ffmpeg or video.ffmpeg_exe()
     if not exe:
         raise EvidenceCheckError("transcode_failed")
@@ -257,15 +343,19 @@ def shrink_video(data: bytes, step: Tuple[int, int, str, str], *, timeout: float
             source = os.path.join(folder, "clip" + suffix)
             target = os.path.join(folder, "copy.mp4")
             with open(source, "wb") as handle:
-                handle.write(data)
-            # Stopped (killed) at the timeout, before the folder goes.
-            result = subprocess.run(shrink_args(exe, source, target, step), capture_output=True, timeout=timeout)
-            if result.returncode != 0 or not os.path.exists(target):
+                if isinstance(data, StoredClip):
+                    data.copy_to(handle)
+                else:
+                    handle.write(data)
+            _stop_if(cancel)
+            if time.monotonic() >= until:
+                raise EvidenceCheckError("transcode_timeout")
+            # Stopped (killed) at the timeout or the cancel, before the folder goes.
+            if _run_ffmpeg(shrink_args(exe, source, target, step), until, cancel) != 0 \
+                    or not os.path.exists(target):
                 raise EvidenceCheckError("transcode_failed")
             with open(target, "rb") as handle:
                 copy = handle.read()
-    except subprocess.TimeoutExpired:
-        raise EvidenceCheckError("transcode_timeout") from None
     except OSError:
         raise EvidenceCheckError("transcode_failed") from None
     if not copy:
@@ -277,36 +367,58 @@ def _suffix(mime: str) -> str:
     return {"video/quicktime": ".mov", "video/webm": ".webm"}.get(mime, ".mp4")
 
 
-def fit_inline(media: Sequence[Tuple[bytes, str, str]], limit: int, *, budget: float,
-               ffmpeg: Optional[str] = None) -> Tuple[List[Tuple[bytes, str, str]], bool]:
-    """The media as one request sends it, and whether a clip was shrunk.
+def _take_slot(slots: threading.BoundedSemaphore, until: float, cancel: Optional[threading.Event]) -> None:
+    """One of the server's TRANSCODE_SLOTS, waited for until `until`
+    (`transcode_timeout`) or the turn stops waiting (`cancelled`)."""
+    while not slots.acquire(timeout=max(0.0, min(_POLL_SECONDS, until - time.monotonic()))):
+        _stop_if(cancel)
+        if time.monotonic() >= until:
+            raise EvidenceCheckError("transcode_timeout")
 
-    Within the limit, everything goes as it is. Over it, every clip goes as a
-    smaller copy at the first step, then at the second (made from the first
-    copy: decoding the phone's original again is the slow part); still over,
-    `too_large`. A photo is never changed (the chat page already sends them at
-    1280 px), so photos alone over the limit are `too_large` at once. A copy
-    no smaller than its clip is not used. Every copy shares one `budget` of
-    seconds."""
+
+def fit_inline(media: Sequence[Tuple[Media, str, str]], limit: int, *, budget: float,
+               ffmpeg: Optional[str] = None,
+               cancel: Optional[threading.Event] = None) -> Tuple[List[Tuple[bytes, str, str]], bool]:
+    """The media as one request sends it, as bytes, and whether a clip was
+    shrunk.
+
+    Within the limit, everything goes as it is (a clip still in the bucket is
+    read). Over it, every clip goes as a smaller copy at the first step, then
+    at the second (made from the first copy: decoding the phone's original
+    again is the slow part); still over, `too_large`. A photo is never changed
+    (the chat page already sends them at 1280 px), so photos alone over the
+    limit are `too_large` at once. A copy no smaller than its clip is not
+    used. Waiting for a transcode slot and every copy share one `budget` of
+    seconds; the slot is held until the copies are made, and given back
+    whatever happens."""
     media = list(media)
-    if sum(len(data) for data, _, _ in media) <= limit:
-        return media, False
+    if sum(media_size(data) for data, _, _ in media) <= limit:
+        return [(read_media(data), mime, name) for data, mime, name in media], False
     clips = [n for n, (_, mime, _) in enumerate(media) if mime.startswith("video/")]
-    if not clips or sum(len(data) for n, (data, _, _) in enumerate(media) if n not in clips) > limit:
+    if not clips or sum(media_size(data) for n, (data, _, _) in enumerate(media) if n not in clips) > limit:
         raise EvidenceCheckError("too_large")
-    started = time.monotonic()
-    sent = media
-    for step in SHRINK_STEPS:
-        sent = list(sent)
-        for n in clips:
-            data, mime, name = sent[n]
-            copy = shrink_video(data, step, timeout=budget - (time.monotonic() - started), ffmpeg=ffmpeg,
-                                suffix=_suffix(mime))
-            if len(copy) < len(data):
-                sent[n] = (copy, SHRUNK_MIME, name)
-        if sum(len(data) for data, _, _ in sent) <= limit:
-            return sent, True
-    raise EvidenceCheckError("too_large")
+    until = time.monotonic() + budget
+    slot = _TRANSCODE_SLOTS
+    _take_slot(slot, until, cancel)
+    try:
+        sent = media
+        for step in SHRINK_STEPS:
+            sent = list(sent)
+            for n in clips:
+                _stop_if(cancel)
+                data, mime, name = sent[n]
+                copy = shrink_video(data, step, timeout=until - time.monotonic(), ffmpeg=ffmpeg,
+                                    suffix=_suffix(mime), cancel=cancel)
+                if len(copy) < media_size(data):
+                    sent[n] = (copy, SHRUNK_MIME, name)
+            if sum(media_size(data) for data, _, _ in sent) <= limit:
+                break
+        else:
+            raise EvidenceCheckError("too_large")
+    finally:
+        slot.release()
+    # A clip whose copy was no smaller is read only now, within the limit.
+    return [(read_media(data), mime, name) for data, mime, name in sent], True
 
 
 class OpenRouterEvidenceChecker:
@@ -341,24 +453,42 @@ class OpenRouterEvidenceChecker:
         # The billed usage of the last check, for the caller to log.
         self.last_usage: Optional[Dict[str, Any]] = None
 
-    def check(self, media: Sequence[Tuple[bytes, str, str]], complaint: str, component: str) -> EvidenceVerdict:
-        """Whether the media (bytes, mime, name) shows the problem described."""
+    def check(self, media: Sequence[Tuple[Media, str, str]], complaint: str, component: str, *,
+              deadline_at: Optional[float] = None, cancel: Optional[threading.Event] = None) -> EvidenceVerdict:
+        """Whether the media (bytes or a StoredClip, mime, name) shows the
+        problem described.
+
+        `deadline_at` is when the caller stops waiting (time.monotonic()): the
+        API's turn, whose wait starts before the clips are read. The check
+        ends by then or by its own deadline, whichever is first: the shrink
+        takes at most half of what is left, the request the rest, and with
+        less than MIN_REQUEST_SECONDS left the request is not sent
+        (`timeout`). Once `cancel` is set, nothing more is done (`cancelled`):
+        ffmpeg is stopped and nothing is sent."""
         from .llm import from_openai_response
         from .openrouter import CHAT_PATH, OpenRouterError
 
-        started = time.monotonic()
+        ends = time.monotonic() + self.deadline_seconds
+        if deadline_at is not None:
+            ends = min(ends, deadline_at)
         if component not in COMPONENTS:
             raise EvidenceCheckError("bad_component")
         if not media:
             raise EvidenceCheckError("no_media")
+        _stop_if(cancel)
         # A clip over the limit goes as a smaller copy, which lives only in
         # this request: the customer's original is what is stored and sent
         # to Zoho, and the copy is never logged or kept.
-        media, shrunk = fit_inline(media, self.inline_limit, budget=self.shrink_budget, ffmpeg=self.ffmpeg)
-        # After a shrink, the request has what is left of the deadline.
+        budget = min(self.shrink_budget, (ends - time.monotonic()) / 2)
+        media, shrunk = fit_inline(media, self.inline_limit, budget=budget, ffmpeg=self.ffmpeg, cancel=cancel)
+        _stop_if(cancel)
+        # The request has what is left of the deadline; with no caller's
+        # deadline and nothing done first, the whole of its own.
         timeout = self.deadline_seconds
-        if shrunk:
-            timeout = max(1.0, self.deadline_seconds - (time.monotonic() - started))
+        if shrunk or deadline_at is not None:
+            timeout = ends - time.monotonic()
+            if timeout < MIN_REQUEST_SECONDS:
+                raise EvidenceCheckError("timeout")
         # Angle brackets go, so the complaint cannot close its own tag.
         said = complaint_from([complaint]).replace("<", "(").replace(">", ")")
         content: list = [

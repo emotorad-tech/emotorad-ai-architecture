@@ -18,7 +18,13 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from emotorad_ai.contract import Reply
-from emotorad_ai.evidence_check import INLINE_LIMIT, EvidenceCheckError, EvidenceVerdict, OpenRouterEvidenceChecker
+from emotorad_ai.evidence_check import (
+    INLINE_LIMIT,
+    EvidenceCheckError,
+    EvidenceVerdict,
+    OpenRouterEvidenceChecker,
+    read_media,
+)
 from tests.test_api_media_persistence import jpeg_data_url
 from tests.test_evidence_shrink import FFMPEG, FakeTransport, make_clip, probe, stream
 from tests.test_api_photo_check import FakeChecker as FakePhotoChecker
@@ -33,15 +39,21 @@ FAIL = EvidenceVerdict(shows_part=True, fault_visible=False, matches_complaint=F
 class FakeEvidenceChecker:
     provider = "openrouter"
 
-    def __init__(self, verdict=PASS, error=None, delay=0.0):
+    def __init__(self, verdict=PASS, error=None, delay=0.0, until_cancelled=0.0):
         self.verdict, self.error, self.delay = verdict, error, delay
+        # Works until the turn gives up (its cancel), for at most this long.
+        self.until_cancelled = until_cancelled
         self.calls = []
 
-    def check(self, media, complaint, component):
-        self.calls.append({"media": [(len(data), mime) for data, mime, _ in media], "complaint": complaint,
-                           "component": component})
+    def check(self, media, complaint, component, deadline_at=None, cancel=None):
+        # As the real checker does: a clip still in the bucket is read.
+        self.calls.append({"media": [(len(read_media(data)), mime) for data, mime, _ in media],
+                           "complaint": complaint, "component": component, "deadline_at": deadline_at,
+                           "cancel": cancel})
         if self.delay:
             time.sleep(self.delay)
+        if self.until_cancelled:
+            cancel.wait(self.until_cancelled)
         if self.error is not None:
             raise self.error
         return self.verdict
@@ -49,6 +61,17 @@ class FakeEvidenceChecker:
 
 def photo():
     return {"kind": "image", "url": jpeg_data_url()}
+
+
+def soon(condition, seconds=2.0):
+    """Whether `condition()` holds within `seconds`: the check runs on its
+    own thread, and may not have started when the turn returns."""
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return bool(condition())
 
 
 class SlowSummariser(_Summariser):
@@ -252,6 +275,76 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.5)
         self.assertEqual(self.verdict(message), {"error": "timeout"})
 
+    def test_the_check_is_given_the_turns_deadline(self):
+        # The turn's wait starts before the clip is read from the bucket, so
+        # the checker is told when it ends (the re-review of 6 October 2026).
+        self.route()
+        video = self.upload()
+        with mock.patch.object(self.api, "VIDEO_SUMMARY_SECONDS", 3.0):
+            started = time.monotonic()
+            self.post(attachments=[{"upload_id": video["upload_id"]}])
+            finished = time.monotonic()
+        deadline_at = self.checker.calls[0]["deadline_at"]
+        self.assertGreaterEqual(deadline_at, started + 3.0)
+        self.assertLessEqual(deadline_at, finished + 3.0)
+
+    def test_a_photos_check_is_given_the_photo_checks_deadline(self):
+        self.route()
+        with mock.patch.object(self.api, "PHOTO_CHECK_DEADLINE_SECONDS", 2.0):
+            started = time.monotonic()
+            self.post()
+            finished = time.monotonic()
+        deadline_at = self.checker.calls[0]["deadline_at"]
+        self.assertGreaterEqual(deadline_at, started + 2.0)
+        self.assertLessEqual(deadline_at, finished + 2.0)
+
+    def test_a_turn_that_stops_waiting_tells_the_check_to_stop(self):
+        self.checker.until_cancelled = 3.0
+        self.route()
+        with mock.patch.object(self.api, "PHOTO_CHECK_DEADLINE_SECONDS", 0.2):
+            started = time.monotonic()
+            message = self.post()
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(self.verdict(message), {"error": "timeout"})
+        self.assertTrue(self.checker.calls[0]["cancel"].is_set())
+
+    def test_a_check_that_answers_in_time_is_not_told_to_stop(self):
+        self.route()
+        self.post()
+        self.assertFalse(self.checker.calls[0]["cancel"].is_set())
+
+    def test_a_turn_that_fails_after_the_check_started_tells_it_to_stop(self):
+        class Broken(_Summariser):
+            def summarise(self, data, mime, name="video"):
+                raise RuntimeError("the summariser broke")
+
+        self.api.VIDEO_SUMMARISER = Broken()
+        self.checker.until_cancelled = 3.0
+        self.route()
+        video = self.upload()
+        client = TestClient(self.api.app, raise_server_exceptions=False)
+        r = client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya", "text": "here",
+                                          "attachments": [{"upload_id": video["upload_id"]}]})
+        self.assertEqual(r.status_code, 500)
+        self.assertTrue(soon(lambda: self.checker.calls))
+        self.assertTrue(soon(lambda: self.checker.calls[0]["cancel"].is_set()))
+
+    def test_an_uploaded_clip_reaches_the_checker_still_in_the_bucket(self):
+        # Streamed by the checker when it is shrunk, never all read at once
+        # here (the re-review of 6 October 2026).
+        self.route()
+        video = self.upload(size=INLINE_LIMIT + 1)
+        loads = []
+        real = self.checker.check
+
+        def check(media, complaint, component, **kwargs):
+            loads.extend(type(data).__name__ for data, _, _ in media)
+            return real(media, complaint, component, **kwargs)
+
+        self.checker.check = check
+        self.post(attachments=[{"upload_id": video["upload_id"]}, photo()])
+        self.assertEqual(loads, ["StoredClip", "bytes"])
+
     def test_it_runs_beside_the_video_summary(self):
         self.api.VIDEO_SUMMARISER = SlowSummariser(delay=0.5)
         self.checker.delay = 0.5
@@ -351,6 +444,13 @@ class SafetyDoesNotWaitTests(unittest.TestCase):
         self.assertNotIn("evidence_verdict", message.entry_metadata)
         self.assertTrue(message.attachments[0].summary)
 
+    def test_a_check_dropped_for_a_safety_report_is_told_to_stop(self):
+        self.checker.delay, self.checker.until_cancelled = 0.0, 3.0
+        self.api.PHOTO_CHECKER = FakePhotoChecker(answers=(["swelling"],))
+        self.post("here is the battery", [photo()])
+        self.assertTrue(soon(lambda: self.checker.calls))
+        self.assertTrue(soon(lambda: self.checker.calls[0]["cancel"].is_set()))
+
     def test_a_clip_whose_description_names_a_hazard_is_not_held(self):
         self.api.VIDEO_SUMMARISER = _Summariser("Smoke rises from the battery pack while it charges.")
         video = self.upload()
@@ -371,11 +471,18 @@ class _ClipStore(_Store):
 
     def __init__(self):
         super().__init__()
-        self.data, self.puts = {}, []
+        self.data, self.puts, self.streamed = {}, [], []
 
     def get_bytes(self, key):
         self.fetched.append(key)
         return self.data.get(key, b"\x89PNG fake")
+
+    def copy_to(self, key, handle):
+        """S3Store.copy_to: the object written into a file in parts."""
+        self.streamed.append(key)
+        data = self.data.get(key, b"\x89PNG fake")
+        for start in range(0, len(data), 65536):
+            handle.write(data[start:start + 65536])
 
     def put_bytes(self, key, data, mime):
         self.puts.append((key, len(data), mime))
@@ -448,6 +555,40 @@ class ShrinkAtIngestTests(unittest.TestCase):
         logged = repr(self.api.log.events)
         self.assertNotIn(base64.b64encode(sent[:60]).decode()[:40], logged)
         self.assertNotIn(str(len(sent)), logged)
+
+    def test_the_clip_is_streamed_from_the_bucket_into_the_shrink(self):
+        message, key = self.send_clip()
+        self.assertEqual(message.entry_metadata["evidence_verdict"]["passed"], True)
+        self.assertEqual((self.store.streamed, self.store.fetched), ([key], []))
+
+    def test_a_safety_report_stops_the_shrink_and_nothing_is_sent(self):
+        # The turn drops its wait for a safety report; the copy that would
+        # have been made 0.6 s later never reaches OpenRouter.
+        self.api.VIDEO_SUMMARISER = _Summariser("Smoke rises from the battery pack while it charges.")
+        slow = self.fake_ffmpeg("slow", 'sleep 0.6; for a; do out="$a"; done; head -c 100 /dev/zero > "$out"')
+        started = time.monotonic()
+        message, _ = self.send_clip(ffmpeg=slow)
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertNotIn("evidence_verdict", message.entry_metadata)
+        time.sleep(1.2)
+        self.assertEqual(self.transport.posts, [])
+
+    def test_a_turn_that_stopped_waiting_sends_nothing_later(self):
+        # The turn waits 0.5 s; the copy would be ready at 0.8 s. Nothing is
+        # sent after the turn has stopped waiting.
+        slow = self.fake_ffmpeg("slower", 'sleep 0.8; for a; do out="$a"; done; head -c 100 /dev/zero > "$out"')
+        with mock.patch.object(self.api, "VIDEO_SUMMARY_SECONDS", 0.5):
+            message, _ = self.send_clip(ffmpeg=slow)
+        self.assertIn("error", message.entry_metadata["evidence_verdict"])
+        time.sleep(1.2)
+        self.assertEqual(self.transport.posts, [])
+
+    def fake_ffmpeg(self, name, body):
+        path = os.path.join(self.folder.name, "ffmpeg-" + name)
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(path, 0o755)
+        return path
 
     def test_a_shrink_that_fails_reaches_the_turn_as_not_checked(self):
         failing = os.path.join(self.folder.name, "ffmpeg-fails")
