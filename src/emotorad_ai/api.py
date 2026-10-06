@@ -561,6 +561,9 @@ def health() -> dict:
         # Where proved numbers outlive a restart: memory, mongodb, or memory
         # and why (wiring.build_stores: no TTL index, no saving).
         "verification_sessions": stores.verified_sessions_status,
+        # Where the chat socket's receipts are kept: memory, mongodb, or
+        # memory and why (wiring.build_stores: their indexes missing).
+        "amiigo_receipts": stores.amiigo_receipts_status,
         # Whether Amiigo access tokens can be checked: on, or not configured.
         "amiigo_tokens": "on" if AMIIGO_TOKENS.enabled else "not configured",
         # Whether Zoho Desk can tell us a ticket closed: on, not configured,

@@ -69,7 +69,7 @@ from emotorad_ai.stores.mongo import (
     MongoConversationStore,
     ensure_indexes,
 )
-from emotorad_ai.wiring import build_stores
+from emotorad_ai.wiring import RECEIPTS_INDEX_UNREADABLE, RECEIPTS_INDEXES_MISSING, build_stores
 from tests.amiigo_tokens import RIDER_PHONE, Keypair
 from tests.clock import mongomock_clock_at
 from tests.test_api_health import zoho_blank
@@ -1946,7 +1946,9 @@ class WiringTests(unittest.TestCase):
         return [e for e in log.events if e["event"] == "amiigo_receipts_ttl_missing"]
 
     def test_memory_gives_in_memory_receipts(self):
-        self.assertIsInstance(build_stores(Settings(store="memory")).amiigo_receipts, InMemoryAmiigoReceipts)
+        stores = build_stores(Settings(store="memory"))
+        self.assertIsInstance(stores.amiigo_receipts, InMemoryAmiigoReceipts)
+        self.assertEqual(stores.amiigo_receipts_status, "memory")
 
     def test_mongodb_gives_mongodb_receipts_once_their_ttl_index_exists(self):
         client = mongomock.MongoClient()
@@ -1954,7 +1956,27 @@ class WiringTests(unittest.TestCase):
         log = EventLog(path=None)
         stores = build_stores(Settings(store="mongodb"), log=log, client=client)
         self.assertIsInstance(stores.amiigo_receipts, MongoAmiigoReceipts)
+        self.assertEqual(stores.amiigo_receipts_status, "mongodb")
         self.assertEqual(self.missing(log), [])
+
+    def test_receipts_that_cannot_check_their_indexes_stay_in_memory_and_say_so(self):
+        client = mongomock.MongoClient()
+        ensure_indexes(client["emotorad_ai"])
+        down = StoreUnavailable("MongoDB index_information failed")
+        with mock.patch.object(MongoAmiigoReceipts, "has_indexes", side_effect=down), \
+                self.assertLogs("emotorad_ai.wiring", level="ERROR"):
+            stores = build_stores(Settings(store="mongodb"), log=EventLog(path=None), client=client)
+        self.assertIsInstance(stores.amiigo_receipts, InMemoryAmiigoReceipts)
+        self.assertEqual(stores.amiigo_receipts_status, RECEIPTS_INDEX_UNREADABLE)
+
+    def test_health_says_where_receipts_are_kept(self):
+        # The final review's Minor 6, beside verification_sessions.
+        with mock.patch.object(auth_module, "_not_configured_logged", True):
+            api = fresh_api()
+        self.assertEqual(api.health()["amiigo_receipts"], "memory")
+        with mock.patch.object(api.stores, "amiigo_receipts_status", RECEIPTS_INDEXES_MISSING):
+            self.assertEqual(api.health()["amiigo_receipts"], RECEIPTS_INDEXES_MISSING)
+        self.assertTrue(RECEIPTS_INDEXES_MISSING.startswith("memory: indexes missing"))
 
     def test_without_the_ttl_index_receipts_stay_in_memory_and_it_says_so(self):
         client = mongomock.MongoClient()
@@ -1962,6 +1984,7 @@ class WiringTests(unittest.TestCase):
         with self.assertLogs("emotorad_ai.wiring", level="ERROR") as logged:
             stores = build_stores(Settings(store="mongodb"), log=log, client=client)
         self.assertIsInstance(stores.amiigo_receipts, InMemoryAmiigoReceipts)
+        self.assertEqual(stores.amiigo_receipts_status, RECEIPTS_INDEXES_MISSING)
         [event] = self.missing(log)
         self.assertEqual(event["level"], "error")
         self.assertIn("amiigo_receipts_ttl_missing", "\n".join(logged.output))

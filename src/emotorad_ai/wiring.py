@@ -25,6 +25,14 @@ SESSIONS_MONGODB = "mongodb"
 # before 2026-10-06) because a saved one might never be removed.
 SESSIONS_TTL_MISSING = "memory: TTL index missing, run scripts/mongo_setup.py"
 SESSIONS_INDEX_UNREADABLE = "memory: TTL index could not be checked"
+# The /health "amiigo_receipts" values (the final review's Minor 6): where the
+# chat socket's receipts are kept. MongoDB is the store, but receipts stay in
+# this process's memory (a restart forgets which messages were answered)
+# until both their indexes exist.
+RECEIPTS_MEMORY = "memory"
+RECEIPTS_MONGODB = "mongodb"
+RECEIPTS_INDEXES_MISSING = "memory: indexes missing, run scripts/mongo_setup.py"
+RECEIPTS_INDEX_UNREADABLE = "memory: indexes could not be checked"
 
 
 @dataclass
@@ -65,6 +73,8 @@ class Stores:
     # The chat socket's receipts (amiigo/receipts.py): a rider's message is
     # handled once, however often it is sent, for 24 hours.
     amiigo_receipts: Any = None
+    # Where they are kept, for /health (RECEIPTS_*).
+    amiigo_receipts_status: str = RECEIPTS_MEMORY
 
 
 def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Stores:
@@ -92,38 +102,41 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
 
     db = connect(db_name=settings.mongo_db, client=client)
     sessions, sessions_status = _verified_sessions(MongoVerifiedSessions(db), log)
+    receipts, receipts_status = _amiigo_receipts(MongoAmiigoReceipts(db), log)
     return Stores(
         conversations=MongoConversationStore(db, state_ttl_hours=settings.state_ttl_hours, log=log),
         idempotency=MongoIdempotencyStore(db, ttl_days=settings.idempotency_ttl_days),
         tickets=MongoTicketStore(db),
         verified_sessions=sessions,
         verified_sessions_status=sessions_status,
-        amiigo_receipts=_amiigo_receipts(MongoAmiigoReceipts(db), log),
+        amiigo_receipts=receipts,
+        amiigo_receipts_status=receipts_status,
     )
 
 
-def _amiigo_receipts(mongo: Any, log: Any) -> Any:
+def _amiigo_receipts(mongo: Any, log: Any) -> Tuple[Any, str]:
     """MongoDB's receipts only when both their indexes exist, as the
     proved numbers (`_verified_sessions`): without the TTL index a receipt,
     which names the rider's phone in its id, would never be removed, and
     without the one-processing index a conversation is not held busy across
     servers. Until a person runs mongo_setup.py and restarts, receipts stay
     in this process's memory (a restart forgets which messages were
-    answered), and `amiigo_receipts_ttl_missing` is logged at error level."""
+    answered), `amiigo_receipts_ttl_missing` is logged at error level, and
+    /health says which (`amiigo_receipts`, RECEIPTS_*)."""
     from .conversation import StoreUnavailable
 
     error = None
     try:
         if mongo.has_indexes():
-            return mongo
-        status = "indexes_missing"
+            return mongo, RECEIPTS_MONGODB
+        status, shown = "indexes_missing", RECEIPTS_INDEXES_MISSING
     except StoreUnavailable as exc:
-        status, error = "index_unreadable", type(exc).__name__
+        status, shown, error = "index_unreadable", RECEIPTS_INDEX_UNREADABLE, type(exc).__name__
     _logger.error("amiigo_receipts_ttl_missing: %s", status)
     if log is not None:
         fields = {"error": error} if error else {}
         log.emit("amiigo_receipts_ttl_missing", "amiigo_receipts", level="error", reason=status, **fields)
-    return InMemoryAmiigoReceipts()
+    return InMemoryAmiigoReceipts(), shown
 
 
 def _verified_sessions(mongo: Any, log: Any) -> Tuple[Any, str]:
