@@ -117,6 +117,13 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertEqual(self.checker.calls[0]["component"], "battery")
         self.assertEqual(self.verdict(message)["passed"], True)
 
+    def test_a_chat_that_named_the_fault_before_any_agent_is_checked(self):
+        # "My motor grinds, connect me to a person" asked for a video; the
+        # video that follows says nothing about the motor (the review).
+        self.api.stores.conversations.get("c1").fault_topic = "motor"
+        self.post(text="here it is")
+        self.assertEqual(self.checker.calls[0]["component"], "motor")
+
     def test_nothing_is_written_outside_the_turn(self):
         self.post(text="my battery won't charge, photo attached", cid="c-new")
         self.assertIsNone(self.api.stores.conversations.peek("c-new"))

@@ -79,8 +79,10 @@ class EvidenceChat:
         if routed:
             self.conversations.get("c1").route_to(routed)
 
-    def say(self, text, verdict=None, attachments=(), identity=RIDER):
+    def say(self, text, verdict=None, attachments=(), identity=RIDER, pill=None):
         meta = {"evidence_verdict": dict(verdict)} if verdict is not None else {}
+        if pill:
+            meta["pill_clicked"] = pill
         return self.runtime.handle(InboundMessage(
             conversation_id="c1", persona="customer", channel="website_chat", message_text=text,
             identity=identity, attachments=[Attachment(**a) for a in attachments], entry_metadata=meta,
@@ -445,6 +447,72 @@ class MergeTests(unittest.TestCase):
         merged = chat.runtime._merge_onto_fresh(
             ours, [], Reply(conversation_id="c1", text="ok", handled_by="battery_support"), loaded=loaded)
         self.assertTrue(merged.evidence_verdict["passed"])
+
+
+class FaultChatForTheRunTests(unittest.TestCase):
+    """A fault chat stays one for the run (the review of 6 October 2026): the
+    navigation that clears the agent and the topic does not open the handover."""
+
+    def test_start_over_then_talk_to_a_person_still_waits_for_evidence(self):
+        chat = EvidenceChat()
+        chat.say("start over")
+        self.assertIsNone(chat.state().agent)
+        reply = chat.say("I want to talk to a person")
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertTrue(chat.no_ticket_anywhere())
+        self.assertEqual(chat.llm.requests, [])
+
+    def test_a_first_message_naming_the_fault_and_asking_for_a_person_waits(self):
+        chat = EvidenceChat(routed=None)
+        reply = chat.say("my battery won't charge, I want to talk to a person")
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertTrue(chat.no_ticket_anywhere())
+        self.assertEqual(chat.llm.requests, [])
+        self.assertTrue(is_fault_chat(chat.state()))
+        passed = chat.say("here is the video, now I want to talk to a person", PASS, [VIDEO])
+        (record,) = chat.records()
+        self.assertEqual((record["kind"], record["evidence_check"]), ("handover", SEEN))
+        self.assertTrue(passed.escalated)
+
+    def test_a_pill_naming_the_fault_with_a_request_for_a_person_waits(self):
+        chat = EvidenceChat(routed=None)
+        reply = chat.say("talk to a person", pill="battery_issue")
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertTrue(chat.no_ticket_anywhere())
+
+    def test_with_zoho_off_a_first_message_naming_the_fault_waits_too(self):
+        chat = EvidenceChat(routed=None, zoho=False)
+        reply = chat.say("the motor makes a grinding noise, connect me to a person")
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertFalse(reply.escalated)
+
+    def test_a_number_typed_for_a_waiting_handover_records_nothing_without_evidence(self):
+        chat = EvidenceChat()
+        chat.state().awaiting_callback = "handover"
+        reply = chat.say("9999999999", identity=Identity(strength=ANONYMOUS, em_aid="aid-1"))
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertTrue(chat.no_ticket_anywhere())
+        self.assertIsNone(chat.state().awaiting_callback)
+        self.assertEqual(chat.state().typed_number, "9999999999")
+        self.assertNotIn("9999999999", repr(chat.state().history))
+
+    def test_a_number_typed_with_the_fault_after_a_plain_request_records_nothing(self):
+        chat = EvidenceChat(routed=None)
+        anonymous = Identity(strength=ANONYMOUS, em_aid="aid-1")
+        chat.say("talk to a person", identity=anonymous)
+        self.assertEqual(chat.state().awaiting_callback, "handover")
+        reply = chat.say("9999999999, my battery won't charge", identity=anonymous)
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertTrue(chat.no_ticket_anywhere())
+
+    def test_a_registration_chat_with_a_battery_topic_records_the_handover_as_today(self):
+        chat = EvidenceChat(routed="late_warranty")
+        chat.state().pending_topic = "battery"
+        reply = chat.say("I want to talk to a person")
+        (record,) = chat.records()
+        self.assertEqual(record["kind"], "handover")
+        self.assertTrue(reply.escalated)
+        self.assertNotEqual(reply.metadata.get("handover"), "evidence_needed")
 
 
 class AnonymousTests(unittest.TestCase):

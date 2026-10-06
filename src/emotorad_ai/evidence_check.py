@@ -255,15 +255,20 @@ def verdict_passed(verdict: Optional[Mapping[str, Any]]) -> bool:
 
 def fault_component(state: Any) -> Optional[str]:
     """"battery" or "motor" when the conversation is about a bike fault, else
-    None: routed to the battery or motor agent, or triage has classified the
-    issue as battery or motor while the bike is chosen."""
+    None. While an agent is routed, the agent decides: the battery or motor
+    agent is a fault chat, any other (late registration with a battery topic
+    left over) is not. With none routed, triage's topic while the bike is
+    chosen, failing that the fault the run was last about (`fault_topic`),
+    which going back to the list or another number never clears."""
     if state is None:
         return None
-    by_agent = FAULT_AGENTS.get(getattr(state, "agent", None) or "")
-    if by_agent:
-        return by_agent
-    topic = getattr(state, "pending_topic", None)
-    return topic if topic in COMPONENTS else None
+    agent = getattr(state, "agent", None)
+    if agent:
+        return FAULT_AGENTS.get(agent)
+    for topic in (getattr(state, "pending_topic", None), getattr(state, "fault_topic", None)):
+        if topic in COMPONENTS:
+            return topic
+    return None
 
 
 def is_fault_chat(state: Any) -> bool:

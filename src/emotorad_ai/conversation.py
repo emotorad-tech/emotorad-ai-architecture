@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from . import erasure as erasure_rules
 from .attachments import MACHINE_TEXT_PREFIXES
 from .contract import InboundMessage, Reply
+from .evidence_check import FAULT_AGENTS
 from .observability import redact_pii
 
 # Phases. A conversation moves forward through these, and can move back — a
@@ -109,6 +110,12 @@ class ConversationState:
     # earns one extra ask.
     evidence_verdict: Optional[Dict[str, Any]] = None
     evidence_check_errors: int = 0
+    # The bike fault this run was last about, "battery" or "motor"
+    # (evidence_check.fault_component): set when the chat is routed to the
+    # battery or motor agent, or a request for a person names the fault, and
+    # kept for the run. Going back to the list or to another number clears the
+    # agent and the topic, never this: only a new run (restart_for) does.
+    fault_topic: Optional[str] = None
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool
@@ -271,6 +278,7 @@ class ConversationState:
 
     def route_to(self, agent: str) -> None:
         self.agent = agent
+        self.fault_topic = FAULT_AGENTS.get(agent, self.fault_topic)
         self.move_to(ROUTED, agent)
 
     def hand_back(self, reason: str) -> None:

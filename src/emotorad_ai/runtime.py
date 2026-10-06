@@ -126,6 +126,7 @@ from .navigation import (
 )
 from .observability import EventLog
 from .evidence_asks import MAX_EVIDENCE_ASKS, added_line, asks_for_media, declines_video
+from .evidence_check import COMPONENTS as FAULT_COMPONENTS
 from .evidence_check import (
     EVIDENCE_HANDOVER_TEXT,
     EVIDENCE_HANDOVER_TEXT_HI,
@@ -164,7 +165,15 @@ from .tickets.caps import CAP_TEXTS, cap_reached
 from .tickets.clock import now_iso, parse, plus
 from .tickets.kinds import is_desk_reference, is_urgent
 from .tickets.record import GONE
-from .triage import TriageAgent, bike_ref, unlisted_as_bike, unlisted_context, which_bike_text
+from .triage import (
+    TriageAgent,
+    bike_ref,
+    classify_issue,
+    topic_from_pill,
+    unlisted_as_bike,
+    unlisted_context,
+    which_bike_text,
+)
 from .verify_first import (
     CODE,
     CONFIRMED,
@@ -1354,6 +1363,13 @@ class Runtime:
             self.log.emit("handover_ticket_not_recorded", cid, why="ticket_gone")
             return self._finish(shown, state, HANDOVER_GONE_MESSAGE, "guardrail:callback:not_recorded",
                                 metadata=dict(metadata, why="ticket_gone"))
+        if waiting == "handover" and self._handover_needs_evidence(message, state):
+            # A fault chat with nothing that passed the evidence check: the
+            # number records no handover ticket either (the review of 6
+            # October 2026). The wait ends; the number is kept, hidden, for
+            # the handover once evidence passes.
+            self._end_wait(cid, state, "evidence_needed")
+            return self._evidence_before_handover(shown, state, metadata)
         if waiting == "safety":
             recorded = self._record_ticket(
                 message, state, resolved, kind="safety", purpose=PURPOSE_SAFETY, phone=phone, verified=False,
@@ -1477,7 +1493,7 @@ class Runtime:
             self.log.guardrail(message.conversation_id, "human_handoff", handoff.matched)
             if resolved.persona == "customer" and self._desk_store() is not None:
                 return {"reply": self._handover_ticket(message, state, resolved, handoff.matched)}
-            if resolved.persona == "customer" and self._needs_evidence(state):
+            if resolved.persona == "customer" and self._handover_needs_evidence(message, state):
                 # A fault chat with nothing that passed the evidence check: no
                 # hand-over yet, with Zoho off as with it on.
                 return {"reply": self._evidence_before_handover(message, state, {"matched": handoff.matched})}
@@ -1527,7 +1543,7 @@ class Runtime:
             self.log.emit("handover_ticket_not_recorded", cid, why="ticket_gone")
             return self._finish(shown, state, HANDOVER_GONE_MESSAGE, "guardrail:human_handoff",
                                 metadata=dict(metadata, handover="ticket_gone"))
-        if self._needs_evidence(state):
+        if self._handover_needs_evidence(message, state):
             # A fault chat: no handover ticket until evidence has passed the
             # check (the person's brief, 6 October 2026). A ticket the run
             # already holds took the note above, as before.
@@ -2971,6 +2987,22 @@ class Runtime:
     def _needs_evidence(self, state: ConversationState) -> bool:
         """A fault chat with the check on and nothing that passed it."""
         return self._evidence_gated(state) and not verdict_passed(state.evidence_verdict)
+
+    def _handover_needs_evidence(self, message: InboundMessage, state: ConversationState) -> bool:
+        """Whether "talk to a person" (or the number it waited for) must wait
+        for evidence: a fault chat with nothing that passed the check. Before
+        any agent is routed, a message whose pill or words name the battery or
+        the motor makes the chat a fault chat, as api._evidence_subject reads
+        the same message for its media, and it stays one for the run, so the
+        video asked for next is checked."""
+        if not self.evidence_check:
+            return False
+        if state.agent is None and not is_fault_chat(state):
+            topic = (topic_from_pill(message.entry_metadata.get("pill_clicked"))
+                     or classify_issue(message.message_text or ""))
+            if topic in FAULT_COMPONENTS:
+                state.fault_topic = topic
+        return self._needs_evidence(state)
 
     def _ask_limit(self, state: ConversationState) -> int:
         """Asks with nothing back before the end: three, and one more once a

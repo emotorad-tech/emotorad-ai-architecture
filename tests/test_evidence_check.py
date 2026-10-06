@@ -300,6 +300,38 @@ class FaultChatTests(unittest.TestCase):
 
         self.assertEqual(FAULT_AGENTS, {BATTERY: "battery", MOTOR: "motor"})
 
+    def test_a_registration_chat_with_a_battery_topic_is_not_a_fault_chat(self):
+        # verify_first keeps "my battery won't charge" as the topic; a number
+        # with no warranty record then routes to registration (the review).
+        state = ConversationState(conversation_id="c1", pending_topic="battery")
+        state.route_to("late_warranty")
+        self.assertFalse(is_fault_chat(state))
+        self.assertIsNone(fault_component(state))
+
+    def test_a_fault_chat_stays_one_for_the_run(self):
+        # "Start over" and "change number" clear the agent and the topic.
+        state = ConversationState(conversation_id="c1", selected_frame="F1", pending_topic="battery")
+        state.route_to("battery_support")
+        state.forget_bike()
+        state.pending_topic = None
+        self.assertEqual(fault_component(state), "battery")
+        state.route_to("motor_support")
+        state.hand_back("resolved")
+        self.assertEqual(fault_component(state), "motor")
+
+    def test_routed_to_an_agent_that_is_not_a_fault_agent_it_is_not_one_for_now(self):
+        state = ConversationState(conversation_id="c1")
+        state.route_to("battery_support")
+        state.hand_back("other")
+        state.route_to("late_warranty")
+        self.assertFalse(is_fault_chat(state))
+
+    def test_only_a_new_run_ends_it(self):
+        state = ConversationState(conversation_id="c1", turns=2)
+        state.route_to("motor_support")
+        state.restart_for("someone-else", "2026-10-06T09:00:00+00:00")
+        self.assertFalse(is_fault_chat(state))
+
     def test_anything_else_is_not(self):
         late = ConversationState(conversation_id="c1")
         late.route_to("late_warranty")
