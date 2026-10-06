@@ -18,11 +18,12 @@ media bucket, the log, the clock and the limiters) is one `AmiigoContext` on
 
 from __future__ import annotations
 
+import threading
 import time
 import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request
 from starlette.datastructures import MutableHeaders
@@ -59,6 +60,9 @@ MESSAGES_PER_MINUTE = 20
 SOCKET_IDLE_SECONDS = 600.0
 # How often a socket waiting on the same message's turn elsewhere looks again.
 SOCKET_POLL_SECONDS = 0.25
+# A rider's messages being answered at once, across all their sockets (the
+# final review's Minor 3): a third is `too_many_in_flight`.
+TURNS_IN_FLIGHT = 2
 # The chat socket's own worker threads, apart from anyio's default pool that
 # the sync HTTP routes (POST /message among them) share: turns, which can
 # take a minute or two, and the short reads and writes of the receipts and
@@ -93,6 +97,66 @@ class RiderLimiter:
         return self._limiter.allow(rider.rider_hash)
 
 
+class TurnSlot:
+    """One message's place under its rider's cap (`TurnsInFlight`), given
+    back once. A turn's worker thread takes it over (`to_thread`) and gives
+    it back when the turn ends, so a turn whose socket closed still counts
+    while it runs; until then the socket's task gives it back."""
+
+    _HELD, _IN_THREAD, _FREE = "held", "in_thread", "free"
+
+    def __init__(self, owner: "TurnsInFlight", user_key: str) -> None:
+        self._owner = owner
+        self._user_key = user_key
+        self._state = self._HELD
+        self._lock = threading.Lock()
+
+    def to_thread(self) -> None:
+        with self._lock:
+            if self._state == self._HELD:
+                self._state = self._IN_THREAD
+
+    def give_back(self, from_thread: bool = False) -> None:
+        """Give the place back; from the socket's loop, not while the turn's
+        thread holds it."""
+        with self._lock:
+            if self._state == self._FREE or (self._state == self._IN_THREAD and not from_thread):
+                return
+            self._state = self._FREE
+        self._owner._give_back(self._user_key)
+
+
+class TurnsInFlight:
+    """How many of each rider's messages are being answered right now, in
+    this process, across all their sockets, held to `cap`. Thread-safe."""
+
+    def __init__(self, cap: int = TURNS_IN_FLIGHT) -> None:
+        self.cap = cap
+        self._held: Dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def take(self, user_key: str) -> Optional[TurnSlot]:
+        """A place for one more of the rider's messages, or None at the cap."""
+        with self._lock:
+            held = self._held.get(user_key, 0)
+            if held >= self.cap:
+                return None
+            self._held[user_key] = held + 1
+        return TurnSlot(self, user_key)
+
+    def _give_back(self, user_key: str) -> None:
+        with self._lock:
+            held = self._held.get(user_key, 0) - 1
+            if held > 0:
+                self._held[user_key] = held
+            else:
+                self._held.pop(user_key, None)
+
+    def held(self, user_key: str) -> int:
+        with self._lock:
+            return self._held.get(user_key, 0)
+
+
 @dataclass
 class AmiigoContext:
     """What the Amiigo routes read from the process. `stores` has
@@ -108,7 +172,8 @@ class AmiigoContext:
     message a rider sent (receipts.py); `sockets`, the open sockets by rider
     (sockets.py); `prepare_turn` and `handle_turn`, api.prepare_turn and the
     runtime's handle, set by api.py (the socket closes 1011 without them);
-    and its limit, its thread allowances and timings. `thread_limiters`
+    its limit, the cap on each rider's turns in flight (`turns_in_flight`),
+    its thread allowances and timings. `thread_limiters`
     holds the socket's anyio CapacityLimiters, one pair per event loop
     (socket.py makes them).
 
@@ -129,6 +194,7 @@ class AmiigoContext:
     prepare_turn: Optional[Callable[..., Any]] = None
     handle_turn: Optional[Callable[[Any], Any]] = None
     message_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(MESSAGES_PER_MINUTE))
+    turns_in_flight: TurnsInFlight = field(default_factory=TurnsInFlight)
     socket_idle_seconds: float = SOCKET_IDLE_SECONDS
     socket_poll_seconds: float = SOCKET_POLL_SECONDS
     socket_turn_threads: int = SOCKET_TURN_THREADS

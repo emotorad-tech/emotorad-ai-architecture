@@ -1041,6 +1041,96 @@ class OneAtATimeTests(SocketCase):
         self.assertEqual(len(self.turns.calls), 1)
 
 
+CID_3 = "6d5f2d4b-8e0a-4b1d-8f54-0a7b8c9d1e23"
+CID_4 = "7e6a3e5c-9f1b-4c2e-9a65-1b8c9d0e2f34"
+
+
+class TurnsInFlightTests(SocketCase):
+    """The final review's Minor 3: at most two of a rider's messages are
+    answered at once, across all their sockets; a third is refused."""
+
+    def all_answered(self, sockets):
+        for ws in sockets:
+            self.assertEqual([frame(ws)["type"], frame(ws)["type"]], ["ack", "reply"])
+
+    def test_a_third_message_while_two_are_answered_is_refused_and_not_handled(self):
+        gate = self.gated()
+        with self.socket() as ws, self.socket() as second:
+            self.send(ws, message(n=1, cid=CID))
+            self.assertEqual(frame(ws)["type"], "bot_typing")
+            self.send(second, message(n=2, cid=CID_2))
+            self.assertEqual(frame(second)["type"], "bot_typing")
+            wait_until(lambda: len(self.turns.calls) == 2)
+            for sock, n, cid in ((ws, 3, CID_3), (second, 4, CID_4)):
+                self.refused(sock, message(n=n, cid=cid), "too_many_in_flight")
+            self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(3))))
+            self.assertIsNone(self.ctx.receipts.in_flight(CID_3))
+            gate.set()
+            self.all_answered([ws, second])
+            self.exchange(ws, message(n=3, cid=CID_3))
+        self.assertEqual([m.conversation_id for m in self.turns.calls], [CID, CID_2, CID_3])
+        outcomes = [e["outcome"] for e in self.events("amiigo_message")]
+        self.assertEqual(outcomes.count("too_many_in_flight"), 2)
+
+    def test_another_rider_has_their_own_two(self):
+        gate = self.gated()
+        with self.socket() as ws, self.socket(token=self.other_token) as theirs:
+            self.send(ws, message(n=1, cid=CID))
+            self.send(ws, message(n=2, cid=CID_2))
+            self.assertEqual([frame(ws)["type"], frame(ws)["type"]], ["bot_typing", "bot_typing"])
+            self.send(theirs, message(n=3, cid=CID_3))
+            self.assertEqual(frame(theirs)["type"], "bot_typing")
+            gate.set()
+            self.all_answered([ws, ws, theirs])
+        self.assertEqual(len(self.turns.calls), 3)
+
+    def test_a_resend_waiting_on_another_socket_takes_no_place(self):
+        gate = self.gated()
+        with self.socket() as ws, self.socket() as second:
+            self.send(ws, message(n=1, cid=CID))
+            self.assertEqual(frame(ws)["type"], "bot_typing")
+            self.assertTrue(self.turns.started.wait(TIMEOUT))
+            self.send(second, message(n=1, cid=CID))
+            self.assertEqual(frame(second)["type"], "bot_typing")
+            self.send(second, message(n=2, cid=CID_2))
+            self.assertEqual(frame(second)["type"], "bot_typing")
+            gate.set()
+            self.all_answered([ws])
+            replies = sorted(frame(second)["type"] for _ in range(4))
+        self.assertEqual(replies, ["ack", "ack", "reply", "reply"])
+        self.assertEqual(len(self.turns.calls), 2)
+
+    def test_a_turn_whose_socket_closed_keeps_its_place_until_it_ends(self):
+        # The turn runs on in its thread after its socket goes: it still counts.
+        gate = self.gated()
+        with self.socket() as ws:
+            self.send(ws, message(n=1, cid=CID))
+            self.send(ws, message(n=2, cid=CID_2))
+            wait_until(lambda: len(self.turns.calls) == 2)
+        with self.socket() as ws:
+            self.refused(ws, message(n=3, cid=CID_3), "too_many_in_flight")
+            gate.set()
+            wait_until(lambda: all((self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(n))) or {}).get("state")
+                                   == DONE for n in (1, 2)))
+            wait_until(lambda: self.ctx.turns_in_flight.held(RIDER_KEY) == 0)
+            self.exchange(ws, message(n=3, cid=CID_3))
+        self.assertEqual(len(self.turns.calls), 3)
+
+    def test_every_place_is_given_back_whatever_happens_to_the_message(self):
+        # Refused, answered, folded, failed: none keeps a place.
+        photo_less_upload = message(n=1, cid=CID, attachments=[{"upload_id": "upl_nothing"}])
+        with self.socket() as ws:
+            self.refused(ws, photo_less_upload, "upload_not_found")
+            self.exchange(ws, message(n=2, cid=CID))
+            self.resend(ws, message(n=2, cid=CID))
+        self.turns.error = RuntimeError("a bug")
+        with self.socket() as ws:
+            self.send(ws, message(n=3, cid=CID_2))
+            self.assertEqual(frame(ws)["type"], "bot_typing")
+            self.assertEqual(closed(ws)[0], 1011)
+        wait_until(lambda: self.ctx.turns_in_flight.held(RIDER_KEY) == 0)
+
+
 class AdmissionRaceTests(SocketCase):
     """`ChatSocket._admit` on its own, with the race made to happen."""
 
