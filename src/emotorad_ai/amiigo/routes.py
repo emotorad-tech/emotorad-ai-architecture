@@ -22,13 +22,16 @@ token proves: the app's channel, and the app's sign-in as the proof.
 
 While the token check is off, uploads and deletion answer 503
 `storage_unavailable` before the token is read (the plan's Ruling 1).
+
+The chat socket: `/chat` ("The chat socket"), socket.py. Its token is read
+from the handshake's `Authorization` header, as every route's is.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Literal, Optional
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 
@@ -36,6 +39,7 @@ from .. import erasure
 from ..conversation import StoreUnavailable
 from ..storage.uploads import UploadError
 from . import history
+from . import socket as chat_socket
 from .auth import Rider
 from .common import (
     CONFIRM_REQUIRED,
@@ -133,6 +137,14 @@ def get_messages(
         raise amiigo_error(503, HISTORY_UNAVAILABLE) from None
     _logged(context, event, conversation_id, rider, "ok", count=len(body["messages"]))
     return body
+
+
+# -- the chat socket -------------------------------------------------------------------
+
+
+@router.websocket("/chat")
+async def chat(websocket: WebSocket) -> None:
+    await chat_socket.serve(websocket, websocket.app.state.amiigo)
 
 
 # -- uploads ----------------------------------------------------------------------

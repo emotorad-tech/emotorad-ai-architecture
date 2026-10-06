@@ -375,7 +375,8 @@ def _cluster_for_phone(phone: str) -> str:
 # under that path. Nothing outside /amiigo/v1/ is touched. The upload
 # registry is the website's own: one place an upload id is minted and claimed.
 app.state.amiigo = AmiigoContext(stores=stores, tokens=AMIIGO_TOKENS, log=log, media_store=MEDIA_STORE,
-                                 uploads=UPLOADS, cluster_for_phone=_cluster_for_phone)
+                                 uploads=UPLOADS, cluster_for_phone=_cluster_for_phone,
+                                 receipts=stores.amiigo_receipts)
 app.include_router(amiigo_routes.router)
 app.add_middleware(NoStoreMiddleware)
 
@@ -1183,13 +1184,19 @@ def prepare_turn(
     HTTPException for an upload that cannot be claimed (404 unknown or
     expired, 403 not the caller's, 409 not finished or not as presigned, 503
     no media storage) or uploads from a caller with no cluster (400); and
-    ValueError for a channel it does not serve, or an app turn with no rider.
+    ValueError for a channel it does not serve, an app turn with no rider,
+    or a rider's phone on any channel but the app's.
     `client_ip` is used for the place only, and goes no further.
     """
     if channel not in TURN_CHANNELS:
         raise ValueError("prepare_turn serves %s, not %r" % (" and ".join(TURN_CHANNELS), channel))
     if channel == APP_CHANNEL and not rider_phone:
         raise ValueError("an Amiigo app turn is a rider's: rider_phone, from the token, is required")
+    if rider_phone and channel != APP_CHANNEL:
+        # A token-proved phone belongs to the app's turns only (the plan's
+        # Ruling 11): on any other channel it would verify a visitor who
+        # proved nothing.
+        raise ValueError("rider_phone is the Amiigo app's, not %r's" % (channel,))
     phone = normalise(PHONE, rider_phone) if rider_phone else None
     if phone is not None:
         def cluster() -> str:
@@ -1255,6 +1262,17 @@ def prepare_turn(
     if extra:
         message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
     return message
+
+
+def _handle_app_turn(message: InboundMessage) -> Reply:
+    """The chat socket's turn: the same runtime, read when the turn runs."""
+    return runtime.handle(message)
+
+
+# The chat socket's turn (amiigo/socket.py): prepare_turn with the app's
+# channel and the token's phone, then the runtime, as POST /message does.
+app.state.amiigo.prepare_turn = prepare_turn
+app.state.amiigo.handle_turn = _handle_app_turn
 
 
 def _rider_message(

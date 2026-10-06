@@ -214,8 +214,62 @@ class SameMessageAsPostMessageTests(ApiCase):
         self.assertNotIn("49.36.1.1", repr(made.to_dict()))
 
 
+class WebsiteTurnPinnedTests(ApiCase):
+    """The plan's Ruling 11: before the chat socket became prepare_turn's
+    second caller, the website's text turn is pinned field by field to a
+    literal, and POST /message is shown to ignore the app's fields in a body."""
+
+    def setUp(self):
+        super().setUp()
+        self.capture()
+
+    def test_a_website_text_turn_is_exactly_this_message(self):
+        sent = self.post(conversation_id="c-lit", session_token="sess-ananya", em_aid="aid-1",
+                         text="  my battery is not charging ", pill="battery_issue", agent="battery_support")
+        # Two values are read back rather than written here: the cluster, a
+        # random id the identity graph mints, and the moment the message was made.
+        cluster = self.api._cluster_for_session("sess-ananya", "aid-1")
+        expected = InboundMessage(
+            conversation_id="c-lit",
+            persona="customer",
+            identity=Identity(cluster_id=cluster, strength=VERIFIED, em_aid="aid-1", phone="+919876543210",
+                              channel_user_id="sess-ananya", dealer_id=None, employee_email=None, customer_id=None),
+            channel="website_chat",
+            message_text="my battery is not charging",
+            subject=None,
+            entry_metadata={"pill_clicked": "battery_issue", "cluster_id": cluster, "pinned_agent": "battery_support"},
+            attachments=[],
+            timestamp=sent.timestamp,
+        )
+        self.assertEqual(sent, expected)
+
+    def test_post_message_ignores_a_riders_phone_a_channel_and_a_screen_in_its_body(self):
+        app_fields = {"rider_phone": RIDER_PHONE, "channel": "amiigo_app", "screen": "battery_health"}
+        for who in ({"session_token": "sess-ananya"}, {"em_aid": "aid-9"}):
+            with self.subTest(who=who):
+                plain = self.post(conversation_id="c-body", text="my battery is not charging", **who)
+                dressed = self.post(conversation_id="c-body", text="my battery is not charging",
+                                    **dict(who, **app_fields))
+                self.assertEqual(comparable(dressed), comparable(plain))
+                self.assertEqual(dressed.channel, "website_chat")
+                self.assertNotIn("screen", dressed.entry_metadata)
+                self.assertNotEqual(dressed.identity.phone, RIDER_PHONE)
+        # An anonymous visitor stays anonymous whatever number the body names.
+        self.assertEqual((dressed.identity.strength, dressed.identity.phone), ("anonymous", None))
+
+
 class ChannelAndRiderTests(ApiCase):
     """The channel argument, and the rider's phone from the token."""
+
+    def test_a_riders_phone_on_a_website_turn_is_refused_before_anything_is_claimed(self):
+        mine = self.rider_upload("c1")
+        for channel in ({}, {"channel": "website_chat"}):
+            with self.subTest(channel=channel):
+                with self.assertRaises(ValueError):
+                    self.api.prepare_turn(conversation_id="c1", text="hi", rider_phone=RIDER_PHONE, em_aid="aid-1",
+                                          attachments=[{"upload_id": mine.upload_id}], **channel)
+        self.assertIsNotNone(self.api.UPLOADS.peek(mine.upload_id), "nothing claimed")
+        self.assertEqual(self.api.stores.conversations.media_of("c1"), [])
 
     def test_the_channel_is_the_website_chat_unless_named(self):
         self.assertEqual(self.api.prepare_turn(conversation_id="c1", text="hi", em_aid="aid-1").channel,

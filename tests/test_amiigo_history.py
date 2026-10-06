@@ -547,6 +547,35 @@ class HistoryApiContract:
                       channel="website_chat", customer="a stranger's words")
         self.assertNotInHistory(CID_A, ["a stranger's words"])
 
+    def test_another_riders_app_run_known_only_by_where_it_came_from_hides_the_chat(self):
+        # The plan's Ruling 10: a run whose summary was never written (its
+        # write failed) is known by its origin record alone, and that record
+        # names another rider. The summaries name only this rider.
+        self.exchange(CID_A, NOW - timedelta(hours=60), customer="the rider's words")
+        later = NOW - timedelta(hours=1)
+        self.conversations.record_origin({
+            "_id": summary_key(CID_A, iso(later)), "conversation_id": CID_A, "started_at": iso(later),
+            "channel": "amiigo_app", "user_key": OTHER_KEY, "country": "IN", "region": None, "city": None,
+            "source": "phone", "db": None})
+        self.exchange(CID_A, later, user_key=None, run_started=later, customer="the other rider's words",
+                      origin=False)
+        self.assertEqual(self.conversations.owner_of(CID_A), RIDER_KEY)
+        self.assertNotInHistory(CID_A, ["the other rider's words", "the rider's words"])
+        self.assertFalse(history.rider_may_use(self.ctx.stores, self.rider(), CID_A))
+
+    def test_an_anonymous_app_run_under_an_app_chats_id_hides_the_chat(self):
+        # Ruling 10: an app run nobody was proved in records where it came
+        # from with no user key; its words are nobody's to read out.
+        self.exchange(CID_A, NOW - timedelta(hours=60), customer="the rider's words")
+        self.exchange(CID_A, NOW - timedelta(hours=1), user_key=None, run_started=NOW - timedelta(hours=1),
+                      customer="a stranger's words")
+        self.assertEqual([o["channel"] for o in self.conversations.origins_of(CID_A)], ["amiigo_app"] * 2)
+        self.assertNotInHistory(CID_A, ["a stranger's words", "the rider's words"])
+        self.assertFalse(history.rider_may_use(self.ctx.stores, self.rider(), CID_A))
+
+    def rider(self):
+        return auth_module.rider_from_header("Bearer " + self.rider_token, self.token_check)
+
     def test_limits_outside_the_range_are_422_with_the_field_list(self):
         for path, limit in (("/conversations", 0), ("/conversations", 51),
                             ("/conversations/%s/messages" % CID_A, 0), ("/conversations/%s/messages" % CID_A, 101)):

@@ -28,6 +28,8 @@ from starlette.datastructures import MutableHeaders
 
 from ..ratelimit import RateLimiter
 from .auth import Rider, TokenCheck, rider_from_header, utc_now
+from .receipts import InMemoryAmiigoReceipts
+from .sockets import SocketRegistry
 
 PREFIX = "/amiigo/v1"
 NO_STORE = "no-store"
@@ -50,6 +52,12 @@ CONFIRM_REQUIRED = "confirm_required"
 HISTORY_PER_MINUTE = 60
 # "Upload slots: 20 a minute per rider".
 UPLOADS_PER_MINUTE = 20
+# "More than 20 messages a minute from this rider" (the socket's rate_limited).
+MESSAGES_PER_MINUTE = 20
+# "The server closes a socket that sends nothing for 10 minutes."
+SOCKET_IDLE_SECONDS = 600.0
+# How often a socket waiting on the same message's turn elsewhere looks again.
+SOCKET_POLL_SECONDS = 0.25
 
 # A chat's id: a UUID the app makes ("Conversation lifecycle"), in either case
 # (iOS writes capitals), used exactly as sent. An explicit ASCII class, so no
@@ -86,7 +94,14 @@ class AmiigoContext:
     registry (storage/uploads.py, the website's too), None without a bucket;
     `cluster_for_phone` gives a verified phone's identity-graph cluster, the
     one an upload's key is made under; `clock` gives the time history answers
-    at and a deletion request is recorded at."""
+    at and a deletion request is recorded at, and the chat socket's `ready`
+    and token expiry are reckoned on.
+
+    The chat socket (socket.py) also reads: `receipts`, the record of each
+    message a rider sent (receipts.py); `sockets`, the open sockets by rider
+    (sockets.py); `prepare_turn` and `handle_turn`, api.prepare_turn and the
+    runtime's handle, set by api.py (the socket closes 1011 without them);
+    and its limit and timings."""
 
     stores: Any
     tokens: TokenCheck
@@ -97,6 +112,13 @@ class AmiigoContext:
     clock: Callable[[], datetime] = utc_now
     history_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(HISTORY_PER_MINUTE))
     upload_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(UPLOADS_PER_MINUTE))
+    receipts: Any = field(default_factory=InMemoryAmiigoReceipts)
+    sockets: SocketRegistry = field(default_factory=SocketRegistry)
+    prepare_turn: Optional[Callable[..., Any]] = None
+    handle_turn: Optional[Callable[[Any], Any]] = None
+    message_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(MESSAGES_PER_MINUTE))
+    socket_idle_seconds: float = SOCKET_IDLE_SECONDS
+    socket_poll_seconds: float = SOCKET_POLL_SECONDS
 
 
 def context_of(request: Request) -> AmiigoContext:

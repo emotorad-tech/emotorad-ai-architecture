@@ -2,13 +2,14 @@
 
 Spec: docs/superpowers/specs/2026-09-29-mongodb-conversation-store-design.md.
 
-Twelve collections. `transcript_turns`, `conversation_summaries`, `media`
+Thirteen collections. `transcript_turns`, `conversation_summaries`, `media`
 and `conversation_notices` (a notice in a chat, such as a ticket closed in
 Zoho Desk) are the conversation record and are kept permanently: no TTL
 index, and deletion on request through `delete_person` or
 `delete_conversation`.
 `conversations` (working state), `idempotency_keys` and
 `verification_sessions` (the number each web chat proved, twelve hours)
+and `amiigo_receipts` (a rider's sent messages, 24 hours: amiigo/receipts.py)
 expire through TTL indexes. `conversation_origins` (where each run came
 from), `erasure_requests` and `erasure_log` are described beside their names
 below.
@@ -41,6 +42,18 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from .. import erasure as erasure_rules
+from ..amiigo.receipts import (
+    ABANDONED,
+    BUSY,
+    CLAIMED,
+    DONE,
+    DUPLICATE,
+    LEASE,
+    PROCESSING,
+    RECEIPT_TTL,
+    answers,
+    new_receipt,
+)
 from ..contract import InboundMessage, Reply
 from ..conversation import (
     SHARED_OWNER,
@@ -91,6 +104,10 @@ TICKET_COUNTER = "ticket_reference"
 # Expires with the proof after twelve hours, and is erased with the person or
 # the conversation. Used only once its TTL index exists (wiring.build_stores).
 VERIFICATION_SESSIONS = "verification_sessions"
+# The chat socket's receipts (amiigo/receipts.py): one per message a rider
+# sent, `_id` `<user_key>#<client_message_id>`, kept 24 hours. Used only once
+# its TTL index exists (wiring.build_stores).
+AMIIGO_RECEIPTS = "amiigo_receipts"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
 INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
@@ -150,6 +167,14 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     VERIFICATION_SESSIONS: [
         ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
         ([("user_key", 1)], {"name": "user_key"}),
+    ],
+    AMIIGO_RECEIPTS: [
+        ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
+        # One message of a conversation processing at a time, held by the
+        # database across servers ("conversation_busy"); also how the socket
+        # finds the message in flight.
+        ([("conversation_id", 1)], {"name": "one_processing_per_conversation", "unique": True,
+                                    "partialFilterExpression": {"state": PROCESSING}}),
     ],
 }
 
@@ -667,6 +692,106 @@ class MongoVerifiedSessions:
         keeps proofs in memory instead (wiring.build_stores). Raises
         StoreUnavailable when the index list cannot be read."""
         info = self._guard("index_information", lambda: self._sessions.index_information())
+        return any([name for name, _ in spec.get("key", [])] == ["expires_at"]
+                   and spec.get("expireAfterSeconds") == 0 for spec in info.values())
+
+
+def _aware(moment: Any) -> Any:
+    """A time read back from the driver, which hands back naive UTC."""
+    if isinstance(moment, datetime) and moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+class MongoAmiigoReceipts:
+    """The chat socket's receipts (amiigo/receipts.py) for every server,
+    held to the same behaviour as InMemoryAmiigoReceipts
+    (tests/test_amiigo_socket.py).
+
+    The claim is the insert: a duplicate `_id` is the same message already
+    accepted, and the partial unique index on `conversation_id` refuses a
+    second processing message of one conversation, from any server. A claim
+    past its lease is set `abandoned` first, so it holds the conversation no
+    longer, and its own message may be claimed again. Reads check
+    `expires_at` themselves, since the TTL monitor runs about once a minute.
+    """
+
+    def __init__(self, db: Any, now: Callable[[], datetime] = _utc_now, lease: timedelta = LEASE,
+                 ttl: timedelta = RECEIPT_TTL) -> None:
+        self._receipts = db[AMIIGO_RECEIPTS]
+        self._now = now
+        self._lease = lease
+        self._ttl = ttl
+
+    def _guard(self, operation: str, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except DuplicateKeyError:
+            raise
+        except PyMongoError as exc:
+            raise StoreUnavailable("MongoDB %s failed (%s)" % (operation, type(exc).__name__)) from None
+
+    def _read(self, rid: str, now: datetime) -> Optional[Dict[str, Any]]:
+        doc = self._guard("find_one", lambda: self._receipts.find_one({"_id": rid}))
+        if doc is None:
+            return None
+        doc["at"], doc["expires_at"] = _aware(doc["at"]), _aware(doc["expires_at"])
+        return doc if doc["expires_at"] > now else None
+
+    def get(self, rid: str) -> Optional[Dict[str, Any]]:
+        return self._read(rid, self._now())
+
+    def in_flight(self, conversation_id: str) -> Optional[str]:
+        now = self._now()
+        doc = self._guard("find_one", lambda: self._receipts.find_one(
+            {"conversation_id": conversation_id, "state": PROCESSING, "at": {"$gt": now - self._lease}},
+            projection={"user_key": 1}))
+        return doc["user_key"] if doc else None
+
+    def claim(self, rid: str, user_key: str, conversation_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        now = self._now()
+        # A claim past its lease belongs to a turn that died with its server.
+        self._guard("update_many", lambda: self._receipts.update_many(
+            {"conversation_id": conversation_id, "state": PROCESSING, "at": {"$lte": now - self._lease}},
+            {"$set": {"state": ABANDONED}}))
+        doc = self._read(rid, now)
+        if answers(doc, now, self._lease):
+            return DUPLICATE, doc
+        fresh = new_receipt(rid, user_key, conversation_id, now, self._ttl)
+        try:
+            if doc is None:
+                # Expired but not yet removed by the TTL monitor: gone.
+                self._guard("delete_one", lambda: self._receipts.delete_one({"_id": rid, "expires_at": {"$lte": now}}))
+                self._guard("insert_one", lambda: self._receipts.insert_one(fresh))
+                return CLAIMED, None
+            # Abandoned, or past its lease: taken over, unless someone else
+            # took it since it was read.
+            taken = self._guard("replace_one", lambda: self._receipts.replace_one(
+                {"_id": rid, "state": doc["state"], "at": doc["at"]}, fresh))
+            if taken.matched_count:
+                return CLAIMED, None
+        except DuplicateKeyError:
+            pass
+        # Someone else claimed it, or the conversation, first.
+        doc = self._read(rid, now)
+        return (DUPLICATE, doc) if answers(doc, now, self._lease) else (BUSY, None)
+
+    def finish(self, rid: str, ack: Dict[str, Any], reply: Dict[str, Any]) -> bool:
+        result = self._guard("update_one", lambda: self._receipts.update_one(
+            {"_id": rid}, {"$set": {"state": DONE, "ack": ack, "reply": reply}}))
+        return result.matched_count > 0
+
+    def release(self, rid: str) -> None:
+        # Only a processing claim is released; a finished receipt is never undone.
+        self._guard("delete_one", lambda: self._receipts.delete_one({"_id": rid, "state": PROCESSING}))
+
+    def has_ttl_index(self) -> bool:
+        """Whether mongo_setup.py has made the index that removes a receipt
+        at its `expires_at` (and the one that holds a conversation busy).
+        Without it the service keeps receipts in memory instead
+        (wiring.build_stores). Raises StoreUnavailable when the index list
+        cannot be read."""
+        info = self._guard("index_information", lambda: self._receipts.index_information())
         return any([name for name, _ in spec.get("key", [])] == ["expires_at"]
                    and spec.get("expireAfterSeconds") == 0 for spec in info.values())
 

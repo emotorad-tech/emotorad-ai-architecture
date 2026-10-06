@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
+from .amiigo.receipts import InMemoryAmiigoReceipts
 from .config import Settings
 from .jev import JevClient
 from .llm import SINGLE_MODEL_MODES
@@ -61,6 +62,9 @@ class Stores:
     verified_sessions: Any = None
     # Where they are kept, for /health (SESSIONS_*).
     verified_sessions_status: str = SESSIONS_MEMORY
+    # The chat socket's receipts (amiigo/receipts.py): a rider's message is
+    # handled once, however often it is sent, for 24 hours.
+    amiigo_receipts: Any = None
 
 
 def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Stores:
@@ -78,9 +82,11 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
         from .tickets.store import InMemoryTicketStore
 
         return Stores(conversations=InMemoryConversationStore(), idempotency=IdempotencyStore(),
-                      tickets=InMemoryTicketStore(), verified_sessions=InMemoryVerifiedSessions())
+                      tickets=InMemoryTicketStore(), verified_sessions=InMemoryVerifiedSessions(),
+                      amiigo_receipts=InMemoryAmiigoReceipts())
     from .stores.mongo import (
-        MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, MongoVerifiedSessions, connect,
+        MongoAmiigoReceipts, MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, MongoVerifiedSessions,
+        connect,
     )
 
     db = connect(db_name=settings.mongo_db, client=client)
@@ -91,7 +97,31 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
         tickets=MongoTicketStore(db),
         verified_sessions=sessions,
         verified_sessions_status=sessions_status,
+        amiigo_receipts=_amiigo_receipts(MongoAmiigoReceipts(db), log),
     )
+
+
+def _amiigo_receipts(mongo: Any, log: Any) -> Any:
+    """MongoDB's receipts only when their TTL index exists, as the proved
+    numbers (`_verified_sessions`): without it a receipt, which names the
+    rider's phone in its id, would never be removed. Until a person runs
+    mongo_setup.py and restarts, receipts stay in this process's memory (a
+    restart forgets which messages were answered), and
+    `amiigo_receipts_ttl_missing` is logged at error level."""
+    from .conversation import StoreUnavailable
+
+    error = None
+    try:
+        if mongo.has_ttl_index():
+            return mongo
+        status = "ttl_missing"
+    except StoreUnavailable as exc:
+        status, error = "index_unreadable", type(exc).__name__
+    _logger.error("amiigo_receipts_ttl_missing: %s", status)
+    if log is not None:
+        fields = {"error": error} if error else {}
+        log.emit("amiigo_receipts_ttl_missing", "amiigo_receipts", level="error", reason=status, **fields)
+    return InMemoryAmiigoReceipts()
 
 
 def _verified_sessions(mongo: Any, log: Any) -> Tuple[Any, str]:

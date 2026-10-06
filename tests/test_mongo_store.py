@@ -128,19 +128,19 @@ class MongoStoreTests(StoreContract, unittest.TestCase):
 
 
 class IndexTests(unittest.TestCase):
-    def test_every_collection_gets_exactly_its_indexes_and_only_three_expire(self):
+    def test_every_collection_gets_exactly_its_indexes_and_only_four_expire(self):
         db = fresh_db()
         report = ensure_indexes(db)
         self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media",
                                        "conversation_origins", "erasure_requests", "tickets", "counters",
-                                       "verification_sessions", "conversation_notices"})
+                                       "verification_sessions", "conversation_notices", "amiigo_receipts"})
         ttl = {}
         for collection in report:
             for index, info in db[collection].index_information().items():
                 if "expireAfterSeconds" in info:
                     ttl["%s.%s" % (collection, index)] = info["expireAfterSeconds"]
         self.assertEqual(ttl, {"conversations.expires_at_ttl": 0, "idempotency_keys.expires_at_ttl": 0,
-                               "verification_sessions.expires_at_ttl": 0})
+                               "verification_sessions.expires_at_ttl": 0, "amiigo_receipts.expires_at_ttl": 0})
         self.assertTrue(db["transcript_turns"].index_information()["conversation_turn"]["unique"])
         self.assertIn("user_recent", db["conversation_summaries"].index_information())
 

@@ -9,10 +9,10 @@ it was recorded.
 
 In v1 the history holds the rider's Amiigo app chats only (the plan's
 Ruling 6): a chat is listed, and read, only when every run of it is an
-`amiigo_app` run and every summarised run is the rider's (`owner_of`). The
-runs are the summaries and, for a run that wrote none (someone who never
-proved a number), the record of where the run came from (`origins_of`,
-written for every run). Anything else, a website chat even where the rider
+`amiigo_app` run and every run is the rider's: the summaries (`owner_of`)
+and, for a run that wrote none (someone who never proved a number), the
+record of where the run came from (`origins_of`, written for every run,
+which must name the rider too: Ruling 10). Anything else, a website chat even where the rider
 proved this number, or one in which someone else wrote, is
 `conversation_not_found` and never listed: nothing of another person's
 words is read out.
@@ -299,13 +299,17 @@ class _Chat:
 def _app_chat_of(conversations: Any, rider: Rider, conversation_id: str,
                  runs: Sequence[ConversationSummaryItem]) -> bool:
     """Ruling 6: the rider's summarised runs of the chat (`runs`) are all app
-    runs, nobody else has one (`owner_of`), and no run that wrote no summary
-    came from anywhere but the app (`origins_of`)."""
+    runs, nobody else has one (`owner_of`), and every run, a run that wrote
+    no summary too, came from the app and from this rider (`origins_of`;
+    Ruling 10). A run's origin names its person from its first turn
+    (Runtime._note_origin), so an origin with no user key, or another's, is
+    a run in which someone else wrote."""
     if not runs or any(run.channel != APP_CHANNEL for run in runs):
         return False
     if conversations.owner_of(conversation_id) != rider.user_key:
         return False
-    return all(origin.get("channel") == APP_CHANNEL for origin in conversations.origins_of(conversation_id))
+    return all(origin.get("channel") == APP_CHANNEL and origin.get("user_key") == rider.user_key
+               for origin in conversations.origins_of(conversation_id))
 
 
 def is_riders_app_chat(stores: Any, rider: Rider, conversation_id: str) -> bool:
@@ -348,9 +352,16 @@ def is_app_chat(conversations: Any, conversation_id: str) -> bool:
 
 def rider_may_use(stores: Any, rider: Rider, conversation_id: str) -> bool:
     """Whether the rider may add to this chat: a new one, or their own app
-    chat. Anything else is `conversation_not_found`, as in the history."""
-    return (is_new_conversation(stores.conversations, conversation_id)
-            or is_riders_app_chat(stores, rider, conversation_id))
+    chat. Anything else is `conversation_not_found`, as in the history.
+
+    A chat with nothing recorded may still have a working state, from a
+    turn whose records failed to write, and that state holds what was said.
+    It is new to the rider only when the state is their own app run."""
+    conversations = stores.conversations
+    if is_new_conversation(conversations, conversation_id):
+        state = conversations.peek(conversation_id)
+        return state is None or (state.user_key == rider.user_key and state.channel == APP_CHANNEL)
+    return is_riders_app_chat(stores, rider, conversation_id)
 
 
 def _chats(runs: Sequence[ConversationSummaryItem]) -> List[_Chat]:
