@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
+from .amiigo.auth import token_check_from_env
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
 from . import evidence_check
@@ -171,6 +172,12 @@ OTP_SENDER = MockOtpSender()
 # Amigo, read-only (tools/amigo.py), when EMOTORAD_AMIGO_PG_DSN is set; the
 # config store exports it from the staging secret. None: behaviour as before.
 AMIGO = amigo_tools.from_env()
+
+# The Amiigo app's token check (amiigo/auth.py): Amiigo's public key from
+# EMOTORAD_AMIIGO_PUBLIC_KEY, which a person sets in the config store. Without
+# it the check is off, /health says so and amiigo_tokens_not_configured is
+# logged once.
+AMIIGO_TOKENS = token_check_from_env()
 
 # Zoho Desk tickets (spec 2026-10-05). Decided here, once, and nowhere else:
 # the CLI, the playground and the live evaluation keep the mock. Zoho is off
@@ -517,6 +524,8 @@ def health() -> dict:
         # Where proved numbers outlive a restart: memory, mongodb, or memory
         # and why (wiring.build_stores: no TTL index, no saving).
         "verification_sessions": stores.verified_sessions_status,
+        # Whether Amiigo access tokens can be checked: on, or not configured.
+        "amiigo_tokens": "on" if AMIIGO_TOKENS.enabled else "not configured",
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.
