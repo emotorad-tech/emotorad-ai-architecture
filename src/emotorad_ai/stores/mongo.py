@@ -87,10 +87,11 @@ MEDIA = "media"
 CONVERSATION_ORIGINS = "conversation_origins"
 # Notices in a chat, read back as `system` messages by the Amiigo history
 # (amiigo/history.py): `_id` `<conversation_id>#N<seq:05d>`, `conversation_id`,
-# `user_key`, `kind` ("ticket_closed"), `text` and `at` (ISO 8601 UTC, as a
-# transcript turn's). Permanent, and erased with the person or the conversation.
+# `user_key`, `kind` ("ticket_closed"), `text`, `at` (ISO 8601 UTC, as a
+# transcript turn's) and `reference` (the ticket: one notice of a kind per
+# ticket in a chat). Permanent, and erased with the person or the conversation.
 CONVERSATION_NOTICES = "conversation_notices"
-# How often a notice is tried when its number or its text was taken by
+# How often a notice is tried when its number or its ticket was taken by
 # another server between the look and the write.
 NOTICE_ATTEMPTS = 5
 # Self-service erasure requests (erasure.py), and the audit log every erasure
@@ -133,8 +134,8 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     CONVERSATION_NOTICES: [
         ([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"}),
         # A chat says one thing once: two servers writing the same ticket's
-        # closure make one notice (add_notice).
-        ([("conversation_id", 1), ("kind", 1), ("text", 1)], {"name": "one_notice_per_text", "unique": True}),
+        # closure make one notice (add_notice), whatever its wording.
+        ([("conversation_id", 1), ("kind", 1), ("reference", 1)], {"name": "one_notice_per_ticket", "unique": True}),
     ],
     IDEMPOTENCY_KEYS: [
         ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
@@ -193,6 +194,15 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
 }
 
 
+# Collection -> indexes an earlier version made and this one replaced, which
+# ensure_indexes removes. `one_notice_per_text` held a notice to its wording,
+# so a reworded draft wrote a second notice for one closure (the final
+# review's Minor 1): `one_notice_per_ticket` replaced it.
+OBSOLETE_INDEXES: Dict[str, List[str]] = {
+    CONVERSATION_NOTICES: ["one_notice_per_text"],
+}
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -219,13 +229,17 @@ def connect(
 
 
 def ensure_indexes(db: Any) -> Dict[str, List[str]]:
-    """Create the collections and indexes the stores rely on. Safe to rerun:
-    MongoDB leaves an identical index alone. Returns collection -> index names."""
+    """Create the collections and indexes the stores rely on, and remove the
+    ones a later version replaced (OBSOLETE_INDEXES). Safe to rerun: MongoDB
+    leaves an identical index alone. Returns collection -> index names."""
     existing = set(db.list_collection_names())
     report: Dict[str, List[str]] = {}
     for collection, indexes in INDEXES.items():
         if collection not in existing:
             db.create_collection(collection)
+        for name in OBSOLETE_INDEXES.get(collection, []):
+            if name in db[collection].index_information():
+                db[collection].drop_index(name)
         for keys, options in indexes:
             db[collection].create_index(keys, **options)
         report[collection] = sorted(db[collection].index_information())
@@ -434,21 +448,22 @@ class MongoConversationStore:
             "find", lambda: list(notices.find({"conversation_id": conversation_id}).sort([("at", 1), ("_id", 1)])))
 
     def add_notice(self, conversation_id: str, user_key: Optional[str], kind: str, text: str,
-                   at: str) -> Tuple[Dict[str, Any], bool]:
+                   at: str, *, reference: str) -> Tuple[Dict[str, Any], bool]:
         """A notice in the chat, numbered after its others, and whether this
-        call wrote it. A notice of the same kind and text already in the chat
-        is returned as it is. Two servers writing at once collide on the
-        `_id` or on `one_notice_per_text` (mongo_setup.py): the loser looks
-        again, and finds the other's notice or takes the next number."""
+        call wrote it. A notice of the same kind about the same ticket
+        (`reference`) already in the chat is returned as it is, whatever its
+        wording. Two servers writing at once collide on the `_id` or on
+        `one_notice_per_ticket` (mongo_setup.py): the loser looks again, and
+        finds the other's notice or takes the next number."""
         notices = self._collection(CONVERSATION_NOTICES)
-        same_query = {"conversation_id": conversation_id, "kind": kind, "text": text}
+        same_query = {"conversation_id": conversation_id, "kind": kind, "reference": reference}
         for _ in range(NOTICE_ATTEMPTS):
             same = self._guard("find_one", lambda: notices.find_one(same_query))
             if same is not None:
                 return same, False
             taken = self._guard("find", lambda: list(notices.find({"conversation_id": conversation_id}, {"_id": 1})))
             doc = notice_doc(conversation_id, max((notice_seq(d["_id"]) for d in taken), default=0) + 1,
-                             user_key, kind, text, at)
+                             user_key, kind, text, at, reference)
             try:
                 self._guard("insert_one", lambda: notices.insert_one(dict(doc)))
             except DuplicateKeyError:

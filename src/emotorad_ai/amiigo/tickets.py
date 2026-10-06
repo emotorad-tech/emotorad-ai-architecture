@@ -12,8 +12,9 @@ closure, in this order:
    person's request (erasure does not reach `tickets` yet), so nothing is
    written back into it.
 3. A `system` notice in the chat (`add_notice`), with the person whose chat
-   it is: written once, so a repeat of the closure, or the agent editing a
-   closed ticket, finds it there and is `already_closed`, with nothing sent.
+   it is: written once per ticket, whatever its wording, so a repeat of the
+   closure, or the agent editing a closed ticket, finds it there and is
+   `already_closed`, with nothing sent.
    A closure whose notice was never written (the store failed after step 1,
    and the webhook answered 503) is finished by Zoho's next call.
 4. `ticket_update` to every open socket of the rider, only when the chat is
@@ -84,7 +85,7 @@ def close_ticket(stores: Any, registry: Any, *, zoho_ticket_id: str, closed_at: 
     user_key = owner if owner and owner != SHARED_OWNER else None
     app_chat = user_key is not None and history.is_app_chat_of(stores, user_key, conversation_id)
     notice, written = conversations.add_notice(conversation_id, user_key, NOTICE_KIND, notice_text(reference),
-                                               now.isoformat())
+                                               now.isoformat(), reference=reference)
     if not written:
         return ALREADY_CLOSED
     pushed = 0

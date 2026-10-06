@@ -372,11 +372,11 @@ Contract: `docs/contracts/amiigo-support-chat.md`. Two fields of the config stor
 1. **nginx first.** Set `access_log off;` for the `/webhooks/zoho/` location on the host, before the webhook exists in Zoho Desk. The secret is in the path, and nginx writes the path to its access log. The nginx config lives on the host, not in this repo, so a person with access to the host changes it and reloads nginx. Our API's own access log already writes the path as `/webhooks/zoho/tickets/[secret]`.
 2. **The secret.** Set `EMOTORAD_ZOHO_WEBHOOK_SECRET` as above, and redeploy (section 3).
 3. **The collections and indexes.** Rerun `python scripts/mongo_setup.py` against the environment's database, then restart the container (`sudo docker restart emotorad-ai`): the receipts check for their indexes only when the container starts. Check that the output lists:
-   - `conversation_notices` as `permanent`, with `conversation_at` and `one_notice_per_text`;
+   - `conversation_notices` as `permanent`, with `conversation_at` and `one_notice_per_ticket` (and not `one_notice_per_text`, which an earlier build made and the script now removes);
    - `amiigo_receipts` as `expires`, with `expires_at_ttl (TTL 0s)`, `one_processing_per_conversation`, `user_key` and `conversation_at`;
    - `tickets` with `zoho_ticket`.
 
-   Without `zoho_ticket`, each closure scans `tickets`, which is small. Without `one_notice_per_text`, two servers racing could write two notices; staging runs one. Without the receipts indexes, see "If the indexes are missing" below.
+   Without `zoho_ticket`, each closure scans `tickets`, which is small. Without `one_notice_per_ticket`, two servers racing could write two notices; staging runs one. Without the receipts indexes, see "If the indexes are missing" below.
 4. **Check `/health`.** `curl -s https://ai-release-stage.emotorad.com/health` shows `"amiigo_tokens":"on"` and `"zoho_webhook":"on"`.
 5. **Create the webhook in Zoho Desk,** with the secret already in its address. Zoho's documentation says it checks the address with a GET and then a POST. Ours answers the GET 405 and the POST 200, whatever the body. This has not been seen against Zoho yet: if creation fails at this step, tell the engineer, because a GET that answers 200 behind the secret may be needed.
 6. **Subscribe to `Ticket_Update`** with `departmentIds` (the test department on staging) and `fields: ["status"]`, plus the criterion that the subject contains `[AI chat]` (never "starts with": see "What Zoho rules filter on" in section 7). Without these filters every ticket update in the organisation reaches us. Each is answered quickly and logged, as one line.

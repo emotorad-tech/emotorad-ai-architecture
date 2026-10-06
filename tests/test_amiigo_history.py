@@ -110,10 +110,10 @@ def signed(key):
     return "https://%s.s3.ap-south-1.amazonaws.com/%s?X-Amz-Signature=fake" % (BUCKET, key)
 
 
-def notice(cid, seq, at, user_key=RIDER_KEY, text=CLOSED_TEXT):
-    """A notice as Task 6 writes it."""
+def notice(cid, seq, at, user_key=RIDER_KEY, text=CLOSED_TEXT, reference="EM-1000001"):
+    """A notice as Task 6 writes it, with the ticket it is about."""
     return {"_id": "%s#N%05d" % (cid, seq), "conversation_id": cid, "user_key": user_key,
-            "kind": "ticket_closed", "text": text, "at": iso(at)}
+            "kind": "ticket_closed", "text": text, "at": iso(at), "reference": reference}
 
 
 def ticket_record(store, cid=CID_A, **stored):
@@ -254,8 +254,9 @@ class StoreReadsContract:
         self.assertEqual(self.conversations.count_turns("never-seen"), 0)
 
     def test_notices_of_come_in_time_order(self):
-        # A chat says one thing once (one_notice_per_text): the second differs.
-        self.put_notice(notice(CID_A, 2, NOW, text=CLOSED_TEXT.replace("EM-1000001", "EM-1000002")))
+        # One notice per ticket in a chat (one_notice_per_ticket): the second is another's.
+        self.put_notice(notice(CID_A, 2, NOW, text=CLOSED_TEXT.replace("EM-1000001", "EM-1000002"),
+                               reference="EM-1000002"))
         self.put_notice(notice(CID_A, 1, NOW - timedelta(minutes=5)))
         self.put_notice(notice(CID_B, 1, NOW))
         self.assertEqual([n["_id"] for n in self.conversations.notices_of(CID_A)],
@@ -303,8 +304,8 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(summaries["conversation"], [("conversation_id", 1)])
         self.assertEqual([(keys, options) for keys, options in INDEXES[CONVERSATION_NOTICES]],
                          [([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"}),
-                          ([("conversation_id", 1), ("kind", 1), ("text", 1)],
-                           {"name": "one_notice_per_text", "unique": True})])
+                          ([("conversation_id", 1), ("kind", 1), ("reference", 1)],
+                           {"name": "one_notice_per_ticket", "unique": True})])
         db = mongomock.MongoClient()["emotorad_ai"]
         ensure_indexes(db)
         self.assertIn(CONVERSATION_NOTICES, db.list_collection_names())
@@ -748,7 +749,7 @@ class HistoryApiContract:
         self.put_notice(notice(CID_A, 1, NOW - timedelta(minutes=5)))
         self.exchange(CID_A, NOW - timedelta(minutes=1))
         # At the same instant as a turn, the turn comes first.
-        self.put_notice(notice(CID_A, 2, NOW - timedelta(minutes=1), text="Second notice."))
+        self.put_notice(notice(CID_A, 2, NOW - timedelta(minutes=1), text="Second notice.", reference="EM-1000002"))
         page = self.messages(CID_A)
         self.assertEqual([m["id"] for m in page["messages"]],
                          [tid(CID_A, 1), tid(CID_A, 2), CID_A + "#N00001", tid(CID_A, 3), tid(CID_A, 4),

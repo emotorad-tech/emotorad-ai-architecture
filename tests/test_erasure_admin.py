@@ -297,7 +297,7 @@ class DeleteTests(unittest.TestCase):
         self.reviewed()
         self.desk.store.add_notice("mine", ME, "ticket_closed",
                                    "Your support request EM-00001 was closed by our support team.",
-                                   "2026-10-03T08:30:00+00:00")
+                                   "2026-10-03T08:30:00+00:00", reference="EM-00001")
         code, text = self.delete()
         self.assertEqual(code, 1)
         self.assertIn("has changed since your review", text)

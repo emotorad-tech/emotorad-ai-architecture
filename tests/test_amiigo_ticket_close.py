@@ -278,21 +278,22 @@ class MongoTicketCloseTests(MongoStores, TicketCloseContract, unittest.TestCase)
 
 
 class NoticeContract(StoreKinds):
-    def add(self, cid=CID, text=None, at=NOW, user_key=RIDER_KEY, kind="ticket_closed"):
-        return self.conversations.add_notice(cid, user_key, kind, text or notice_text("EM-1000001"), at.isoformat())
+    def add(self, cid=CID, text=None, at=NOW, user_key=RIDER_KEY, kind="ticket_closed", reference="EM-1000001"):
+        return self.conversations.add_notice(cid, user_key, kind, text or notice_text(reference), at.isoformat(),
+                                             reference=reference)
 
-    def test_a_notice_has_exactly_the_fields_history_reads(self):
+    def test_a_notice_has_exactly_the_fields_history_reads_and_its_ticket(self):
         notice, written = self.add()
         self.assertTrue(written)
         expected = {"_id": CID + "#N00001", "conversation_id": CID, "user_key": RIDER_KEY, "kind": "ticket_closed",
-                    "text": notice_text("EM-1000001"), "at": NOW.isoformat()}
+                    "text": notice_text("EM-1000001"), "at": NOW.isoformat(), "reference": "EM-1000001"}
         self.assertEqual(dict(notice), expected)
         self.assertEqual([dict(n) for n in self.conversations.notices_of(CID)], [expected])
 
     def test_notices_are_numbered_in_their_chat(self):
-        self.add(text=notice_text("EM-1000001"))
-        self.add(text=notice_text("EM-1000002"), at=NOW + timedelta(seconds=1))
-        self.add(cid=CID_OTHER, text=notice_text("EM-1000003"))
+        self.add(reference="EM-1000001")
+        self.add(reference="EM-1000002", at=NOW + timedelta(seconds=1))
+        self.add(cid=CID_OTHER, reference="EM-1000003")
         self.assertEqual([n["_id"] for n in self.conversations.notices_of(CID)], [CID + "#N00001", CID + "#N00002"])
         self.assertEqual([n["_id"] for n in self.conversations.notices_of(CID_OTHER)], [CID_OTHER + "#N00001"])
 
@@ -304,12 +305,22 @@ class NoticeContract(StoreKinds):
         self.assertEqual(again["at"], NOW.isoformat())
         self.assertEqual(len(self.conversations.notices_of(CID)), 1)
 
+    def test_one_notice_per_ticket_whatever_its_wording(self):
+        # The final review's Minor 1: the notice is the ticket's, not its
+        # text's, so a reworded draft on a repeat closure writes nothing.
+        first, _ = self.add()
+        again, written = self.add(text="Our support team has closed your request EM-1000001.",
+                                  at=NOW + timedelta(minutes=3))
+        self.assertFalse(written)
+        self.assertEqual(dict(again), dict(first))
+        self.assertEqual([n["text"] for n in self.conversations.notices_of(CID)], [notice_text("EM-1000001")])
+
     def test_erasure_finds_counts_and_removes_the_persons_notices(self):
         # Ruling 21, on the write side: a chat that holds only a notice is
         # still the person's, and both deletions take it.
         self.chat()
         self.add()
-        self.add(cid=CID_OTHER, text=notice_text("EM-1000002"))
+        self.add(cid=CID_OTHER, reference="EM-1000002")
         self.assertEqual(self.conversations.conversations_of(RIDER_KEY), sorted([CID, CID_OTHER]))
         self.assertEqual(self.conversations.delete_person(RIDER_KEY, dry_run=True)["conversation_notices"], 2)
         self.assertEqual(len(self.conversations.notices_of(CID)), 1)
@@ -329,11 +340,13 @@ class MongoNoticeTests(MongoStores, NoticeContract, unittest.TestCase):
         self.assertEqual(self.conversations.delete_conversation(CID, dry_run=True)["conversation_notices"], 1)
         self.assertEqual(len(self.conversations.notices_of(CID)), 1)
 
-    def test_one_notice_per_kind_and_text_is_held_by_the_database(self):
+    def test_one_notice_per_kind_and_ticket_is_held_by_the_database(self):
         # Two servers writing the same closure: the second insert collides.
         info = self.db[CONVERSATION_NOTICES].index_information()
-        self.assertEqual(info["one_notice_per_text"]["key"], [("conversation_id", 1), ("kind", 1), ("text", 1)])
-        self.assertTrue(info["one_notice_per_text"]["unique"])
+        self.assertEqual(info["one_notice_per_ticket"]["key"],
+                         [("conversation_id", 1), ("kind", 1), ("reference", 1)])
+        self.assertTrue(info["one_notice_per_ticket"]["unique"])
+        self.assertNotIn("one_notice_per_text", info)
         first, _ = self.add()
         notices = self.db[CONVERSATION_NOTICES]
         real_find_one = notices.find_one
@@ -357,10 +370,20 @@ class MongoNoticeTests(MongoStores, NoticeContract, unittest.TestCase):
                 self.add()
 
     def test_the_index_table_says_so_and_nothing_expires(self):
-        self.assertIn(([("conversation_id", 1), ("kind", 1), ("text", 1)],
-                       {"name": "one_notice_per_text", "unique": True}), INDEXES[CONVERSATION_NOTICES])
+        self.assertIn(([("conversation_id", 1), ("kind", 1), ("reference", 1)],
+                       {"name": "one_notice_per_ticket", "unique": True}), INDEXES[CONVERSATION_NOTICES])
+        self.assertNotIn("one_notice_per_text", [options["name"] for _, options in INDEXES[CONVERSATION_NOTICES]])
         for _, options in INDEXES[CONVERSATION_NOTICES]:
             self.assertNotIn("expireAfterSeconds", options)
+
+    def test_setup_removes_the_index_by_wording_an_earlier_run_made(self):
+        notices = self.db[CONVERSATION_NOTICES]
+        notices.create_index([("conversation_id", 1), ("kind", 1), ("text", 1)], name="one_notice_per_text",
+                             unique=True)
+        report = ensure_indexes(self.db)
+        self.assertNotIn("one_notice_per_text", notices.index_information())
+        self.assertNotIn("one_notice_per_text", report[CONVERSATION_NOTICES])
+        self.assertIn("one_notice_per_ticket", report[CONVERSATION_NOTICES])
 
 
 # -- close_ticket: the record, the notice and the push ----------------------------
@@ -376,7 +399,7 @@ class CloseTicketContract(StoreKinds):
         [notice] = self.conversations.notices_of(CID)
         self.assertEqual(dict(notice), {"_id": CID + "#N00001", "conversation_id": CID, "user_key": RIDER_KEY,
                                         "kind": "ticket_closed", "text": notice_text(reference),
-                                        "at": NOW.isoformat()})
+                                        "at": NOW.isoformat(), "reference": reference})
         expected = {
             "type": "ticket_update",
             "conversation_id": CID,
@@ -398,6 +421,18 @@ class CloseTicketContract(StoreKinds):
                          "already_closed")
         self.assertEqual(len(self.conversations.notices_of(CID)), 1)
         self.assertEqual(self.tickets.ticket_status(self.reference_of[CID])["closed_at"], CLOSED_AT.isoformat())
+        mine, _ = self.pushed()
+        self.assertEqual([len(frames) for frames in mine], [1, 1])
+
+    def test_a_repeat_closure_after_the_wording_changed_writes_nothing_and_sends_nothing(self):
+        # The final review's Minor 1: the notice's draft is reworded between
+        # two deliveries of one closure (a deploy in between).
+        self.chat()
+        reference = self.ticket()
+        self.assertEqual(self.close(), "closed")
+        with mock.patch.object(closure, "NOTICE_TEXT", "Our support team closed your request {reference}."):
+            self.assertEqual(self.close(now=NOW + timedelta(hours=2)), "already_closed")
+        self.assertEqual([n["text"] for n in self.conversations.notices_of(CID)], [notice_text(reference)])
         mine, _ = self.pushed()
         self.assertEqual([len(frames) for frames in mine], [1, 1])
 

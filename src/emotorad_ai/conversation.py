@@ -403,14 +403,15 @@ SHARED_OWNER = "#shared"
 
 
 def notice_doc(conversation_id: str, seq: int, user_key: Optional[str], kind: str, text: str,
-               at: str) -> Dict[str, Any]:
-    """A notice in a chat (a ticket closed in Zoho Desk), with exactly the
-    fields the Amiigo history reads (amiigo/history.py): `_id`
+               at: str, reference: str) -> Dict[str, Any]:
+    """A notice in a chat (a ticket closed in Zoho Desk), with the fields the
+    Amiigo history reads (amiigo/history.py): `_id`
     `<conversation_id>#N<seq:05d>`, `conversation_id`, `user_key` (the person
     whose chat it is, or None), `kind`, `text` and `at` (ISO 8601 UTC, as a
-    transcript turn's)."""
+    transcript turn's); and `reference`, the ticket it is about, which makes
+    it one of a kind in its chat whatever its wording."""
     return {"_id": "%s#N%05d" % (conversation_id, seq), "conversation_id": conversation_id, "user_key": user_key,
-            "kind": kind, "text": text, "at": at}
+            "kind": kind, "text": text, "at": at, "reference": reference}
 
 
 def notice_seq(notice_id: str) -> int:
@@ -623,16 +624,18 @@ class InMemoryConversationStore:
         return [dict(n) for n in sorted(notices, key=lambda n: (n["at"], n["_id"]))]
 
     def add_notice(self, conversation_id: str, user_key: Optional[str], kind: str, text: str,
-                   at: str) -> Tuple[Dict[str, Any], bool]:
+                   at: str, *, reference: str) -> Tuple[Dict[str, Any], bool]:
         """A notice in the chat, numbered after its others, and whether this
-        call wrote it. A notice of the same kind and text already in the chat
-        is returned as it is: a chat says one thing once."""
+        call wrote it. A notice of the same kind about the same ticket
+        (`reference`) already in the chat is returned as it is, whatever its
+        wording: a chat says one thing once (the final review's Minor 1)."""
         with self._notice_lock:
             mine = self._notices.setdefault(conversation_id, {})
-            same = next((n for n in mine.values() if n["kind"] == kind and n["text"] == text), None)
+            same = next((n for n in mine.values() if n["kind"] == kind and n.get("reference") == reference), None)
             if same is not None:
                 return dict(same), False
-            notice = notice_doc(conversation_id, max(map(notice_seq, mine), default=0) + 1, user_key, kind, text, at)
+            notice = notice_doc(conversation_id, max(map(notice_seq, mine), default=0) + 1, user_key, kind, text, at,
+                                reference)
             mine[notice["_id"]] = notice
             return dict(notice), True
 
