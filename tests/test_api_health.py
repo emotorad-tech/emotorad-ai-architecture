@@ -34,14 +34,34 @@ class HealthTests(unittest.TestCase):
         # counts appear while nothing is waiting.
         api = fresh_api(dict({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
                               "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
-                              "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"}, **zoho_blank()))
+                              "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb",
+                              "EMOTORAD_MELT_ASK": ""}, **zoho_blank()))
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
-             "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory"},
+             "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory",
+             "melt_ask": "off"},
         )
+
+    def test_health_says_why_the_melt_ask_is_off_when_it_is_switched_on(self):
+        # The person's decision (6 October 2026): off until the battery serial
+        # sticker photo exists. Switched on today it stays off and says why.
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_MELT_ASK": "on", "EMOTORAD_AI_MEDIA_BUCKET": ""})
+        self.assertTrue(api.health()["melt_ask"].startswith("off: missing melt_battery_serial"), api.health())
+        self.assertIsNone(api.runtime.melt_ask)
+        self.assertEqual(len(api.GUIDE_MEDIA), 2)
+        self.assertEqual(len(api.CATALOGUE), 4)
+
+    def test_the_runtime_is_given_the_melt_ask_when_it_is_on(self):
+        from emotorad_ai import melt_ask
+
+        sentinel = object()
+        with mock.patch.object(melt_ask, "from_env", return_value=(sentinel, "on")):
+            api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_MELT_ASK": "on"})
+        self.assertIs(api.runtime.melt_ask, sentinel)
+        self.assertEqual(api.health()["melt_ask"], "on")
 
     def test_safety_reports_not_recorded_are_counted_once_there_are_any(self):
         # Spec 2026-10-05, section 6: safety_ticket_not_recorded is alarmed and

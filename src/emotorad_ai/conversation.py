@@ -116,6 +116,14 @@ class ConversationState:
     # kept for the run. Going back to the list or to another number clears the
     # agent and the topic, never this: only a new run (restart_for) does.
     fault_topic: Optional[str] = None
+    # The melt ask (melt_ask.py, 6 October 2026). `melt_pending`: a customer
+    # said something melted in a turn that ended before the ask could go (the
+    # which-bike question, verify first), so it goes on the first later turn
+    # where it can; cleared once sent, with the bike (forget_bike) and when a
+    # dealer writes. `melt_asked_frames`: the bikes it was sent for, by the
+    # reference they are chosen by, so each bike is asked once.
+    melt_pending: bool = False
+    melt_asked_frames: List[str] = field(default_factory=list)
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool
@@ -262,7 +270,8 @@ class ConversationState:
         warranty lookup and a failed one, the evidence seen and the asks for
         it. Orders placed stay: they were placed. A number the customer typed
         stays: it is theirs, not the bike's. The topic is the caller's to keep
-        or clear."""
+        or clear. A melt ask waiting for a bike goes; the bikes it was sent
+        for stay, so none is asked twice."""
         if self.selected_frame:
             self.transitions.append("bike_forgotten:%s" % self.selected_frame)
         self.selected_frame = None
@@ -275,6 +284,7 @@ class ConversationState:
         self.evidence_seen = False
         self.evidence_asks, self.video_declined = 0, False
         self.evidence_verdict = None
+        self.melt_pending = False
 
     def route_to(self, agent: str) -> None:
         self.agent = agent
