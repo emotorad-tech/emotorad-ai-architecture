@@ -18,10 +18,19 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-PLAYGROUND_VERSION = "0.15.0"
+PLAYGROUND_VERSION = "0.16.0"
 
 # (version, date, what a tester would notice). Newest first.
 CHANGELOG: List[Tuple[str, str, str]] = [
+    (
+        "0.16.0",
+        "2026-10-06",
+        "Media upload (admin) sends the file straight from the browser to S3, with a "
+        "progress bar, the way the chat page sends a clip: presign, PUT, finish. It no "
+        "longer passes through nginx or Streamlit, so the host's 1 MB body cap that "
+        "turned every clip into a 413 no longer applies; clips up to 100 MB, photos and "
+        "PDFs up to 10 MB, and .mov and .3gp are accepted alongside .mp4.",
+    ),
     (
         "0.15.0",
         "2026-09-10",

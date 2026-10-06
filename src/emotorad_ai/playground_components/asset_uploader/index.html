@@ -1,0 +1,187 @@
+<!doctype html>
+<!--
+  The playground's admin media upload, as a Streamlit custom component.
+
+  Why a component and not st.file_uploader: Streamlit's uploader posts the file
+  to its own server first, through nginx and the FastAPI proxy, and nginx's
+  default body cap is 1 MB. Photos went up; the first 2.7 MB clip came back 413.
+  The chat page never had this problem because it presigns and PUTs straight to
+  S3, so this does the same, in three steps against the API this page is served
+  by: POST /uploads (tree "assets") for a signed URL, PUT the bytes to S3 with a
+  progress bar, POST /uploads/<id>/finish for the derivatives and the id.
+
+  Served by Streamlit under /playground/component/..., so it shares the page's
+  origin: the browser replays the playground's Basic Auth on /uploads by itself,
+  and the bucket's CORS rule for this origin covers the PUT.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, sans-serif; font-size: 14px; color: #31333f; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=file] { font-size: 13px; max-width: 100%; }
+  button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid #d6d6d9; background: #fff; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .track { height: 6px; background: #e6e6e9; border-radius: 3px; overflow: hidden; margin-top: 8px; display: none; }
+  .fill { height: 100%; width: 0; background: #ff4b4b; transition: width 0.15s; }
+  .status { margin-top: 6px; min-height: 18px; color: #5f6368; }
+  .status.err { color: #c62828; }
+  .status.ok { color: #2e7d32; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <input type="file" id="file">
+    <button id="go">Upload to media bucket</button>
+  </div>
+  <div class="track" id="track"><div class="fill" id="fill"></div></div>
+  <div class="status" id="status"></div>
+
+<script>
+(function () {
+  var args = {};
+  var busy = false;
+  var fileInput = document.getElementById("file");
+  var button = document.getElementById("go");
+  var track = document.getElementById("track");
+  var fill = document.getElementById("fill");
+  var status = document.getElementById("status");
+
+  // The API this page is proxied by: /playground/component/... -> "".
+  var API = window.location.pathname.replace(/\/playground(\/.*)?$/, "");
+
+  // Mirrors the server's allowlist (storage/keys.py). `file.type` is empty
+  // for some picks on macOS and Android, so the extension decides then.
+  var MIME_BY_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp",
+                      mp4: "video/mp4", mov: "video/quicktime", "3gp": "video/3gpp", pdf: "application/pdf" };
+  var MAX_BYTES = { image: 10 * 1024 * 1024, video: 100 * 1024 * 1024, application: 10 * 1024 * 1024 };
+
+  function send(type, data) {
+    var msg = { isStreamlitMessage: true, type: type };
+    for (var k in data) msg[k] = data[k];
+    window.parent.postMessage(msg, "*");
+  }
+  function height() { send("streamlit:setFrameHeight", { height: document.body.scrollHeight + 4 }); }
+  function say(text, cls) { status.textContent = text; status.className = "status" + (cls ? " " + cls : ""); height(); }
+  function progress(pct) {
+    track.style.display = pct === null ? "none" : "block";
+    fill.style.width = (pct || 0) + "%";
+  }
+  function mimeOf(file) {
+    if (file.type) return file.type;
+    var ext = (file.name || "").split(".").pop().toLowerCase();
+    return MIME_BY_EXT[ext] || "";
+  }
+  function fail(text, extra) {
+    busy = false;
+    button.disabled = false;
+    progress(null);
+    say(text, "err");
+    var value = { ok: false, error: text };
+    for (var k in (extra || {})) value[k] = extra[k];
+    send("streamlit:setComponentValue", { value: value, dataType: "json" });
+  }
+  function http(method, url, body) {
+    return fetch(url, {
+      method: method,
+      credentials: "same-origin",
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      return r.text().then(function (text) {
+        var json = null;
+        try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
+        if (!r.ok) {
+          var err = new Error((json && json.detail) ? String(json.detail) : "HTTP " + r.status);
+          err.status = r.status;
+          throw err;
+        }
+        return json;
+      });
+    });
+  }
+  // XMLHttpRequest rather than fetch: fetch has no upload progress event.
+  function putToS3(file, presign) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("PUT", presign.url, true);
+      Object.keys(presign.headers || {}).forEach(function (name) {
+        // The browser sets Content-Length itself and refuses it from a script.
+        if (name.toLowerCase() === "content-length") return;
+        xhr.setRequestHeader(name, presign.headers[name]);
+      });
+      xhr.upload.onprogress = function (e) {
+        if (e.lengthComputable) progress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error("S3 refused the upload (HTTP " + xhr.status + ")"));
+      };
+      xhr.onerror = function () { reject(new Error("The upload to S3 failed (network or CORS)")); };
+      xhr.onabort = function () { reject(new Error("The upload was cancelled")); };
+      xhr.send(file);
+    });
+  }
+
+  function upload() {
+    if (busy) return;
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) { say("Choose a file first.", "err"); return; }
+    if (!args.slug) { say("Give the asset a slug first.", "err"); return; }
+    var mime = mimeOf(file);
+    if (!mime) { say("Unsupported file type: " + (file.name || ""), "err"); return; }
+    var cap = MAX_BYTES[mime.split("/")[0]] || 0;
+    if (cap && file.size > cap) { say("Too large: " + file.name + " is over the " + Math.round(cap / 1048576) + " MB cap.", "err"); return; }
+
+    busy = true;
+    button.disabled = true;
+    progress(0);
+    say("Asking for a signed upload…");
+    var presign;
+    http("POST", API + "/uploads", {
+      tree: "assets",
+      mime_type: mime,
+      size_bytes: file.size,
+      path: { programme: args.programme, category: args.category, kind: args.kind, slug: args.slug }
+    }).then(function (p) {
+      presign = p;
+      say("Uploading " + file.name + " to S3…");
+      return putToS3(file, presign);
+    }).then(function () {
+      say("Making derivatives…");
+      return http("POST", API + "/uploads/" + encodeURIComponent(presign.upload_id) + "/finish");
+    }).then(function (result) {
+      busy = false;
+      button.disabled = false;
+      progress(null);
+      say("Uploaded " + file.name, "ok");
+      fileInput.value = "";
+      send("streamlit:setComponentValue", {
+        value: { ok: true, upload_id: presign.upload_id, name: file.name, mime: mime, size: file.size, result: result },
+        dataType: "json"
+      });
+    }).catch(function (err) {
+      fail((err && err.message) || "Upload failed", { status: err && err.status });
+    });
+  }
+
+  button.addEventListener("click", upload);
+  fileInput.addEventListener("change", function () {
+    var f = fileInput.files && fileInput.files[0];
+    say(f ? f.name + " · " + (f.size / 1048576).toFixed(1) + " MB, ready" : "");
+  });
+
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    args = event.data.args || {};
+    if (args.accept && fileInput.getAttribute("accept") !== args.accept) fileInput.setAttribute("accept", args.accept);
+    height();
+  });
+  send("streamlit:componentReady", { apiVersion: 1 });
+  height();
+})();
+</script>
+</body>
+</html>

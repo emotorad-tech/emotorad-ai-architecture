@@ -80,6 +80,7 @@ from .storage import keys
 from .storage.keys import KeyValidationError, cluster_of, is_customer_key, is_valid_key
 from .storage.s3 import StorageError, store_from_env
 from . import tracing
+from .storage.assets import finish_asset
 from .storage.uploads import UploadError, UploadRegistry
 from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
@@ -1339,6 +1340,33 @@ def require_playground_auth(request: Request) -> None:
 DEV_CODES = os.environ.get("EMOTORAD_AI_DEV_CODES") == "1"
 
 
+# The playground's admin upload, step three. The browser presigned an asset
+# (`POST /uploads`, tree "assets"), PUT the bytes straight to S3, and now asks
+# for the derivatives (a 900px WebP for a photo, a poster frame for a clip) and
+# the id to paste into a knowledge record. Behind the playground login, like
+# the presign: a customer upload is never finished this way, and the id stays
+# claimable by the message it belongs to.
+@app.post("/uploads/{upload_id}/finish", dependencies=[Depends(require_playground_auth)])
+def finish_upload(upload_id: str) -> Dict[str, Any]:
+    _require_media()
+    pending = UPLOADS.peek(upload_id)
+    if pending is None:
+        raise HTTPException(404, "unknown or expired upload id")
+    if pending.tree != "assets":
+        raise HTTPException(403, "not an asset upload")
+    try:
+        claimed = UPLOADS.claim(upload_id)
+    except UploadError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    try:
+        return finish_asset(MEDIA_STORE, claimed.key)
+    except Exception as exc:
+        # The original is in the bucket and the id is spent, so the admin
+        # has to upload again under the same slug; say so rather than hide it.
+        _logger.exception("asset derivatives failed for %s", claimed.key)
+        raise HTTPException(500, "stored %s but could not make its derivatives (%s); upload it again" % (claimed.key, type(exc).__name__)) from None
+
+
 @app.get("/dev/verification/{conversation_id}", dependencies=[Depends(require_playground_auth)])
 def dev_verification(conversation_id: str) -> dict:
     if not DEV_CODES:
@@ -1483,8 +1511,12 @@ async def playground_http_proxy(request: Request, rest: str = "") -> StreamingRe
         content=await request.body(),
     )
     upstream_response = await _playground_client.send(upstream_request, stream=True)
+    # aiter_bytes, not aiter_raw: Content-Encoding is dropped below, so the
+    # body must go out decoded. Streamlit gzips the files of a custom component
+    # (the admin uploader's index.html); forwarded raw, the browser rendered
+    # the gzip stream as text and the component never came up.
     return StreamingResponse(
-        upstream_response.aiter_raw(),
+        upstream_response.aiter_bytes(),
         status_code=upstream_response.status_code,
         headers={k: v for k, v in upstream_response.headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS},
         background=BackgroundTask(upstream_response.aclose),

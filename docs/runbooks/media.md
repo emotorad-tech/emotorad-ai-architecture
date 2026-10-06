@@ -57,6 +57,22 @@ default because Whisper downloads a model on first use and has no deadline.
 
 ## 3. Upload a guide asset
 
+Two ways, one set of derivatives (`storage/assets.py`).
+
+**From the playground.** Open the sidebar's "Media upload (admin)", fill in programme,
+category, kind and slug, pick the file and press "Upload to media bucket". The browser
+asks `POST /uploads` (tree `assets`) for a presigned PUT, sends the bytes straight to S3
+with a progress bar, then calls `POST /uploads/<upload_id>/finish`, which claims the
+upload and writes the derivatives. The file never passes through nginx, uvicorn or
+Streamlit, so the host's body cap does not apply (nginx's default is 1 MB; a 2.7 MB clip
+was 413 before this). The caps are the bucket's: photos and PDFs 10 MB, clips 100 MB,
+types `png jpg webp mp4 mov 3gp pdf`. Locally this needs the API in front of Streamlit
+(open `http://127.0.0.1:8000/playground/`, not port 8501), the bucket set, and
+`http://localhost:8000` in the bucket's CORS origins, which `infra/media.yaml` already
+carries.
+
+**From a terminal**, with your own AWS credentials:
+
 ```bash
 .venv/bin/python3 scripts/upload_asset.py soc.png \
   --programme afs --category battery --kind photos --slug soc-button
