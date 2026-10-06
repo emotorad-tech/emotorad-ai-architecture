@@ -155,7 +155,7 @@ A chat is one `conversation_id`: the app keeps it and sends it with every messag
 - **One message at a time.** Disable Send until the reply arrives. A second message sent meanwhile may get a short "one moment" reply (`handled_by: "conversation_busy"`) instead of an answer.
 - **After 48 hours of silence.** The same `conversation_id` still works, but the bot starts that chat afresh. Offer the rider a new chat instead.
 - **Memory across chats.** For a signed-in rider, the bot sees a one-line summary of their last 3 chats (topic, bike, outcome, ticket) and can say "last time we spoke about…".
-- **Showing past messages.** The server has no endpoint that returns a chat's history to the app yet. Keep the chat on the device to show it again.
+- **Showing past messages.** Proposed: `GET /amiigo/v1/conversations` and `GET /amiigo/v1/conversations/{conversation_id}/messages` return a signed-in rider's chats and their messages on any device. See `docs/contracts/amiigo-chat-history.md`. Until they ship, keep the chat on the device to show it again.
 
 ## Deleting conversation data
 
@@ -232,5 +232,5 @@ The version is in the path, `/amiigo/v1/`. Within v1, changes only add things: n
 | Should a message carry a client id, so a retry after a timeout is answered once? | Chat team | An optional `client_message_id`; the server answers a repeat with the first reply |
 | The rate limit counts messages per network address, and mobile carriers put many riders behind one address. Should the app's limit count per rider? | Chat team | Yes: 20 messages a minute per rider, keyed on the token |
 | After a handover, do agent replies come into the app chat? | Support and product | Decided with the Zoho work (see "What changes with the Zoho integration") |
-| Should the server return a chat's history? | Both | A `GET` of the transcript, if the app needs history across devices |
+| Should the server return a chat's history? | Both | Yes: proposed in `docs/contracts/amiigo-chat-history.md` |
 | Where do app developers get staging access and a test token? | Chat team | A staging test rider, plus the `sess-amiigo-test` session until tokens are wired |
