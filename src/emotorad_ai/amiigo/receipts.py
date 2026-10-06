@@ -11,7 +11,11 @@ exists." One receipt per message, `_id` `<user_key>#<client_message_id>`
 * `done` with what the rider was answered (`finish`), from then until the
   receipt expires, 24 hours after the message was accepted;
 * removed (`release`) when the message could not be handled at all (an
-  upload that is not there), so the app can send it again.
+  upload that is not there), so the app can send it again. Each claim
+  carries the claimer's own id (`claim`, made by the socket), and a release
+  names it: a socket whose claim was lost in a store failure never lets go
+  of a claim another socket made for the same message (the final review's
+  Minor 7).
 
 A turn that was recorded leaves none of the rider's words in its receipt:
 `ack` names the stored turn by message id, and `reply` names the bot's,
@@ -39,6 +43,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
@@ -67,10 +72,15 @@ def receipt_id(user_key: str, client_message_id: str) -> str:
     return "%s#%s" % (user_key, client_message_id)
 
 
+def new_claim_id() -> str:
+    """An id for one claim, which only its claimer knows: what `release` names."""
+    return uuid.uuid4().hex
+
+
 def new_receipt(rid: str, user_key: str, conversation_id: str, now: datetime,
-                ttl: timedelta = RECEIPT_TTL) -> Dict[str, Any]:
+                ttl: timedelta = RECEIPT_TTL, claim_id: Optional[str] = None) -> Dict[str, Any]:
     return {"_id": rid, "user_key": user_key, "conversation_id": conversation_id, "state": PROCESSING,
-            "ack": None, "reply": None, "at": now, "expires_at": now + ttl}
+            "ack": None, "reply": None, "at": now, "expires_at": now + ttl, "claim": claim_id or new_claim_id()}
 
 
 def holds(doc: Dict[str, Any], now: datetime, lease: timedelta = LEASE) -> bool:
@@ -125,10 +135,13 @@ class InMemoryAmiigoReceipts:
                     return doc["user_key"]
         return None
 
-    def claim(self, rid: str, user_key: str, conversation_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    def claim(self, rid: str, user_key: str, conversation_id: str,
+              claim_id: Optional[str] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
         """CLAIMED (the message is this caller's to handle), DUPLICATE with
         the receipt that answers for it, or BUSY (another message of the
-        conversation is processing)."""
+        conversation is processing). `claim_id` is the caller's id for this
+        claim, which a release must name (one is made when none is given,
+        for a caller that never lets go)."""
         with self._lock:
             now = self._now()
             self._sweep(now)
@@ -138,7 +151,7 @@ class InMemoryAmiigoReceipts:
             if any(other != rid and d["conversation_id"] == conversation_id and holds(d, now, self._lease)
                    for other, d in self._docs.items()):
                 return BUSY, None
-            self._docs[rid] = new_receipt(rid, user_key, conversation_id, now, self._ttl)
+            self._docs[rid] = new_receipt(rid, user_key, conversation_id, now, self._ttl, claim_id)
             return CLAIMED, None
 
     def finish(self, rid: str, ack: Dict[str, Any], reply: Dict[str, Any]) -> bool:
@@ -150,11 +163,13 @@ class InMemoryAmiigoReceipts:
             doc.update(state=DONE, ack=copy.deepcopy(ack), reply=copy.deepcopy(reply))
             return True
 
-    def release(self, rid: str) -> None:
-        """The message was not handled: it may be sent again. A done receipt stays."""
+    def release(self, rid: str, claim_id: str) -> None:
+        """The message was not handled: it may be sent again. Only the claim
+        `claim_id` names, while it is processing: a done receipt stays, and
+        so does another's claim."""
         with self._lock:
             doc = self._docs.get(rid)
-            if doc is not None and doc["state"] == PROCESSING:
+            if doc is not None and doc["state"] == PROCESSING and doc.get("claim") == claim_id:
                 del self._docs[rid]
 
     # -- erasure (the conversation store calls these) ---------------------------

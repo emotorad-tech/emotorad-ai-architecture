@@ -93,7 +93,7 @@ from .common import (
     AmiigoContext,
     TurnSlot,
 )
-from .receipts import BUSY, DONE, DUPLICATE, receipt_id
+from .receipts import BUSY, DONE, DUPLICATE, new_claim_id, receipt_id
 from .sockets import OpenSocket
 
 PROTOCOL = 1
@@ -366,6 +366,15 @@ def answer_frames(frame: MessageFrame, ack: Dict[str, Any], reply: Dict[str, Any
 
 
 @dataclass(frozen=True)
+class Claim:
+    """This socket's claim on a message's receipt: the receipt's id and the
+    claim's own, which a release names (the final review's Minor 7)."""
+
+    rid: str
+    claim_id: str
+
+
+@dataclass(frozen=True)
 class Admission:
     error: Optional[str] = None
     duplicate: bool = False
@@ -376,6 +385,11 @@ class Admission:
     # The message's place under the rider's cap, when it is to start a turn
     # (not a refusal, not a resend that waits on another socket's turn).
     slot: Optional[TurnSlot] = None
+    # The claim the turn finishes or lets go, when it is to start one with a receipt.
+    claim: Optional[Claim] = None
+    # A claim written as the store failed, whose release failed too: tried
+    # once more when the turn that runs without a receipt is over.
+    orphan: Optional[Claim] = None
 
 
 @dataclass(frozen=True)
@@ -512,21 +526,30 @@ class ChatSocket:
         message is admitted without one (the plan's Ruling 23), after the
         same ownership and upload checks: a smoke report must never wait on
         reconnects while the store is down."""
+        orphans: List[Claim] = []
         try:
-            return self._admit_with_receipt(frame, rid)
+            return self._admit_with_receipt(frame, rid, orphans)
         except StoreUnavailable as exc:
             self._noted("amiigo_receipts_unavailable", "amiigo", error=type(exc).__name__)
+        orphan = orphans[0] if orphans else None
+        error: Optional[str] = None
+        video = False
+        slot = None
         if not self._may_use(frame.conversation_id):
-            return Admission(error=CONVERSATION_NOT_FOUND)
-        error, video = self._uploads(frame)
+            error = CONVERSATION_NOT_FOUND
+        else:
+            error, video = self._uploads(frame)
+            if error is None:
+                slot = self.context.turns_in_flight.take(self.rider.user_key)
+                if slot is None:
+                    error = TOO_MANY_IN_FLIGHT
         if error is not None:
+            # No turn to wait for: the lost claim is tried once more now.
+            self._release(orphan)
             return Admission(error=error)
-        slot = self.context.turns_in_flight.take(self.rider.user_key)
-        if slot is None:
-            return Admission(error=TOO_MANY_IN_FLIGHT)
-        return Admission(video=video, receipted=False, slot=slot)
+        return Admission(video=video, receipted=False, slot=slot, orphan=orphan)
 
-    def _admit_with_receipt(self, frame: MessageFrame, rid: str) -> Admission:
+    def _admit_with_receipt(self, frame: MessageFrame, rid: str, orphans: List["Claim"]) -> Admission:
         context, rider, conversation_id = self.context, self.rider, frame.conversation_id
         receipts = context.receipts
         existing = receipts.answering(rid)
@@ -546,12 +569,16 @@ class ChatSocket:
         if slot is None:
             return Admission(error=TOO_MANY_IN_FLIGHT)
         admitted = False
+        claim = Claim(rid, new_claim_id())
         try:
             try:
-                outcome, doc = receipts.claim(rid, rider.user_key, conversation_id)
+                outcome, doc = receipts.claim(rid, rider.user_key, conversation_id, claim_id=claim.claim_id)
             except StoreUnavailable:
                 # The claim may have been written before the store failed.
-                self._release(rid)
+                # Only this claim is let go, never another socket's; if
+                # that fails too, the turn tries once more when it is over.
+                if not self._release(claim):
+                    orphans.append(claim)
                 raise
             if outcome == DUPLICATE:
                 return self._same_message(doc, frame)
@@ -565,13 +592,13 @@ class ChatSocket:
                 # the claim: looked at again.
                 mine = self._may_use(conversation_id)
             except BaseException:
-                self._release(rid)
+                self._release(claim)
                 raise
             if not mine:
-                self._release(rid)
+                self._release(claim)
                 return Admission(error=CONVERSATION_NOT_FOUND)
             admitted = True
-            return Admission(video=video, slot=slot)
+            return Admission(video=video, slot=slot, claim=claim)
         finally:
             if not admitted:
                 slot.give_back()
@@ -653,8 +680,8 @@ class ChatSocket:
         slot = admission.slot
         try:
             if not admission.duplicate:
-                await self._turn(frame, rid if admission.receipted else None, admission.video, typed=False,
-                                 slot=slot)
+                await self._turn(frame, admission.claim, admission.video, typed=False, slot=slot,
+                                 orphan=admission.orphan)
                 return
             # Accepted already, here or on another socket: wait for its answer,
             # reading the receipt once a poll, or admit it afresh when the first
@@ -674,12 +701,11 @@ class ChatSocket:
                             # Ruling 24: an expired token starts no turn. The
                             # claim goes back, and the socket closes 4401 once
                             # nothing else is being answered on it.
-                            if again.receipted:
-                                await self._store(self._release, rid)
+                            await self._store(self._release, again.claim or again.orphan)
                             self._logged("amiigo", TOKEN_EXPIRED)
                             return
-                        await self._turn(frame, rid if again.receipted else None, again.video, typed=typed,
-                                         slot=slot)
+                        await self._turn(frame, again.claim, again.video, typed=typed, slot=slot,
+                                         orphan=again.orphan)
                         return
                     continue
                 if doc["conversation_id"] != frame.conversation_id:
@@ -697,15 +723,15 @@ class ChatSocket:
             if slot is not None:
                 slot.give_back()
 
-    async def _turn(self, frame: MessageFrame, rid: Optional[str], video: bool, typed: bool,
-                    slot: Optional[TurnSlot]) -> None:
+    async def _turn(self, frame: MessageFrame, claim: Optional[Claim], video: bool, typed: bool,
+                    slot: Optional[TurnSlot], orphan: Optional[Claim] = None) -> None:
         if not typed:
             await self.sock.send(typing_frame(frame.conversation_id, video))
         # On the socket's own turn threads, never anyio's default pool that
         # POST /message shares. Abandoned, not cancelled, when the socket
         # goes: the turn finishes and its receipt is written in the thread,
         # which gives the rider's place back then.
-        result = await anyio.to_thread.run_sync(self._run_turn, frame, rid, slot, abandon_on_cancel=True,
+        result = await anyio.to_thread.run_sync(self._run_turn, frame, claim, slot, orphan, abandon_on_cancel=True,
                                                 limiter=_threads(self.context, TURN_THREADS))
         await self._deliver(frame, result)
 
@@ -736,20 +762,23 @@ class ChatSocket:
 
     # -- in the worker thread ------------------------------------------------------------
 
-    def _run_turn(self, frame: MessageFrame, rid: Optional[str], slot: Optional[TurnSlot] = None) -> TurnResult:
+    def _run_turn(self, frame: MessageFrame, claim: Optional[Claim], slot: Optional[TurnSlot] = None,
+                  orphan: Optional[Claim] = None) -> TurnResult:
         """The turn, as POST /message runs one, then its receipt (none when
-        `rid` is None: the receipts could not answer), holding the rider's
+        `claim` is None: the receipts could not answer), holding the rider's
         place under their cap until it ends, whether or not its socket is
-        still there. Blocking."""
-        if slot is None:
-            return self._turn_and_receipt(frame, rid)
-        slot.to_thread()
+        still there. A claim lost as the store failed (`orphan`) is let go
+        once more when the turn is over. Blocking."""
+        if slot is not None:
+            slot.to_thread()
         try:
-            return self._turn_and_receipt(frame, rid)
+            return self._turn_and_receipt(frame, claim)
         finally:
-            slot.give_back(from_thread=True)
+            self._release(orphan)
+            if slot is not None:
+                slot.give_back(from_thread=True)
 
-    def _turn_and_receipt(self, frame: MessageFrame, rid: Optional[str]) -> TurnResult:
+    def _turn_and_receipt(self, frame: MessageFrame, claim: Optional[Claim]) -> TurnResult:
         context = self.context
         try:
             message = context.prepare_turn(
@@ -758,17 +787,17 @@ class ChatSocket:
                 pill=frame.pill, screen=frame.screen, location=frame.location,
                 channel=history.APP_CHANNEL, rider_phone=self.rider.phone)
         except HTTPException as exc:
-            self._release(rid)
+            self._release(claim)
             detail = _UPLOAD_REFUSALS.get(exc.status_code)
             if detail is None:
                 raise
             return TurnResult(error=detail)
         except AttachmentError:
             # The frame's checks leave none: the count is checked on arrival.
-            self._release(rid)
+            self._release(claim)
             return TurnResult(error=BAD_FRAME)
         except BaseException:
-            self._release(rid)
+            self._release(claim)
             raise
         try:
             # Inside the try: a fault reading the last turn number lets the
@@ -776,14 +805,14 @@ class ChatSocket:
             last = self._last_turn(frame.conversation_id)
             reply = context.handle_turn(message)
         except BaseException:
-            self._release(rid)
+            self._release(claim)
             raise
         # The turn happened: from here its message is never handled again.
         now = context.clock()
         recorded = self._recorded(frame.conversation_id, last)
         ack, answer = receipt_of(frame, message, reply, recorded, now.isoformat())
         try:
-            if rid is not None and not context.receipts.finish(rid, ack, answer):
+            if claim is not None and not context.receipts.finish(claim.rid, ack, answer):
                 self._noted("amiigo_receipt_not_saved", frame.conversation_id, error="receipt_gone")
         except StoreUnavailable as exc:
             # A resend after the lease runs the turn again: said, not hidden.
@@ -836,15 +865,19 @@ class ChatSocket:
         answered = next((t for t in turns if said is not None and t.role == "bot" and t.n == said.n + 1), None)
         return (said, answered) if answered is not None else None
 
-    def _release(self, rid: Optional[str]) -> None:
-        """Let the message go, so it may be sent again. A release that
-        fails is logged by its class; the claim then runs out with its lease."""
-        if rid is None:
-            return
+    def _release(self, claim: Optional[Claim]) -> bool:
+        """Let the message go, so it may be sent again: this socket's claim
+        only, never another's for the same message. False when the release
+        failed, which is logged by its class; the claim then runs out with
+        its lease unless it is tried again."""
+        if claim is None:
+            return True
         try:
-            self.context.receipts.release(rid)
+            self.context.receipts.release(claim.rid, claim.claim_id)
         except Exception as exc:
             self._noted("amiigo_receipt_not_released", "amiigo", error=type(exc).__name__)
+            return False
+        return True
 
     # -- refusals and logs -------------------------------------------------------------
 

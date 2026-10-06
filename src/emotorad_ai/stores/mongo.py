@@ -812,7 +812,8 @@ class MongoAmiigoReceipts:
             projection={"user_key": 1}))
         return doc["user_key"] if doc else None
 
-    def claim(self, rid: str, user_key: str, conversation_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    def claim(self, rid: str, user_key: str, conversation_id: str,
+              claim_id: Optional[str] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
         now = self._now()
         # A claim past its lease belongs to a turn that died with its server.
         self._guard("update_many", lambda: self._receipts.update_many(
@@ -821,7 +822,7 @@ class MongoAmiigoReceipts:
         doc = self._read(rid, now)
         if answers(doc, now, self._lease):
             return DUPLICATE, doc
-        fresh = new_receipt(rid, user_key, conversation_id, now, self._ttl)
+        fresh = new_receipt(rid, user_key, conversation_id, now, self._ttl, claim_id)
         try:
             if doc is None:
                 # Expired but not yet removed by the TTL monitor: gone.
@@ -845,9 +846,11 @@ class MongoAmiigoReceipts:
             {"_id": rid}, {"$set": {"state": DONE, "ack": ack, "reply": reply}}))
         return result.matched_count > 0
 
-    def release(self, rid: str) -> None:
-        # Only a processing claim is released; a finished receipt is never undone.
-        self._guard("delete_one", lambda: self._receipts.delete_one({"_id": rid, "state": PROCESSING}))
+    def release(self, rid: str, claim_id: str) -> None:
+        # Only this caller's processing claim is released: a finished receipt
+        # is never undone, and another socket's claim is never let go.
+        self._guard("delete_one", lambda: self._receipts.delete_one(
+            {"_id": rid, "state": PROCESSING, "claim": claim_id}))
 
     def has_indexes(self) -> bool:
         """Whether mongo_setup.py has made the two indexes the receipts rest

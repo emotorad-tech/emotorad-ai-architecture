@@ -841,6 +841,39 @@ class WhoseChatTests(SocketCase):
         [kept] = self.events("amiigo_receipt_not_released")
         self.assertEqual((kept["error"], kept["rider_hash"]), ("RuntimeError", rider_hash_of(RIDER_KEY)))
 
+    def test_a_claim_written_as_the_store_failed_is_let_go_once_the_turn_is_over(self):
+        # The final review's Minor 7: the claim was written, its answer lost,
+        # and the release straight after failed too. The turn runs without a
+        # receipt (Ruling 23); after it the release is tried once more, so
+        # the chat is not busy for the ten-minute lease.
+        receipts = self.ctx.receipts
+        real_claim, real_release = receipts.claim, receipts.release
+        releases = []
+
+        def claim(*args, **kwargs):
+            real_claim(*args, **kwargs)
+            raise StoreUnavailable("MongoDB insert_one failed")
+
+        def release(*args, **kwargs):
+            releases.append(args)
+            if len(releases) == 1:
+                raise StoreUnavailable("MongoDB delete_one failed")
+            return real_release(*args, **kwargs)
+
+        with mock.patch.object(receipts, "claim", side_effect=claim), \
+                mock.patch.object(receipts, "release", side_effect=release):
+            with self.socket() as ws:
+                self.exchange(ws, message(n=1))
+        self.assertEqual(len(releases), 2)
+        self.assertEqual(releases[0], releases[1])
+        self.assertIsNone(receipts.get(receipt_id(RIDER_KEY, cmid(1))))
+        self.assertIsNone(receipts.in_flight(CID))
+        with self.socket() as ws:
+            self.exchange(ws, message(n=2, text="yes it is on"))
+        self.assertEqual(len(self.turns.calls), 2)
+        [kept] = self.events("amiigo_receipt_not_released")
+        self.assertEqual(kept["error"], "StoreUnavailable")
+
     def test_a_fault_while_admitting_a_message_closes_1011(self):
         with mock.patch.object(history, "rider_may_use", side_effect=RuntimeError("a bug")):
             with self.socket() as ws:
@@ -1154,6 +1187,24 @@ class AdmissionRaceTests(SocketCase):
         with mock.patch.object(receipts, "answering", side_effect=answering):
             admission = self.chat()._admit(MessageFrame(cmid(1), CID, "hi"), rid)
         self.assertEqual((admission.duplicate, admission.error), (True, None))
+
+    def test_a_lost_claim_lets_go_only_its_own_never_another_sockets(self):
+        # The final review's Minor 7: the claim failed in the store while the
+        # same message's claim from another socket landed.
+        rid = receipt_id(RIDER_KEY, cmid(1))
+        receipts = self.ctx.receipts
+        real = receipts.claim
+
+        def claim(r, user_key, cid, claim_id=None):
+            real(r, user_key, cid, claim_id="the other socket's")
+            raise StoreUnavailable("MongoDB insert_one failed")
+
+        with mock.patch.object(receipts, "claim", side_effect=claim):
+            admission = self.chat()._admit(MessageFrame(cmid(1), CID, "hi"), rid)
+        self.assertEqual((admission.error, admission.receipted), (None, False))
+        doc = receipts.get(rid)
+        self.assertEqual((doc["state"], doc["claim"]), (PROCESSING, "the other socket's"))
+        admission.slot.give_back()
 
     def test_a_chat_taken_between_the_check_and_the_claim_is_refused_and_the_claim_let_go(self):
         rid = receipt_id(RIDER_KEY, cmid(1))
@@ -1679,14 +1730,30 @@ class ReceiptsContract:
         self.assertEqual(self.receipts.claim(receipt_id(RIDER_KEY, cmid(3)), RIDER_KEY, CID), (CLAIMED, None))
 
     def test_a_released_message_may_be_claimed_again_and_a_finished_one_is_never_released(self):
-        self.receipts.claim(self.RID, RIDER_KEY, CID)
-        self.receipts.release(self.RID)
+        self.receipts.claim(self.RID, RIDER_KEY, CID, claim_id="mine")
+        self.receipts.release(self.RID, "mine")
         self.assertIsNone(self.receipts.get(self.RID))
         self.assertIsNone(self.receipts.in_flight(CID))
-        self.assertEqual(self.receipts.claim(self.RID, RIDER_KEY, CID), (CLAIMED, None))
+        self.assertEqual(self.receipts.claim(self.RID, RIDER_KEY, CID, claim_id="mine again"), (CLAIMED, None))
         self.receipts.finish(self.RID, {"id": "a"}, {"id": "b"})
-        self.receipts.release(self.RID)
+        self.receipts.release(self.RID, "mine again")
         self.assertEqual(self.receipts.get(self.RID)["state"], DONE)
+
+    def test_release_lets_go_only_the_claim_it_names(self):
+        # The final review's Minor 7: a socket whose claim was lost never
+        # lets go of the claim another socket made for the same message.
+        self.receipts.claim(self.RID, RIDER_KEY, CID, claim_id="the other socket's")
+        self.receipts.release(self.RID, "a lost one")
+        doc = self.receipts.get(self.RID)
+        self.assertEqual((doc["state"], doc["claim"]), (PROCESSING, "the other socket's"))
+        self.assertEqual(self.receipts.in_flight(CID), RIDER_KEY)
+        # Past its lease, taken over by a third: the second's release misses too.
+        self.clock.move(LEASE + timedelta(seconds=1))
+        self.assertEqual(self.receipts.claim(self.RID, RIDER_KEY, CID, claim_id="a third"), (CLAIMED, None))
+        self.receipts.release(self.RID, "the other socket's")
+        self.assertEqual(self.receipts.get(self.RID)["claim"], "a third")
+        self.receipts.release(self.RID, "a third")
+        self.assertIsNone(self.receipts.get(self.RID))
 
     def test_a_claim_past_its_lease_no_longer_holds_the_conversation(self):
         self.receipts.claim(self.RID, RIDER_KEY, CID)
@@ -1765,7 +1832,7 @@ class MongoReceiptsTests(ReceiptsContract, unittest.TestCase):
         self.receipts.finish(self.RID, {"id": CID + "#00001"}, {"id": CID + "#00002", "actions": []})
         doc = self.db[AMIIGO_RECEIPTS].find_one({"_id": self.RID})
         self.assertEqual(set(doc), {"_id", "user_key", "conversation_id", "state", "ack", "reply", "at",
-                                    "expires_at"})
+                                    "expires_at", "claim"})
 
     def test_without_either_index_the_check_says_so(self):
         for missing in ("expires_at_ttl", "one_processing_per_conversation"):
