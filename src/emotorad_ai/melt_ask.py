@@ -71,12 +71,49 @@ TEXT_HI = (
     "नीचे दी गई तस्वीरों में हर एक का उदाहरण है।"
 )
 
+# What the battery and narrow agents are told while the ask went out for the
+# chosen bike and no evidence has passed (the controller's ruling 4 of 6
+# October 2026), so the model does not ask again for the ends one at a time,
+# the frozen record's way. Code-built, added in Runtime._run.
+ASKED_NOTE = (
+    "The customer was already asked, in one message, for a photo of the battery serial sticker, a photo of the "
+    "controller's label and a video of the battery terminals and the frame's connector. Judge what they send. "
+    "Do not ask again for the ends one at a time; if something is missing or unclear, ask only for that item."
+)
+
 # ASCII phrases stand alone: no letter or digit either side, so "unmelted"
 # and "E-061" do not count. Explicit lookarounds, never \b or \w, which miss
 # Devanagari (CLAUDE.md). Under IGNORECASE these cover capitals too.
 _ASCII_BEFORE = r"(?<![a-z0-9])"
 _ASCII_AFTER = r"(?![a-z0-9])"
 _SPACES = r"\s+"
+
+# A melt on a motor part is not a battery melt (the controller's ruling 3 of 6
+# October 2026): text that names the motor and no battery word gets no ask,
+# and triage routes it as it would anyway. The words are the ruling's, with
+# their plurals; ASCII words stand alone ("EMotorad" and "github" name no
+# motor), Devanagari ones match as substrings.
+MOTOR_WORDS = re.compile(
+    r"(?<![a-z0-9])(?:motors?|hubs?)(?![a-z0-9])|मोटर",
+    re.IGNORECASE,
+)
+BATTERY_WORDS = re.compile(
+    r"(?<![a-z0-9])(?:batter(?:y|ies)|terminals?|charging\s+ports?|chargers?)(?![a-z0-9])|बैटरी|टर्मिनल",
+    re.IGNORECASE,
+)
+
+
+def names_motor(text: Optional[str]) -> bool:
+    return bool(text) and MOTOR_WORDS.search(text) is not None
+
+
+def names_battery(text: Optional[str]) -> bool:
+    return bool(text) and BATTERY_WORDS.search(text) is not None
+
+
+def is_motor_melt(text: Optional[str]) -> bool:
+    """The text names the motor and no battery word."""
+    return names_motor(text) and not names_battery(text)
 
 
 def trigger_phrases(records: Optional[Sequence[Any]] = None) -> Tuple[str, ...]:
@@ -134,6 +171,11 @@ class MeltAsk:
 
     def triggered(self, text: Optional[str]) -> bool:
         return triggered(self.pattern, text)
+
+    def battery_melt(self, text: Optional[str]) -> bool:
+        """A melt phrase that is not a motor melt: what the ask answers, and
+        what triage reads as the battery topic while the ask is on."""
+        return self.triggered(text) and not is_motor_melt(text)
 
     @staticmethod
     def text(hindi: bool) -> str:

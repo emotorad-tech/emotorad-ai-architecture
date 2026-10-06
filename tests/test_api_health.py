@@ -57,7 +57,8 @@ class HealthTests(unittest.TestCase):
     def test_the_runtime_is_given_the_melt_ask_when_it_is_on(self):
         from emotorad_ai import melt_ask
 
-        sentinel = object()
+        # Shaped like the ask: the runtime hands its battery_melt to triage.
+        sentinel = mock.Mock(spec=melt_ask.MeltAsk)
         with mock.patch.object(melt_ask, "from_env", return_value=(sentinel, "on")):
             api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_MELT_ASK": "on"})
         self.assertIs(api.runtime.melt_ask, sentinel)

@@ -19,17 +19,22 @@ from emotorad_ai.adapters import DealerWhatsAppAdapter
 from emotorad_ai.config import Settings
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Identity, InboundMessage, Reply
 from emotorad_ai.conversation import ConversationState, InMemoryConversationStore
+from emotorad_ai.decisions import Q_CATEGORY, Q_SUB_CATEGORY
 from emotorad_ai.disclosure import apply_disclosure
+from emotorad_ai.evidence_asks import MAX_EVIDENCE_ASKS
+from emotorad_ai.evidence_check import verdict_record
 from emotorad_ai.guardrails import SAFETY_MESSAGE
 from emotorad_ai.identity import IdentityResolver
+from emotorad_ai.jev import JevDecision, ScriptedJev, choose
 from emotorad_ai.knowledge import load_records
 from emotorad_ai.llm import ScriptedClaude, say
 from emotorad_ai.media import load_catalogue
 from emotorad_ai.observability import EventLog
-from emotorad_ai.runtime import TURN_FACT_FIELDS, Runtime
+from emotorad_ai.runtime import TOPIC_AGENTS, TURN_FACT_FIELDS, Runtime
 from emotorad_ai.tools import fixtures
 from emotorad_ai.tools.mocks import build_registry
 from emotorad_ai.tools.verification import VerificationStore
+from emotorad_ai.triage import TriageAgent
 
 TODAY = date(2026, 10, 6)
 ONE_BIKE = "+919876543210"  # Ananya, one EMX Plus EMXP2025004417 (fixtures)
@@ -231,9 +236,10 @@ def first_reply(text, channel="website_chat"):
 
 
 class MeltChat:
-    """One customer, with the melt ask on (the default here) or off."""
+    """One customer, with the melt ask on (the default here) or off. Any other
+    keyword goes to the Runtime (Jev and the narrow model, for one)."""
 
-    def __init__(self, replies=(), ask=True, phone=ONE_BIKE, select=None, routed=None, store=None):
+    def __init__(self, replies=(), ask=True, phone=ONE_BIKE, select=None, routed=None, store=None, **runtime_kwargs):
         self.registry = build_registry(today=TODAY)
         self.llm = ScriptedClaude(list(replies))
         self.conversations = InMemoryConversationStore()
@@ -243,7 +249,7 @@ class MeltChat:
         self.runtime = Runtime(
             settings=Settings(log_path="", log_to_stdout=False), registry=self.registry, llm=self.llm,
             log=self.log, resolver=IdentityResolver(self.registry), conversations=self.conversations,
-            melt_ask=active(self.store) if ask else None,
+            melt_ask=active(self.store) if ask else None, **runtime_kwargs,
         )
         state = self.conversations.get("c1")
         if select:
@@ -456,6 +462,317 @@ class MeltAskTests(unittest.TestCase):
         self.assertEqual(reply.handled_by, "melt_ask")
         self.assertEqual(len(reply.attachments), 3)
         self.assertEqual(conversations.peek("c1").melt_asked_frames, ["EMXP2026001234"])
+
+
+# --- the fix round (the controller's rulings of 6 October 2026) ---------------
+
+# Ruling 4: what the battery and narrow agents are told after the ask, verbatim.
+ASKED_NOTE = (
+    "The customer was already asked, in one message, for a photo of the battery serial sticker, a photo of the "
+    "controller's label and a video of the battery terminals and the frame's connector. Judge what they send. "
+    "Do not ask again for the ends one at a time; if something is missing or unclear, ask only for that item."
+)
+LATER_REPLY = "Thanks for letting me know. Is there anything else about the bike I can help with?"
+MOTOR_REPLY = "Thanks. Does the motor stop completely, or does it cut in and out?"
+FRAME = "EMXP2025004417"  # ONE_BIKE's EMX Plus
+
+# Ruling 3: the motor named and no battery word is a motor melt.
+MOTOR_NAMED = ("motor", "Motor", "MOTOR", "the motors", "hub", "hub motor", "the hub's wire", "मोटर", "मोटर का")
+NOT_MOTOR = ("EMotorad", "my emotorad bike", "motorbike", "github", "chub", "hubby", "")
+BATTERY_NAMED = ("battery", "Battery", "batteries", "terminal", "terminals", "charging port", "charging  ports",
+                 "charger", "chargers", "बैटरी", "टर्मिनल", "बैटरी का")
+NOT_BATTERY = ("batteryless", "terminally", "supercharger", "charging", "port", "connector", "")
+MOTOR_MELTS = ("my motor connector is melted", "the hub connector melted", "Motor wire pighal gaya",
+               "मोटर का कनेक्टर पिघल गया", "the motors cable melted")
+BATTERY_MELTS = ("the battery terminal near the motor melted", "motor side charging port melted",
+                 "the charger plug by the hub melted", "मोटर के पास बैटरी का टर्मिनल पिघल गया",
+                 "मोटर के पास टर्मिनल पिघल गया", "something is melted in battery", "connector melted", "E-06",
+                 "terminal pighal gaya", "my EMotorad connector melted")
+
+
+class MotorMeltTests(unittest.TestCase):
+    """Ruling 3: a melt on a motor part is not a battery melt."""
+
+    def test_the_motor_words(self):
+        for text in MOTOR_NAMED:
+            with self.subTest(text=text):
+                self.assertTrue(melt_ask.names_motor(text))
+        for text in NOT_MOTOR:
+            with self.subTest(text=text):
+                self.assertFalse(melt_ask.names_motor(text))
+
+    def test_the_battery_words(self):
+        for text in BATTERY_NAMED:
+            with self.subTest(text=text):
+                self.assertTrue(melt_ask.names_battery(text))
+        for text in NOT_BATTERY:
+            with self.subTest(text=text):
+                self.assertFalse(melt_ask.names_battery(text))
+
+    def test_the_patterns_use_neither_word_boundaries_nor_word_classes(self):
+        for pattern in (melt_ask.MOTOR_WORDS, melt_ask.BATTERY_WORDS):
+            with self.subTest(pattern=pattern.pattern):
+                self.assertNotIn("\\b", pattern.pattern)
+                self.assertNotIn("\\w", pattern.pattern)
+                self.assertIn("(?<![a-z0-9])", pattern.pattern)
+
+    def test_a_melt_naming_the_motor_and_no_battery_word_is_not_a_battery_melt(self):
+        ask = active()
+        for text in MOTOR_MELTS:
+            with self.subTest(text=text):
+                self.assertTrue(ask.triggered(text))
+                self.assertFalse(ask.battery_melt(text))
+        for text in BATTERY_MELTS:
+            with self.subTest(text=text):
+                self.assertTrue(ask.battery_melt(text))
+        for text in NEAR_MISSES:
+            with self.subTest(text=text):
+                self.assertFalse(ask.battery_melt(text))
+
+    def test_my_motor_connector_is_melted_gets_no_ask_and_triage_routes_it(self):
+        chat = MeltChat([say(MOTOR_REPLY)])
+        reply = chat.say("my motor connector is melted")
+        self.assertEqual(reply.handled_by, "motor_support")
+        self.assertIn(MOTOR_REPLY, reply.text)
+        self.assertEqual(reply.attachments, [])
+        self.assertEqual(chat.events("melt_ask"), [])
+        self.assertEqual(chat.state().agent, "motor_support")
+        self.assertFalse(chat.state().melt_pending)
+        self.assertEqual(chat.state().melt_asked_frames, [])
+
+    def test_a_motor_melt_on_a_routed_chat_gets_no_ask(self):
+        chat = MeltChat([say(LATER_REPLY)], select=FRAME, routed="battery_support")
+        reply = chat.say("मोटर का कनेक्टर पिघल गया")
+        self.assertEqual(reply.handled_by, "battery_support")
+        self.assertEqual(chat.events("melt_ask"), [])
+
+    def test_the_battery_terminal_near_the_motor_gets_it(self):
+        chat = MeltChat()
+        reply = chat.say("the battery terminal near the motor melted")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual(reply.handled_by, "melt_ask")
+        self.assertEqual(reply.text, first_reply(melt_ask.TEXT_EN))
+        self.assertEqual(chat.state().melt_asked_frames, [FRAME])
+
+
+class MeltIsTheBatteryTopicTests(unittest.TestCase):
+    """Ruling 2: with the ask on, a battery melt is the battery topic in
+    triage; with it off, triage is exactly as today."""
+
+    def test_triage_reads_a_battery_melt_as_the_battery_topic_only_when_told(self):
+        ask = active()
+        on, off = TriageAgent(TOPIC_AGENTS, battery_melt=ask.battery_melt), TriageAgent(TOPIC_AGENTS)
+        for text in ("connector melted", "E-06", "terminal pighal gaya", "the battery terminal near the motor melted"):
+            with self.subTest(text=text):
+                self.assertEqual(on.classify(text), "battery")
+                self.assertIsNone(off.classify(text))
+        # A motor melt stays motor; text with no melt is as classify_issue says.
+        self.assertEqual(on.classify("my motor connector is melted"), "motor")
+        self.assertEqual(on.classify("the motor is noisy"), "motor")
+        self.assertIsNone(on.classify("hello there"))
+
+    def test_with_the_ask_on_a_first_message_melt_is_routed_and_asked(self):
+        for text, expected in (("connector melted", melt_ask.TEXT_EN), ("E-06", melt_ask.TEXT_EN),
+                               ("terminal pighal gaya", melt_ask.TEXT_EN), ("टर्मिनल पिघल गया", melt_ask.TEXT_HI)):
+            with self.subTest(text=text):
+                chat = MeltChat()
+                reply = chat.say(text)
+                self.assertEqual(chat.llm.requests, [])
+                self.assertEqual(reply.handled_by, "melt_ask")
+                self.assertEqual(reply.text, first_reply(expected))
+                self.assertEqual(len(reply.attachments), 3)
+                self.assertEqual(chat.state().agent, "battery_support")
+                self.assertEqual(chat.state().melt_asked_frames, [FRAME])
+
+    def test_with_two_bikes_a_melt_alone_is_asked_once_the_bike_is_chosen(self):
+        chat = MeltChat(phone=TWO_BIKES)
+        which = chat.say("connector melted")
+        self.assertEqual((which.handled_by, which.metadata["reason"]), ("triage", "multiple_bikes:2"))
+        self.assertTrue(chat.state().melt_pending)
+        reply = chat.say("EMX Plus")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertEqual(reply.handled_by, "melt_ask")
+        self.assertEqual(reply.text, melt_ask.TEXT_EN)
+        self.assertEqual(chat.state().melt_asked_frames, ["EMXP2026001234"])
+
+    def test_on_the_web_chat_a_melt_alone_before_verifying_is_asked_once_the_bike_is_chosen(self):
+        store = VerificationStore()
+        registry = build_registry(verification=store, today=TODAY, account_finder=fixtures.find_account_by_order_code)
+        llm = ScriptedClaude([])
+        conversations = InMemoryConversationStore()
+        runtime = Runtime(
+            settings=Settings(log_path="", log_to_stdout=False), registry=registry, llm=llm,
+            log=EventLog(path=None), resolver=IdentityResolver(registry), conversations=conversations,
+            self_service_identity=True, phone_resolver=store.verified_phone, otp_verified_at=store.verified_on,
+            verify_first=True, melt_ask=active(),
+        )
+
+        def send(text):
+            return runtime.handle(InboundMessage(
+                conversation_id="c1", persona="customer", channel="website_chat", message_text=text,
+                identity=Identity(strength=ANONYMOUS, em_aid="aid-1")))
+
+        self.assertEqual(send("connector melted").handled_by, "verify_first:ask_number")
+        send(TWO_BIKES[3:])
+        self.assertEqual(send(store.pending_code("c1")).handled_by, "verify_first:verified")
+        reply = send("EMX Plus")
+        self.assertEqual(llm.requests, [])
+        self.assertEqual(reply.handled_by, "melt_ask")
+        self.assertEqual(conversations.peek("c1").melt_asked_frames, ["EMXP2026001234"])
+
+    def test_with_the_ask_off_triage_is_as_today(self):
+        for text in ("connector melted", "E-06", "terminal pighal gaya"):
+            with self.subTest(text=text):
+                chat = MeltChat(ask=False)
+                reply = chat.say(text)
+                self.assertEqual(chat.llm.requests, [])
+                self.assertEqual((reply.handled_by, reply.metadata["reason"]), ("triage", "issue_unknown"))
+                self.assertIn("What is happening with the bike?", reply.text)
+                self.assertEqual(reply.attachments, [])
+                self.assertIsNone(chat.state().agent)
+
+
+class WaitingAskTests(unittest.TestCase):
+    """Ruling 1: a waiting ask survives only a turn that ended for want of a
+    bike (triage asking which bike) or of verification (the verify step)."""
+
+    def test_a_handover_clears_it(self):
+        chat = MeltChat([say(LATER_REPLY)], select=FRAME, routed="battery_support")
+        first = chat.say("my battery connector is melted, connect me to a human")
+        self.assertEqual(first.handled_by, "guardrail:human_handoff")
+        self.assertFalse(chat.state().melt_pending)
+        second = chat.say("ok thanks, when will they call?")
+        self.assertEqual(second.handled_by, "battery_support")
+        self.assertIn(LATER_REPLY, second.text)
+        self.assertEqual(second.attachments, [])
+        self.assertEqual(chat.events("melt_ask"), [])
+        self.assertEqual(chat.state().melt_asked_frames, [])
+
+    def test_the_erasure_flow_clears_it(self):
+        chat = MeltChat([say(LATER_REPLY)], select=FRAME, routed="battery_support")
+        self.assertEqual(chat.say("my battery connector is melted, delete my data").handled_by, "erasure:confirm")
+        self.assertFalse(chat.state().melt_pending)
+        self.assertEqual(chat.say("no").handled_by, "erasure:kept")
+        reply = chat.say("ok thanks")
+        self.assertEqual(reply.handled_by, "battery_support")
+        self.assertEqual(chat.events("melt_ask"), [])
+
+    def test_on_the_web_chat_the_erasure_offered_on_verifying_clears_it(self):
+        store = VerificationStore()
+        registry = build_registry(verification=store, today=TODAY, account_finder=fixtures.find_account_by_order_code)
+        llm = ScriptedClaude([say(LATER_REPLY)])
+        conversations = InMemoryConversationStore()
+        log = EventLog(path=None)
+        runtime = Runtime(
+            settings=Settings(log_path="", log_to_stdout=False), registry=registry, llm=llm,
+            log=log, resolver=IdentityResolver(registry), conversations=conversations,
+            self_service_identity=True, phone_resolver=store.verified_phone, otp_verified_at=store.verified_on,
+            verify_first=True, melt_ask=active(),
+        )
+
+        def send(text):
+            return runtime.handle(InboundMessage(
+                conversation_id="c1", persona="customer", channel="website_chat", message_text=text,
+                identity=Identity(strength=ANONYMOUS, em_aid="aid-1")))
+
+        self.assertEqual(send("my battery connector is melted, delete my data").handled_by,
+                         "verify_first:ask_number")
+        self.assertTrue(conversations.peek("c1").melt_pending)
+        send(TWO_BIKES[3:])
+        self.assertEqual(send(store.pending_code("c1")).handled_by, "verify_first:verified")
+        self.assertFalse(conversations.peek("c1").melt_pending)
+        self.assertEqual(send("no").handled_by, "erasure:kept")
+        self.assertEqual(send("EMX Plus").handled_by, "battery_support")
+        self.assertEqual([e for e in log.events if e["event"] == "melt_ask"], [])
+
+    def test_the_which_bike_question_keeps_it(self):
+        chat = MeltChat(phone=TWO_BIKES)
+        chat.say("my battery terminal is melted")
+        self.assertTrue(chat.state().melt_pending)
+        # A reply that names no listed bike is asked again: still for want of a bike.
+        again = chat.say("hmm")
+        self.assertEqual(again.metadata["reason"], "selection_unmatched")
+        self.assertTrue(chat.state().melt_pending)
+        self.assertEqual(chat.say("EMX Plus").handled_by, "melt_ask")
+
+
+class AfterTheAskTests(unittest.TestCase):
+    """Ruling 4: the battery and narrow agents are told the customer was
+    asked, while the ask went out for the chosen bike and no evidence passed."""
+
+    def test_the_note_is_the_ruled_text(self):
+        self.assertEqual(melt_ask.ASKED_NOTE, ASKED_NOTE)
+        self.assertNotIn(chr(0x2014), ASKED_NOTE)
+
+    def test_the_battery_agent_is_told_after_the_ask(self):
+        chat = MeltChat([say(LATER_REPLY), say(LATER_REPLY)], select=FRAME, routed="battery_support")
+        chat.say("something is melted in battery")
+        self.assertEqual(chat.say("ok, sending them now").handled_by, "battery_support")
+        self.assertIn(ASKED_NOTE, chat.llm.requests[0]["system"])
+        # Every turn while nothing has passed, not only the next one.
+        chat.say("did you get them?")
+        self.assertIn(ASKED_NOTE, chat.llm.requests[1]["system"])
+
+    def test_the_narrow_agent_is_told_after_the_ask(self):
+        narrow = ScriptedClaude([say(LATER_REPLY)])
+        jev = ScriptedJev([JevDecision(answers={Q_CATEGORY: choose("battery", 0.95),
+                                                Q_SUB_CATEGORY: choose("battery-melted-terminal", 0.9)})])
+        chat = MeltChat(jev=jev, narrow_llm=narrow, standard_responses=[])
+        self.assertEqual(chat.say("my battery connector is melted").handled_by, "melt_ask")
+        reply = chat.say("ok, sending them now")
+        self.assertEqual(reply.handled_by, "narrow_support")
+        self.assertEqual(chat.llm.requests, [])
+        self.assertIn(ASKED_NOTE, narrow.requests[0]["system"])
+
+    def test_no_note_without_an_ask(self):
+        for ask in (True, False):
+            with self.subTest(ask=ask):
+                chat = MeltChat([say(LATER_REPLY)], ask=ask, select=FRAME, routed="battery_support")
+                chat.say("my battery won't charge")
+                self.assertNotIn(ASKED_NOTE, chat.llm.requests[0]["system"])
+        chat = MeltChat([say(AGENT_REPLY)], ask=False, select=FRAME, routed="battery_support")
+        chat.say("something is melted in battery")
+        self.assertNotIn(ASKED_NOTE, chat.llm.requests[0]["system"])
+
+    def test_no_note_once_evidence_passed(self):
+        chat = MeltChat([say(LATER_REPLY)], select=FRAME, routed="battery_support")
+        chat.say("something is melted in battery")
+        state = chat.state()
+        state.evidence_verdict = verdict_record(
+            {"passed": True, "seen": "Melted pins on the battery terminal."}, at="2026-10-06T10:00:00+00:00",
+            frame=FRAME, started_at=state.started_at, component="battery")
+        chat.say("did you get them?")
+        self.assertNotIn(ASKED_NOTE, chat.llm.requests[0]["system"])
+
+    def test_no_note_for_another_bike(self):
+        chat = MeltChat([say(LATER_REPLY)], phone=THREE_BIKES)
+        chat.say("my battery terminal is melted")
+        self.assertEqual(chat.say("T-Rex Air").handled_by, "melt_ask")
+        self.assertEqual(chat.say("other bike").handled_by, "navigation:change_bike")
+        reply = chat.say("EMX Plus")
+        self.assertEqual(reply.handled_by, "battery_support")
+        self.assertNotIn(ASKED_NOTE, chat.llm.requests[0]["system"])
+
+
+class EvidenceCapTests(unittest.TestCase):
+    """Ruling 5: the ask is one evidence ask, and none is sent at the cap."""
+
+    def test_at_the_cap_the_ask_is_not_sent_and_the_hand_over_applies(self):
+        chat = MeltChat([say(AGENT_REPLY)], select=FRAME, routed="battery_support")
+        chat.state().evidence_asks = MAX_EVIDENCE_ASKS
+        reply = chat.say("something is melted in battery")
+        self.assertEqual(reply.handled_by, "guardrail:evidence_not_forthcoming")
+        self.assertTrue(reply.escalated)
+        self.assertEqual(reply.attachments, [])
+        self.assertEqual(chat.events("melt_ask"), [])
+        self.assertEqual(chat.state().melt_asked_frames, [])
+        self.assertFalse(chat.state().melt_pending)
+
+    def test_one_below_the_cap_the_ask_is_the_last_one(self):
+        chat = MeltChat(select=FRAME, routed="battery_support")
+        chat.state().evidence_asks = MAX_EVIDENCE_ASKS - 1
+        self.assertEqual(chat.say("something is melted in battery").handled_by, "melt_ask")
+        self.assertEqual(chat.state().evidence_asks, MAX_EVIDENCE_ASKS)
 
 
 class StateTests(unittest.TestCase):
