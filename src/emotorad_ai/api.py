@@ -65,7 +65,7 @@ from .config import load_settings
 from .config_store import SECRET_ID_ENV
 from .contract import new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
-from .media import load_catalogue
+from .media import load_catalogue, model_offered
 from .media import sendable as media_sendable
 from .guardrails import check_safety, check_safety_in_description
 from .identity import IdentityResolver
@@ -197,7 +197,11 @@ ZOHO = build_zoho(
 # catalogue was ever passed here, so the tool was never registered and was
 # filtered straight back out of the slice. The prompt told the model to point at
 # the button it was describing, and it had nothing to point with.
-GUIDE_MEDIA = load_catalogue()
+CATALOGUE = load_catalogue()
+# What a model may be offered: the code-only pictures (the melt ask's, which
+# code attaches to its own reply) are left out here, and again by
+# media.sendable and build_registry.
+GUIDE_MEDIA = model_offered(CATALOGUE)
 # Only the pictures this server can actually send reach the model; with none,
 # the tool is not registered at all, so a picture it does not have is never
 # offered (the person's rule, 2026-09-29). /health says how many.

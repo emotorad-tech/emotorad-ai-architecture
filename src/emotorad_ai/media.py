@@ -127,11 +127,12 @@ def sendable(
     offers a picture it does not have (the person's rule, 2026-09-29). An
     item is sendable when `resolve` can turn it into a link. Whether the S3
     object exists is not checked here: that would put a network call per
-    picture in front of every start.
+    picture in front of every start. A `code_only` item is never one the
+    model can send, so it is neither kept nor reported as dropped.
     """
     kept: Dict[str, Mapping[str, Any]] = {}
     dropped: Dict[str, str] = {}
-    for key, item in catalogue.items():
+    for key, item in model_offered(catalogue).items():
         found = resolve(item, store)
         if found.get("unresolved"):
             dropped[key] = found.get("reason") or "unresolved"
@@ -245,6 +246,24 @@ class CatalogueError(Exception):
     """A malformed catalogue. Raised at load, never at send time."""
 
 
+def is_code_only(item: Mapping[str, Any]) -> bool:
+    """An entry code attaches to a fixed reply of its own (the melt ask,
+    6 October 2026) and no model is ever offered."""
+    return item.get("code_only") is True
+
+
+def model_offered(catalogue: Mapping[str, Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
+    """The entries a model may be offered: every one but the code-only ones.
+    What the send_guide_media enum, the narrow prompt and the knowledge search
+    list, and what media.sendable starts from."""
+    return {key: item for key, item in catalogue.items() if not is_code_only(item)}
+
+
+def code_only(catalogue: Mapping[str, Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
+    """The entries only code may send."""
+    return {key: item for key, item in catalogue.items() if is_code_only(item)}
+
+
 def load_catalogue(directory: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
     """key -> media item, validated the same way knowledge records are."""
     import pathlib
@@ -274,5 +293,9 @@ def load_catalogue(directory: Optional[Any] = None) -> Dict[str, Dict[str, Any]]
         kind = item.get("kind", "image")
         if kind not in KINDS:
             raise CatalogueError("%s: kind must be 'image' or 'video', not %r" % (where, kind))
+        if "code_only" in item and not isinstance(item["code_only"], bool):
+            # A quoted "true" or a 1 would be read as offered to the model by
+            # one check and as code-only by another; only true or false.
+            raise CatalogueError("%s: code_only must be true or false, not %r" % (where, item["code_only"]))
         catalogue[str(key)] = dict(item)
     return catalogue

@@ -19,6 +19,13 @@
 # looked up under `assets/` and signed through the store in
 # `src/emotorad_ai/storage/s3.py`. Upload new assets with
 # `scripts/upload_asset.py`, which writes the key back here.
+#
+# `code_only: true` (6 October 2026): the picture is never offered to the model
+# (not in send_guide_media's list, the narrow prompt or a search result). Code
+# attaches it to the melt ask, the one fixed reply that asks for all three
+# items at once (src/emotorad_ai/melt_ask.py), in this order: battery serial,
+# controller label, terminals. The ask stays off until all three exist.
+# melt_battery_serial is not here yet (no photo exists): upload assets/afs/battery/photos/battery-serial-label.jpg with its .w900.webp, add melt_battery_serial with id afs/battery/photos/battery-serial-label.jpg and code_only: true, then set EMOTORAD_MELT_ASK=on to turn the ask on.
 
 soc_button:
   id: afs/battery/photos/soc-button-non-doodle.png
@@ -29,3 +36,15 @@ battery_onoff_switch:
   id: afs/battery/photos/battery-onoff-switch.png
   kind: image
   caption: The battery On/Off switch, set it to ON before charging
+
+melt_controller_label:
+  id: afs/battery/photos/controller-pins-closeup.jpg
+  kind: image
+  caption: "Example: the controller's label, next to the battery pins on the frame"
+  code_only: true
+
+melt_terminals:
+  id: afs/battery/photos/battery-terminals.jpg
+  kind: image
+  caption: "Example: the battery's metal terminals, to film up close"
+  code_only: true

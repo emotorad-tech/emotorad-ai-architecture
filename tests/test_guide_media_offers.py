@@ -35,6 +35,10 @@ CATALOGUE = {
     "battery_onoff_switch": {"id": SWITCH_ID, "kind": "image", "caption": "The battery On/Off switch"},
     "hosted_elsewhere": {"url": "https://cdn.example/guide.jpg", "kind": "image", "caption": "Hosted"},
 }
+# A code-only entry (the melt ask, 6 October 2026), here on a picture a record
+# names, so every listing that would offer it is exercised.
+CODE_ONLY_SWITCH = {"switch_for_code": {"id": SWITCH_ID, "kind": "image", "caption": "Code only",
+                                        "code_only": True}}
 
 
 class CannotSign:
@@ -58,6 +62,11 @@ class SendableTests(unittest.TestCase):
         self.assertEqual(sorted(kept), ["battery_onoff_switch", "hosted_elsewhere"])
         self.assertEqual(dropped, {})
         self.assertEqual(kept["battery_onoff_switch"], CATALOGUE["battery_onoff_switch"])  # the item, not a URL
+
+    def test_a_code_only_picture_is_never_sendable_by_the_model(self):
+        kept, dropped = media.sendable(dict(CATALOGUE, **CODE_ONLY_SWITCH), store=Signs())
+        self.assertEqual(sorted(kept), ["battery_onoff_switch", "hosted_elsewhere"])
+        self.assertEqual(dropped, {})
 
 
 class NoPicturesTests(unittest.TestCase):
@@ -107,6 +116,11 @@ class NarrowListingTests(unittest.TestCase):
         self.assertIn("- battery_onoff_switch:", text)
         self.assertNotIn("- " + SWITCH_ID, text)
 
+    def test_a_code_only_picture_is_not_listed(self):
+        text = self.prompt(sendable=CODE_ONLY_SWITCH)
+        self.assertNotIn("switch_for_code", text)
+        self.assertNotIn("Guide media you can send", text)
+
     def test_with_nothing_sendable_no_picture_is_listed(self):
         text = self.prompt(sendable={})
         self.assertNotIn("Guide media you can send", text)
@@ -128,6 +142,11 @@ class SearchResultTests(unittest.TestCase):
             for item in passage["media"]:
                 self.assertEqual(set(item), {"key", "kind", "caption"})
                 self.assertEqual(item["key"], "battery_onoff_switch")
+
+    def test_the_search_never_names_a_code_only_picture(self):
+        passages = self.search(CODE_ONLY_SWITCH)
+        self.assertTrue(passages)
+        self.assertFalse([p for p in passages if p.get("media")])
 
     def test_with_nothing_sendable_the_search_names_no_picture(self):
         passages = self.search({})
