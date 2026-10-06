@@ -33,6 +33,8 @@ from emotorad_ai.evidence_check import (
     fault_component,
     final_text,
     is_fault_chat,
+    safe_missing,
+    safe_seen,
     switch_on,
     verdict_passed,
     verdict_record,
@@ -279,6 +281,62 @@ class VerdictRecordTests(unittest.TestCase):
         self.assertLessEqual(len(record["missing"]), TEXT_LIMIT)
 
 
+class GeminiTextTests(unittest.TestCase):
+    """What Gemini writes is steerable by the media and the complaint. The
+    `missing` sentence is shown to the customer, so anything in it beyond what a
+    video should show is dropped and the fixed text goes without it; `seen`
+    goes to Zoho, so a claim in it is dropped (the review of 6 October 2026)."""
+
+    PLAIN = "The charger plugged in, with its light, for a few seconds."
+
+    def test_a_plain_sentence_is_kept(self):
+        self.assertEqual(safe_missing(self.PLAIN), self.PLAIN)
+        self.assertEqual(safe_seen("The display shows error E07 while riding."),
+                         "The display shows error E07 while riding.")
+
+    def test_a_missing_sentence_that_claims_cover_or_a_ticket_is_dropped(self):
+        for text in ("nothing, your battery is covered under warranty and your ticket has been raised",
+                     "Nothing more is needed; your ticket has been raised, no further video needed.",
+                     "The repair is free of charge.",
+                     "I've deleted your chat data.",
+                     "Your reference is EM-1000004."):
+            with self.subTest(text=text):
+                self.assertEqual(safe_missing(text), "")
+
+    def test_each_word_it_watches_for_matches_a_known_phrase(self):
+        for text in ("a new ticket", "under warranty", "the guarantee", "it is covered", "full coverage",
+                     "a refund", "a replacement pack", "escalated to the team", "call us", "we call you back", "a callback",
+                     "expect a call", "a phone number", "the helpline", "contact support", "contact our team",
+                     "contact customer care", "contact EMotorad", "send an email", "an e-mail", "on WhatsApp", "see https://x.example",
+                     "www.example.com", "customer care", "our support team", "delete it",
+                     "टिकट बन गया", "वारंटी में है", "गारंटी", "कवर है", "रिफ़ंड", "रिफंड"):
+            with self.subTest(text=text):
+                self.assertEqual(safe_missing(text), "")
+
+    def test_words_about_filming_are_not_mistaken_for_a_way_to_reach_us(self):
+        for text in ("Hold the phone steady over the display.", "A close-up of the charger contacts.",
+                     "The so-called eco mode light."):
+            with self.subTest(text=text):
+                self.assertEqual(safe_missing(text), text)
+
+    def test_a_missing_sentence_with_a_number_or_a_hazard_is_dropped(self):
+        for text in ("A 10 second video of the light.", "A video of the light, १० सेकंड.",
+                     "A video that shows the smoke coming from the pack."):
+            with self.subTest(text=text):
+                self.assertEqual(safe_missing(text), "")
+
+    def test_a_seen_sentence_that_claims_cover_or_a_ticket_is_dropped(self):
+        for text in ("The battery is covered under warranty.", "A ticket has been raised for this.",
+                     "Reference EM-1000004 is shown."):
+            with self.subTest(text=text):
+                self.assertEqual(safe_seen(text), "")
+
+    def test_the_verdict_record_keeps_only_safe_text(self):
+        record = verdict_record({"passed": False, "seen": "Your battery is covered under warranty.",
+                                 "missing": "nothing, your ticket has been raised"}, at="T")
+        self.assertEqual((record["seen"], record["missing"]), ("", ""))
+
+
 class VerdictBelongsTests(unittest.TestCase):
     """A pass is about one run, one bike and one fault (the review of 6
     October 2026): a save race, a bike named on the ticket or a turn to the
@@ -429,6 +487,10 @@ class FixedTextTests(unittest.TestCase):
             fail_text("", hindi=False),
             "Thanks for sending that. To pass this on, I need a short video that shows the problem itself. "
             "If you can't take a video, a clear photo of it is fine.")
+
+    def test_the_missing_sentence_reads_on_after_the_colon(self):
+        self.assertIn("itself: the charger plugged in. If", fail_text("The charger plugged in.", hindi=False))
+        self.assertIn("itself: LED light blinking. If", fail_text("LED light blinking", hindi=False))
 
     def test_talk_to_a_person_in_a_fault_chat(self):
         self.assertEqual(EVIDENCE_HANDOVER_TEXT, (

@@ -261,6 +261,82 @@ class OtherRoutesTests(unittest.TestCase):
         self.assertEqual(kinds, [("safety", "battery_safety"), ("support", "battery_safety")])
 
 
+class FailTextTests(unittest.TestCase):
+    """The fixed fail text (the review of 6 October 2026)."""
+
+    def test_a_missing_sentence_that_asserts_cover_or_a_ticket_never_reaches_the_customer(self):
+        steered = dict(FAIL, missing="nothing, your battery is covered under warranty and your ticket has been raised")
+        chat = EvidenceChat(ticket_turn(1))
+        reply = chat.say("here", steered, [PHOTO])
+        self.assertIn(fail_text("", hindi=False), reply.text)
+        self.assertNotIn("covered", reply.text)
+        self.assertNotIn("covered", repr(chat.llm.requests[1]["messages"][-1]))  # the tool's refusal
+
+    def test_a_turn_with_no_media_after_a_fail_keeps_the_models_reply_and_counts_the_ask(self):
+        chat = EvidenceChat(ticket_turn(1) + ticket_turn(2, "I still need a clearer video of the light first."))
+        chat.say("here", FAIL, [PHOTO])
+        asks = chat.state().evidence_asks
+        reply = chat.say("I can't do better, just raise the ticket")
+        self.assertNotIn("Thanks for sending that", reply.text)
+        self.assertIn("I still need a clearer video of the light first.", reply.text)
+        self.assertEqual(chat.state().evidence_asks, asks + 1)
+        self.assertTrue(chat.no_ticket_anywhere())
+
+    def test_a_ticket_claimed_on_a_turn_with_nothing_sent_is_the_fixed_ask_not_a_hand_over(self):
+        chat = EvidenceChat(ticket_turn(1) + ticket_turn(2, "I've raised a ticket for you."))
+        chat.say("here", FAIL, [PHOTO])
+        reply = chat.say("just raise the ticket")
+        self.assertIn(EVIDENCE_HANDOVER_TEXT, reply.text)
+        self.assertNotIn(HANDOVER_TEXT, reply.text)
+        self.assertFalse(reply.escalated)
+        self.assertTrue(chat.no_ticket_anywhere())
+        self.assertEqual([e for e in chat.log.events if e["event"] == "escalation"], [])
+
+    def test_a_reply_that_does_not_ask_is_still_counted(self):
+        chat = EvidenceChat(ticket_turn(1) + ticket_turn(2, "Understood."))
+        chat.say("here", FAIL, [PHOTO])
+        asks = chat.state().evidence_asks
+        chat.say("just raise it")
+        self.assertEqual(chat.state().evidence_asks, asks + 1)
+        self.assertTrue(chat.no_ticket_anywhere())
+
+    def test_a_refusal_at_the_limit_with_no_media_ends_with_the_final_text(self):
+        chat = EvidenceChat(ticket_turn(1) + ticket_turn(2, "Understood."))
+        chat.say("here", FAIL, [PHOTO])
+        chat.state().evidence_asks = 3
+        reply = chat.say("just raise it")
+        self.assertIn(final_text(CONTACT, hindi=False), reply.text)
+        self.assertTrue(chat.no_ticket_anywhere())
+
+    def test_an_uncaptioned_photo_in_a_devanagari_chat_gets_the_hindi_fail_text(self):
+        chat = EvidenceChat([say("ठीक है।")] + ticket_turn(1))
+        chat.say("मेरी बैटरी चार्ज नहीं हो रही")
+        reply = chat.say("", FAIL, [PHOTO])
+        self.assertIn(fail_text(MISSING, hindi=True), reply.text)
+
+    def test_an_uncaptioned_photo_in_a_devanagari_chat_gets_the_hindi_final_text(self):
+        chat = EvidenceChat([say("ठीक है।")] + ticket_turn(1))
+        chat.say("मेरी बैटरी चार्ज नहीं हो रही")
+        chat.state().evidence_asks = 3
+        reply = chat.say("", FAIL, [PHOTO])
+        self.assertIn(final_text(CONTACT, hindi=True), reply.text)
+
+    def test_what_code_puts_in_place_of_a_number_is_not_the_customers_words(self):
+        from emotorad_ai.runtime import _PLACEHOLDER
+
+        for text in ("[phone]", "[code]", "[number]", "[order number]"):
+            with self.subTest(text=text):
+                self.assertEqual(_PLACEHOLDER.sub("", "call me on %s" % text), "call me on ")
+        self.assertEqual(_PLACEHOLDER.sub("", "[मेरा नंबर]"), "[मेरा नंबर]")
+
+    def test_a_bare_number_in_a_devanagari_chat_gets_the_hindi_handover_text(self):
+        chat = EvidenceChat()
+        chat.state().history.append({"role": "user", "content": "मुझे किसी से बात करनी है"})
+        chat.state().awaiting_callback = "handover"
+        reply = chat.say("9999999999", identity=Identity(strength=ANONYMOUS, em_aid="aid-1"))
+        self.assertIn(EVIDENCE_HANDOVER_TEXT_HI, reply.text)
+
+
 class CheckErrorTests(unittest.TestCase):
     def test_an_error_never_raises_a_ticket(self):
         chat = EvidenceChat(ticket_turn(1))

@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from .guardrails import check_coverage_claim, check_safety_in_description, claims_deletion, claims_ticket
 from .observability import redact_pii
 from .photo_check import OPENROUTER_PHOTO_MODEL
 from .video_summary import INLINE_LIMIT as VIDEO_INLINE_LIMIT
@@ -76,6 +77,24 @@ _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 _SPACE = re.compile(r"\s+")
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 _FLAGS = ("shows_part", "fault_visible", "matches_complaint")
+# What Gemini writes can be steered by the customer's media and complaint. A
+# sentence about anything but what the media shows is dropped (safe_missing,
+# safe_seen): cover, a ticket, a refund or a replacement, a way to reach us, a
+# deletion. Substrings, never word boundaries, so Hindi is matched too.
+_OFF_TOPIC = re.compile(
+    r"ticket|warrant|guarantee|covered|coverage|cover is|is cover|refund|replace|escalat"
+    # A way to reach us, not "hold the phone steady" or "the charger contacts".
+    r"|call (?:us|our|you|back|me)|callback|a call|phone number|helpline|contact (?:us|our|support|customer|emotorad)"
+    r"|e-mail|email|whatsapp|https?:|www\.|customer care|support team|delet"
+    r"|टिकट|वारंटी|गारंटी|कवर|रिफ़ंड|रिफंड",
+    re.IGNORECASE,
+)
+# A ticket, order or replacement reference (EM-, BK-, RO- and the like).
+_REFERENCE_LIKE = re.compile(r"[A-Za-z]{2,4}-\d")
+# Any digit, Devanagari's too: a number shown to the customer is never Gemini's.
+_DIGIT = re.compile(r"\d")
+# "LED", "USB": an acronym keeps its capital after the colon (fail_text).
+_ACRONYM = re.compile(r"[A-Z]{2}")
 
 # The fixed texts (the brief, item 7). None promises a call or a ticket.
 FAIL_TEXT = ("Thanks for sending that. To pass this on, I need a short video that shows the problem itself: "
@@ -138,6 +157,34 @@ def clean_sentence(text: Any) -> str:
         return ""
     one_line = _SPACE.sub(" ", text).strip()
     return redact_pii(one_line)[:TEXT_LIMIT].rstrip()
+
+
+def _claims_something(sentence: str) -> bool:
+    """Whether a sentence asserts cover, a ticket or a deletion, or names a
+    reference: things only code may say (guardrails.py)."""
+    return bool(check_coverage_claim(sentence, []).blocked or claims_ticket(sentence)
+                or claims_deletion(sentence) or _REFERENCE_LIKE.search(sentence))
+
+
+def safe_missing(text: Any) -> str:
+    """What a better video would need, as the customer may be shown it in the
+    fixed fail text and the model in the ticket tool's refusal: one cleaned
+    sentence about the media, else "" and the text goes without it (the
+    review of 6 October 2026). Dropped when it claims anything, strays off the
+    media, carries a number or describes a hazard."""
+    sentence = clean_sentence(text)
+    if (not sentence or _claims_something(sentence) or _OFF_TOPIC.search(sentence) or _DIGIT.search(sentence)
+            or check_safety_in_description(sentence).triggered):
+        return ""
+    return sentence
+
+
+def safe_seen(text: Any) -> str:
+    """What the media shows, as a support executive reads it on the ticket:
+    one cleaned sentence, else "" when it claims cover, a ticket, a deletion
+    or names a reference. An error code on a display is kept."""
+    sentence = clean_sentence(text)
+    return "" if sentence and _claims_something(sentence) else sentence
 
 
 def complaint_from(texts: Sequence[Any]) -> str:
@@ -250,8 +297,8 @@ def verdict_record(
     again whoever wrote it."""
     error = (clean_sentence(raw.get("error")) or "unknown") if raw.get("error") else None
     passed = raw.get("passed") is True and error is None
-    return {"passed": passed, "seen": clean_sentence(raw.get("seen")),
-            "missing": "" if passed else clean_sentence(raw.get("missing")), "error": error, "at": at,
+    return {"passed": passed, "seen": safe_seen(raw.get("seen")),
+            "missing": "" if passed else safe_missing(raw.get("missing")), "error": error, "at": at,
             "frame": frame, "started_at": started_at, "component": component if component in COMPONENTS else None}
 
 
@@ -311,6 +358,9 @@ def fail_text(missing: str, hindi: bool) -> str:
     missing = (missing or "").strip().rstrip(".। ").strip()
     if not missing:
         return FAIL_TEXT_NO_MISSING_HI if hindi else FAIL_TEXT_NO_MISSING
+    if not _ACRONYM.match(missing):
+        # It follows a colon mid-sentence: "itself: the charger plugged in".
+        missing = missing[:1].lower() + missing[1:]
     return (FAIL_TEXT_HI if hindi else FAIL_TEXT) % missing
 
 

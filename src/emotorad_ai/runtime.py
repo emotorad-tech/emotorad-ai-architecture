@@ -392,6 +392,9 @@ def _live(*records: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 _REFERENCE = re.compile(r"\b[A-Z]{2,4}-\d{3,}\b")
+# What code put in a message's place: [phone], [code], [number], [order number].
+# Not the customer's words, so not their language (Runtime._writes_hindi).
+_PLACEHOLDER = re.compile(r"\[[a-z ]+\]")
 
 
 def _ticket_raised(turn: Any) -> bool:
@@ -2263,20 +2266,33 @@ class Runtime:
         # The evidence check (evidence_check.py): the model tried to raise the
         # support ticket and was refused because nothing has passed the check.
         # Code writes the ask, saying what a better video needs, rather than
-        # the model's reply. Only once something was sent and checked ("Thanks
-        # for sending that"), and never in place of a stop instruction.
+        # the model's reply. Only on a turn whose media was checked ("Thanks
+        # for sending that"), and never in place of a stop instruction. On a
+        # turn with nothing sent, the model's reply stands (the refusal told it
+        # what is missing) and is counted as an ask below.
         refusals = _evidence_refusals(turn) if self._evidence_gated(state) else []
         if any((call.get("arguments") or {}).get("category") == "battery_safety" for call in refusals):
             # The model filed a fault as a safety issue with no hazard in the
             # customer's words or its own description (tools/mocks._hazard_ticket).
             self.log.guardrail(message.conversation_id, "safety_label_without_hazard", {"category": "battery_safety"})
-        if (refusals and state.evidence_verdict is not None
-                and not check_safety_in_description(turn.text).triggered):
-            hindi = writes_hindi(message.message_text)
+        stop = check_safety_in_description(turn.text).triggered
+        checked_now = isinstance(message.entry_metadata.get("evidence_verdict"), dict)
+        if refusals and state.evidence_verdict is not None and checked_now and not stop:
+            hindi = self._writes_hindi(message, state, turn)
             return self._evidence_ask(
                 message, state, fail_text(state.evidence_verdict.get("missing") or "", hindi) + self._already_done(turn),
                 "guardrail:evidence_check", turn=turn, already_in_history=True,
                 metadata={"blocked_reason": EVIDENCE_NOT_ACCEPTED, "suppressed_text": turn.text},
+            )
+        if (refusals and not stop and claims_ticket(turn.text) and not _ticket_raised(turn)
+                and not _ticket_known(turn.text, state)):
+            # Refused, nothing sent this turn, and the reply says a ticket was
+            # raised: the fixed ask for the video, not the backstop's hand-over,
+            # since nobody takes a fault chat over without evidence.
+            text = EVIDENCE_HANDOVER_TEXT_HI if self._writes_hindi(message, state, turn) else EVIDENCE_HANDOVER_TEXT
+            return self._evidence_ask(
+                message, state, text + self._already_done(turn), "guardrail:evidence_check", turn=turn,
+                already_in_history=True, metadata={"blocked_reason": EVIDENCE_NOT_ACCEPTED, "suppressed_text": turn.text},
             )
 
         # The backstop (spec 2026-10-01, revised): a reply that says a ticket
@@ -2320,6 +2336,14 @@ class Runtime:
         if asked is not None and (evidence.reason == "safety_exempt"
                                   or check_safety_in_description(turn.text).triggered):
             asked = None
+        if asked is None and refusals and not stop:
+            # A ticket refused for want of evidence on a turn with nothing
+            # sent: the model's reply is the ask, whatever its words, so it is
+            # counted, and the asks still end in the customer care contact.
+            if state.evidence_asks >= self._ask_limit(state):
+                return self._evidence_final(message, state, turn, already_in_history=True,
+                                            metadata={"suppressed_text": turn.text})
+            state.evidence_asks += 1
         if asked is not None:
             if state.evidence_asks >= self._ask_limit(state):
                 if self._evidence_gated(state):
@@ -3091,6 +3115,23 @@ class Runtime:
         return self._finish(message, state, text, handled_by, ticket_id=turn.ticket_id if turn else None,
                             metadata=metadata, already_in_history=already_in_history)
 
+    @staticmethod
+    def _writes_hindi(message: InboundMessage, state: ConversationState, turn: Any = None) -> bool:
+        """Whether the evidence texts go out in the Hindi drafts: the customer
+        writes Devanagari. Read from this message; one with no words (an
+        uncaptioned photo, a bare number) is read from the customer's last
+        words in the conversation, failing that the model's reply."""
+        def has_words(text: str) -> bool:
+            return any(ch.isalpha() for ch in _PLACEHOLDER.sub("", text))
+
+        text = message.message_text or ""
+        if has_words(text):
+            return writes_hindi(text)
+        said = [words for words in customer_texts(state.history) if has_words(words)]
+        if said:
+            return writes_hindi(said[-1])
+        return writes_hindi(getattr(turn, "text", None) or "")
+
     def _evidence_final(
         self, message: InboundMessage, state: ConversationState, turn: Any = None, *,
         already_in_history: bool, metadata: Optional[Dict[str, Any]] = None,
@@ -3103,7 +3144,7 @@ class Runtime:
         outcome = ("error:%s" % verdict["error"]) if verdict.get("error") else ("failed" if verdict else "none")
         self.log.guardrail(message.conversation_id, "evidence_not_accepted",
                            {"asks": state.evidence_asks, "errors": state.evidence_check_errors, "verdict": outcome})
-        text = final_text(self.customer_care_contact, writes_hindi(message.message_text))
+        text = final_text(self.customer_care_contact, self._writes_hindi(message, state, turn))
         if turn is not None:
             text += self._already_done(turn)
         return self._finish(message, state, text, "guardrail:evidence_not_accepted",
@@ -3118,7 +3159,7 @@ class Runtime:
         check: no ticket, a fixed reply asking for the video, counted as an
         ask. Before the model, as the handover gate always is."""
         self.log.emit("handover_needs_evidence", shown.conversation_id, asks=state.evidence_asks)
-        text = EVIDENCE_HANDOVER_TEXT_HI if writes_hindi(shown.message_text) else EVIDENCE_HANDOVER_TEXT
+        text = EVIDENCE_HANDOVER_TEXT_HI if self._writes_hindi(shown, state) else EVIDENCE_HANDOVER_TEXT
         return self._evidence_ask(shown, state, text, "guardrail:human_handoff", already_in_history=False,
                                   metadata=dict(metadata, handover="evidence_needed"))
 
