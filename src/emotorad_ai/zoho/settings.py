@@ -36,6 +36,10 @@ PRIORITY_MEDIUM = "EMOTORAD_ZOHO_PRIORITY_MEDIUM"
 CHANNEL = "EMOTORAD_ZOHO_CHANNEL"
 CREDITS_FLOOR = "EMOTORAD_ZOHO_CREDITS_FLOOR"
 ATTACHMENT_LIMIT_MB = "EMOTORAD_ZOHO_ATTACHMENT_LIMIT_MB"
+# The Zoho Desk webhook's secret, the last segment of the path Zoho Desk calls
+# when support closes a ticket (amiigo/webhooks.py). Secret. Not needed for
+# tickets to be sent: without it the webhook answers 503.
+WEBHOOK_SECRET = "EMOTORAD_ZOHO_WEBHOOK_SECRET"
 # Set by the deploy (deploy-staging.yml). It prefixes every chat reference, so
 # two deployments sharing one Zoho organisation never adopt each other's
 # tickets. Not a Zoho name, so it is not in ENV_NAMES.
@@ -50,7 +54,7 @@ LIVE_ONLY = (DEPARTMENT_ID, UNVERIFIED_CONTACT_ID)
 ENV_NAMES = (
     REFRESH_TOKEN, CLIENT_ID, CLIENT_SECRET, ORG_ID, TEST_DEPARTMENT_ID, TEST_CONTACT_ID,
     DEPARTMENT_ID, UNVERIFIED_CONTACT_ID, LIVE, LAYOUT_ID,
-    PRIORITY_HIGH, PRIORITY_MEDIUM, CHANNEL, CREDITS_FLOOR, ATTACHMENT_LIMIT_MB,
+    PRIORITY_HIGH, PRIORITY_MEDIUM, CHANNEL, CREDITS_FLOOR, ATTACHMENT_LIMIT_MB, WEBHOOK_SECRET,
 )
 
 # The values only part 1's probe can give. These defaults hold until it runs.

@@ -296,28 +296,35 @@ class _Chat:
     last: datetime
 
 
-def _app_chat_of(conversations: Any, rider: Rider, conversation_id: str,
+def _app_chat_of(conversations: Any, user_key: str, conversation_id: str,
                  runs: Sequence[ConversationSummaryItem]) -> bool:
-    """Ruling 6: the rider's summarised runs of the chat (`runs`) are all app
-    runs, nobody else has one (`owner_of`), and every run, a run that wrote
-    no summary too, came from the app and from this rider (`origins_of`;
-    Ruling 10). A run's origin names its person from its first turn
+    """Ruling 6: the rider's (`user_key`'s) summarised runs of the chat
+    (`runs`) are all app runs, nobody else has one (`owner_of`), and every
+    run, a run that wrote no summary too, came from the app and from this
+    rider (`origins_of`; Ruling 10). A run's origin names its person from its first turn
     (Runtime._note_origin), so an origin with no user key, or another's, is
     a run in which someone else wrote."""
     if not runs or any(run.channel != APP_CHANNEL for run in runs):
         return False
-    if conversations.owner_of(conversation_id) != rider.user_key:
+    if conversations.owner_of(conversation_id) != user_key:
         return False
-    return all(origin.get("channel") == APP_CHANNEL and origin.get("user_key") == rider.user_key
+    return all(origin.get("channel") == APP_CHANNEL and origin.get("user_key") == user_key
                for origin in conversations.origins_of(conversation_id))
 
 
 def is_riders_app_chat(stores: Any, rider: Rider, conversation_id: str) -> bool:
     """Whether this chat is in the rider's history: an Amiigo app chat whose
     every run is theirs. Anything else is `conversation_not_found`."""
+    return is_app_chat_of(stores, rider.user_key, conversation_id)
+
+
+def is_app_chat_of(stores: Any, user_key: str, conversation_id: str) -> bool:
+    """`is_riders_app_chat` for the person with this user key, when there is
+    no token to hand: a ticket closed in Zoho Desk (amiigo/tickets.py) is
+    pushed to the rider only for a chat their history holds (Ruling 18)."""
     conversations = stores.conversations
-    runs = [run for run in conversations.runs_of(rider.user_key) if run.conversation_id == conversation_id]
-    return _app_chat_of(conversations, rider, conversation_id, runs)
+    runs = [run for run in conversations.runs_of(user_key) if run.conversation_id == conversation_id]
+    return _app_chat_of(conversations, user_key, conversation_id, runs)
 
 
 def is_new_conversation(conversations: Any, conversation_id: str) -> bool:
@@ -436,7 +443,7 @@ def list_conversations(stores: Any, rider: Rider, *, limit: int, cursor: Optiona
         if since is not None and not (chat.last < since[0] or (chat.last == since[0]
                                                                and chat.conversation_id > since[1])):
             continue
-        if not _app_chat_of(conversations, rider, chat.conversation_id, chat.runs):
+        if not _app_chat_of(conversations, rider.user_key, chat.conversation_id, chat.runs):
             continue
         if len(page) == limit:
             more = True

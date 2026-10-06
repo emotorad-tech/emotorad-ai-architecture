@@ -110,7 +110,10 @@ class AmiigoContext:
     runtime's handle, set by api.py (the socket closes 1011 without them);
     and its limit, its thread allowances and timings. `thread_limiters`
     holds the socket's anyio CapacityLimiters, one pair per event loop
-    (socket.py makes them)."""
+    (socket.py makes them).
+
+    The Zoho Desk webhook (webhooks.py) reads `zoho_webhook_secret`, and
+    pushes a closed ticket through `sockets`."""
 
     stores: Any
     tokens: TokenCheck
@@ -131,6 +134,9 @@ class AmiigoContext:
     socket_turn_threads: int = SOCKET_TURN_THREADS
     socket_store_threads: int = SOCKET_STORE_THREADS
     thread_limiters: Any = field(default_factory=weakref.WeakKeyDictionary, repr=False)
+    # The Zoho Desk webhook's secret (webhooks.py), or None: the webhook then
+    # answers 503. Never in the repr.
+    zoho_webhook_secret: Optional[str] = field(default=None, repr=False)
 
 
 def context_of(request: Request) -> AmiigoContext:

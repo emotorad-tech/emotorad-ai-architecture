@@ -334,7 +334,7 @@ class NamesTests(unittest.TestCase):
         names = {value for value in vars(zs).values() if isinstance(value, str) and value.startswith("EMOTORAD_ZOHO_")}
         self.assertEqual(set(zs.ENV_NAMES), names)
         self.assertEqual(len(zs.ENV_NAMES), len(set(zs.ENV_NAMES)))
-        self.assertEqual(len(zs.ENV_NAMES), 15)
+        self.assertEqual(len(zs.ENV_NAMES), 16)
 
     def test_the_layout_and_the_probe_only_values_are_in_the_list(self):
         for name in (zs.LAYOUT_ID, zs.PRIORITY_HIGH, zs.PRIORITY_MEDIUM, zs.CHANNEL,

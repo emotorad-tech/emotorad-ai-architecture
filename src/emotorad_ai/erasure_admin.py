@@ -35,8 +35,10 @@ FILES = "s3_objects"
 # days and `verification_sessions` after 12 hours on its own, which made
 # delete refuse when the customer had done nothing (the final review). They
 # are still counted, and deleted, through delete_person. A new chat adds
-# transcript turns either way.
-PERMANENT = ("transcript_turns", "conversation_summaries", "media", "conversation_origins", FILES)
+# transcript turns either way. A ticket closed in Zoho Desk after the review
+# adds a notice to the chat (amiigo/tickets.py), which counts too.
+PERMANENT = ("transcript_turns", "conversation_summaries", "media", "conversation_origins",
+             "conversation_notices", FILES)
 
 
 class Refused(Exception):

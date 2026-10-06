@@ -402,6 +402,23 @@ def utc_now_iso() -> str:
 SHARED_OWNER = "#shared"
 
 
+def notice_doc(conversation_id: str, seq: int, user_key: Optional[str], kind: str, text: str,
+               at: str) -> Dict[str, Any]:
+    """A notice in a chat (a ticket closed in Zoho Desk), with exactly the
+    fields the Amiigo history reads (amiigo/history.py): `_id`
+    `<conversation_id>#N<seq:05d>`, `conversation_id`, `user_key` (the person
+    whose chat it is, or None), `kind`, `text` and `at` (ISO 8601 UTC, as a
+    transcript turn's)."""
+    return {"_id": "%s#N%05d" % (conversation_id, seq), "conversation_id": conversation_id, "user_key": user_key,
+            "kind": kind, "text": text, "at": at}
+
+
+def notice_seq(notice_id: str) -> int:
+    """A notice's number in its chat, from its `_id`; 0 when it has none."""
+    seq = str(notice_id).rsplit("#N", 1)[-1]
+    return int(seq) if seq.isascii() and seq.isdigit() else 0
+
+
 class ConversationConflict(Exception):
     """Another server saved this conversation after we loaded it."""
 
@@ -529,8 +546,10 @@ class InMemoryConversationStore:
         # Where each run came from (origin.py), permanent: conversation id -> run key -> record.
         self._origins: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Notices in a chat (a ticket closed in Zoho Desk), permanent like the
-        # transcript: conversation id -> notice id -> notice.
+        # transcript: conversation id -> notice id -> notice. Written under
+        # the lock, so one notice is never written twice.
         self._notices: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._notice_lock = threading.Lock()
         # Self-service erasure requests (erasure.py): reference -> request.
         self._erasures: Dict[str, Dict[str, Any]] = {}
         # One pending request per person, even for two requests at once.
@@ -602,6 +621,20 @@ class InMemoryConversationStore:
     def notices_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         notices = self._notices.get(conversation_id, {}).values()
         return [dict(n) for n in sorted(notices, key=lambda n: (n["at"], n["_id"]))]
+
+    def add_notice(self, conversation_id: str, user_key: Optional[str], kind: str, text: str,
+                   at: str) -> Tuple[Dict[str, Any], bool]:
+        """A notice in the chat, numbered after its others, and whether this
+        call wrote it. A notice of the same kind and text already in the chat
+        is returned as it is: a chat says one thing once."""
+        with self._notice_lock:
+            mine = self._notices.setdefault(conversation_id, {})
+            same = next((n for n in mine.values() if n["kind"] == kind and n["text"] == text), None)
+            if same is not None:
+                return dict(same), False
+            notice = notice_doc(conversation_id, max(map(notice_seq, mine), default=0) + 1, user_key, kind, text, at)
+            mine[notice["_id"]] = notice
+            return dict(notice), True
 
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice

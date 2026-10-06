@@ -1779,6 +1779,10 @@ NOT_ALARMED = {
     "lockout_ticket_not_recorded": "with Zoho on the reply promises nothing: it says the hand-over was not "
                                    "passed on",
     "close_runs_failed": "the earlier run's record stays open, and its ticket goes to support only; " + STORE_ALARMS,
+    "zoho_webhook": "one line per event Zoho Desk sends; a closure the store could not record (outcome "
+                    "store_unavailable) leaves the ticket shown as open, not wrong, and is answered 503 for Zoho "
+                    "to send again",
+    "zoho_webhook_misconfigured": "the webhook answers 503 and /health says why; tickets are still sent",
 }
 _EMITTED = re.compile(
     r"""\bemit\(\s*["']((?:zoho|safety_ticket|unverified_ticket|ticket|handover_ticket|lockout_ticket|close_runs)"""

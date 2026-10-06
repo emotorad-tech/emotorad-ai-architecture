@@ -254,7 +254,8 @@ class StoreReadsContract:
         self.assertEqual(self.conversations.count_turns("never-seen"), 0)
 
     def test_notices_of_come_in_time_order(self):
-        self.put_notice(notice(CID_A, 2, NOW))
+        # A chat says one thing once (one_notice_per_text): the second differs.
+        self.put_notice(notice(CID_A, 2, NOW, text=CLOSED_TEXT.replace("EM-1000001", "EM-1000002")))
         self.put_notice(notice(CID_A, 1, NOW - timedelta(minutes=5)))
         self.put_notice(notice(CID_B, 1, NOW))
         self.assertEqual([n["_id"] for n in self.conversations.notices_of(CID_A)],
@@ -301,7 +302,9 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(summaries["user_last"], [("user_key", 1), ("last_at", -1)])
         self.assertEqual(summaries["conversation"], [("conversation_id", 1)])
         self.assertEqual([(keys, options) for keys, options in INDEXES[CONVERSATION_NOTICES]],
-                         [([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"})])
+                         [([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"}),
+                          ([("conversation_id", 1), ("kind", 1), ("text", 1)],
+                           {"name": "one_notice_per_text", "unique": True})])
         db = mongomock.MongoClient()["emotorad_ai"]
         ensure_indexes(db)
         self.assertIn(CONVERSATION_NOTICES, db.list_collection_names())

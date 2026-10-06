@@ -57,6 +57,7 @@ from starlette.background import BackgroundTask
 from .adapters import WebsiteChatAdapter
 from .amiigo import history as amiigo_history
 from .amiigo import routes as amiigo_routes
+from .amiigo import webhooks as zoho_webhooks
 from .amiigo.auth import token_check_from_env
 from .amiigo.common import AmiigoContext, NoStoreMiddleware
 from .client_ip import client_ip, trusted_from_env
@@ -181,6 +182,17 @@ AMIGO = amigo_tools.from_env()
 # it the check is off, /health says so and amiigo_tokens_not_configured is
 # logged once.
 AMIIGO_TOKENS = token_check_from_env()
+
+# The Zoho Desk webhook (amiigo/webhooks.py): its secret, from
+# EMOTORAD_ZOHO_WEBHOOK_SECRET, which a person sets in the config store and
+# in the webhook's path in Zoho Desk. Without a secret we accept, the webhook
+# answers 503 and /health says so, never the value. The secret is in the path,
+# so uvicorn's access log writes the path without it.
+ZOHO_WEBHOOK_SECRET = zoho_webhooks.webhook_secret_from_env()
+ZOHO_WEBHOOK_STATUS = zoho_webhooks.webhook_status()
+if ZOHO_WEBHOOK_STATUS == zoho_webhooks.MISCONFIGURED:
+    log.emit("zoho_webhook_misconfigured", "zoho", error=ZOHO_WEBHOOK_STATUS)
+zoho_webhooks.hide_secret_in_access_log()
 
 # Zoho Desk tickets (spec 2026-10-05). Decided here, once, and nowhere else:
 # the CLI, the playground and the live evaluation keep the mock. Zoho is off
@@ -376,8 +388,11 @@ def _cluster_for_phone(phone: str) -> str:
 # registry is the website's own: one place an upload id is minted and claimed.
 app.state.amiigo = AmiigoContext(stores=stores, tokens=AMIIGO_TOKENS, log=log, media_store=MEDIA_STORE,
                                  uploads=UPLOADS, cluster_for_phone=_cluster_for_phone,
-                                 receipts=stores.amiigo_receipts)
+                                 receipts=stores.amiigo_receipts, zoho_webhook_secret=ZOHO_WEBHOOK_SECRET)
 app.include_router(amiigo_routes.router)
+# Zoho Desk's call when support closes a ticket: the ticket's chat gets a
+# notice and the rider's open sockets a ticket_update (amiigo/tickets.py).
+app.include_router(zoho_webhooks.router)
 app.add_middleware(NoStoreMiddleware)
 
 
@@ -548,6 +563,9 @@ def health() -> dict:
         "verification_sessions": stores.verified_sessions_status,
         # Whether Amiigo access tokens can be checked: on, or not configured.
         "amiigo_tokens": "on" if AMIIGO_TOKENS.enabled else "not configured",
+        # Whether Zoho Desk can tell us a ticket closed: on, not configured,
+        # or why the secret was refused. Never the secret.
+        "zoho_webhook": ZOHO_WEBHOOK_STATUS,
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.

@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import copy
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..conversation import StoreUnavailable
 from .clock import parse, plus
 from .kinds import FIRST_DESK_NUMBER, STUCK_SECONDS, URGENT_LATE_SECONDS, desk_reference
-from .record import GONE, HELD, OUTSTANDING, SENT, STUCK, WAITING, support_status
+from .record import GONE, HELD, OUTSTANDING, SENT, STUCK, SUPPORT_CLOSED, WAITING, support_status
 
 
 def age_seconds(since: str, now: str) -> int:
@@ -97,6 +97,23 @@ class InMemoryTicketStore:
 
     def _with_source_key(self, source_key: str) -> Optional[Dict[str, Any]]:
         return next((r for r in self._records.values() if r["source_key"] == source_key), None)
+
+    def close_support(self, zoho_ticket_id: Optional[str], closed_at: str) -> Optional[Tuple[Dict[str, Any], bool]]:
+        """Support closed this Zoho Desk ticket: the record sent as it, closed
+        once under the lock, `closed_at` kept from the first closure. None
+        when no record was sent as this ticket; otherwise the record and
+        whether this call closed it."""
+        if not zoho_ticket_id:
+            return None
+        with self._lock:
+            record = next((r for r in self._records.values()
+                           if (r.get("zoho") or {}).get("ticket_id") == zoho_ticket_id), None)
+            if record is None:
+                return None
+            if record.get("support_status") == SUPPORT_CLOSED:
+                return copy.deepcopy(record), False
+            record.update(support_status=SUPPORT_CLOSED, closed_at=closed_at)
+            return copy.deepcopy(record), True
 
     # -- new content -------------------------------------------------------------
 

@@ -63,13 +63,15 @@ from ..conversation import (
     StoreUnavailable,
     TranscriptTurn,
     _is_customer_turn,
+    notice_doc,
+    notice_seq,
     summary_key,
     transcript_turns,
     utc_now_iso,
 )
 from ..tickets.clock import plus
 from ..tickets.kinds import FIRST_DESK_NUMBER, STUCK_SECONDS, URGENT_LATE_SECONDS, desk_reference
-from ..tickets.record import GONE, OUTSTANDING, SENT, STUCK, WAITING, support_status
+from ..tickets.record import GONE, OUTSTANDING, SENT, STUCK, SUPPORT_CLOSED, WAITING, support_status
 from ..tickets.store import age_seconds, listing_row
 from ..tools.registry import CLAIM_LEASE_SECONDS, write_in_progress
 
@@ -88,6 +90,9 @@ CONVERSATION_ORIGINS = "conversation_origins"
 # `user_key`, `kind` ("ticket_closed"), `text` and `at` (ISO 8601 UTC, as a
 # transcript turn's). Permanent, and erased with the person or the conversation.
 CONVERSATION_NOTICES = "conversation_notices"
+# How often a notice is tried when its number or its text was taken by
+# another server between the look and the write.
+NOTICE_ATTEMPTS = 5
 # Self-service erasure requests (erasure.py), and the audit log every erasure
 # writes. Neither is erased with the person: a closed request holds only a hash.
 ERASURE_REQUESTS = "erasure_requests"
@@ -127,6 +132,9 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     ],
     CONVERSATION_NOTICES: [
         ([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"}),
+        # A chat says one thing once: two servers writing the same ticket's
+        # closure make one notice (add_notice).
+        ([("conversation_id", 1), ("kind", 1), ("text", 1)], {"name": "one_notice_per_text", "unique": True}),
     ],
     IDEMPOTENCY_KEYS: [
         ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
@@ -161,6 +169,9 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
         # The cap on unverified tickets (tickets/caps.py) counts a window of
         # them on every one it records: unverified_since.
         ([("identity", 1), ("urgent", 1), ("created_at", 1)], {"name": "unverified_recent"}),
+        # A closure from Zoho Desk names the ticket by Zoho's id (close_support).
+        # Not unique: every record not yet sent has none.
+        ([("zoho.ticket_id", 1)], {"name": "zoho_ticket"}),
     ],
     # One small document per sequence, found by its _id: no index of its own.
     COUNTERS: [],
@@ -421,6 +432,29 @@ class MongoConversationStore:
         notices = self._collection(CONVERSATION_NOTICES)
         return self._guard(
             "find", lambda: list(notices.find({"conversation_id": conversation_id}).sort([("at", 1), ("_id", 1)])))
+
+    def add_notice(self, conversation_id: str, user_key: Optional[str], kind: str, text: str,
+                   at: str) -> Tuple[Dict[str, Any], bool]:
+        """A notice in the chat, numbered after its others, and whether this
+        call wrote it. A notice of the same kind and text already in the chat
+        is returned as it is. Two servers writing at once collide on the
+        `_id` or on `one_notice_per_text` (mongo_setup.py): the loser looks
+        again, and finds the other's notice or takes the next number."""
+        notices = self._collection(CONVERSATION_NOTICES)
+        same_query = {"conversation_id": conversation_id, "kind": kind, "text": text}
+        for _ in range(NOTICE_ATTEMPTS):
+            same = self._guard("find_one", lambda: notices.find_one(same_query))
+            if same is not None:
+                return same, False
+            taken = self._guard("find", lambda: list(notices.find({"conversation_id": conversation_id}, {"_id": 1})))
+            doc = notice_doc(conversation_id, max((notice_seq(d["_id"]) for d in taken), default=0) + 1,
+                             user_key, kind, text, at)
+            try:
+                self._guard("insert_one", lambda: notices.insert_one(dict(doc)))
+            except DuplicateKeyError:
+                continue
+            return doc, True
+        raise StoreUnavailable("MongoDB insert_one failed (notice collided %d times)" % NOTICE_ATTEMPTS)
 
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice
@@ -877,6 +911,25 @@ class MongoTicketStore:
 
     def by_source_key(self, source_key: str) -> Optional[Dict[str, Any]]:
         return self._guard("find_one", lambda: self._tickets.find_one({"source_key": source_key}))
+
+    def close_support(self, zoho_ticket_id: Optional[str], closed_at: str) -> Optional[Tuple[Dict[str, Any], bool]]:
+        """Support closed this Zoho Desk ticket (amiigo/tickets.py): the record
+        sent as it, closed once, in one conditional update, so a repeat or a
+        second server never closes it again and `closed_at` stays the first.
+        None when no record was sent as this ticket; otherwise the record
+        (`_id`, `conversation_id`, `support_status`, `closed_at`) and whether
+        this call closed it. Nothing the worker owns is touched."""
+        if not zoho_ticket_id:
+            return None
+        fields = {"conversation_id": 1, "support_status": 1, "closed_at": 1}
+        closed = self._guard("find_one_and_update", lambda: self._tickets.find_one_and_update(
+            {"zoho.ticket_id": zoho_ticket_id, "support_status": {"$ne": SUPPORT_CLOSED}},
+            {"$set": {"support_status": SUPPORT_CLOSED, "closed_at": closed_at}},
+            projection=fields, return_document=ReturnDocument.AFTER))
+        if closed is not None:
+            return closed, True
+        found = self._guard("find_one", lambda: self._tickets.find_one({"zoho.ticket_id": zoho_ticket_id}, fields))
+        return (found, False) if found is not None else None
 
     # -- new content -------------------------------------------------------------
 

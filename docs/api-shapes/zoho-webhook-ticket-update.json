@@ -1,0 +1,28 @@
+{
+  "_source": "Not a live capture: from Zoho Desk's documentation, https://desk.zoho.com/support/WebhookDocument.do (\"Ticket Update Event\", Sample Payload), read on 7 October 2026. An excerpt: the event envelope (prevState, payload, eventTime, eventType, orgId) as documented, and of prevState and payload only the fields that identify the ticket and its status, with Zoho's own example values; the documented sample's other fields (the contact, the assignee, custom fields and about fifty more) are left out. The documented sample is a change from On Hold to Open, so it carries no closure. A closed ticket has statusType Closed (Tickets API: statusType is OPEN, ONHOLD or CLOSED, written Open, On Hold and Closed in answers) and closedTime set; status is a name each department chooses (the documentation's own example has a status called Closed whose statusType is Open). The request carries Zoho's JWT in the X-ZDesk-JWT header (\"Webhook Authentication\" on the same page). Replace this file with a masked capture once the webhook is configured.",
+  "body": [
+    {
+      "prevState": {
+        "modifiedTime": "2021-04-15T13:26:11.000Z",
+        "statusType": "Open",
+        "departmentId": "31138000000006907",
+        "closedTime": null,
+        "id": "31138000011967402",
+        "status": "On Hold",
+        "ticketNumber": "1161"
+      },
+      "payload": {
+        "modifiedTime": "2021-04-15T13:34:27.000Z",
+        "statusType": "Open",
+        "departmentId": "31138000000006907",
+        "closedTime": null,
+        "id": "31138000011967402",
+        "status": "Open",
+        "ticketNumber": "1161"
+      },
+      "eventTime": "1618493667780",
+      "eventType": "Ticket_Update",
+      "orgId": "54983163"
+    }
+  ]
+}

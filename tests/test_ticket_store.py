@@ -198,11 +198,11 @@ class MongoTicketStoreTests(TicketStoreContract, unittest.TestCase):
 
 
 class TicketIndexTests(unittest.TestCase):
-    def test_tickets_get_their_five_indexes_and_counters_none(self):
+    def test_tickets_get_their_six_indexes_and_counters_none(self):
         db = mongomock.MongoClient()["emotorad_ai"]
         report = ensure_indexes(db)
         self.assertEqual(report[TICKETS],
-                         ["_id_", "conversation", "due", "phone", "source_key", "unverified_recent"])
+                         ["_id_", "conversation", "due", "phone", "source_key", "unverified_recent", "zoho_ticket"])
         self.assertEqual(report[COUNTERS], ["_id_"])
         info = db[TICKETS].index_information()
         self.assertTrue(info["source_key"]["unique"])
