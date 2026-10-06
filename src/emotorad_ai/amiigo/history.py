@@ -316,6 +316,22 @@ def is_riders_app_chat(stores: Any, rider: Rider, conversation_id: str) -> bool:
     return _app_chat_of(conversations, rider, conversation_id, runs)
 
 
+def is_new_conversation(conversations: Any, conversation_id: str) -> bool:
+    """Nothing is recorded under this id: no turn, no summary, no record of
+    where a run came from. The app makes a new chat's id itself, and uploads
+    the chat's first photo or video under it before its first message."""
+    return (conversations.count_turns(conversation_id) == 0
+            and conversations.owner_of(conversation_id) is None
+            and not conversations.origins_of(conversation_id))
+
+
+def rider_may_use(stores: Any, rider: Rider, conversation_id: str) -> bool:
+    """Whether the rider may add to this chat: a new one, or their own app
+    chat. Anything else is `conversation_not_found`, as in the history."""
+    return (is_new_conversation(stores.conversations, conversation_id)
+            or is_riders_app_chat(stores, rider, conversation_id))
+
+
 def _chats(runs: Sequence[ConversationSummaryItem]) -> List[_Chat]:
     """One chat per conversation: started when its first run started, last
     active when its last run was, and otherwise as its latest run says. Most

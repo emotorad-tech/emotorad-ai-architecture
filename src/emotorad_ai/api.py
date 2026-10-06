@@ -71,7 +71,7 @@ from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .media import sendable as media_sendable
 from .guardrails import check_safety, check_safety_in_description
-from .identity import IdentityResolver
+from .identity import PHONE, IdentityResolver
 from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
@@ -360,10 +360,21 @@ async def _lifespan(_: FastAPI):
 
 app = FastAPI(title="Emotorad AI — battery support", lifespan=_lifespan)
 
+
+def _cluster_for_phone(phone: str) -> str:
+    """The identity-graph cluster of a phone the caller has proved, with no
+    cookie: what `_cluster_for_session` gives for a session that maps to this
+    phone (IdentityResolver.resolve_website), so an Amiigo rider's uploads are
+    keyed under the same person either way. Never the phone itself."""
+    return resolver.graph.link(None, PHONE, phone, verified=True)
+
+
 # The Amiigo app's routes under /amiigo/v1/ (amiigo/routes.py), with what
 # they read from this process, and Cache-Control: no-store on every answer
-# under that path. Nothing outside /amiigo/v1/ is touched.
-app.state.amiigo = AmiigoContext(stores=stores, tokens=AMIIGO_TOKENS, log=log, media_store=MEDIA_STORE)
+# under that path. Nothing outside /amiigo/v1/ is touched. The upload
+# registry is the website's own: one place an upload id is minted and claimed.
+app.state.amiigo = AmiigoContext(stores=stores, tokens=AMIIGO_TOKENS, log=log, media_store=MEDIA_STORE,
+                                 uploads=UPLOADS, cluster_for_phone=_cluster_for_phone)
 app.include_router(amiigo_routes.router)
 app.add_middleware(NoStoreMiddleware)
 
@@ -1219,7 +1230,7 @@ def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str, Dict
         raise HTTPException(status_code=429, detail="Too many requests. Wait a moment and try again.")
     persona, identity = resolver.resolve_website(None, body.session_token or None)
     if persona == "customer" and identity.may_disclose and identity.phone:
-        return "PHONE#" + identity.phone, "amiigo_app", erasure_rules.proof_of(None)
+        return erasure_rules.app_requester(identity.phone)
     phone = _proved_phone(body.conversation_id)
     if phone:
         return ("PHONE#" + phone, "website_chat",
@@ -1245,11 +1256,9 @@ def _proved_phone(conversation_id: Optional[str]) -> Optional[str]:
     return verification_store.restore(conversation_id, proved_owner(state))
 
 
-def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPException:
-    log.emit("erasure_request_failed", conversation_id or "erasure", error=type(exc).__name__)
-    return HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED)
-
-
+# The bodies of these three are erasure.py's (record_request, request_status,
+# cancel_request), shared with the app's /amiigo/v1/erasure-requests*: this
+# path finds the person by session or verified chat, and words its own errors.
 @app.post("/erasure-requests", status_code=201)
 def post_erasure_request(body: ErasureIn, request: Request, response: Response) -> Dict[str, Any]:
     """The Amiigo app's "Delete my conversation data" button, after its own
@@ -1258,44 +1267,35 @@ def post_erasure_request(body: ErasureIn, request: Request, response: Response) 
     if not body.confirm:
         raise HTTPException(status_code=400, detail="Send confirm: true once the rider has confirmed.")
     try:
-        pending = stores.conversations.pending_erasure_of(user_key)
-        reference = pending["_id"] if pending else stores.conversations.request_erasure(
-            user_key, channel, body.conversation_id, utc_now_iso(), proof=proof)
-    except Exception as exc:
-        raise _erasure_store_down(exc, body.conversation_id) from None
-    if pending:
+        recorded, answer = erasure_rules.record_request(stores.conversations, log, user_key, channel, proof,
+                                                        body.conversation_id, utc_now_iso())
+    except erasure_rules.RequestsUnavailable:
+        raise HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED) from None
+    if not recorded:
         response.status_code = 200
-        return {"reference": reference, "status": "pending",
-                "text": erasure_rules.ERASURE_EXISTING.format(reference=reference)}
-    log.emit("erasure_requested", body.conversation_id or "erasure", reference=reference)
-    return {"reference": reference, "status": "pending",
-            "text": erasure_rules.ERASURE_REQUESTED.format(reference=reference)}
+    return answer
 
 
 @app.post("/erasure-requests/status")
 def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
     user_key, _, _ = _erasure_person(request, body)
     try:
-        pending = stores.conversations.pending_erasure_of(user_key)
-    except Exception as exc:
-        raise _erasure_store_down(exc, body.conversation_id) from None
-    if pending is None:
-        return {"reference": None, "status": "none"}
-    return {"reference": pending["_id"], "status": "pending", "requested_at": pending["requested_at"]}
+        return erasure_rules.request_status(stores.conversations, log, user_key, body.conversation_id)
+    except erasure_rules.RequestsUnavailable:
+        raise HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED) from None
 
 
 @app.post("/erasure-requests/cancel")
 def post_erasure_cancel(body: ErasureIn, request: Request) -> Dict[str, Any]:
     user_key, _, _ = _erasure_person(request, body)
     try:
-        reference = stores.conversations.cancel_erasure(user_key, utc_now_iso())
-    except Exception as exc:
-        raise _erasure_store_down(exc, body.conversation_id) from None
-    if reference is None:
+        answer = erasure_rules.cancel_request(stores.conversations, log, user_key, body.conversation_id,
+                                              utc_now_iso())
+    except erasure_rules.RequestsUnavailable:
+        raise HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED) from None
+    if answer is None:
         raise HTTPException(status_code=404, detail=erasure_rules.ERASURE_NOTHING_TO_CANCEL)
-    log.emit("erasure_cancelled", body.conversation_id or "erasure", reference=reference)
-    return {"reference": reference, "status": "cancelled",
-            "text": erasure_rules.ERASURE_CANCELLED.format(reference=reference)}
+    return answer
 
 
 # The playground has no auth of its own and takes an Anthropic API key as

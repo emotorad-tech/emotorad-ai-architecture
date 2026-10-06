@@ -38,10 +38,23 @@ CONVERSATION_NOT_FOUND = "conversation_not_found"
 RATE_LIMITED = "rate_limited"
 HISTORY_UNAVAILABLE = "history_unavailable"
 STORAGE_UNAVAILABLE = "storage_unavailable"
+FILE_TOO_LARGE = "file_too_large"
+FILE_TYPE_NOT_ACCEPTED = "file_type_not_accepted"
+NOTHING_PENDING = "nothing_pending"
+# A deletion request without `"confirm": true` ("Deleting conversation data":
+# 400). The contract gives that 400 no code; this is it.
+CONFIRM_REQUIRED = "confirm_required"
 
 # "More than 60 history requests ... a minute for one rider", both history
 # endpoints together.
 HISTORY_PER_MINUTE = 60
+# "Upload slots: 20 a minute per rider".
+UPLOADS_PER_MINUTE = 20
+
+# A chat's id: a UUID the app makes ("Conversation lifecycle"), in either case
+# (iOS writes capitals), used exactly as sent. An explicit ASCII class, so no
+# other script's digits pass, and anchored: pydantic searches a pattern.
+CONVERSATION_ID_PATTERN = r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
 
 
 def amiigo_error(status: int, code: str) -> HTTPException:
@@ -69,14 +82,21 @@ class RiderLimiter:
 class AmiigoContext:
     """What the Amiigo routes read from the process. `stores` has
     `.conversations` and `.tickets` (wiring.Stores); `media_store` is the S3
-    store or None without a bucket; `clock` gives the time history answers at."""
+    store or None without a bucket; `uploads` is the process's one upload
+    registry (storage/uploads.py, the website's too), None without a bucket;
+    `cluster_for_phone` gives a verified phone's identity-graph cluster, the
+    one an upload's key is made under; `clock` gives the time history answers
+    at and a deletion request is recorded at."""
 
     stores: Any
     tokens: TokenCheck
     log: Any
     media_store: Any = None
+    uploads: Any = None
+    cluster_for_phone: Optional[Callable[[str], str]] = None
     clock: Callable[[], datetime] = utc_now
     history_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(HISTORY_PER_MINUTE))
+    upload_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(UPLOADS_PER_MINUTE))
 
 
 def context_of(request: Request) -> AmiigoContext:
@@ -88,7 +108,7 @@ class RequireRider:
 
     `unavailable` is the 503 code while the token check is off:
     `history_unavailable` on the history routes (`require_rider`),
-    `storage_unavailable` on uploads and erasure (`RequireRider(STORAGE_UNAVAILABLE)`).
+    `storage_unavailable` on uploads and erasure (`require_storage_rider`).
     A refused token is logged by its code only, never the token."""
 
     def __init__(self, unavailable: str) -> None:
@@ -106,6 +126,7 @@ class RequireRider:
 
 
 require_rider = RequireRider(HISTORY_UNAVAILABLE)
+require_storage_rider = RequireRider(STORAGE_UNAVAILABLE)
 
 
 class NoStoreMiddleware:
