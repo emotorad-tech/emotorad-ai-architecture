@@ -118,8 +118,11 @@ not read the secret does not start; its reason is one line in the CloudWatch log
 A release that adds a MongoDB collection needs a person to rerun `python scripts/mongo_setup.py`
 against the environment's database. The first deploy after 2026-10-06 adds `verification_sessions`
 (the number each web chat proved, kept 12 hours so a restart does not ask for it again): check that
-it is listed as `expires` with `expires_at_ttl (TTL 0s)`. Until then the service still treats a
-session as over after 12 hours, but nothing removes the document, and it holds a phone number.
+it is listed as `expires` with `expires_at_ttl (TTL 0s)`. Until that index exists the service saves
+nothing there: it keeps proofs in memory as before, logs `verification_sessions_ttl_missing` at
+error level, and `/health` shows `"verification_sessions":"memory: TTL index missing, run
+scripts/mongo_setup.py"`. Run the script, then restart the container (`sudo docker restart
+emotorad-ai`) and check that `/health` shows `"verification_sessions":"mongodb"`.
 
 ## 4. After the first successful deploy
 

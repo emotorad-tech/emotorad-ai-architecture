@@ -149,6 +149,7 @@ from .tools.verification import (
     REQUEST_IDENTITY_VERIFICATION,
     VERIFY_IDENTITY,
     apply_proven_phone,
+    proved_owner,
 )
 from .tickets.caps import CAP_TEXTS, cap_reached
 from .tickets.clock import now_iso, parse, plus
@@ -1086,6 +1087,7 @@ class Runtime:
         state.turns += 1
         self._note_typed_number(message, state)
         if self.verify_gate is not None and self.phone_resolver is not None:
+            self._restore_proof(message, state)
             # A number this conversation has proved opens the identity here,
             # so the runtime does not depend on the API having done it.
             message = apply_proven_phone(message, self.phone_resolver(message.conversation_id))
@@ -1151,6 +1153,16 @@ class Runtime:
         # customer's turn is built for the model (_note_customer_turn), and
         # only when that turn shows a photo or video.
         return {"message": message, "conversation": state, "resolved": resolved}
+
+    def _restore_proof(self, message: InboundMessage, state: ConversationState) -> None:
+        """After a restart, a number this conversation proved before it, from
+        the saved sessions, but only for the person the saved conversation
+        says finished verifying (VerificationStore.restore, proved_owner). A
+        channel that brings its own phone needs nothing taken back."""
+        restore = getattr(self.verify_gate.store, "restore", None)
+        if restore is None or message.identity.phone:
+            return
+        restore(message.conversation_id, proved_owner(state))
 
     @staticmethod
     def _note_typed_number(message: InboundMessage, state: ConversationState) -> None:

@@ -4,8 +4,9 @@ On staging a customer who had proved their number in the web chat was asked
 for it again mid-conversation, and then for their bike again. The
 conversation was in MongoDB, but the proof lived only in the process's
 VerificationStore, so every deploy made every chat in progress anonymous.
-Proved numbers are now saved (`verification_sessions`, twelve hours) and read
-back when this process has no proof of its own. Codes in transit stay in
+Proved numbers are now saved (`verification_sessions`, twelve hours) and taken
+back after a restart, but only for the person the saved conversation says
+proved its number (`VerificationStore.restore`). Codes in transit stay in
 memory.
 """
 
@@ -14,6 +15,7 @@ import io
 import logging
 import os
 import sys
+import threading
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -25,7 +27,8 @@ from pymongo.errors import ServerSelectionTimeoutError
 
 from emotorad_ai.agents import battery_support
 from emotorad_ai.config import Settings
-from emotorad_ai.conversation import InMemoryConversationStore, StoreUnavailable
+from emotorad_ai.contract import ANONYMOUS, Identity, InboundMessage
+from emotorad_ai.conversation import ConversationState, InMemoryConversationStore, StoreUnavailable
 from emotorad_ai.llm import say
 from emotorad_ai.observability import EventLog
 from emotorad_ai.stores.mongo import (
@@ -35,14 +38,22 @@ from emotorad_ai.stores.mongo import (
     MongoVerifiedSessions,
     ensure_indexes,
 )
-from emotorad_ai.tools.verification import VERIFIED_TTL_SECONDS, InMemoryVerifiedSessions, VerificationStore
-from emotorad_ai.wiring import build_stores
+from emotorad_ai.tools.verification import (
+    VERIFIED_TTL_SECONDS,
+    InMemoryVerifiedSessions,
+    VerificationStore,
+    apply_verified_identity,
+    proved_owner,
+)
+from emotorad_ai.wiring import SESSIONS_INDEX_UNREADABLE, SESSIONS_TTL_MISSING, build_stores
 from tests.test_api_health import fresh_api
 from tests.test_verify_first import ONE_BIKE, Chat
 
 NOW = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
 PHONE = "+919700000033"
 OTHER = "+919700000044"
+# Who the saved conversation says proved its number (proved_owner).
+OWNER = "PHONE#" + PHONE
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 # mongomock expires TTL documents against the real clock; these tests run on NOW.
@@ -105,6 +116,42 @@ class Broken:
         return self._call("delete", *args)
 
 
+class Counting(InMemoryVerifiedSessions):
+    """Real saved sessions that count their reads."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.gets = 0
+
+    def get(self, conversation_id):
+        self.gets += 1
+        return super().get(conversation_id)
+
+
+class DeleteFails(InMemoryVerifiedSessions):
+    """Saves and reads, but every delete fails, as on a MongoDB blip."""
+
+    def delete(self, conversation_id):
+        raise StoreUnavailable("MongoDB delete_one failed (AutoReconnect)")
+
+
+class BlockingDelete(InMemoryVerifiedSessions):
+    """A delete that, once `block` is set, waits for `release`: one MongoDB
+    round trip, held open so another request can run inside it."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.block = False
+        self.deleting = threading.Event()
+        self.release = threading.Event()
+
+    def delete(self, conversation_id):
+        if self.block:
+            self.deleting.set()
+            assert self.release.wait(5), "the test never released the delete"
+        super().delete(conversation_id)
+
+
 # -- VerificationStore over a saved-session backend ---------------------------
 
 
@@ -118,61 +165,92 @@ class SurvivesARestartTests(unittest.TestCase):
         """A new process: nothing in memory, the same saved sessions."""
         return self.clocks.store(self.sessions)
 
-    def test_a_new_store_sharing_the_sessions_knows_the_proved_number(self):
+    def test_a_restarted_store_takes_the_proof_back_for_its_owner(self):
         verify(self.first)
         second = self.restarted()
+        # Nothing in memory until the saved conversation's owner is known.
+        self.assertIsNone(second.verified_phone("c1"))
+        self.assertEqual(second.restore("c1", OWNER), PHONE)
         self.assertEqual(second.verified_phone("c1"), PHONE)
         self.assertEqual(second.verified_on("c1"), NOW.isoformat())
+        self.assertIsNone(second.restore("c2", OWNER))
         self.assertIsNone(second.verified_phone("c2"))
 
     def test_without_shared_sessions_a_new_store_knows_nothing(self):
         verify(self.first)
-        self.assertIsNone(VerificationStore().verified_phone("c1"))
+        store = VerificationStore()
+        self.assertIsNone(store.restore("c1", OWNER))
+        self.assertIsNone(store.verified_phone("c1"))
 
     def test_the_saved_session_lasts_twelve_hours_and_no_longer(self):
         verify(self.first)
         self.clocks.advance(VERIFIED_TTL_SECONDS - 1)
-        self.assertEqual(self.restarted().verified_phone("c1"), PHONE)
-        self.clocks.advance(2)
         second = self.restarted()
+        self.assertEqual(second.restore("c1", OWNER), PHONE)
+        self.clocks.advance(2)
+        # The proof taken back lapses when the first one would have.
         self.assertIsNone(second.verified_phone("c1"))
         self.assertIsNone(second.verified_on("c1"))
+        third = self.restarted()
+        self.assertIsNone(third.restore("c1", OWNER))
+        self.assertIsNone(third.verified_on("c1"))
+
+    def test_a_proof_taken_back_halfway_keeps_its_first_deadline(self):
+        verify(self.first)
+        self.clocks.advance(6 * 60 * 60)
+        second = self.restarted()
+        self.assertEqual(second.restore("c1", OWNER), PHONE)
+        self.clocks.advance(6 * 60 * 60 - 1)
+        self.assertEqual(second.verified_phone("c1"), PHONE)
+        self.clocks.advance(2)
+        self.assertIsNone(second.verified_phone("c1"))
+
+    def test_a_proof_taken_back_has_no_code_to_type(self):
+        verify(self.first)
+        second = self.restarted()
+        second.restore("c1", OWNER)
+        for typed in ("", " ", "123456"):
+            self.assertFalse(second.check("c1", typed), repr(typed))
+        self.assertEqual(second.verified_phone("c1"), PHONE)
+        self.assertIsNone(second.pending_code("c1"))
 
     def test_a_new_code_ends_the_saved_session(self):
         verify(self.first)
         self.first.issue("c1", OTHER, "654321")
         self.assertIsNone(self.first.verified_phone("c1"))
         self.assertIsNone(self.sessions.get("c1"))
-        self.assertIsNone(self.restarted().verified_phone("c1"))
+        self.assertIsNone(self.restarted().restore("c1", OWNER))
 
     def test_a_new_code_after_a_restart_ends_the_saved_session(self):
         verify(self.first)
         second = self.restarted()
+        self.assertEqual(second.restore("c1", OWNER), PHONE)
         second.issue("c1", OTHER, "654321")
         self.assertIsNone(second.verified_phone("c1"))
-        self.assertIsNone(self.restarted().verified_phone("c1"))
+        self.assertIsNone(self.restarted().restore("c1", OWNER))
 
     def test_reset_ends_the_saved_session(self):
         verify(self.first)
         self.first.reset("c1")
         self.assertIsNone(self.first.verified_phone("c1"))
-        self.assertIsNone(self.restarted().verified_phone("c1"))
+        self.assertIsNone(self.restarted().restore("c1", OWNER))
 
     def test_reset_after_a_restart_ends_the_saved_session(self):
-        # The runtime's "wrong number" after a deploy: the proof is read from
-        # the saved session, then reset must remove it there.
+        # The runtime's "wrong number" after a deploy: the proof is taken back
+        # from the saved session, then reset must remove it there.
         verify(self.first)
         second = self.restarted()
-        self.assertEqual(second.verified_phone("c1"), PHONE)
+        self.assertEqual(second.restore("c1", OWNER), PHONE)
         second.reset("c1")
         self.assertIsNone(second.verified_phone("c1"))
-        self.assertIsNone(self.restarted().verified_phone("c1"))
+        self.assertIsNone(second.restore("c1", OWNER))
+        self.assertIsNone(self.restarted().restore("c1", OWNER))
 
     def test_cancelling_a_code_leaves_a_proved_number_alone_as_in_memory(self):
         verify(self.first)
         self.first.cancel_code("c1")
         self.assertEqual(self.first.verified_phone("c1"), PHONE)
-        self.assertEqual(self.restarted().verified_phone("c1"), PHONE)
+        self.assertEqual(self.restarted().restore("c1", OWNER), PHONE)
 
     def test_a_session_memory_has_let_lapse_is_never_read_back(self):
         # The monotonic clock says twelve hours have gone; the wall clock was
@@ -181,13 +259,15 @@ class SurvivesARestartTests(unittest.TestCase):
         verify(self.first)
         self.clocks.advance(VERIFIED_TTL_SECONDS + 1, wall=False)
         self.assertIsNone(self.first.verified_phone("c1"))
+        self.assertIsNone(self.first.restore("c1", OWNER))
         self.first.issue("c2", OTHER, "111111")  # the sweep runs on issue
         self.assertIsNone(self.first.verified_phone("c1"))
-        self.assertIsNone(self.restarted().verified_phone("c1"))
+        self.assertIsNone(self.restarted().restore("c1", OWNER))
 
     def test_a_code_in_transit_is_not_saved(self):
         self.first.issue("c1", PHONE, "123456")
         second = self.restarted()
+        self.assertIsNone(second.restore("c1", OWNER))
         self.assertIsNone(second.pending_code("c1"))
         self.assertFalse(second.check("c1", "123456"))
         self.assertIsNone(self.sessions.get("c1"))
@@ -201,6 +281,128 @@ class SurvivesARestartTests(unittest.TestCase):
         self.assertIsNone(store.verified_phone("c1"))
 
 
+class StateAgreementTests(unittest.TestCase):
+    """A saved session is honoured only when the saved conversation agrees
+    with it (the review of the fix, minor 3): on a shared browser, a proof
+    that this process ended but MongoDB kept must not bring the first
+    person's number, bikes and coverage back after a restart."""
+
+    def setUp(self):
+        self.clocks = Clocks()
+        self.sessions = Counting(now=lambda: self.clocks.wall)
+        verify(self.clocks.store(self.sessions))
+
+    def test_only_for_the_owner_the_saved_conversation_names(self):
+        store = self.clocks.store(self.sessions)
+        for owner in (None, "", "PHONE#" + OTHER, "AID#aid-1", PHONE):
+            self.assertIsNone(store.restore("c1", owner), owner)
+            self.assertIsNone(store.verified_phone("c1"), owner)
+        self.assertEqual(store.restore("c1", OWNER), PHONE)
+
+    def test_no_owner_reads_nothing(self):
+        store = self.clocks.store(self.sessions)
+        store.restore("c1", None)
+        store.restore("c1", "AID#aid-1")
+        self.assertEqual(self.sessions.gets, 0)
+
+    def test_memory_answers_before_the_saved_session(self):
+        store = self.clocks.store(self.sessions)
+        verify(store, phone=OTHER)
+        reads = self.sessions.gets
+        self.assertEqual(store.restore("c1", OWNER), OTHER)
+        self.assertEqual(self.sessions.gets, reads, "memory held a proof: nothing read")
+
+    def test_the_owner_is_whoever_proved_it_and_finished_verifying(self):
+        self.assertEqual(proved_owner(ConversationState(conversation_id="c1", user_key=OWNER)), OWNER)
+        for step in ("number", "code"):
+            state = ConversationState(conversation_id="c1", user_key=OWNER, verify_step=step)
+            self.assertIsNone(proved_owner(state), step)
+        self.assertIsNone(proved_owner(ConversationState(conversation_id="c1")))
+        self.assertIsNone(proved_owner(None))
+
+    def test_a_saved_proof_not_taken_back_is_never_stamped_on_a_message(self):
+        # api.post_message stamps the proof before the turn loads the saved
+        # conversation: it must not stamp one the conversation may disown.
+        store = self.clocks.store(self.sessions)
+        message = InboundMessage(conversation_id="c1", persona="customer", channel="website_chat",
+                                 message_text="hi", identity=Identity(strength=ANONYMOUS, em_aid="aid-1"))
+        self.assertIsNone(apply_verified_identity(message, store).identity.phone)
+        store.restore("c1", OWNER)
+        self.assertEqual(apply_verified_identity(message, store).identity.phone, PHONE)
+
+
+class ConcurrencyTests(unittest.TestCase):
+    """Two requests on one conversation (a double send next to "wrong
+    number"): while the saved session is being deleted, the other request
+    must not see the proof memory has just ended (the review, minor 2)."""
+
+    def setUp(self):
+        self.clocks = Clocks()
+        self.sessions = BlockingDelete(now=lambda: self.clocks.wall)
+        verify(self.clocks.store(self.sessions))
+        self.store = self.clocks.store(self.sessions)  # restarted
+        self.assertEqual(self.store.restore("c1", OWNER), PHONE)
+
+    def ending(self, end):
+        self.sessions.block = True
+        thread = threading.Thread(target=end)
+        thread.start()
+        self.assertTrue(self.sessions.deleting.wait(5))
+        return thread
+
+    def assert_never_verified_while_deleting(self, end):
+        thread = self.ending(end)
+        restored = []
+        reader = threading.Thread(target=lambda: restored.append(self.store.restore("c1", OWNER)))
+        try:
+            self.assertIsNone(self.store.verified_phone("c1"))
+            self.assertIsNone(self.store.verified_on("c1"))
+            reader.start()
+            self.assertIsNone(self.store.verified_phone("c1"))
+        finally:
+            self.sessions.release.set()
+            thread.join(5)
+            reader.join(5)
+        self.assertEqual(restored, [None])
+        self.assertIsNone(self.store.verified_phone("c1"))
+        self.assertIsNone(self.sessions.get("c1"))
+
+    def test_while_reset_deletes(self):
+        self.assert_never_verified_while_deleting(lambda: self.store.reset("c1"))
+
+    def test_while_a_new_code_deletes(self):
+        self.assert_never_verified_while_deleting(lambda: self.store.issue("c1", OTHER, "654321"))
+
+    def test_a_reset_during_a_read_is_not_undone_by_it(self):
+        # The other order: the saved session is read first, held open, and a
+        # "wrong number" arrives meanwhile. The proof must not land in memory
+        # after the reset has finished.
+        class SlowRead(InMemoryVerifiedSessions):
+            reading, release = threading.Event(), threading.Event()
+
+            def get(self, conversation_id):
+                found = super().get(conversation_id)
+                self.reading.set()
+                assert self.release.wait(5), "the test never released the read"
+                return found
+
+        sessions = SlowRead(now=lambda: self.clocks.wall)
+        verify(self.clocks.store(sessions))
+        store = self.clocks.store(sessions)  # restarted
+        reader = threading.Thread(target=store.restore, args=("c1", OWNER))
+        reader.start()
+        self.assertTrue(SlowRead.reading.wait(5))
+        resetting = threading.Thread(target=store.reset, args=("c1",))
+        resetting.start()
+        resetting.join(0.2)
+        SlowRead.release.set()
+        reader.join(5)
+        resetting.join(5)
+        self.assertIsNone(store.verified_phone("c1"))
+        self.assertIsNone(store.restore("c1", OWNER))
+        self.assertIsNone(sessions.get("c1"))
+
+
 class BackendFailureTests(unittest.TestCase):
     def setUp(self):
         self.log = EventLog(path=None)
@@ -211,9 +413,10 @@ class BackendFailureTests(unittest.TestCase):
     def test_a_failing_read_is_not_verified_and_never_raises(self):
         store = VerificationStore(sessions=Broken(), log=self.log)
         with self.assertLogs("emotorad_ai.tools.verification", level="WARNING") as logged:
+            self.assertIsNone(store.restore("c1", OWNER))
             self.assertIsNone(store.verified_phone("c1"))
             self.assertIsNone(store.verified_on("c1"))
-        [first, _] = self.failures()
+        [first] = self.failures()
         self.assertEqual((first["operation"], first["error"]), ("get", "StoreUnavailable"))
         self.assertIn("verification_session_unavailable", "\n".join(logged.output))
 
@@ -222,13 +425,16 @@ class BackendFailureTests(unittest.TestCase):
             def get(self, cid):
                 raise ServerSelectionTimeoutError("no servers found")
 
+        store = VerificationStore(sessions=Raises())
         with self.assertLogs("emotorad_ai.tools.verification", level="WARNING"):
-            self.assertIsNone(VerificationStore(sessions=Raises()).verified_phone("c1"))
+            self.assertIsNone(store.restore("c1", OWNER))
+        self.assertIsNone(store.verified_phone("c1"))
 
     def test_memory_answers_first_so_a_failing_read_does_not_matter_after_a_code(self):
         store = VerificationStore(sessions=Broken(fail=("get",)), log=self.log)
         verify(store)
         self.assertEqual(store.verified_phone("c1"), PHONE)
+        self.assertEqual(store.restore("c1", OWNER), PHONE)
         self.assertEqual(self.failures(), [])
 
     def test_a_failing_save_still_verifies_in_this_process_and_never_logs_the_phone(self):
@@ -250,6 +456,7 @@ class BackendFailureTests(unittest.TestCase):
             store.reset("c1")
         self.assertIsNotNone(backend.inner.get("c1"), "the delete really failed")
         self.assertIsNone(store.verified_phone("c1"))
+        self.assertIsNone(store.restore("c1", OWNER))
         self.assertEqual(self.failures()[0]["operation"], "delete")
 
     def test_a_new_proof_after_a_failed_delete_is_used_again(self):
@@ -260,7 +467,7 @@ class BackendFailureTests(unittest.TestCase):
             store.reset("c1")
             verify(store, phone=OTHER)
         self.assertEqual(store.verified_phone("c1"), OTHER)
-        self.assertEqual(VerificationStore(sessions=backend).verified_phone("c1"), OTHER)
+        self.assertEqual(VerificationStore(sessions=backend).restore("c1", "PHONE#" + OTHER), OTHER)
 
 
 class InMemorySessionsTests(unittest.TestCase):
@@ -328,8 +535,39 @@ class MongoSessionsTests(unittest.TestCase):
         clocks = Clocks()
         sessions = MongoVerifiedSessions(self.db, now=lambda: clocks.wall)
         verify(clocks.store(sessions))
-        self.assertEqual(clocks.store(MongoVerifiedSessions(self.db, now=lambda: clocks.wall)).verified_phone("c1"),
-                         PHONE)
+        restarted = clocks.store(MongoVerifiedSessions(self.db, now=lambda: clocks.wall))
+        self.assertEqual(restarted.restore("c1", OWNER), PHONE)
+
+
+class TtlIndexTests(unittest.TestCase):
+    """Only mongo_setup.py makes the TTL index, and a deploy never runs it. A
+    collection created by the first write has none, and every proved number
+    would stay for ever (the review of the fix, important 1)."""
+
+    def setUp(self):
+        self.db = mongomock.MongoClient()["emotorad_ai"]
+
+    def test_there_after_setup(self):
+        ensure_indexes(self.db)
+        self.assertTrue(MongoVerifiedSessions(self.db).has_ttl_index())
+
+    def test_not_there_on_a_collection_the_first_write_made(self):
+        MongoVerifiedSessions(self.db).save("c1", PHONE, NOW.isoformat(), NOW + timedelta(hours=12))
+        self.assertFalse(MongoVerifiedSessions(self.db).has_ttl_index())
+
+    def test_an_index_that_does_not_expire_on_the_date_does_not_count(self):
+        for options in ({}, {"expireAfterSeconds": 3600}):
+            db = mongomock.MongoClient()["emotorad_ai"]
+            db[VERIFICATION_SESSIONS].create_index([("expires_at", 1)], name="expires_at_ttl", **options)
+            self.assertFalse(MongoVerifiedSessions(db).has_ttl_index(), options)
+
+    def test_an_unreadable_index_list_is_store_unavailable(self):
+        class Unreachable:
+            def index_information(self):
+                raise ServerSelectionTimeoutError("no servers found")
+
+        with self.assertRaises(StoreUnavailable):
+            MongoVerifiedSessions({VERIFICATION_SESSIONS: Unreachable()}).has_ttl_index()
 
 
 class ErasureTests(unittest.TestCase):
@@ -448,15 +686,56 @@ class ScriptTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
+    def missing(self, log):
+        return [e for e in log.events if e["event"] == "verification_sessions_ttl_missing"]
+
     def test_memory_gives_in_memory_sessions(self):
-        self.assertIsInstance(build_stores(Settings(store="memory")).verified_sessions, InMemoryVerifiedSessions)
+        stores = build_stores(Settings(store="memory"))
+        self.assertIsInstance(stores.verified_sessions, InMemoryVerifiedSessions)
+        self.assertEqual(stores.verified_sessions_status, "memory")
 
     def test_mongodb_gives_mongodb_sessions_on_the_same_database(self):
         client = mongomock.MongoClient()
-        stores = build_stores(Settings(store="mongodb"), client=client)
+        ensure_indexes(client["emotorad_ai"])
+        log = EventLog(path=None)
+        stores = build_stores(Settings(store="mongodb"), log=log, client=client)
         self.assertIsInstance(stores.verified_sessions, MongoVerifiedSessions)
+        self.assertEqual(stores.verified_sessions_status, "mongodb")
+        self.assertEqual(self.missing(log), [])
         stores.verified_sessions.save("c1", PHONE, NOW.isoformat(), NOW + timedelta(hours=12))
         self.assertEqual(client["emotorad_ai"][VERIFICATION_SESSIONS].count_documents({}), 1)
+
+    def test_without_the_ttl_index_proofs_stay_in_memory_and_it_says_so(self):
+        client = mongomock.MongoClient()
+        log = EventLog(path=None)
+        with self.assertLogs("emotorad_ai.wiring", level="ERROR") as logged:
+            stores = build_stores(Settings(store="mongodb"), log=log, client=client)
+        self.assertIsInstance(stores.verified_sessions, InMemoryVerifiedSessions)
+        self.assertEqual(stores.verified_sessions_status, SESSIONS_TTL_MISSING)
+        [event] = self.missing(log)
+        self.assertEqual((event["level"], event["reason"]), ("error", SESSIONS_TTL_MISSING))
+        self.assertIn("verification_sessions_ttl_missing", "\n".join(logged.output))
+        self.assertNotIn(VERIFICATION_SESSIONS, client["emotorad_ai"].list_collection_names(),
+                         "nothing is written where it would never expire")
+
+    def test_an_unreadable_index_list_keeps_proofs_in_memory_too(self):
+        client = mongomock.MongoClient()
+        ensure_indexes(client["emotorad_ai"])
+        log = EventLog(path=None)
+        unreachable = ServerSelectionTimeoutError("no servers found")
+        with mock.patch.object(mongomock.collection.Collection, "index_information", side_effect=unreachable), \
+                self.assertLogs("emotorad_ai.wiring", level="ERROR"):
+            stores = build_stores(Settings(store="mongodb"), log=log, client=client)
+        self.assertIsInstance(stores.verified_sessions, InMemoryVerifiedSessions)
+        self.assertEqual(stores.verified_sessions_status, SESSIONS_INDEX_UNREADABLE)
+        [event] = self.missing(log)
+        self.assertEqual((event["reason"], event["error"]), (SESSIONS_INDEX_UNREADABLE, "StoreUnavailable"))
+
+    def test_health_says_where_proofs_are_kept(self):
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"})
+        self.assertEqual(api.health()["verification_sessions"], "memory")
+        with mock.patch.object(api.stores, "verified_sessions_status", SESSIONS_TTL_MISSING):
+            self.assertEqual(api.health()["verification_sessions"], SESSIONS_TTL_MISSING)
 
     def test_the_api_store_saves_to_the_built_sessions_and_logs_to_the_event_log(self):
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"})
@@ -499,6 +778,35 @@ class RestartMidConversationTests(unittest.TestCase):
         conversations = self.start(None)
         restarted = Chat(conversations=conversations)
         self.assertEqual(restarted.say("I am blind").handled_by, "verify_first:ask_number")
+
+    def test_a_change_of_number_whose_delete_failed_stays_changed_after_a_restart(self):
+        # The review, minor 3: "wrong mobile number" ended the proof in memory
+        # but MongoDB kept it, and the turn was saved. On a shared browser a
+        # restart must not hand the first person's bike to whoever is typing.
+        sessions = DeleteFails()
+        chat = Chat(replies=[say("Is the charger light on?")], sessions=sessions)
+        chat.verify(phone=ONE_BIKE)
+        chat.say("yes")
+        with self.assertLogs("emotorad_ai.tools.verification", level="WARNING"):
+            self.assertEqual(chat.say("wrong mobile number").handled_by, "verify_first:change_number")
+        self.assertIsNotNone(sessions.get("c1"), "the delete really failed")
+        self.assertEqual(chat.state().verify_step, "number")
+        restarted = Chat(conversations=chat.conversations, sessions=sessions)  # no model reply to give
+        reply = restarted.say("I am blind")
+        self.assertTrue(reply.handled_by.startswith("verify_first:ask_number"), reply.handled_by)
+        self.assertIsNone(restarted.store.verified_phone("c1"))
+        self.assertEqual(restarted.llm.requests, [])
+
+    def test_a_saved_session_for_someone_else_is_not_taken_back(self):
+        # The saved conversation is one person's; the saved session names
+        # another (a save that lost its race). Neither is guessed at.
+        sessions = InMemoryVerifiedSessions()
+        conversations = self.start(sessions)
+        sessions.save("c1", "+919700000099", datetime.now(timezone.utc).isoformat(),
+                      datetime.now(timezone.utc) + timedelta(hours=1))
+        restarted = Chat(conversations=conversations, sessions=sessions)
+        self.assertTrue(restarted.say("I am blind").handled_by.startswith("verify_first:"))
+        self.assertIsNone(restarted.store.verified_phone("c1"))
 
 
 if __name__ == "__main__":

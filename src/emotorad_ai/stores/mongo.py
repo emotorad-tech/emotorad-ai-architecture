@@ -78,8 +78,10 @@ COUNTERS = "counters"
 # The counters document behind EM-1000001, EM-1000002, ...
 TICKET_COUNTER = "ticket_reference"
 # Which number each web chat has proved (tools/verification.py), so a restart
-# or another server does not make a verified chat anonymous. Expires with the
-# proof after twelve hours, and is erased with the person or the conversation.
+# of the one process does not make a verified chat anonymous. Not enough for
+# several servers: codes stay in each process's memory, which answers first.
+# Expires with the proof after twelve hours, and is erased with the person or
+# the conversation. Used only once its TTL index exists (wiring.build_stores).
 VERIFICATION_SESSIONS = "verification_sessions"
 
 # Collection -> [(keys, options)]. The permanent record has no TTL index.
@@ -601,6 +603,16 @@ class MongoVerifiedSessions:
 
     def delete(self, conversation_id: str) -> None:
         self._guard("delete_one", lambda: self._sessions.delete_one({"_id": conversation_id}))
+
+    def has_ttl_index(self) -> bool:
+        """Whether mongo_setup.py has made the index that removes a session at
+        its `expires_at`. Only that script makes it, and a deploy never runs it,
+        so without it a proved number would stay for ever: the service then
+        keeps proofs in memory instead (wiring.build_stores). Raises
+        StoreUnavailable when the index list cannot be read."""
+        info = self._guard("index_information", lambda: self._sessions.index_information())
+        return any([name for name, _ in spec.get("key", [])] == ["expires_at"]
+                   and spec.get("expireAfterSeconds") == 0 for spec in info.values())
 
 
 class MongoTicketStore:

@@ -83,7 +83,7 @@ from .tools import amigo as amigo_tools
 from .tools import fixtures
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
-from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity
+from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity, proved_owner
 from .video_summary import VideoSummaryError, summariser_from_env
 from .wiring import build_models, build_stores
 from .zoho.wiring import build_zoho, ticket_health, zoho_status
@@ -143,9 +143,11 @@ _logger = logging.getLogger(__name__)
 # `request_identity_verification` or `verify_identity` at all, and an anonymous
 # visitor asked for their number has no way to prove it — the flow dead-ends.
 # Proved numbers are also saved with the stores (MongoDB `verification_sessions`
-# with EMOTORAD_STORE=mongodb), so a deploy does not make every verified chat
-# anonymous and ask for the number and the bike again (staging, 2026-10-06).
-# Codes in transit stay in this process's memory.
+# with EMOTORAD_STORE=mongodb, once mongo_setup.py has made its TTL index), so
+# a deploy does not make every verified chat anonymous and ask for the number
+# and the bike again (staging, 2026-10-06). The turn takes a saved one back
+# only when the saved conversation agrees (VerificationStore.restore). Codes
+# in transit stay in this process's memory: one process, not several servers.
 verification_store = VerificationStore(sessions=stores.verified_sessions, log=log)
 
 # Sends the one-time code. A stand-in until the OTP service is wired (the
@@ -494,6 +496,9 @@ def health() -> dict:
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
         # Zoho Desk: on, off, or why not (zoho/wiring.py).
         "zoho": zoho_status(ZOHO),
+        # Where proved numbers outlive a restart: memory, mongodb, or memory
+        # and why (wiring.build_stores: no TTL index, no saving).
+        "verification_sessions": stores.verified_sessions_status,
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.
@@ -965,12 +970,29 @@ def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str, Dict
     persona, identity = resolver.resolve_website(None, body.session_token or None)
     if persona == "customer" and identity.may_disclose and identity.phone:
         return "PHONE#" + identity.phone, "amiigo_app", erasure_rules.proof_of(None)
-    phone = verification_store.verified_phone(body.conversation_id) if body.conversation_id else None
+    phone = _proved_phone(body.conversation_id)
     if phone:
         return ("PHONE#" + phone, "website_chat",
                 erasure_rules.proof_of(verification_store.verified_on(body.conversation_id)))
     detail = erasure_rules.ERASURE_SIGN_IN if body.session_token is not None else erasure_rules.ERASURE_VERIFY_FIRST
     raise HTTPException(status_code=403, detail=detail)
+
+
+def _proved_phone(conversation_id: Optional[str]) -> Optional[str]:
+    """The number this chat proved. After a restart, its saved session is
+    taken back first, as a turn would, and only if the saved conversation
+    says the same person finished verifying (VerificationStore.restore).
+    A store that cannot be read proves nothing."""
+    if not conversation_id:
+        return None
+    phone = verification_store.verified_phone(conversation_id)
+    if phone is not None or verification_store.sessions is None:
+        return phone
+    try:
+        state = stores.conversations.peek(conversation_id)
+    except StoreUnavailable:
+        return None
+    return verification_store.restore(conversation_id, proved_owner(state))
 
 
 def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPException:

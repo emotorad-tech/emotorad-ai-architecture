@@ -101,16 +101,50 @@ def _session_expiry(verified_on: str) -> datetime:
     return at + timedelta(seconds=VERIFIED_TTL_SECONDS)
 
 
+def _seconds_since(verified_on: str, now_iso: str) -> Optional[float]:
+    """How long ago, by the wall clock, a session was proved, or None when
+    either time cannot be read (then nothing is taken back)."""
+    try:
+        then, now = datetime.fromisoformat(verified_on), datetime.fromisoformat(now_iso)
+    except (TypeError, ValueError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    # A server whose clock runs behind the one that saved it counts no time.
+    return max(0.0, (now - then).total_seconds())
+
+
+def proved_owner(state: Any) -> Optional[str]:
+    """Who the saved conversation says has proved its number: its `user_key`,
+    once verification has finished (`verify_step` None), else None.
+
+    The one thing a saved session is checked against before it is taken back
+    after a restart (VerificationStore.restore). A conversation saved while a
+    number was being changed or a code was awaited has no owner here, so a
+    saved session that this process ended but could not delete never comes
+    back (the review of the fix, 2026-10-06).
+    """
+    if state is None or getattr(state, "verify_step", None) is not None:
+        return None
+    return getattr(state, "user_key", None)
+
+
 class VerifiedSessions(Protocol):
     """Where a proved number is kept, so it outlives the process that proved it.
 
     A deploy restarts the container; with the proof in process memory only,
     every chat in progress became anonymous and was asked for its number, then
-    its bike, again (staging, 2026-10-06). With several servers it would happen
-    on any message that reached another one. `get` answers None for a session
+    its bike, again (staging, 2026-10-06). `get` answers None for a session
     past `expires_at`, by the wall clock, whatever the backend's own expiry has
     or has not removed yet. Implementations: InMemoryVerifiedSessions below,
     MongoVerifiedSessions in stores/mongo.py (`verification_sessions`).
+
+    This carries one process (one container, one worker) across a restart. It
+    does not make several servers safe: codes stay in each process's memory,
+    and memory answers first (VerificationStore). Several servers need codes
+    and proofs in the shared store, with the store, not memory, the authority.
     """
 
     def save(self, conversation_id: str, phone: str, verified_on: str, expires_at: datetime) -> None: ...
@@ -203,19 +237,24 @@ class VerificationStore:
     Codes live in memory only: a restart while a code is outstanding means the
     customer asks for a new one, which costs them a message, not their proof.
     A proved number is also saved to `sessions` (VerifiedSessions) when one is
-    given, for VERIFIED_TTL_SECONDS, so a deploy or another server does not
-    make a verified chat anonymous (staging, 2026-10-06). Without `sessions`
-    it is memory only, as before.
+    given, for VERIFIED_TTL_SECONDS, so a deploy does not make a verified chat
+    anonymous (staging, 2026-10-06). Without `sessions` it is memory only, as
+    before. This is for one process (one container, one worker), restarted:
+    see VerifiedSessions for what several servers would need.
 
-    Memory answers first. The saved session is read only when this process
-    holds no proof for the conversation, and every place memory ends a proof
+    Memory is the only thing `verified_phone` and `verified_on` read. A saved
+    session comes back into memory through `restore` alone, which the turn
+    calls with the saved conversation's owner (proved_owner): it is taken
+    back only when this process holds nothing for the conversation, has not
+    ended a proof there that it could not delete, and the saved conversation
+    says the same person finished verifying. Every place memory ends a proof
     (a new code, reset, the sweep of a lapsed session) deletes the saved one
     too, so a session can never outlive what memory would allow. Cancelling
     a code leaves a proved number alone, here as in memory.
 
     A backend failure never fails a turn: the conversation counts as not
-    verified for that call, and `verification_session_unavailable` is logged
-    with the operation and the error's class, never the phone or the message.
+    verified, and `verification_session_unavailable` is logged with the
+    operation and the error's class, never the phone or the message.
     """
 
     _pending: Dict[str, _Pending] = field(default_factory=dict)
@@ -228,11 +267,12 @@ class VerificationStore:
     sessions: Optional[Any] = None
     # The EventLog, for verification_session_unavailable. Optional.
     log: Optional[Any] = None
-    # Held while memory changes and the saved session follows, so two
-    # requests on one conversation leave both in the same order.
+    # Held while memory changes and the saved session follows, and while a
+    # saved session is taken back, so two requests on one conversation leave
+    # both in the same order and never see one without the other.
     _write_lock: threading.Lock = field(default_factory=threading.Lock)
-    # Conversations whose saved session could not be deleted: never read back
-    # by this process until a new proof is saved or a delete succeeds.
+    # Conversations whose saved session could not be deleted: never taken
+    # back by this process until a new proof is saved or a delete succeeds.
     _unended: Set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
@@ -286,6 +326,10 @@ class VerificationStore:
                 pending = self._pending.get(conversation_id)
                 if pending is None or pending.cancelled or pending.attempts >= MAX_ATTEMPTS:
                     return False
+                if not pending.code:
+                    # A proof taken back from a saved session (restore) has
+                    # no code: nothing typed, the empty string included, is it.
+                    return False
                 # An expired code fails without costing an attempt: the customer has
                 # done nothing wrong, and they need a fresh code, not a lockout.
                 if pending.code_expired(self.clock()):
@@ -314,22 +358,53 @@ class VerificationStore:
         return (session[1] or None) if session else None
 
     def _session(self, conversation_id: str) -> Optional[Tuple[str, str]]:
-        """(phone, verified_on) from memory, else from the saved sessions."""
+        """(phone, verified_on) from memory. A saved session counts only once
+        `restore` has taken it back."""
         with self._lock:
             pending = self._pending.get(conversation_id)
-            if pending is not None and pending.verified:
-                # Memory's verdict stands, lapsed or not: a saved session is
-                # never read back over a proof memory has let go.
-                if pending.session_expired(self.clock()):
-                    return None
-                return pending.phone, pending.verified_on
-            if self.sessions is None or conversation_id in self._unended:
+            if pending is None or not pending.verified or pending.session_expired(self.clock()):
                 return None
-        try:
-            return self.sessions.get(conversation_id)
-        except Exception as exc:
-            self._unavailable("get", conversation_id, exc)
-            return None
+            return pending.phone, pending.verified_on
+
+    def restore(self, conversation_id: str, owner: Optional[str]) -> Optional[str]:
+        """After a restart: the saved session of this conversation, taken back
+        into memory when the saved conversation agrees with it. Returns the
+        number the conversation has proved afterwards (verified_phone).
+
+        `owner` is proved_owner(the saved state): the user key of the person
+        who finished verifying, or None. The saved session is read only when
+        memory holds nothing for the conversation (a proof, live or lapsed,
+        or a code: memory's verdict stands) and this process has not ended a
+        proof there (`_unended`). It is taken back only when its number is
+        the owner's, for what is left of its twelve hours, with no code that
+        can be typed. Held under the write lock, so a reset or a new code
+        deleting the saved session is either wholly before it or after it.
+        """
+        if self.sessions is None or not owner or not owner.startswith("PHONE#"):
+            return self.verified_phone(conversation_id)
+        with self._write_lock:
+            with self._lock:
+                held = conversation_id in self._pending or conversation_id in self._unended
+            if held:
+                return self.verified_phone(conversation_id)
+            try:
+                session = self.sessions.get(conversation_id)
+            except Exception as exc:
+                self._unavailable("get", conversation_id, exc)
+                return None
+            if session is None or "PHONE#" + session[0] != owner:
+                return None
+            phone, verified_on = session
+            elapsed = _seconds_since(verified_on, self.wall_clock())
+            if elapsed is None or elapsed >= VERIFIED_TTL_SECONDS:
+                return None
+            with self._lock:
+                now = self.clock()
+                self._pending[conversation_id] = _Pending(
+                    phone=phone, code="", verified=True, issued_at=now - elapsed,
+                    verified_at=now - elapsed, verified_on=verified_on,
+                )
+        return phone
 
     def pending_code(self, conversation_id: str) -> Optional[str]:
         """The outstanding code — for the harness to display. Never for the model."""
@@ -591,6 +666,10 @@ def apply_verified_identity(
     uses) are where the disclosure gate opens, and it opens on the store's
     verdict rather than the model's. `Identity.may_disclose` follows from the
     strength set there, so no prompt wording can reach it.
+
+    It reads memory only. After a restart a saved session is stamped by the
+    turn itself (Runtime._node_prepare), once `restore` has checked it
+    against the saved conversation; never here, before that check.
     """
     return apply_proven_phone(message, store.verified_phone(message.conversation_id))
 
