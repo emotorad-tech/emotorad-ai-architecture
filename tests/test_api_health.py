@@ -40,7 +40,7 @@ class HealthTests(unittest.TestCase):
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
-             "photo_check": "off", "zoho": "not configured"},
+             "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory"},
         )
 
     def test_safety_reports_not_recorded_are_counted_once_there_are_any(self):

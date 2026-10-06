@@ -5,14 +5,25 @@ One function so the CLI and the API cannot drift apart on what a mode means.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from .config import Settings
 from .jev import JevClient
 from .llm import SINGLE_MODEL_MODES
 from .llm import OpenRouterChat, select_llm
 from .openrouter import OpenRouterTransport
+
+_logger = logging.getLogger(__name__)
+
+# The /health "verification_sessions" values: where proved numbers are kept.
+SESSIONS_MEMORY = "memory"
+SESSIONS_MONGODB = "mongodb"
+# MongoDB is the store, but proofs stay in memory (a restart forgets them, as
+# before 2026-10-06) because a saved one might never be removed.
+SESSIONS_TTL_MISSING = "memory: TTL index missing, run scripts/mongo_setup.py"
+SESSIONS_INDEX_UNREADABLE = "memory: TTL index could not be checked"
 
 
 @dataclass
@@ -45,6 +56,11 @@ class Stores:
     # The ticket record (tickets/store.py, stores/mongo.py). Written only when
     # Zoho Desk is on; the mock ticket system never touches it.
     tickets: Any = None
+    # The numbers web chats have proved (tools/verification.py), so a restart
+    # does not make a verified chat anonymous.
+    verified_sessions: Any = None
+    # Where they are kept, for /health (SESSIONS_*).
+    verified_sessions_status: str = SESSIONS_MEMORY
 
 
 def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Stores:
@@ -57,16 +73,51 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
     if settings.store == "memory":
         from .conversation import InMemoryConversationStore
         from .tools.registry import IdempotencyStore
+        from .tools.verification import InMemoryVerifiedSessions
 
         from .tickets.store import InMemoryTicketStore
 
         return Stores(conversations=InMemoryConversationStore(), idempotency=IdempotencyStore(),
-                      tickets=InMemoryTicketStore())
-    from .stores.mongo import MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, connect
+                      tickets=InMemoryTicketStore(), verified_sessions=InMemoryVerifiedSessions())
+    from .stores.mongo import (
+        MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, MongoVerifiedSessions, connect,
+    )
 
     db = connect(db_name=settings.mongo_db, client=client)
+    sessions, sessions_status = _verified_sessions(MongoVerifiedSessions(db), log)
     return Stores(
         conversations=MongoConversationStore(db, state_ttl_hours=settings.state_ttl_hours, log=log),
         idempotency=MongoIdempotencyStore(db, ttl_days=settings.idempotency_ttl_days),
         tickets=MongoTicketStore(db),
+        verified_sessions=sessions,
+        verified_sessions_status=sessions_status,
     )
+
+
+def _verified_sessions(mongo: Any, log: Any) -> Tuple[Any, str]:
+    """MongoDB's saved sessions only when their TTL index exists.
+
+    Only mongo_setup.py makes it, and a deploy never runs that. A collection
+    created by the first write has none, and every proved number would stay
+    in it for ever, against the twelve hours the code and CLAUDE.md promise.
+    So without the index, or when it cannot be checked, proofs stay in this
+    process's memory (a restart asks for the number again, as before) and
+    `verification_sessions_ttl_missing` is logged at error level for a
+    person to run mongo_setup.py and restart. /health says which. The same
+    guard as Zoho's unique `source_key` index (zoho/settings.py).
+    """
+    from .conversation import StoreUnavailable
+    from .tools.verification import InMemoryVerifiedSessions
+
+    error = None
+    try:
+        if mongo.has_ttl_index():
+            return mongo, SESSIONS_MONGODB
+        status = SESSIONS_TTL_MISSING
+    except StoreUnavailable as exc:
+        status, error = SESSIONS_INDEX_UNREADABLE, type(exc).__name__
+    _logger.error("verification_sessions_ttl_missing: %s", status)
+    if log is not None:
+        fields = {"error": error} if error else {}
+        log.emit("verification_sessions_ttl_missing", "verification_sessions", level="error", reason=status, **fields)
+    return InMemoryVerifiedSessions(), status
