@@ -18,30 +18,40 @@ minutes with no frame close it 4408 `idle`. When the token expires (its
 a message that arrives after the expiry is not handled (logged
 `token_expired`), and the app sends it again on its next socket.
 
-A message, once its fields are as the contract says, is admitted in this
-order. A message already accepted (its receipt, receipts.py) is never
-handled again: it gets the same `ack` and `reply`, once they exist, on any
-socket of the rider. Then 20 messages a minute (`rate_limited`). A
-conversation another rider is writing in right now, or whose records are not
-this rider's app chat (history.rider_may_use: a new chat, or the rider's
-own), is `conversation_not_found`, never saying which. One message at a
-time per conversation (`conversation_busy`). An upload that is not there is
-`upload_not_found`. Then `bot_typing` (`looking_at_video` when the message
-carries a video, which is described before the turn), and the turn runs in
-a worker thread so the socket keeps answering: api.prepare_turn with
+A message, once its fields are as the contract says, first counts against
+the rider's 20 a minute, resends included (`rate_limited`), and a resend
+this socket is still answering is folded into that one answer. Then it is
+admitted in this order. A message already accepted (its receipt,
+receipts.py) is never handled again: it gets the same `ack` and `reply`,
+once they exist, on any socket of the rider. A conversation another rider
+is writing in right now, or whose records are not this rider's app chat
+(history.rider_may_use: a new chat, or the rider's own), is
+`conversation_not_found`, never saying which. One message at a time per
+conversation (`conversation_busy`). An upload that is not there is
+`upload_not_found`, and no media storage on this server is
+`storage_unavailable`. When the store cannot answer, the ownership check
+and the receipts fail open (the plan's Rulings 13 and 23): the turn runs,
+without a receipt if need be, and the runtime's outage path answers, so a
+smoke report gets the safety steps and 112, never a closed socket. Then
+`bot_typing` (`looking_at_video` when the message carries a video, which is
+described before the turn), and the turn runs on the socket's own worker
+threads so the socket keeps answering: api.prepare_turn with
 `channel="amiigo_app"` and the token's phone, then the runtime's `handle`,
 exactly as a website turn, so the safety branch, the disclosure, the
 evidence check and the post-checks apply unchanged.
 
 The ack and the reply. The runtime records the rider's message and the bot's
 reply together, at the end of the turn. So the `ack` (the rider's message as
-stored) goes out with the `reply`, after `bot_typing`, both read back from
-the transcript (history.message_view): their ids are the ones history uses,
-and their text is masked as history shows it. A turn the store could not
-record still gets its one answer, with ids history does not know. The turn
-finishes, and its receipt is written, in the worker thread: a socket that
-closed mid-turn loses nothing, and the app fetches the reply with GET or by
-sending the message again.
+stored, masked as history shows it) goes out with the `reply`, after
+`bot_typing`, both with the ids history uses. The `reply` carries the
+bot's text as sent, what POST /message would have returned (the plan's
+Ruling 16); history shows the same message masked. A turn the store could
+not record still gets its one answer, with ids history does not know. The
+turn finishes, and its receipt is written, in the worker thread: a socket
+that closed mid-turn loses nothing, and the app fetches the reply with GET
+or by sending the message again. A socket waiting on the same message's
+turn elsewhere takes it over if that turn lets it go, unless its own token
+has run out (it closes 4401 instead, Ruling 24).
 
 Logs: `amiigo_socket_open`, `amiigo_socket_close` (code, reason) and
 `amiigo_message` (outcome), each with the rider's hash; never a token,
@@ -348,6 +358,9 @@ class Admission:
     error: Optional[str] = None
     duplicate: bool = False
     video: bool = False
+    # False when the receipts could not answer (Ruling 23): the turn runs
+    # without one, and nothing is folded across sockets.
+    receipted: bool = True
 
 
 @dataclass(frozen=True)
@@ -372,6 +385,8 @@ class ChatSocket:
         self.working: Dict[str, "asyncio.Task[None]"] = {}
         self.bad_in_a_row = 0
         self.fault = False
+        # When the token runs out, on the loop's clock (set by `run`).
+        self.expires = math.inf
 
     # -- the loop ---------------------------------------------------------------
 
@@ -383,7 +398,7 @@ class ChatSocket:
         try:
             # The token check accepts a token until a minute after its `exp`.
             left = (self.rider.expires_at + LEEWAY - context.clock()).total_seconds()
-            expires = loop.time() + left
+            self.expires = expires = loop.time() + left
             idle_at = loop.time() + context.socket_idle_seconds
             expiring = False
             while True:
@@ -463,12 +478,6 @@ class ChatSocket:
             return
         try:
             admission = await self._store(self._admit, frame, rid)
-        except StoreUnavailable as exc:
-            # The receipts cannot be read: exactly once cannot be kept, so
-            # nothing runs (only the ownership check fails open, Ruling 13).
-            self._logged("amiigo", "store_unavailable", error=type(exc).__name__)
-            self._fail()
-            return
         except Exception as exc:
             # A fault while admitting: logged by its class, the socket closes 1011.
             self._logged("amiigo", "fault", error=type(exc).__name__)
@@ -483,7 +492,23 @@ class ChatSocket:
         task.add_done_callback(functools.partial(self._answered, rid))
 
     def _admit(self, frame: MessageFrame, rid: str) -> Admission:
-        """Blocking: the receipts and the conversation's records."""
+        """Blocking: the receipts and the conversation's records. When the
+        receipts cannot answer (`answering`, `in_flight`, `claim`), the
+        message is admitted without one (the plan's Ruling 23), after the
+        same ownership and upload checks: a smoke report must never wait on
+        reconnects while the store is down."""
+        try:
+            return self._admit_with_receipt(frame, rid)
+        except StoreUnavailable as exc:
+            self._noted("amiigo_receipts_unavailable", "amiigo", error=type(exc).__name__)
+        if not self._may_use(frame.conversation_id):
+            return Admission(error=CONVERSATION_NOT_FOUND)
+        error, video = self._uploads(frame)
+        if error is not None:
+            return Admission(error=error)
+        return Admission(video=video, receipted=False)
+
+    def _admit_with_receipt(self, frame: MessageFrame, rid: str) -> Admission:
         context, rider, conversation_id = self.context, self.rider, frame.conversation_id
         receipts = context.receipts
         existing = receipts.answering(rid)
@@ -497,15 +522,28 @@ class ChatSocket:
         error, video = self._uploads(frame)
         if error is not None:
             return Admission(error=error)
-        outcome, doc = receipts.claim(rid, rider.user_key, conversation_id)
+        try:
+            outcome, doc = receipts.claim(rid, rider.user_key, conversation_id)
+        except StoreUnavailable:
+            # The claim may have been written before the store failed.
+            self._release(rid)
+            raise
         if outcome == DUPLICATE:
             return self._same_message(doc, frame)
         if outcome == BUSY:
             return self._held(frame, rid, receipts.in_flight(conversation_id))
-        # The chat may have become someone else's between the check and the
-        # claim: looked at again, and the claim let go if so.
-        if not self._may_use(conversation_id):
-            receipts.release(rid)
+        # The claim is this socket's: whatever happens next, it is let go
+        # unless the message is admitted (the second review: a fault here
+        # left the chat busy for the lease).
+        try:
+            # The chat may have become someone else's between the check and
+            # the claim: looked at again.
+            mine = self._may_use(conversation_id)
+        except BaseException:
+            self._release(rid)
+            raise
+        if not mine:
+            self._release(rid)
             return Admission(error=CONVERSATION_NOT_FOUND)
         return Admission(video=video)
 
@@ -565,7 +603,7 @@ class ChatSocket:
 
     async def _answer(self, frame: MessageFrame, rid: str, admission: Admission) -> None:
         if not admission.duplicate:
-            await self._turn(frame, rid, admission.video, typed=False)
+            await self._turn(frame, rid if admission.receipted else None, admission.video, typed=False)
             return
         # Accepted already, here or on another socket: wait for its answer,
         # reading the receipt once a poll, or admit it afresh when the first
@@ -580,7 +618,15 @@ class ChatSocket:
                     await self._refuse(frame.client_message_id, again.error)
                     return
                 if not again.duplicate:
-                    await self._turn(frame, rid, again.video, typed=typed)
+                    if asyncio.get_running_loop().time() >= self.expires:
+                        # Ruling 24: an expired token starts no turn. The
+                        # claim goes back, and the socket closes 4401 once
+                        # nothing else is being answered on it.
+                        if again.receipted:
+                            await self._store(self._release, rid)
+                        self._logged("amiigo", TOKEN_EXPIRED)
+                        return
+                    await self._turn(frame, rid if again.receipted else None, again.video, typed=typed)
                     return
                 continue
             if doc["conversation_id"] != frame.conversation_id:
@@ -595,7 +641,7 @@ class ChatSocket:
                 typed = True
             await asyncio.sleep(self.context.socket_poll_seconds)
 
-    async def _turn(self, frame: MessageFrame, rid: str, video: bool, typed: bool) -> None:
+    async def _turn(self, frame: MessageFrame, rid: Optional[str], video: bool, typed: bool) -> None:
         if not typed:
             await self.sock.send(typing_frame(frame.conversation_id, video))
         # On the socket's own turn threads, never anyio's default pool that
@@ -629,8 +675,9 @@ class ChatSocket:
 
     # -- in the worker thread ------------------------------------------------------------
 
-    def _run_turn(self, frame: MessageFrame, rid: str) -> TurnResult:
-        """The turn, as POST /message runs one, then its receipt. Blocking."""
+    def _run_turn(self, frame: MessageFrame, rid: Optional[str]) -> TurnResult:
+        """The turn, as POST /message runs one, then its receipt (none when
+        `rid` is None: the receipts could not answer). Blocking."""
         context = self.context
         try:
             message = context.prepare_turn(
@@ -662,7 +709,7 @@ class ChatSocket:
         recorded = self._recorded(frame.conversation_id, last)
         ack, answer = receipt_of(frame, message, reply, recorded, now.isoformat())
         try:
-            if not context.receipts.finish(rid, ack, answer):
+            if rid is not None and not context.receipts.finish(rid, ack, answer):
                 self._noted("amiigo_receipt_not_saved", frame.conversation_id, error="receipt_gone")
         except StoreUnavailable as exc:
             # A resend after the lease runs the turn again: said, not hidden.
@@ -709,11 +756,14 @@ class ChatSocket:
         answered = next((t for t in turns if said is not None and t.role == "bot" and t.n == said.n + 1), None)
         return (said, answered) if answered is not None else None
 
-    def _release(self, rid: str) -> None:
+    def _release(self, rid: Optional[str]) -> None:
+        """Let the message go, so it may be sent again. A release that
+        fails is logged by its class; the claim then runs out with its lease."""
+        if rid is None:
+            return
         try:
             self.context.receipts.release(rid)
-        except StoreUnavailable as exc:
-            # It runs out with its lease instead.
+        except Exception as exc:
             self._noted("amiigo_receipt_not_released", "amiigo", error=type(exc).__name__)
 
     # -- refusals and logs -------------------------------------------------------------

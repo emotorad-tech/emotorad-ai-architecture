@@ -27,7 +27,6 @@ from unittest import mock
 
 import anyio
 import mongomock
-from fastapi import WebSocket
 from fastapi.testclient import TestClient
 from pymongo.errors import DuplicateKeyError
 
@@ -786,16 +785,60 @@ class WhoseChatTests(SocketCase):
         self.assertEqual({(e["error"], e["rider_hash"]) for e in failed},
                          {("StoreUnavailable", rider_hash_of(RIDER_KEY))})
 
-    def test_a_receipts_store_that_cannot_answer_closes_1011_and_runs_nothing(self):
-        # Exactly once rests on the receipts: they never fail open.
+    def test_a_receipts_store_that_cannot_answer_lets_the_turn_run_without_a_receipt(self):
+        # The plan's Ruling 23: as the ownership check, the receipts fail
+        # open, so a smoke report never waits on reconnects. No receipt is
+        # kept, and nothing is folded across sockets.
         down = StoreUnavailable("MongoDB find failed")
-        for method in ("answering", "in_flight", "claim"):
+        for n, method in enumerate(("answering", "in_flight", "claim"), start=1):
             with self.subTest(method=method):
                 with mock.patch.object(self.ctx.receipts, method, side_effect=down):
                     with self.socket() as ws:
-                        self.send(ws, message())
-                        self.assertEqual(closed(ws)[0], 1011)
-        self.assertEqual(self.turns.calls, [])
+                        _, ack, reply = self.exchange(ws, message(n=n))
+                self.assertEqual((ack["client_message_id"], reply["in_reply_to"]), (cmid(n), cmid(n)))
+                self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(n))))
+        self.assertEqual(len(self.turns.calls), 3)
+        logged = self.events("amiigo_receipts_unavailable")
+        self.assertEqual([(e["error"], e["rider_hash"]) for e in logged],
+                         [("StoreUnavailable", rider_hash_of(RIDER_KEY))] * 3)
+
+    def test_without_receipts_a_resend_on_one_socket_is_still_folded(self):
+        gate = self.gated()
+        down = StoreUnavailable("MongoDB find failed")
+        with mock.patch.object(self.ctx.receipts, "answering", side_effect=down):
+            with self.socket() as ws:
+                self.send(ws, message())
+                self.assertEqual(frame(ws)["type"], "bot_typing")
+                self.assertTrue(self.turns.started.wait(TIMEOUT))
+                self.send(ws, message())
+                quiet(ws)
+                gate.set()
+                self.assertEqual([frame(ws)["type"], frame(ws)["type"]], ["ack", "reply"])
+                quiet(ws)
+        self.assertEqual(len(self.turns.calls), 1)
+
+    def test_a_fault_after_the_claim_lets_the_claim_go(self):
+        # The second review: a bug in the second ownership look left the
+        # claim processing, and the rider's next message busy for the lease.
+        rid = receipt_id(RIDER_KEY, cmid(1))
+        with mock.patch.object(history, "rider_may_use", side_effect=[True, RuntimeError("a bug")]):
+            with self.socket() as ws:
+                self.send(ws, message())
+                self.assertEqual(closed(ws)[0], 1011)
+        self.assertIsNone(self.ctx.receipts.get(rid))
+        self.assertIsNone(self.ctx.receipts.in_flight(CID))
+        with self.socket() as ws:
+            self.exchange(ws, message())
+        self.assertEqual(len(self.turns.calls), 1)
+
+    def test_a_claim_that_cannot_be_let_go_is_logged(self):
+        with mock.patch.object(history, "rider_may_use", side_effect=[True, RuntimeError("a bug")]), \
+                mock.patch.object(self.ctx.receipts, "release", side_effect=RuntimeError("also a bug")):
+            with self.socket() as ws:
+                self.send(ws, message())
+                self.assertEqual(closed(ws)[0], 1011)
+        [kept] = self.events("amiigo_receipt_not_released")
+        self.assertEqual((kept["error"], kept["rider_hash"]), ("RuntimeError", rider_hash_of(RIDER_KEY)))
 
     def test_a_fault_while_admitting_a_message_closes_1011(self):
         with mock.patch.object(history, "rider_may_use", side_effect=RuntimeError("a bug")):
@@ -1027,6 +1070,30 @@ class TokenExpiryTests(SocketCase):
         self.ctx.clock = lambda: ends - timedelta(seconds=seconds)
         return token
 
+    def test_a_takeover_after_the_token_ran_out_starts_no_turn_and_closes_4401(self):
+        # The plan's Ruling 24. The rider's other socket holds the message
+        # and its turn fails; this socket, waiting on it with a token that has
+        # since run out, would take it over: it does not, and closes 4401.
+        issued = datetime.now(timezone.utc).replace(microsecond=0)
+        short = self.keys.token(now=issued, lifetime=timedelta(hours=1))
+        lasting = self.keys.token(now=issued, lifetime=timedelta(hours=2))
+        ends = issued + timedelta(hours=1) + LEEWAY
+        self.ctx.clock = lambda: ends - timedelta(seconds=1.0)
+        gate = self.gated()
+        self.turns.error = RuntimeError("the first attempt fails")
+        with self.socket(token=lasting) as holder, self.socket(token=short) as waiter:
+            self.send(holder, message())
+            self.assertEqual(frame(holder)["type"], "bot_typing")
+            self.assertTrue(self.turns.started.wait(TIMEOUT))
+            self.send(waiter, message())
+            self.assertEqual(frame(waiter)["type"], "bot_typing")
+            time.sleep(1.3)  # the waiter's token has run out
+            gate.set()
+            self.assertEqual(closed(holder)[0], 1011)
+            self.assertEqual(closed(waiter), (4401, "token_expired"))
+        self.assertEqual(len(self.turns.calls), 1)
+        self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1))))
+
     def test_the_socket_closes_4401_token_expired_when_the_token_runs_out(self):
         token = self.expiring_in(0.5)
         with self.socket(token=token) as ws:
@@ -1163,15 +1230,56 @@ class EndToEndTests(SocketCase):
     # by the reply and by the history.
     with_media = False
 
-    def test_a_smoke_report_gets_the_safety_reply_and_the_model_is_never_called(self):
+    def model_calls(self):
+        return len([e for e in self.api.log.events if e["event"] == "llm_request"])
+
+    def test_a_smoke_report_mid_chat_gets_the_safety_reply_and_the_model_is_never_called(self):
+        # The control first: in this chat, once a bike is chosen, an ordinary
+        # message reaches the model. Then the smoke report does not.
+        real = OfflinePlanner.create
+        with mock.patch.object(OfflinePlanner, "create", autospec=True, side_effect=real) as model:
+            with self.socket() as ws:
+                self.exchange(ws, message(n=1, text="my battery is not charging"))
+                _, _, chosen = self.exchange(ws, message(n=2, text="1"))
+                self.assertEqual(chosen["handled_by"], "battery_support")
+                self.assertGreater(model.call_count, 0, "the control never reached the model")
+                self.assertGreater(self.model_calls(), 0)
+                model.reset_mock()
+                before = self.model_calls()
+                _, _, reply = self.exchange(ws, message(n=3, text="my battery is smoking"))
+        model.assert_not_called()
+        self.assertEqual(self.model_calls(), before)
+        self.assertTrue(reply["escalated"], reply)
+        self.assertTrue(reply["handled_by"].startswith("guardrail"), reply["handled_by"])
+
+    def test_a_smoke_report_as_a_chats_first_message_carries_the_disclosure(self):
         with mock.patch.object(OfflinePlanner, "create", autospec=True) as model:
             with self.socket() as ws:
                 _, _, reply = self.exchange(ws, message(text="my battery is smoking"))
         model.assert_not_called()
-        self.assertEqual([e for e in self.api.log.events if e["event"] == "llm_request"], [])
+        self.assertEqual(self.model_calls(), 0)
         self.assertTrue(reply["escalated"], reply)
         self.assertTrue(reply["message"]["text"].startswith(DISCLOSURE_TEXT), reply["message"]["text"])
         self.assertTrue(reply["handled_by"].startswith("guardrail"), reply["handled_by"])
+
+    def test_a_smoke_report_with_both_stores_down_gets_the_safety_steps(self):
+        # Rulings 13 and 23: the conversations and the receipts both down;
+        # the socket stays open and the runtime's outage path answers.
+        down = StoreUnavailable("MongoDB find failed")
+        conversation_reads = ("get", "peek", "origins_of", "owner_of", "count_turns", "turns_of", "runs_of")
+        receipt_calls = ("answering", "in_flight", "claim", "finish", "release", "get")
+        patches = [mock.patch.object(self.conversations, name, side_effect=down) for name in conversation_reads]
+        patches += [mock.patch.object(self.ctx.receipts, name, side_effect=down) for name in receipt_calls]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        with self.socket() as ws:
+            _, ack, reply = self.exchange(ws, message(text="my battery is smoking"))
+        self.assertEqual(reply["handled_by"], "store_unavailable")
+        self.assertIn("112", reply["message"]["text"])
+        self.assertIn(SAFETY_NOT_RECORDED_MESSAGE.split("\n")[0], reply["message"]["text"])
+        self.assertTrue(self.events("amiigo_receipts_unavailable"))
+        self.assertTrue(self.events("amiigo_owner_check_failed"))
 
     def test_a_smoke_report_during_a_store_outage_gets_the_safety_steps(self):
         # Ruling 13: the ownership check fails open, and the runtime's outage
@@ -1291,6 +1399,20 @@ class ReceiptsContract:
         self.clock.move(timedelta(seconds=2))
         self.assertIsNone(self.receipts.get(self.RID))
         self.assertEqual(self.receipts.claim(self.RID, RIDER_KEY, CID), (CLAIMED, None))
+
+    def test_answering_is_a_done_receipt_or_one_running_within_its_lease(self):
+        self.assertIsNone(self.receipts.answering(self.RID))
+        self.receipts.claim(self.RID, RIDER_KEY, CID)
+        self.assertEqual(self.receipts.answering(self.RID)["state"], PROCESSING)
+        self.clock.move(LEASE + timedelta(seconds=1))
+        self.assertIsNone(self.receipts.answering(self.RID), "past its lease")
+        self.receipts.claim(self.RID_2, RIDER_KEY, CID_2)
+        self.receipts.finish(self.RID_2, {"id": "a"}, {"id": "b"})
+        self.assertEqual(self.receipts.answering(self.RID_2)["state"], DONE)
+        self.clock.move(LEASE + timedelta(seconds=1))
+        self.assertEqual(self.receipts.answering(self.RID_2)["state"], DONE, "a done receipt has no lease")
+        self.clock.move(RECEIPT_TTL)
+        self.assertIsNone(self.receipts.answering(self.RID_2), "expired")
 
     def test_finishing_a_receipt_that_is_gone_says_so(self):
         self.assertFalse(self.receipts.finish(self.RID, {"id": "a"}, {"id": "b"}))
