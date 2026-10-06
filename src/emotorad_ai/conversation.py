@@ -101,6 +101,14 @@ class ConversationState:
     # asks with nothing back are sent; the fourth hands over to a person.
     evidence_asks: int = 0
     video_declined: bool = False
+    # The evidence check before a ticket (evidence_check.py, 6 October 2026),
+    # kept only with it switched on: the latest verdict on the customer's
+    # photos and videos ({"passed", "seen", "missing", "error", "at"}), and
+    # how many checks in this run could not be made. A verdict that passed
+    # stays until the run ends or the bike changes; the first error in a run
+    # earns one extra ask.
+    evidence_verdict: Optional[Dict[str, Any]] = None
+    evidence_check_errors: int = 0
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool
@@ -234,6 +242,8 @@ class ConversationState:
         if self.selected_frame and self.selected_frame != frame_number:
             self.agent = None
             self.sub_category = None
+            # Evidence that passed was about the other bike.
+            self.evidence_verdict = None
             self.transitions.append("bike_changed:%s->%s" % (self.selected_frame, frame_number))
         self.selected_frame = frame_number
         self.selected_bike_label = label
@@ -257,6 +267,7 @@ class ConversationState:
         self.lookup_error = None
         self.evidence_seen = False
         self.evidence_asks, self.video_declined = 0, False
+        self.evidence_verdict = None
 
     def route_to(self, agent: str) -> None:
         self.agent = agent

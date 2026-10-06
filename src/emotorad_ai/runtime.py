@@ -126,6 +126,16 @@ from .navigation import (
 )
 from .observability import EventLog
 from .evidence_asks import MAX_EVIDENCE_ASKS, added_line, asks_for_media, declines_video
+from .evidence_check import (
+    EVIDENCE_HANDOVER_TEXT,
+    EVIDENCE_HANDOVER_TEXT_HI,
+    fail_text,
+    final_text,
+    is_fault_chat,
+    verdict_passed,
+    verdict_record,
+    writes_hindi,
+)
 from .one_step import is_too_long, replace_turn_text
 from .one_step import sentences as one_step_sentences
 from .one_step import shorten as shorten_reply
@@ -392,6 +402,17 @@ def _ticket_known(text: str, state: ConversationState) -> bool:
     return any(ref in (state.context_block or "") for ref in _REFERENCE.findall(text or ""))
 
 
+def _evidence_refused(turn: Any) -> bool:
+    """Whether this turn's support ticket was refused because no evidence
+    has passed the check (tools/mocks.create_support_ticket)."""
+    for call in turn.tool_calls:
+        result = call.get("result") or {}
+        if (call.get("tool") == CREATE_SUPPORT_TICKET and is_error(result)
+                and (result.get("error") or {}).get("code") == EVIDENCE_NOT_ACCEPTED):
+            return True
+    return False
+
+
 def _is_image(attachment: Any) -> bool:
     return attachment.kind == "image" or (attachment.mime_type or "").startswith("image/")
 
@@ -413,7 +434,14 @@ _APP_BIKE_STATES = ("not_registered", "warranty_unknown", "warranty_unavailable"
 # person's stretch began after it (Runtime._owner_start), carried when the turn
 # loses a save race and changed it (Runtime._merge_onto_fresh).
 TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callback_asks", "last_code_phone",
-                    "newcomer_started_at", "newcomer_ticket_id", "owner_started_at")
+                    "newcomer_started_at", "newcomer_ticket_id", "owner_started_at",
+                    # The evidence check's verdict and its errors (evidence_check.py).
+                    # A pass on either side stands (_merge_onto_fresh).
+                    "evidence_verdict", "evidence_check_errors")
+
+# Whether a turn's support ticket was refused for want of evidence that passed
+# the check (tools/mocks.create_support_ticket).
+EVIDENCE_NOT_ACCEPTED = "evidence_not_accepted"
 
 
 def _ticket_bike(bikes: Sequence[Dict[str, Any]], selected: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -469,8 +497,17 @@ class Runtime:
         otp_verified_at: Optional[Callable[[str], Optional[str]]] = None,
         media_store: Any = None,
         verify_first: bool = False,
+        evidence_check: bool = False,
+        customer_care_contact: Optional[str] = None,
     ) -> None:
         self.settings = settings or load_settings()
+        # Evidence is checked before a ticket (evidence_check.py, the person's
+        # brief of 6 October 2026). Off unless asked for; api.py turns it on
+        # with EMOTORAD_EVIDENCE_CHECK. Off, every path is exactly as before.
+        self.evidence_check = evidence_check
+        # Given instead of a ticket when the evidence never passes. None: the
+        # final text says to contact customer care, with no number.
+        self.customer_care_contact = customer_care_contact
         self.registry = registry or build_registry(diagnostics_available=diagnostics_available)
         self.log = log or EventLog(path=self.settings.log_path, to_stdout=self.settings.log_to_stdout)
         self.llm = llm if llm is not None else BedrockClaude(self.settings)
@@ -1010,9 +1047,14 @@ class Runtime:
         # the number a code went to. Where this turn changed one, its value
         # stands; where it did not, the other server's does. With nothing
         # loaded to compare (a direct caller), this turn's stands.
+        theirs = fresh.evidence_verdict
         for name in TURN_FACT_FIELDS:
             if loaded is None or getattr(ours, name) != loaded.get(name):
                 setattr(fresh, name, getattr(ours, name))
+        if verdict_passed(theirs) and not verdict_passed(fresh.evidence_verdict):
+            # Evidence that passed on the other server stands: a later photo
+            # that fails never takes a pass back (evidence_check.py).
+            fresh.evidence_verdict = theirs
         for name in ("user_key", "channel", "context_block", "cluster_id"):
             if getattr(fresh, name) is None:
                 setattr(fresh, name, getattr(ours, name))
@@ -1119,6 +1161,7 @@ class Runtime:
             error=resolved.error,
         )
         self._note_origin(message, state, resolved)
+        self._note_evidence_verdict(message, state)
 
         # Built once per conversation and cached on the state. Rebuilding it every
         # turn costs queries, moves the block in the prompt (defeating prefix
@@ -1323,7 +1366,7 @@ class Runtime:
             recorded = self._record_ticket(
                 message, state, resolved, kind="handover", purpose=PURPOSE_HANDOVER, phone=phone, verified=False,
                 description="Customer asked for a person and gave this number when asked.",
-                cluster_id=resolved.cluster_id,
+                cluster_id=resolved.cluster_id, evidence_check=self._evidence_seen_line(state),
             )
         if recorded.refusal is not None:
             # A cap on unverified tickets refused it: say so, promise nothing.
@@ -1434,6 +1477,10 @@ class Runtime:
             self.log.guardrail(message.conversation_id, "human_handoff", handoff.matched)
             if resolved.persona == "customer" and self._desk_store() is not None:
                 return {"reply": self._handover_ticket(message, state, resolved, handoff.matched)}
+            if resolved.persona == "customer" and self._needs_evidence(state):
+                # A fault chat with nothing that passed the evidence check: no
+                # hand-over yet, with Zoho off as with it on.
+                return {"reply": self._evidence_before_handover(message, state, {"matched": handoff.matched})}
             self.log.escalation(message.conversation_id, "customer_requested_human", None)
             return {"reply": self._finish(
                 message, state, HANDOFF_MESSAGE, "guardrail:human_handoff",
@@ -1480,6 +1527,11 @@ class Runtime:
             self.log.emit("handover_ticket_not_recorded", cid, why="ticket_gone")
             return self._finish(shown, state, HANDOVER_GONE_MESSAGE, "guardrail:human_handoff",
                                 metadata=dict(metadata, handover="ticket_gone"))
+        if self._needs_evidence(state):
+            # A fault chat: no handover ticket until evidence has passed the
+            # check (the person's brief, 6 October 2026). A ticket the run
+            # already holds took the note above, as before.
+            return self._evidence_before_handover(shown, state, metadata)
         known = resolved.identity.phone
         phone = "+91" + typed.number if typed.number else known
         if phone is None:
@@ -1495,7 +1547,7 @@ class Runtime:
             # What a ticket the agent raises carries (the plan's cross-check,
             # finding 30), kept by _record_ticket only for a proved number.
             bike=self._handover_bike(resolved, state), coverage=coverage_fact(state, resolved),
-            customer_name=self._handover_name(resolved, state),
+            customer_name=self._handover_name(resolved, state), evidence_check=self._evidence_seen_line(state),
         )
         if recorded.refusal is not None:
             # A cap on unverified tickets refused it: say so, promise nothing.
@@ -2063,6 +2115,11 @@ class Runtime:
                 "channel": lambda: message.channel,
                 "coverage": lambda: coverage_fact(state, resolved),
                 "typed_number": lambda: state.typed_number,
+                # The evidence check (evidence_check.py), only with it on:
+                # whether evidence passed, what a better video would need and
+                # what Gemini saw. None outside a fault chat, where the
+                # ticket tool's evidence_seen rule applies as before.
+                **self._evidence_facts(state),
             },
             # Recorded as the loop runs, not only once the turn ends: a model
             # that calls lookup_warranty_record and place_replacement_order in
@@ -2149,7 +2206,14 @@ class Runtime:
             )
             # The reply is replaced, but a ticket the turn already raised still
             # exists: keep its id so it is tracked and gets the transcript.
-            if state.evidence_asks >= MAX_EVIDENCE_ASKS:
+            if state.evidence_asks >= self._ask_limit(state):
+                if self._evidence_gated(state):
+                    # The evidence check is on: no hand-over and no ticket,
+                    # the customer care contact instead (evidence_check.py).
+                    return self._evidence_final(
+                        message, state, turn, already_in_history=True,
+                        metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text},
+                    )
                 state.evidence_asks = 0  # a fresh count after the hand-over
                 # Asked three times already, and the reply still concludes
                 # with nothing seen: a person takes it from here, rather than the
@@ -2167,6 +2231,20 @@ class Runtime:
                 ticket_id=turn.ticket_id,
                 metadata={"blocked_reason": evidence.reason, "suppressed_text": turn.text},
                 already_in_history=True,
+            )
+
+        # The evidence check (evidence_check.py): the model tried to raise the
+        # support ticket and was refused because nothing has passed the check.
+        # Code writes the ask, saying what a better video needs, rather than
+        # the model's reply. Only once something was sent and checked ("Thanks
+        # for sending that"), and never in place of a stop instruction.
+        if (self._evidence_gated(state) and state.evidence_verdict is not None
+                and _evidence_refused(turn) and not check_safety_in_description(turn.text).triggered):
+            hindi = writes_hindi(message.message_text)
+            return self._evidence_ask(
+                message, state, fail_text(state.evidence_verdict.get("missing") or "", hindi) + self._already_done(turn),
+                "guardrail:evidence_check", turn=turn, already_in_history=True,
+                metadata={"blocked_reason": EVIDENCE_NOT_ACCEPTED, "suppressed_text": turn.text},
             )
 
         # The backstop (spec 2026-10-01, revised): a reply that says a ticket
@@ -2211,7 +2289,12 @@ class Runtime:
                                   or check_safety_in_description(turn.text).triggered):
             asked = None
         if asked is not None:
-            if state.evidence_asks >= MAX_EVIDENCE_ASKS:
+            if state.evidence_asks >= self._ask_limit(state):
+                if self._evidence_gated(state):
+                    # The evidence check is on: the customer care contact, no
+                    # hand-over and no ticket (evidence_check.py).
+                    return self._evidence_final(message, state, turn, already_in_history=True,
+                                                metadata={"suppressed_text": turn.text})
                 # A fresh count after the hand-over: the next message is not
                 # handed over again for the same asks.
                 state.evidence_asks = 0
@@ -2673,6 +2756,7 @@ class Runtime:
         bike: Optional[Dict[str, Any]] = None,
         coverage: Optional[str] = None,
         customer_name: Optional[str] = None,
+        evidence_check: Optional[str] = None,
     ) -> Recorded:
         """A ticket a gate writes straight to the seam (spec sections 2 and 6):
         safety with no number we know, the call-back number, the handover and
@@ -2709,6 +2793,9 @@ class Runtime:
         )
         if verified:
             fields.update(bike or {}, coverage=coverage, customer_name=customer_name)
+        if evidence_check:
+            # What Gemini saw in evidence that passed (zoho/payload.py says so).
+            fields["evidence_check"] = evidence_check
         try:
             created = self.registry.tickets.create(source_key=source_key, persona="customer", **fields)
         except Exception as exc:  # StoreUnavailable included; the class only, never str(exc)
@@ -2863,13 +2950,119 @@ class Runtime:
         if shows_media(content):
             state.evidence_seen = True
             # Something to see arrived: the asks start again (video first).
-            state.evidence_asks = 0
+            # With the evidence check on in a fault chat, only media that
+            # passed it starts them again (_note_evidence_verdict), or a
+            # customer could send unrelated photos for ever.
+            if not self._evidence_gated(state):
+                state.evidence_asks = 0
         elif message.attachments:
             # By kind only: the URL can be a signed link or a customer's key.
             self.log.emit(
                 "attachment_not_evidence", message.conversation_id,
                 kinds=[attachment.kind for attachment in message.attachments],
             )
+
+    # -- the evidence check (evidence_check.py) -------------------------------
+
+    def _evidence_gated(self, state: ConversationState) -> bool:
+        """The check is on and this conversation is about a bike fault."""
+        return self.evidence_check and is_fault_chat(state)
+
+    def _needs_evidence(self, state: ConversationState) -> bool:
+        """A fault chat with the check on and nothing that passed it."""
+        return self._evidence_gated(state) and not verdict_passed(state.evidence_verdict)
+
+    def _ask_limit(self, state: ConversationState) -> int:
+        """Asks with nothing back before the end: three, and one more once a
+        check in this run could not be made (the brief, decision 5)."""
+        extra = 1 if self._evidence_gated(state) and state.evidence_check_errors else 0
+        return MAX_EVIDENCE_ASKS + extra
+
+    def _evidence_seen_line(self, state: ConversationState) -> Optional[str]:
+        """What Gemini saw, for a fault chat's ticket raised after a pass."""
+        if not self._evidence_gated(state) or not verdict_passed(state.evidence_verdict):
+            return None
+        return state.evidence_verdict.get("seen") or None
+
+    def _evidence_facts(self, state: ConversationState) -> Dict[str, Callable[[], Any]]:
+        """The ticket tool's evidence facts, read when it runs. None of them
+        with the check off, so the tool keeps its evidence_seen rule."""
+        if not self.evidence_check:
+            return {}
+
+        def accepted() -> Optional[bool]:
+            return verdict_passed(state.evidence_verdict) if self._evidence_gated(state) else None
+
+        def missing() -> Optional[str]:
+            if not self._evidence_gated(state):
+                return None
+            return (state.evidence_verdict or {}).get("missing") or None
+
+        return {"evidence_accepted": accepted, "evidence_missing": missing,
+                "evidence_checked": lambda: self._evidence_seen_line(state)}
+
+    def _note_evidence_verdict(self, message: InboundMessage, state: ConversationState) -> None:
+        """This turn's verdict, from the check at ingest (api.py), kept on the
+        conversation. A pass stands until the run ends or the bike changes; a
+        fail or an error replaces anything but a pass. A pass starts the asks
+        again. Logged by outcome and code only, never what Gemini wrote."""
+        raw = message.entry_metadata.get("evidence_verdict")
+        if not self.evidence_check or not isinstance(raw, dict):
+            return
+        record = verdict_record(raw, at=utc_now_iso())
+        if record["error"]:
+            state.evidence_check_errors += 1
+        self.log.emit("evidence_check", message.conversation_id, passed=record["passed"],
+                      error=record["error"], errors=state.evidence_check_errors)
+        if record["passed"]:
+            state.evidence_verdict = record
+            state.evidence_asks = 0
+        elif not verdict_passed(state.evidence_verdict):
+            state.evidence_verdict = record
+
+    def _evidence_ask(
+        self, message: InboundMessage, state: ConversationState, text: str, handled_by: str, *,
+        turn: Any = None, already_in_history: bool, metadata: Dict[str, Any],
+    ) -> Reply:
+        """A fixed ask for evidence, counted, or the final text once the
+        asks are used up. Never escalated: no one takes over without evidence."""
+        if state.evidence_asks >= self._ask_limit(state):
+            return self._evidence_final(message, state, turn, already_in_history=already_in_history,
+                                        metadata=metadata)
+        state.evidence_asks += 1
+        return self._finish(message, state, text, handled_by, ticket_id=turn.ticket_id if turn else None,
+                            metadata=metadata, already_in_history=already_in_history)
+
+    def _evidence_final(
+        self, message: InboundMessage, state: ConversationState, turn: Any = None, *,
+        already_in_history: bool, metadata: Optional[Dict[str, Any]] = None,
+    ) -> Reply:
+        """Three asks (four after a check error) with nothing that passed: no
+        ticket, no hand-over, and EMotorad's customer care contact. The chat
+        stays open, and the count stays where it is, so another ask ends the
+        same way until evidence passes."""
+        verdict = state.evidence_verdict or {}
+        outcome = ("error:%s" % verdict["error"]) if verdict.get("error") else ("failed" if verdict else "none")
+        self.log.guardrail(message.conversation_id, "evidence_not_accepted",
+                           {"asks": state.evidence_asks, "errors": state.evidence_check_errors, "verdict": outcome})
+        text = final_text(self.customer_care_contact, writes_hindi(message.message_text))
+        if turn is not None:
+            text += self._already_done(turn)
+        return self._finish(message, state, text, "guardrail:evidence_not_accepted",
+                            ticket_id=turn.ticket_id if turn is not None else None,
+                            metadata=dict(metadata or {}, evidence="not_accepted"),
+                            already_in_history=already_in_history)
+
+    def _evidence_before_handover(
+        self, shown: InboundMessage, state: ConversationState, metadata: Dict[str, Any],
+    ) -> Reply:
+        """"Talk to a person" in a fault chat with nothing that passed the
+        check: no ticket, a fixed reply asking for the video, counted as an
+        ask. Before the model, as the handover gate always is."""
+        self.log.emit("handover_needs_evidence", shown.conversation_id, asks=state.evidence_asks)
+        text = EVIDENCE_HANDOVER_TEXT_HI if writes_hindi(shown.message_text) else EVIDENCE_HANDOVER_TEXT
+        return self._evidence_ask(shown, state, text, "guardrail:human_handoff", already_in_history=False,
+                                  metadata=dict(metadata, handover="evidence_needed"))
 
     # -- outbound ------------------------------------------------------------
 
