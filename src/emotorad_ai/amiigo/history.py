@@ -1,0 +1,365 @@
+"""A rider's chats and their messages, read back for the Amiigo app
+(docs/contracts/amiigo-support-chat.md, "History", "Messages", "What is masked").
+
+Reads only what the runtime already writes: one summary per run of a
+conversation (`runs_of`, grouped here into one chat), the transcript turns
+(`turns_of`) and the notices in a chat (`notices_of`, a ticket closed in Zoho
+Desk, written by the ticket closure). Text is returned as stored, masked as
+it was recorded.
+
+A chat is the rider's when every run of it is theirs (`owner_of`). Anything
+else, including a web chat a second person took over on a shared browser, is
+`conversation_not_found` and never listed: nothing of another person's chat
+is read out.
+
+Cursors are opaque base64url JSON, issued here and scoped to the rider (and,
+for messages, the chat). The list pages by keyset on (last message time,
+conversation id); the messages page back from the oldest message of the page
+before, by its id. So a turn recorded between two requests is neither
+skipped nor repeated: new messages only ever come after the ones already read.
+
+Times are compared as times, never as text: `utc_now_iso` drops the
+microseconds when they are zero. They are written as the contract writes
+them, `2026-10-06T09:12:44Z`.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from urllib.parse import unquote, urlsplit
+
+from ..conversation import ConversationSummaryItem, TranscriptTurn
+from ..storage.keys import is_asset_key, is_valid_key
+from ..tickets.record import SUPPORT_OPEN
+from .auth import Rider
+
+# "can_continue: true when the last message is under 48 hours old": the
+# working state's life (stores/mongo.py, state_ttl_hours).
+CAN_CONTINUE = timedelta(hours=48)
+# "About 15 minutes after the response."
+LINK_SECONDS = 900
+# The general title, for a run that recorded none.
+GENERAL_TITLE = "General question"
+HANDED_TO_SUPPORT = "handed_to_support"
+OPEN = "open"
+S3_SCHEME = "s3://"
+# What a time that cannot be read sorts as: before everything.
+_NEVER = datetime.min.replace(tzinfo=timezone.utc)
+CURSOR_VERSION = 1
+CHATS = "chats"
+MESSAGES = "messages"
+# A cursor as issued: base64url, no padding, and short. An explicit ASCII
+# class, so nothing from another script passes for one.
+_CURSOR = re.compile(r"[A-Za-z0-9_-]{1,512}")
+# An S3 endpoint host: s3.amazonaws.com, s3.<region>.amazonaws.com or
+# s3-<region>.amazonaws.com. Hostnames are ASCII.
+_S3_ENDPOINT = re.compile(r"s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com")
+
+Signer = Callable[[Optional[str]], Tuple[Optional[str], Optional[str]]]
+
+
+class CursorInvalid(Exception):
+    """A `cursor`, `before` or `after` this server did not issue for this rider and chat."""
+
+
+class ConversationNotFound(Exception):
+    """The chat does not exist, or is not this rider's. Which, is never said."""
+
+
+# -- times ---------------------------------------------------------------------
+
+
+def _moment(text: Any) -> Optional[datetime]:
+    """A stored ISO time as an aware UTC datetime, or None."""
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def utc_text(moment: datetime) -> str:
+    """A time as the contract writes one: `2026-10-06T09:12:44Z`."""
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _shown(text: Any) -> Any:
+    """A stored time as the contract writes it, or as stored when it cannot be read."""
+    moment = _moment(text)
+    return utc_text(moment) if moment is not None else text
+
+
+# -- cursors -------------------------------------------------------------------
+
+
+def _encode(kind: str, rider: Rider, **fields: Any) -> str:
+    payload = dict(fields, v=CURSOR_VERSION, k=kind, r=rider.rider_hash)
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _decode(text: str, kind: str, rider: Rider) -> Dict[str, Any]:
+    if not _CURSOR.fullmatch(text) or len(text) % 4 == 1:
+        raise CursorInvalid()
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)))
+    except (ValueError, binascii.Error):
+        # Not base64, not UTF-8, or not JSON.
+        raise CursorInvalid() from None
+    if (not isinstance(payload, dict) or payload.get("v") != CURSOR_VERSION or payload.get("k") != kind
+            or payload.get("r") != rider.rider_hash):
+        raise CursorInvalid()
+    return payload
+
+
+# -- links -------------------------------------------------------------------------
+
+
+def _key_of(url: Any, bucket: str) -> Optional[str]:
+    """The key of a file in our bucket that may be shown, or None.
+
+    `s3://<key>` (how a turn records a stored photo or video, api.py) or
+    `s3://<bucket>/<key>`: any key of the bucket's grammar. An `https://` link
+    to our bucket, virtual-hosted or path-style, as a guide picture's signed
+    link is recorded without its signature: a key under `assets/` only.
+    """
+    if not isinstance(url, str) or not bucket:
+        return None
+    if url.startswith(S3_SCHEME):
+        key = url[len(S3_SCHEME):]
+        if key.startswith(bucket + "/"):
+            key = key[len(bucket) + 1:]
+        return key if is_valid_key(key) else None
+    if not url.startswith("https://"):
+        return None
+    parts = urlsplit(url)
+    host, path = (parts.hostname or "").lower(), unquote(parts.path)
+    if host.startswith(bucket + ".") and _S3_ENDPOINT.fullmatch(host[len(bucket) + 1:]):
+        key = path[1:]
+    elif _S3_ENDPOINT.fullmatch(host) and path.startswith("/%s/" % bucket):
+        key = path[len(bucket) + 2:]
+    else:
+        return None
+    return key if is_valid_key(key) and is_asset_key(key) else None
+
+
+def signer_for(media_store: Any, now: datetime, log: Any = None) -> Signer:
+    """`(stored_url) -> (link, expires_at)`: a link to a file in our bucket,
+    signed for fifteen minutes, and when it stops working; `(None, None)` for
+    anything else: a photo that was never kept (`data:(inline, not kept)`),
+    another host, or no bucket configured. A link that cannot be signed is
+    `(None, None)` too, logged by the error's class, never the key."""
+    expires_at = utc_text(now + timedelta(seconds=LINK_SECONDS))
+
+    def sign(stored_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        if media_store is None:
+            return None, None
+        key = _key_of(stored_url, getattr(media_store, "bucket", ""))
+        if key is None:
+            return None, None
+        try:
+            return media_store.presign_get(key, expires_in=LINK_SECONDS), expires_at
+        except Exception as exc:
+            if log is not None:
+                log.emit("amiigo_media_unsigned", "amiigo", error=type(exc).__name__)
+            return None, None
+
+    return sign
+
+
+# -- messages ------------------------------------------------------------------
+
+
+def turn_id(turn: TranscriptTurn) -> str:
+    """A turn's message id: its stored `_id`, `<conversation_id>#<n:05d>`."""
+    if not turn.conversation_id:
+        raise ValueError("a transcript turn read without its conversation id has no message id")
+    return "%s#%05d" % (turn.conversation_id, turn.n)
+
+
+def message_id(item: Union[TranscriptTurn, Mapping[str, Any]]) -> str:
+    return turn_id(item) if isinstance(item, TranscriptTurn) else str(item["_id"])
+
+
+def message_view(item: Union[TranscriptTurn, Mapping[str, Any]], signer: Signer,
+                 now: Optional[datetime] = None) -> Dict[str, Any]:
+    """The contract's message object for a stored transcript turn or notice.
+
+    A turn is the rider's (`customer`) or the bot's; a notice is `system`.
+    Attachments keep their kind and get a fresh link from `signer`; a caption
+    or a poster is a live reply's only, never history's. `now` is the instant
+    the caller answers at, the same one its signer was made for; the view
+    takes every time it shows from the item and the signer."""
+    if isinstance(item, TranscriptTurn):
+        return {
+            "id": turn_id(item),
+            "sender": "rider" if item.role == "customer" else "bot",
+            "text": item.text,
+            "sent_at": _shown(item.at),
+            "attachments": [_attachment_view(a, signer) for a in item.attachments],
+        }
+    return {"id": str(item["_id"]), "sender": "system", "text": item.get("text") or "",
+            "sent_at": _shown(item.get("at")), "attachments": []}
+
+
+def _attachment_view(stored: Mapping[str, Any], signer: Signer) -> Dict[str, Any]:
+    url, expires_at = signer(stored.get("url"))
+    return {"kind": stored.get("kind"), "url": url, "url_expires_at": expires_at}
+
+
+def _notice_seq(notice_id: str) -> int:
+    seq = notice_id.rsplit("#N", 1)[-1]
+    return int(seq) if seq.isascii() and seq.isdigit() else 0
+
+
+def _in_order(turns: Sequence[TranscriptTurn], notices: Sequence[Mapping[str, Any]]) -> List[Any]:
+    """Turns and notices by time; at the same instant, turns before notices;
+    then by turn number or notice sequence."""
+    keyed: List[Tuple[Tuple[Any, ...], Any]] = [((_moment(t.at) or _NEVER, 0, t.n, ""), t) for t in turns]
+    keyed += [((_moment(n.get("at")) or _NEVER, 1, _notice_seq(str(n["_id"])), str(n["_id"])), n) for n in notices]
+    keyed.sort(key=lambda pair: pair[0])
+    return [item for _, item in keyed]
+
+
+def list_messages(stores: Any, rider: Rider, conversation_id: str, *, limit: int, before: Optional[str],
+                  after: Optional[str], now: datetime, signer: Signer) -> Dict[str, Any]:
+    """GET /amiigo/v1/conversations/{conversation_id}/messages.
+
+    No `before` or `after`: the newest `limit` messages. `before` (an
+    `older_cursor`): the page before. `after` (a message id): the messages
+    after it, with `more_after`. Each page oldest first."""
+    conversations = stores.conversations
+    if conversations.owner_of(conversation_id) != rider.user_key:
+        raise ConversationNotFound()
+    anchor = None
+    if before:
+        cursor = _decode(before, MESSAGES, rider)
+        anchor = cursor.get("m")
+        if cursor.get("c") != conversation_id or not isinstance(anchor, str):
+            raise CursorInvalid()
+    items = _in_order(conversations.turns_of(conversation_id), conversations.notices_of(conversation_id))
+    position = {message_id(item): i for i, item in enumerate(items)}
+    older_cursor, more_after = None, False
+    if after:
+        if after not in position:
+            raise CursorInvalid()
+        start = position[after] + 1
+        page = items[start:start + limit]
+        more_after = start + limit < len(items)
+    else:
+        if anchor is not None and anchor not in position:
+            raise CursorInvalid()
+        end = position[anchor] if anchor is not None else len(items)
+        start = max(0, end - limit)
+        page = items[start:end]
+        if start > 0:
+            older_cursor = _encode(MESSAGES, rider, c=conversation_id, m=message_id(page[0]))
+    return {
+        "conversation_id": conversation_id,
+        "messages": [message_view(item, signer, now) for item in page],
+        "older_cursor": older_cursor,
+        "more_after": more_after,
+    }
+
+
+# -- chats -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Chat:
+    """The runs of one conversation, as one chat."""
+
+    conversation_id: str
+    latest: ConversationSummaryItem
+    started_at: str
+    last_at: str
+    last: datetime
+
+
+def _chats(runs: Sequence[ConversationSummaryItem]) -> List[_Chat]:
+    """One chat per conversation: started when its first run started, last
+    active when its last run was, and otherwise as its latest run says. Most
+    recent activity first, then by conversation id."""
+    by_id: Dict[str, List[ConversationSummaryItem]] = {}
+    for run in runs:
+        by_id.setdefault(run.conversation_id, []).append(run)
+    chats = []
+    for conversation_id, mine in by_id.items():
+        latest = max(mine, key=lambda r: (_moment(r.started_at) or _NEVER, _moment(r.last_at) or _NEVER))
+        first = min(mine, key=lambda r: _moment(r.started_at) or _moment(r.last_at) or _NEVER)
+        last = max(mine, key=lambda r: _moment(r.last_at) or _NEVER)
+        chats.append(_Chat(conversation_id, latest, first.started_at or first.last_at, last.last_at,
+                           _moment(last.last_at) or _NEVER))
+    chats.sort(key=lambda c: c.conversation_id)
+    chats.sort(key=lambda c: c.last, reverse=True)  # stable: ties stay by id
+    return chats
+
+
+def _ticket_view(stores: Any, reference: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The chat's ticket. Open when no record has the reference (the mock's)
+    or the record is from before support statuses."""
+    if not reference:
+        return None
+    tickets = getattr(stores, "tickets", None)
+    status = tickets.ticket_status(reference) if tickets is not None else None
+    if status is None:
+        return {"reference": reference, "status": SUPPORT_OPEN, "closed_at": None}
+    return {"reference": status["reference"], "status": status["status"], "closed_at": _shown(status["closed_at"])}
+
+
+def _chat_view(stores: Any, chat: _Chat, now: datetime) -> Dict[str, Any]:
+    run, conversations = chat.latest, stores.conversations
+    bike = ({"product_name": run.product_name, "frame_number": run.frame_number}
+            if run.product_name or run.frame_number else None)
+    return {
+        "conversation_id": chat.conversation_id,
+        "channel": run.channel,
+        "title": run.title or GENERAL_TITLE,
+        "started_at": _shown(chat.started_at),
+        "last_message_at": _shown(chat.last_at),
+        "bike": bike,
+        "status": HANDED_TO_SUPPORT if run.outcome == "escalated" else OPEN,
+        "ticket": _ticket_view(stores, run.ticket_id),
+        "message_count": (conversations.count_turns(chat.conversation_id)
+                          + len(conversations.notices_of(chat.conversation_id))),
+        "can_continue": chat.last > now - CAN_CONTINUE,
+    }
+
+
+def list_conversations(stores: Any, rider: Rider, *, limit: int, cursor: Optional[str], channel: Optional[str],
+                       now: datetime) -> Dict[str, Any]:
+    """GET /amiigo/v1/conversations: the rider's chats, most recent activity
+    first, `limit` a page, from `cursor` (a `next_cursor`) when given."""
+    since: Optional[Tuple[datetime, str]] = None
+    if cursor:
+        fields = _decode(cursor, CHATS, rider)
+        moment, conversation_id = _moment(fields.get("t")), fields.get("c")
+        if moment is None or not isinstance(conversation_id, str):
+            raise CursorInvalid()
+        since = (moment, conversation_id)
+    conversations = stores.conversations
+    page: List[_Chat] = []
+    more = False
+    for chat in _chats(conversations.runs_of(rider.user_key, channel=channel)):
+        if since is not None and not (chat.last < since[0] or (chat.last == since[0]
+                                                               and chat.conversation_id > since[1])):
+            continue
+        if conversations.owner_of(chat.conversation_id) != rider.user_key:
+            continue  # someone else's runs are in it too
+        if len(page) == limit:
+            more = True
+            break
+        page.append(chat)
+    next_cursor = (_encode(CHATS, rider, t=page[-1].last.isoformat(), c=page[-1].conversation_id)
+                   if more else None)
+    return {"conversations": [_chat_view(stores, chat, now) for chat in page], "next_cursor": next_cursor}

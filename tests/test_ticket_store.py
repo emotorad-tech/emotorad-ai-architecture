@@ -19,6 +19,7 @@ RECORD_KEYS = {
     "ended_at", "channel", "created_at", "phone", "identity", "category", "ai_severity", "summary", "claims", "bike",
     "coverage", "customer_name", "notes", "zoho", "posted_turns", "posted_media", "posted_notes", "state",
     "due_since", "wake", "attempts", "next_attempt_at", "lease_until", "lease_token", "intent", "last_error",
+    "support_status", "closed_at",
 }
 
 

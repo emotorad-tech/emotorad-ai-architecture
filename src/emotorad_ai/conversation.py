@@ -394,6 +394,14 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# What `owner_of` answers for a conversation whose runs belong to more than
+# one person: a web chat on a shared browser, where a second person proved
+# their number after the first person's proof lapsed (restart_for). No user
+# key equals it ("PHONE#..." or "DEALER#..."), so neither person's history,
+# and no rider's socket, can open the conversation and read the other's turns.
+SHARED_OWNER = "#shared"
+
+
 class ConversationConflict(Exception):
     """Another server saved this conversation after we loaded it."""
 
@@ -413,6 +421,11 @@ class TranscriptTurn:
     attachments: Tuple[Dict[str, str], ...] = ()
     handled_by: str = ""
     path: str = ""
+    # The conversation the turn belongs to, as a store reads it back, so the
+    # turn can name its message id (`<conversation_id>#<n:05d>`, the Amiigo
+    # history, amiigo/history.py). Not compared: two readings of one turn are
+    # the same turn.
+    conversation_id: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -455,11 +468,13 @@ def transcript_turns(
     customer = TranscriptTurn(
         n=n, role="customer", text=redact_pii(inbound.message_text or ""), at=at,
         attachments=tuple({"kind": a.kind, "url": recorded_url(a.url)} for a in inbound.attachments),
+        conversation_id=state.conversation_id,
     )
     bot = TranscriptTurn(
         n=n + 1, role="bot", text=redact_pii(reply.text or ""), at=at,
         attachments=tuple({"kind": a.kind, "url": recorded_url(a.url)} for a in reply.attachments),
         handled_by=reply.handled_by or "", path=str(reply.metadata.get("route") or ""),
+        conversation_id=state.conversation_id,
     )
     return customer, bot
 
@@ -509,6 +524,9 @@ class InMemoryConversationStore:
         self._media: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Where each run came from (origin.py), permanent: conversation id -> run key -> record.
         self._origins: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Notices in a chat (a ticket closed in Zoho Desk), permanent like the
+        # transcript: conversation id -> notice id -> notice.
+        self._notices: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Self-service erasure requests (erasure.py): reference -> request.
         self._erasures: Dict[str, Dict[str, Any]] = {}
         # One pending request per person, even for two requests at once.
@@ -555,6 +573,32 @@ class InMemoryConversationStore:
     def transcript(self, conversation_id: str) -> List[TranscriptTurn]:
         return [turn for _, turn in sorted(self._turns.get(conversation_id, {}).items())]
 
+    # -- the Amiigo history (amiigo/history.py) ------------------------------
+
+    def runs_of(self, user_key: str, channel: Optional[str] = None) -> List[ConversationSummaryItem]:
+        """Every run of every conversation of one person: one summary each.
+        Grouped into conversations by amiigo/history.py."""
+        return [s for s in self._summaries.get(user_key, {}).values() if channel is None or s.channel == channel]
+
+    def owner_of(self, conversation_id: str) -> Optional[str]:
+        """The user key of the conversation's summaries: None when it has
+        none, SHARED_OWNER when they name more than one person."""
+        keys = {s.user_key for items in self._summaries.values() for s in items.values()
+                if s.conversation_id == conversation_id}
+        if not keys:
+            return None
+        return keys.pop() if len(keys) == 1 else SHARED_OWNER
+
+    def turns_of(self, conversation_id: str) -> List[TranscriptTurn]:
+        return self.transcript(conversation_id)
+
+    def count_turns(self, conversation_id: str) -> int:
+        return len(self._turns.get(conversation_id, {}))
+
+    def notices_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        notices = self._notices.get(conversation_id, {}).values()
+        return [dict(n) for n in sorted(notices, key=lambda n: (n["at"], n["_id"]))]
+
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice
         (a retried claim) replaces its record rather than duplicating it."""
@@ -578,6 +622,8 @@ class InMemoryConversationStore:
         mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
         mine |= {cid for cid, runs in self._origins.items()
                  if any(r.get("user_key") == user_key for r in runs.values())}
+        mine |= {cid for cid, notices in self._notices.items()
+                 if any(n.get("user_key") == user_key for n in notices.values())}
         return sorted(mine)
 
     def pending_erasure_of(self, user_key: str) -> Optional[Dict[str, Any]]:
@@ -674,12 +720,13 @@ class InMemoryConversationStore:
                 "transcript_turns": sum(len(self._turns.get(cid, {})) for cid in mine),
                 "media": sum(len(self._media.get(cid, {})) for cid in mine),
                 "conversation_origins": sum(len(self._origins.get(cid, {})) for cid in mine),
+                "conversation_notices": sum(len(self._notices.get(cid, {})) for cid in mine),
                 "conversation_summaries": len(self._summaries.get(user_key, {})) + sum(
                     1 for key, items in self._summaries.items() if key != user_key
                     for item in items.values() if item.conversation_id in mine),
             }
         counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
-                  "conversation_summaries": len(self._summaries.pop(user_key, {}))}
+                  "conversation_notices": 0, "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
             for name, count in self.delete_conversation(cid).items():
                 counts[name] += count
@@ -699,6 +746,7 @@ class InMemoryConversationStore:
             "conversation_summaries": summaries,
             "media": len(self._media.pop(conversation_id, {})),
             "conversation_origins": len(self._origins.pop(conversation_id, {})),
+            "conversation_notices": len(self._notices.pop(conversation_id, {})),
         }
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:

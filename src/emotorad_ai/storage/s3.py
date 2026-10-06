@@ -76,9 +76,9 @@ class S3Store:
             "expires_in": PUT_EXPIRY,
         }
 
-    def presign_get(self, key: str) -> str:
+    def presign_get(self, key: str, expires_in: int = GET_EXPIRY) -> str:
         return self._client.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=GET_EXPIRY
+            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_in
         )
 
     def head(self, key: str) -> Optional[Dict[str, Any]]:

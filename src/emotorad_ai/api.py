@@ -55,7 +55,9 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
+from .amiigo import routes as amiigo_routes
 from .amiigo.auth import token_check_from_env
+from .amiigo.common import AmiigoContext, NoStoreMiddleware
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
 from . import evidence_check
@@ -357,6 +359,13 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Emotorad AI — battery support", lifespan=_lifespan)
+
+# The Amiigo app's routes under /amiigo/v1/ (amiigo/routes.py), with what
+# they read from this process, and Cache-Control: no-store on every answer
+# under that path. Nothing outside /amiigo/v1/ is touched.
+app.state.amiigo = AmiigoContext(stores=stores, tokens=AMIIGO_TOKENS, log=log, media_store=MEDIA_STORE)
+app.include_router(amiigo_routes.router)
+app.add_middleware(NoStoreMiddleware)
 
 
 class MessageIn(BaseModel):

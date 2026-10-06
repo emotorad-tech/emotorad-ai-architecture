@@ -2,9 +2,11 @@
 
 Spec: docs/superpowers/specs/2026-09-29-mongodb-conversation-store-design.md.
 
-Eleven collections. `transcript_turns`, `conversation_summaries` and `media`
-are the conversation record and are kept permanently: no TTL index, and
-deletion on request through `delete_person` or `delete_conversation`.
+Twelve collections. `transcript_turns`, `conversation_summaries`, `media`
+and `conversation_notices` (a notice in a chat, such as a ticket closed in
+Zoho Desk) are the conversation record and are kept permanently: no TTL
+index, and deletion on request through `delete_person` or
+`delete_conversation`.
 `conversations` (working state), `idempotency_keys` and
 `verification_sessions` (the number each web chat proved, twelve hours)
 expire through TTL indexes. `conversation_origins` (where each run came
@@ -41,6 +43,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from .. import erasure as erasure_rules
 from ..contract import InboundMessage, Reply
 from ..conversation import (
+    SHARED_OWNER,
     ConversationConflict,
     ConversationState,
     ConversationSummaryItem,
@@ -53,7 +56,7 @@ from ..conversation import (
 )
 from ..tickets.clock import plus
 from ..tickets.kinds import FIRST_DESK_NUMBER, STUCK_SECONDS, URGENT_LATE_SECONDS, desk_reference
-from ..tickets.record import GONE, OUTSTANDING, SENT, STUCK, WAITING
+from ..tickets.record import GONE, OUTSTANDING, SENT, STUCK, WAITING, support_status
 from ..tickets.store import age_seconds, listing_row
 from ..tools.registry import CLAIM_LEASE_SECONDS, write_in_progress
 
@@ -67,6 +70,11 @@ MEDIA = "media"
 # Where each run of a conversation came from (origin.py). Permanent, like the
 # transcript, and erased with the person or the conversation.
 CONVERSATION_ORIGINS = "conversation_origins"
+# Notices in a chat, read back as `system` messages by the Amiigo history
+# (amiigo/history.py): `_id` `<conversation_id>#N<seq:05d>`, `conversation_id`,
+# `user_key`, `kind` ("ticket_closed"), `text` and `at` (ISO 8601 UTC, as a
+# transcript turn's). Permanent, and erased with the person or the conversation.
+CONVERSATION_NOTICES = "conversation_notices"
 # Self-service erasure requests (erasure.py), and the audit log every erasure
 # writes. Neither is erased with the person: a closed request holds only a hash.
 ERASURE_REQUESTS = "erasure_requests"
@@ -96,6 +104,12 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     ],
     CONVERSATION_SUMMARIES: [
         ([("user_key", 1), ("started_at", -1)], {"name": "user_recent"}),
+        # The Amiigo history: a rider's runs, and who owns a conversation.
+        ([("user_key", 1), ("last_at", -1)], {"name": "user_last"}),
+        ([("conversation_id", 1)], {"name": "conversation"}),
+    ],
+    CONVERSATION_NOTICES: [
+        ([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"}),
     ],
     IDEMPOTENCY_KEYS: [
         ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
@@ -185,6 +199,13 @@ def _receipts_of(conversation_id: str) -> Dict[str, Any]:
     what a tool returned about the person (a booking's customer id). Both
     begin with the conversation id and a colon, which is what this matches."""
     return {"_id": {"$regex": "^%s:" % re.escape(conversation_id)}}
+
+
+def _summary_item(doc: Dict[str, Any]) -> ConversationSummaryItem:
+    """A stored summary as the dataclass, ignoring `_id` and any field a
+    newer version wrote."""
+    fields = set(ConversationSummaryItem.__dataclass_fields__)
+    return ConversationSummaryItem(**{k: v for k, v in doc.items() if k in fields})
 
 
 def _turn_starts(history: Sequence[Dict[str, Any]]) -> List[int]:
@@ -334,9 +355,44 @@ class MongoConversationStore:
             TranscriptTurn(
                 n=d["n"], role=d["role"], text=d["text"], at=d["at"],
                 attachments=tuple(d.get("attachments") or ()), handled_by=d.get("handled_by", ""), path=d.get("path", ""),
+                conversation_id=d.get("conversation_id") or conversation_id,
             )
             for d in docs
         ]
+
+    # -- the Amiigo history (amiigo/history.py) ------------------------------
+
+    def runs_of(self, user_key: str, channel: Optional[str] = None) -> List[ConversationSummaryItem]:
+        """Every run of every conversation of one person: one summary each.
+        Grouped into conversations by amiigo/history.py."""
+        query: Dict[str, Any] = {"user_key": user_key}
+        if channel is not None:
+            query["channel"] = channel
+        docs = self._guard(
+            "find", lambda: list(self._collection(CONVERSATION_SUMMARIES).find(query).sort("last_at", -1)))
+        return [_summary_item(d) for d in docs]
+
+    def owner_of(self, conversation_id: str) -> Optional[str]:
+        """The user key of the conversation's summaries: None when it has
+        none, SHARED_OWNER when they name more than one person."""
+        summaries = self._collection(CONVERSATION_SUMMARIES)
+        keys = [k for k in self._guard(
+            "distinct", lambda: summaries.distinct("user_key", {"conversation_id": conversation_id})) if k]
+        if not keys:
+            return None
+        return keys[0] if len(keys) == 1 else SHARED_OWNER
+
+    def turns_of(self, conversation_id: str) -> List[TranscriptTurn]:
+        return self.transcript(conversation_id)
+
+    def count_turns(self, conversation_id: str) -> int:
+        turns = self._collection(TRANSCRIPT_TURNS)
+        return self._guard("count_documents", lambda: turns.count_documents({"conversation_id": conversation_id}))
+
+    def notices_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        notices = self._collection(CONVERSATION_NOTICES)
+        return self._guard(
+            "find", lambda: list(notices.find({"conversation_id": conversation_id}).sort([("at", 1), ("_id", 1)])))
 
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice
@@ -457,15 +513,14 @@ class MongoConversationStore:
             "find",
             lambda: list(self._collection(CONVERSATION_SUMMARIES).find(query).sort("started_at", -1).limit(limit)),
         )
-        fields = set(ConversationSummaryItem.__dataclass_fields__)
-        return [ConversationSummaryItem(**{k: v for k, v in d.items() if k in fields}) for d in docs]
+        return [_summary_item(d) for d in docs]
 
     def conversations_of(self, user_key: str) -> List[str]:
         """Every conversation id tied to one person, in any collection."""
         found = set()
         for name, field in ((CONVERSATIONS, "_id"), (TRANSCRIPT_TURNS, "conversation_id"),
                             (CONVERSATION_SUMMARIES, "conversation_id"), (CONVERSATION_ORIGINS, "conversation_id"),
-                            (VERIFICATION_SESSIONS, "_id")):
+                            (CONVERSATION_NOTICES, "conversation_id"), (VERIFICATION_SESSIONS, "_id")):
             collection = self._collection(name)
             found.update(self._guard("distinct", lambda: collection.distinct(field, {"user_key": user_key})))
         return sorted(found)
@@ -480,7 +535,7 @@ class MongoConversationStore:
         conversation. With `dry_run`, counts what would go and deletes nothing.
         """
         counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA,
-                                       CONVERSATION_ORIGINS, VERIFICATION_SESSIONS)}
+                                       CONVERSATION_ORIGINS, VERIFICATION_SESSIONS, CONVERSATION_NOTICES)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -497,6 +552,7 @@ class MongoConversationStore:
             MEDIA: self._remove(MEDIA, {"conversation_id": conversation_id}, dry_run),
             CONVERSATION_ORIGINS: self._remove(CONVERSATION_ORIGINS, {"conversation_id": conversation_id}, dry_run),
             VERIFICATION_SESSIONS: self._remove(VERIFICATION_SESSIONS, {"_id": conversation_id}, dry_run),
+            CONVERSATION_NOTICES: self._remove(CONVERSATION_NOTICES, {"conversation_id": conversation_id}, dry_run),
         }
 
     def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:
@@ -668,6 +724,13 @@ class MongoTicketStore:
 
     def get(self, reference: str) -> Optional[Dict[str, Any]]:
         return self._guard("find_one", lambda: self._tickets.find_one({"_id": reference}))
+
+    def ticket_status(self, reference: str) -> Optional[Dict[str, Any]]:
+        """{"reference", "status", "closed_at"} as the rider sees it, or None
+        when no record has this reference (the mock's tickets)."""
+        record = self._guard("find_one", lambda: self._tickets.find_one(
+            {"_id": reference}, {"support_status": 1, "closed_at": 1}))
+        return support_status(record) if record is not None else None
 
     def by_source_key(self, source_key: str) -> Optional[Dict[str, Any]]:
         return self._guard("find_one", lambda: self._tickets.find_one({"source_key": source_key}))

@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from ..conversation import StoreUnavailable
 from .clock import parse, plus
 from .kinds import FIRST_DESK_NUMBER, STUCK_SECONDS, URGENT_LATE_SECONDS, desk_reference
-from .record import GONE, HELD, OUTSTANDING, SENT, STUCK, WAITING
+from .record import GONE, HELD, OUTSTANDING, SENT, STUCK, WAITING, support_status
 
 
 def age_seconds(since: str, now: str) -> int:
@@ -87,6 +87,13 @@ class InMemoryTicketStore:
     def by_source_key(self, source_key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             return copy.deepcopy(self._with_source_key(source_key))
+
+    def ticket_status(self, reference: str) -> Optional[Dict[str, Any]]:
+        """{"reference", "status", "closed_at"} as the rider sees it, or None
+        when no record has this reference (the mock's tickets)."""
+        with self._lock:
+            record = self._records.get(reference)
+            return support_status(record) if record is not None else None
 
     def _with_source_key(self, source_key: str) -> Optional[Dict[str, Any]]:
         return next((r for r in self._records.values() if r["source_key"] == source_key), None)

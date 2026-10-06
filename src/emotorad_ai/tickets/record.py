@@ -26,6 +26,13 @@ OUTSTANDING = (WAITING, STUCK)
 MODES = ("test", "live")
 IDENTITIES = ("verified", "unverified")
 
+# Where support has got to with the ticket, as the rider sees it (the Amiigo
+# contract, "Tickets and Zoho Desk"): two statuses in v1. A closure from Zoho
+# Desk sets `support_status` and `closed_at` once; a record from before these
+# fields reads as open, and so does any other Zoho state (on hold, escalated).
+SUPPORT_OPEN = "open"
+SUPPORT_CLOSED = "closed"
+
 # The fallback for a turn that died before its end: the turn's end wakes the
 # record at once, and otherwise it is first sent two minutes after creation.
 FIRST_ATTEMPT_SECONDS = 120
@@ -106,7 +113,17 @@ def new_record(
         "lease_token": None,
         "intent": None,
         "last_error": None,
+        "support_status": SUPPORT_OPEN,
+        "closed_at": None,
     }
     if evidence_check:
         record["evidence_check"] = evidence_check
     return record
+
+
+def support_status(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The ticket as the rider sees it: {"reference", "status", "closed_at"},
+    `closed_at` only when closed."""
+    closed = record.get("support_status") == SUPPORT_CLOSED
+    return {"reference": record["_id"], "status": SUPPORT_CLOSED if closed else SUPPORT_OPEN,
+            "closed_at": record.get("closed_at") if closed else None}
