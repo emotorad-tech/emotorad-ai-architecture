@@ -103,6 +103,27 @@ class SetupScriptTests(unittest.TestCase):
         self.assertRegex(text, r"\btickets\s+permanent")
         self.assertRegex(text, r"\bcounters\s+permanent")
 
+    def test_only_a_collection_with_a_ttl_index_is_printed_as_one_that_expires(self):
+        # The Task 7 review: conversation_origins and erasure_requests have
+        # no TTL index, yet were printed as "expires". And a chat's notices
+        # are part of the chat (Ruling 21): permanent.
+        client = mongomock.MongoClient()
+        module = load("mongo_setup")
+        out = io.StringIO()
+        env = {"EMOTORAD_MONGO_URI": "mongodb+srv://emotorad-ai-dev:SECRET@emotorad.example.mongodb.net/"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(module, "connect", lambda db_name: client[db_name]), \
+                redirect_stdout(out):
+            self.assertEqual(module.main(), 0)
+        kept = dict(line.split()[:2] for line in out.getvalue().splitlines() if line.startswith("  "))
+        expiring = {name for name, label in kept.items() if label == "expires"}
+        self.assertEqual(expiring, {"conversations", "idempotency_keys", "verification_sessions", "amiigo_receipts"})
+        for name in ("conversation_notices", "conversation_origins", "erasure_requests"):
+            self.assertEqual(kept[name], "permanent", name)
+        db = client["emotorad_ai"]
+        for name, label in kept.items():
+            ttl = any("expireAfterSeconds" in index for index in db[name].index_information().values())
+            self.assertEqual(label == "expires", ttl, name)
+
 
 class DeletePersonScriptTests(unittest.TestCase):
     def test_a_dry_run_counts_and_yes_deletes(self):

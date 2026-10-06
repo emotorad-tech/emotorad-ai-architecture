@@ -6,7 +6,7 @@ Oct 7, 2026 · @Sagnik Mukherjee · v1, **Built, not yet on staging**. Replaces 
 
 - **The chat runs over a WebSocket.** The app sends the rider's messages and receives the bot's replies, a typing state and ticket updates on one connection. There is no HTTP endpoint for sending a message: the proposed `POST /amiigo/v1/message` is withdrawn, and messages are sent only as `message` frames on the socket.
 - **The server keeps the history.** When the connection has closed (the rider left the chat, the app went to the background, the network dropped), the app restores the chat with a `GET` when the rider comes back. Uninstalling the app or changing phone loses nothing.
-- **Ticket closure comes from Zoho Desk.** When the support team closes a ticket in Zoho Desk, Zoho tells our server; the app gets a `ticket_update` on the socket, and the chat's history shows the ticket as closed.
+- **Ticket closure comes from Zoho Desk.** When our support team closes a ticket in Zoho Desk, Zoho tells our server; the app gets a `ticket_update` on the socket, and the chat's history shows the ticket as closed.
 - **Every app call carries the rider's Amiigo access token** in the `Authorization` header, including the socket's opening handshake. There is no test session in this contract.
 - **Photos and videos are uploaded first** and sent by `upload_id`; nothing is sent inline on the socket.
 
@@ -34,7 +34,7 @@ Everything below is already written into the sections it belongs to. This list i
 - **The reply is as sent.** `reply.message` carries the text the rider should see. History may show a phone number or email in it masked (see "What is masked").
 - **Resends.** Every message frame counts against the 20 a minute, resends included, and a resend of a message that is still being answered is folded into that answer (see "Resending").
 - **When our storage is down** the chat still answers, and a safety report still gets the safety steps (see "When our storage is unavailable").
-- **New details.** `storage_unavailable` on the socket's `error` frame; `confirm_required` on the deletion request; close reasons for `1008` and `1011`; and `1012` for a restarting server (see the tables below).
+- **New details.** `storage_unavailable` and `too_many_in_flight` on the socket's `error` frame; `confirm_required` on the deletion request; close reasons for `1008` and `1011`; `1012` for a restarting server, and `1006` for one that stopped without closing (see the tables below).
 - **Token expiry.** A socket lives at most 60 seconds past its token's expiry (see "Authentication").
 - **History holds app chats only.** Website chats are not listed and their messages answer `404` (see "Which chats are in the history").
 - **Catching up after a gap** can need the newest page, not only `after` (see "Catching up").
@@ -46,8 +46,8 @@ Everything below is already written into the sections it belongs to. This list i
 2. **Open the socket** to `/amiigo/v1/chat` with the token in the handshake, and wait for `ready`.
 3. **The rider sends a message.** Send a `message` frame. The server answers with `bot_typing` at once: the message was accepted, so show it as delivered. When the bot's answer is ready, it sends `ack` (the message as stored) and `reply` together, `ack` first.
 4. **The socket closes.** Nothing is lost: a reply the bot was still working on is finished and saved on the server.
-5. **The rider comes back.** Fetch everything that arrived while the socket was closed (see "Catching up"), then open the socket again. After a reinstall, step 1 restores the chat from scratch.
-6. **Support closes the ticket in Zoho Desk.** If the socket is open, the app gets `ticket_update`. Either way the chat's history shows the ticket as closed, with a notice message.
+5. **The rider comes back.** Open the socket again first, then fetch everything that arrived while it was closed (see "Catching up"), and merge that with anything the socket sends meanwhile, de-duplicating by message `id`. After a reinstall, step 1 restores the chat from scratch.
+6. **Our support team closes the ticket in Zoho Desk.** If the socket is open, the app gets `ticket_update`. Either way the chat's history shows the ticket as closed, with a notice message.
 
 If the socket cannot be opened, keep retrying with the back-off in "Close codes" and show the rider that the chat is reconnecting; the history stays readable with `GET` meanwhile.
 
@@ -64,7 +64,7 @@ If the socket cannot be opened, keep retrying with the back-off in "Close codes"
 - The bot reads the last 12 exchanges of the chat when it answers.
 - For each rider, the bot also remembers a one-line summary of their last 3 chats (topic, bike, outcome, ticket), so it can say "last time we spoke about…".
 - The server keeps a chat's working state for 48 hours after its last message, and the messages themselves permanently (until the rider asks for them to be deleted). After 48 hours of silence the same `conversation_id` still works, but the bot starts that chat afresh, so offer the rider a new chat instead (`can_continue` says which).
-- One message at a time per chat: send the next message only after the reply to the previous one has arrived. (A message sent while the previous one has no reply yet is refused with `conversation_busy`.)
+- One message at a time per chat: send the next message only after the reply to the previous one has arrived. (A message sent while the previous one has no reply yet is refused with `conversation_busy`.) And at most two of a rider's messages are answered at once, across all their chats and sockets: a third is refused with `too_many_in_flight`.
 
 ## Base URLs
 
@@ -84,7 +84,7 @@ Authorization: Bearer <Amiigo access token>
 
 - Our server checks the token's signature with Amiigo's public key, checks it has not expired, and reads the rider's verified phone number from it. There is no extra sign-in or code step in the app. A token is still accepted for 60 seconds after its expiry time, in case two servers' clocks disagree.
 - Only an **access** token is accepted. A refresh token, an OTP token or any other type is refused.
-- In v1 the phone number in the token must be an Indian mobile number (+91 and ten digits). A token for any other number is `token_invalid`.
+- In v1 the phone number in the token must be an Indian mobile number: +91 and a ten-digit mobile starting 6 to 9. A token for any other number is `token_invalid`.
 - While our server cannot check tokens at all (a set-up fault on our side), every HTTP call answers `503` before it reads the token, and the socket closes `1011` with reason `unavailable` before `ready`. That is our outage, not a reason to ask the rider to sign in again.
 - Never put the token in a URL or a query string. The server never stores it.
 - Native WebSocket clients on Android and iOS can send headers on the handshake (in Flutter, `IOWebSocketChannel.connect(uri, headers: {...})`).
@@ -122,7 +122,7 @@ Authorization: Bearer <Amiigo access token>
 | `conversation_id` | string (UUID) | Yes | The chat this message belongs to. For a new chat, the app makes a new UUID and uses it from the first message on (and for that chat's uploads). |
 | `text` | string | Yes | What the rider typed, up to 4,000 characters. `""` when they send only a photo or tap a chip. |
 | `attachments` | array, up to 3 | No | `{"upload_id": "..."}` for each photo or video, from "Photos and videos". |
-| `screen` | string | No | The app screen the chat was opened from, for example `battery_health`. It helps the bot guess the topic. |
+| `screen` | string | No | The app screen the chat was opened from, for example `battery_health`. Accepted and passed to the bot with the message, but nothing reads it yet: in v1 it does not change the answer, and it is not stored. Send it anyway; a later version will use it to guess the topic. |
 | `pill` | string | No | A quick-reply chip the rider tapped. Today only `battery` and `motor` are handled. |
 | `location` | object | No | `{"latitude": 18.52, "longitude": 73.85}`, sent only after the rider taps "Share my location". The bot turns it into a pincode and keeps no coordinates. |
 
@@ -136,7 +136,7 @@ Authorization: Bearer <Amiigo access token>
 {"type": "ready", "protocol": 1, "server_time": "2026-10-06T09:12:40Z"}
 ```
 
-**`bot_typing`**: the message was accepted and the bot is working on a reply. It is sent at once, before the bot has answered, so it is the app's "delivered" signal for the rider's message.
+**`bot_typing`**: the message was accepted and the bot is working on a reply. It is sent at once, before the bot has answered, so it is the app's "delivered" signal for the rider's message. Every refusal in the `error` table comes before it, with two rare exceptions: an upload that another message took in the same moment (`upload_not_found`), and a message sent again on a second socket, which gets `bot_typing` while it waits on the first attempt: if that attempt lets the message go and this socket cannot take it over, or the chat is no longer the rider's, the `error` comes then. Treat either as the same refusal arriving before `bot_typing`.
 
 ```json
 {"type": "bot_typing", "conversation_id": "3f2c9a1e-5b7d-4e8a-9c21-7d4e5f6a8b90", "state": "thinking"}
@@ -229,6 +229,7 @@ Replies arrive whole, never word by word. Every reply is checked (the safety che
 | `detail` | When | What the app should do |
 | --- | --- | --- |
 | `conversation_busy` | A message for a chat whose previous message has no reply yet | Wait for the reply, then send it again with the same `client_message_id` |
+| `too_many_in_flight` | Two of this rider's messages, in any of their chats and on any of their sockets, are still being answered. The message is not handled. | Wait for one of those replies, then send it again with the same `client_message_id` |
 | `conversation_not_found` | `conversation_id` is not a chat this rider may write in: another rider's, or a website chat. (For a message sent again, also a chat whose data has been deleted since.) The server does not say which. | Start a new chat with a new UUID |
 | `upload_not_found` | An `upload_id` that is unknown, another rider's, or older than an hour | Upload the file again |
 | `upload_not_finished` | The `PUT` to S3 has not completed, or the file does not match what was requested | Finish the `PUT`, or upload again |
@@ -251,22 +252,23 @@ Every message frame counts against the 20 a minute, a resend too. A resend over 
 
 ### When our storage is unavailable
 
-While our server cannot read or write its store, the chat still answers, and the socket stays open. The bot cannot carry on the conversation, so its reply says it is passing the chat to our support team. A safety report (smoke, swelling, heat) is the exception that matters: it gets the safety steps and the emergency number in the `reply`, never a closed socket or a wait. Two things differ from normal:
+While our server cannot read or write its store, the chat still answers, and the socket stays open. (A socket that was already waiting on, or replaying, the answer to a message sent again can still close `1011`: reconnect and send it again.) The bot cannot carry on the conversation, so its reply says it is passing the chat to our support team. A safety report (smoke, swelling, heat) is the exception that matters: it gets the safety steps and the emergency number in the `reply`, never a closed socket or a wait. Two things differ from normal:
 
-- The turn may not be saved. A message sent then may be missing from history, and the `ack` and `reply` for it carry ids history does not know. `after` with such an id is `400 cursor_invalid`: load the newest page instead (see "Catching up").
+- The turn may not be saved. A message sent then may be missing from history, and the `ack` and `reply` for it carry ids history does not know. `after` with such an id is `400 cursor_invalid`: load the newest page instead (see "Catching up"). The rider can carry on in the chat. If nothing in it has been saved yet, it is left out of `GET /amiigo/v1/conversations` until a later message in it is saved, but `GET …/messages` for it still answers.
 - The server cannot tell it has already answered a message. A message sent again on another socket during such an outage can be answered twice, so the app may get two replies to one message.
 
 ### Close codes
 
 | Code | Reason | What the app should do |
 | --- | --- | --- |
-| `4401` | `token_missing`, `token_invalid`, `token_expired` or `token_type_not_allowed` | Expired: refresh the token and reconnect. The others: ask the rider to sign in again. |
+| `4401` | `token_missing`, `token_invalid`, `token_expired` or `token_type_not_allowed` | `token_expired`: refresh the token with Amiigo and reconnect. `token_missing` or `token_type_not_allowed`: the app sent no token, or not the access token, which is a bug in the app: log it, and reconnect with the rider's access token, or ask the rider to sign in again if the app holds none. `token_invalid`: ask the rider to sign in again. |
 | `4408` | `idle` | Nothing: reconnect when the rider is in the chat again |
 | `1012` or `1001` | The server is restarting (`1012` is what our server sends) | Reconnect after 1 to 2 seconds |
 | `1008` | `bad_frames`: three bad frames in a row | A bug in the app: log it |
 | `1011` | `server_error` (a fault on our side) or `unavailable` (our server cannot check tokens yet) | Reconnect with back-off: 1, 2, 4, 8, then every 30 seconds |
+| `1006` | None: the connection dropped, or our server stopped without closing it | Treat it as `1011`: reconnect with the same back-off |
 
-After a `1011`, reconnect and send again, with the same `client_message_id`, any message that has no `reply` (see "Resending").
+After a `1011` or a `1006`, reconnect and send again, with the same `client_message_id`, any message that has no `reply` (see "Resending").
 
 ### Catching up
 
@@ -276,6 +278,8 @@ After any reconnect, and whenever the rider comes back to a chat, bring it up to
 - Reload the chat from its first page: `GET …/messages` with no cursor, the newest messages. Merge them into what the app holds by `id`, and page back with `older_cursor` if the app's last message is not on the page. After a reinstall, this is how the chat is restored.
 
 Messages come in time order. A rider's message and the bot's reply to it are stored together, at the moment the reply is ready, and a ticket notice is stamped when Zoho Desk's call reaches our server. So a notice that arrives while a message is still being answered sorts before that message and its reply, even though the rider sent the message first. At the same instant, a turn sorts before a notice. Keep the order the server returns; do not re-sort by `sent_at`.
+
+This means `after` can miss a notice. If a ticket closed while a message the app now holds was being answered, the notice sorts before that message, so `after=<that message's id>` does not return it. After any gap in which a ticket may have closed (the chat has a ticket that was `open`), reload the first page and merge by `id` instead of relying on `after` alone.
 
 If `after` or `before` is answered `400 cursor_invalid` (an id the server did not issue, such as the id of a message it could not save), reload the first page.
 
@@ -409,11 +413,11 @@ One chat's messages. Three ways to call it:
 
 Text comes back as the server stored it, which is not always exactly what the rider typed.
 
-- Phone numbers and email addresses typed in a message show as `[phone]` and `[email]`. The `ack` shows the rider's own message masked in the same way as history does.
+- Phone numbers and email addresses typed in a message show as `[phone]` and `[email]`. A message that is only 4 to 8 digits, such as a typed pincode or a one-time code, shows as `[N digits]` (for example `[6 digits]`), and any other run of 12 to 19 digits, such as a card number, as `[number]`. Digits typed in Devanagari come back as ASCII digits. The `ack` shows the rider's own message masked in the same way as history does.
 - The same masking applies to the bot's replies in history, so a phone number or email address in a reply may show as `[phone]` or `[email]` there. The live `reply` frame carries the text as sent, so a number the bot gives (customer care's, say) shows correctly when it arrives and may read `[phone]` after the chat is restored.
 - Our server keeps each reply as sent for 24 hours, so a message sent again gets the same text (see "Resending"). After that only the masked copy in history remains. Deleting a rider's data deletes the kept replies too.
 - The bot's first reply in a chat starts with the line saying it is EMotorad's virtual assistant, as the rider saw it.
-- Replies written by a person on the support team are not part of the chat yet.
+- Replies written by a support executive are not part of the chat yet.
 
 ## Rendering
 
@@ -432,19 +436,19 @@ The server sends no quick-reply chips of its own. Chips the app offers at the st
 
 ## Tickets and Zoho Desk
 
-- A ticket gets our own reference while the bot replies: `EM-` and seven digits, from `EM-1000001`. Never the Zoho Desk ticket number: the Zoho Desk ticket carries our reference, so support finds it either way. The reply carries the reference in `ticket` at once, because it never waits for Zoho Desk, and the ticket reaches Zoho Desk shortly after. On staging it goes to a test department until engineering signs off real tickets.
+- A ticket gets our own reference while the bot replies: `EM-` and seven digits, from `EM-1000001`. Never the Zoho Desk ticket number: the Zoho Desk ticket carries our reference, so our support team finds it either way. The reply carries the reference in `ticket` at once, because it never waits for Zoho Desk, and the ticket reaches Zoho Desk shortly after. On staging it goes to a test department until engineering signs off real tickets.
 - A server run without Zoho Desk, such as one on a developer laptop, issues short test references like `EM-00001` instead. One more reason to treat the reference as an opaque string: do not parse it or assume a prefix or length.
-- When the support team closes the ticket in Zoho Desk, Zoho Desk calls our server (see "For the server team"). Our server marks the ticket closed, saves a `system` notice in the chat, and, for an app chat, sends `ticket_update` to the rider's open sockets. A rider with the app closed sees it the next time the app loads the chat.
+- When our support team closes the ticket in Zoho Desk, Zoho Desk calls our server (see "For the server team"). Our server marks the ticket closed, saves a `system` notice in the chat, and, for an app chat, sends `ticket_update` to the rider's open sockets. A rider with the app closed sees it the next time the app loads the chat.
 - v1 reports two statuses, `open` and `closed`. Zoho's other states (on hold, escalated) show as `open`.
-- A ticket that support reopens in Zoho Desk stays `closed` in v1: only a closure is read. A second closure of the same ticket adds no second notice and sends no second `ticket_update`.
+- A ticket that our support team reopens in Zoho Desk stays `closed` in v1: only a closure is read. A second closure of the same ticket adds no second notice and sends no second `ticket_update`, even if the notice's wording changed in between.
 - The rider can always write again after a ticket closes; the bot answers as usual.
 
-**When the bot hands a chat to the support team.** Both wordings below are drafts until the support lead confirms them.
+**When the bot hands a chat to our support team.** Both wordings below are drafts until the support lead confirms them.
 
 | Area | What the server sends | What the app should do |
 | --- | --- | --- |
 | Handover wording | A signed-in rider always has a number on record, so the reply is: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket`. A chat with no number on record first gets "I can pass you to our support team. What mobile number can they reach you on?" with `escalated: false`; a signed-in rider is never asked, so this is written down only because the same engine serves the website chat. | Show the text as sent. Treat `escalated: false` as a chat still open. |
-| Who contacts the rider | Support, from Zoho Desk; by phone or email is not decided | Promise no channel or time: say "our team will contact you" |
+| Who contacts the rider | Our support team, from Zoho Desk; by phone or email is not decided | Promise no channel or time: say "our team will contact you" |
 
 **Evidence before a fault ticket.** For a fault with the bike (battery or motor), the bot raises a ticket, or hands the chat to a person, only after a video or photo shows the fault. It asks for a short video first, and a photo if the rider can't take one. After three asks with nothing that shows the fault, it raises no ticket and gives EMotorad's customer care contact instead. Safety reports, delivery and order questions, and warranty registration never wait for evidence.
 
@@ -474,10 +478,10 @@ Errors come back as an HTTP status with `{"detail": "<code>"}` (a `422` carries 
 
 | Status | `detail` | When | What the app should do |
 | --- | --- | --- | --- |
-| 401 | `token_missing` | No `Authorization` header | Send the access token |
+| 401 | `token_missing` | No `Authorization` header | A bug in the app: log it, and send the rider's access token, or ask the rider to sign in again if the app holds none |
 | 401 | `token_expired` | The access token has expired | Refresh it with Amiigo and retry once |
 | 401 | `token_invalid` | The signature does not check out, or the token cannot be read | Ask the rider to sign in again |
-| 401 | `token_type_not_allowed` | A refresh, OTP or other non-access token | Send the access token |
+| 401 | `token_type_not_allowed` | A refresh, OTP or other non-access token | A bug in the app: log it, and send the rider's access token, or ask the rider to sign in again if the app holds none |
 | 400 | `cursor_invalid` | A `cursor`, `before` or `after` the server did not issue | Load the first page again |
 | 400 | `confirm_required` | A deletion request without `"confirm": true` | Show the dialog first, and send `"confirm": true` only when the rider taps Delete |
 | 404 | `conversation_not_found` | On history: the chat does not exist, or it is not this rider's app chat (a website chat is not). On an upload slot: the chat is not this rider's app chat. The server does not say which. | Drop it from the list |
@@ -514,9 +518,9 @@ The version is in the path, `/amiigo/v1/`, and in `ready.protocol`. Within v1, c
 | --- | --- | --- |
 | Should website chats, where the rider verified their number with a code, appear in the app later? | App and product | Yes, once each message records whether the verified rider wrote it |
 | Should a closed ticket also send a push notification when the app is closed? | App and product | Not in v1: the app sees it on its next `GET` |
-| Should replies from the support team appear in the chat? | Support and product | Later, with Zoho two-way chat; they would arrive as a new `sender` |
+| Should replies from our support team appear in the chat? | Support and product | Later, with Zoho two-way chat; they would arrive as a new `sender` |
 | When a rider writes again after their ticket closed and needs help again, does the same ticket reopen or a new one start? | Support lead | A new ticket, with the old reference noted on it |
-| Should a ticket that support reopens in Zoho Desk show as open again, with a notice? | Support lead and app | Not in v1: it stays `closed` |
+| Should a ticket that our support team reopens in Zoho Desk show as open again, with a notice? | Support lead and app | Not in v1: it stays `closed` |
 | Wording of the closed-ticket notice | Support lead | The draft in `ticket_update` |
 | When a rider changes their number, should history follow the account? | Both | Not in v1: history belongs to the number in the token |
 | Which `screen` names will the app send? | App team | A short fixed list, for example `battery_health`, `bike_home`, `service`, `help` |
@@ -558,12 +562,12 @@ Not for the app. Recorded here so the ticket statuses above have a source. The s
 - Our ticket record is found by its Zoho Desk ticket id, `zoho.ticket_id`. A ticket that is not in our records is not ours: it is ignored and logged.
 - The record is closed once, and the first closing time is kept. A repeat changes nothing.
 - A chat that has been erased has nothing recorded. For such a chat the record is closed, no notice is written, and the outcome is `unknown`: our ticket, but its chat holds nothing.
-- Otherwise a `system` notice is saved in the chat, once. A repeat finds it there and sends nothing. A closure whose notice was not written (our store failed after the record closed) is finished by the next delivery.
+- Otherwise a `system` notice is saved in the chat, once per ticket, whatever its wording: a repeat finds it there and sends nothing. A closure whose notice was not written (our store failed after the record closed) is finished by the next delivery.
 - For an app chat, `ticket_update` goes to the rider's open sockets. For a website chat the notice is written and nothing is pushed: v1 history holds app chats only, so a push would name a chat the app cannot open.
 - A ticket reopened in Zoho Desk stays `closed` in v1, and a second closure adds no second notice.
 
 **The log.** Each event writes `zoho_webhook` with its `outcome` (`closed`, `already_closed`, `not_ours`, `unknown`, `ignored`, `unparsable`, `too_large`, `secret_invalid`, `not_configured` or `store_unavailable`) and a `ticket_hash`: the first 12 hex characters of the SHA-256 of the Zoho Desk ticket id. Never the payload, the id or the secret.
 
-**Finding our tickets in Zoho Desk.** Support finds a chatbot ticket by its subject, which contains `[AI chat]` and ends with our environment and reference in square brackets, for example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. A ticket for a number nobody verified starts `[Unverified] [AI chat]`. There is no custom field for it, so a Zoho Desk rule or webhook filter on the subject must test that it contains `[AI chat]`: a filter on how the subject starts misses the unverified tickets.
+**Finding our tickets in Zoho Desk.** Our support team finds a chatbot ticket by its subject, which contains `[AI chat]` and ends with our environment and reference in square brackets, for example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. A ticket for a number nobody verified starts `[Unverified] [AI chat]`. There is no custom field for it, so a Zoho Desk rule or webhook filter on the subject must test that it contains `[AI chat]`: a filter on how the subject starts misses the unverified tickets.
 
 **Sockets.** Open sockets are held by the API process. Staging runs one container. Running more than one needs a shared channel between them (for example Redis) so a webhook reaches the container holding the rider's socket: today `ticket_update` goes only to sockets on the container that took Zoho's call.

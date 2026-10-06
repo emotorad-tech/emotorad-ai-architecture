@@ -10,15 +10,17 @@ shared database from one.
 Prints every collection and index so the output can be checked, and fails if
 the permanent record (transcripts, summaries, media, tickets, the counter
 behind their references, and the notices in a chat such as a ticket closed in
-Zoho Desk) has picked up an expiry index. The collections that expire are
-listed as such: `conversations` (48 hours), `idempotency_keys` (7 days),
-`verification_sessions` (12 hours, the number each web chat proved, so a
-restart does not ask for it again) and `amiigo_receipts` (24 hours, each
-message a rider sent on the Amiigo chat socket, so a message sent again is
-answered once). Rerun it whenever a collection is added: its TTL index exists
-only once this has run, and the service keeps `verification_sessions` and
-`amiigo_receipts` in memory until it does (docs/runbooks/config-store.md,
-sections 3 and 8).
+Zoho Desk) has picked up an expiry index. Each collection is printed as
+`expires` when one of its indexes is a TTL index, and `permanent` otherwise,
+as read from the database. The ones that expire are `conversations` (48
+hours), `idempotency_keys` (7 days), `verification_sessions` (12 hours, the
+number each web chat proved, so a restart does not ask for it again) and
+`amiigo_receipts` (24 hours, each message a rider sent on the Amiigo chat
+socket, so a message sent again is answered once). Rerun it whenever a
+collection is added: its TTL index exists only once this has run, and the
+service keeps `verification_sessions` and `amiigo_receipts` in memory until
+it does (docs/runbooks/config-store.md, sections 3 and 8). It also removes
+an index a later version replaced (stores/mongo.py, OBSOLETE_INDEXES).
 """
 
 import os
@@ -52,12 +54,15 @@ def main() -> int:
     for collection, names in report.items():
         info = db[collection].index_information()
         cells = []
+        expires = False
         for name in names:
             ttl = info[name].get("expireAfterSeconds")
             cells.append("%s%s" % (name, " (TTL %ss)" % ttl if ttl is not None else ""))
+            expires = expires or ttl is not None
             if collection in PERMANENT and ttl is not None:
                 ok = False
-        kept = "permanent" if collection in PERMANENT else "expires"
+        # As the indexes say, not as a list here says.
+        kept = "expires" if expires else "permanent"
         print("  %-24s %-10s %s" % (collection, kept, ", ".join(cells)))
 
     print("setup OK" if ok else "SETUP PROBLEM: a permanent collection has a TTL index")
