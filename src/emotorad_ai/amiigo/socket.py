@@ -698,8 +698,10 @@ class ChatSocket:
         except BaseException:
             self._release(rid)
             raise
-        last = self._last_turn(frame.conversation_id)
         try:
+            # Inside the try: a fault reading the last turn number lets the
+            # message go too, never leaving it processing for the lease.
+            last = self._last_turn(frame.conversation_id)
             reply = context.handle_turn(message)
         except BaseException:
             self._release(rid)

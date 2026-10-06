@@ -1002,6 +1002,23 @@ class OneAtATimeTests(SocketCase):
         [fault] = [e for e in self.events("amiigo_message") if e["outcome"] == "fault"]
         self.assertEqual(fault["error"], "RuntimeError")
 
+    def test_a_fault_before_the_turn_lets_the_claim_go(self):
+        # The second re-review's probe: a fault reading the last turn number
+        # (any but the store's own StoreUnavailable) left the receipt
+        # processing and the chat busy for the ten-minute lease.
+        rid = receipt_id(RIDER_KEY, cmid(1))
+        with mock.patch.object(ChatSocket, "_last_turn", side_effect=RuntimeError("a bug")):
+            with self.socket() as ws:
+                self.send(ws, message())
+                self.assertEqual(frame(ws)["type"], "bot_typing")
+                self.assertEqual(closed(ws)[0], 1011)
+        self.assertIsNone(self.ctx.receipts.get(rid))
+        self.assertIsNone(self.ctx.receipts.in_flight(CID))
+        self.assertEqual(self.turns.calls, [])
+        with self.socket() as ws:
+            self.exchange(ws, message())
+        self.assertEqual(len(self.turns.calls), 1)
+
 
 class AdmissionRaceTests(SocketCase):
     """`ChatSocket._admit` on its own, with the race made to happen."""
