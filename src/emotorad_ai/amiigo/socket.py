@@ -27,9 +27,12 @@ once they exist, on any socket of the rider. A conversation another rider
 is writing in right now, or whose records are not this rider's app chat
 (history.rider_may_use: a new chat, or the rider's own), is
 `conversation_not_found`, never saying which. One message at a time per
-conversation (`conversation_busy`). An upload that is not there is
-`upload_not_found`, and no media storage on this server is
-`storage_unavailable`. When the store cannot answer, the ownership check
+conversation (`conversation_busy`). An upload that is not there or is
+another rider's is `upload_not_found`, one whose PUT has not finished is
+`upload_not_finished`, and no media storage, or a bucket that cannot
+answer, is `storage_unavailable`, all before `bot_typing`; prepare_turn
+checks again as it claims, so only an upload taken by another message in
+the moment between is refused after it. When the store cannot answer, the ownership check
 and the receipts fail open (the plan's Rulings 13 and 23): the turn runs,
 without a receipt if need be, and the runtime's outage path answers, so a
 smoke report gets the safety steps and 112, never a closed socket. Then
@@ -74,6 +77,8 @@ from fastapi import HTTPException, WebSocket
 from ..attachments import AttachmentError
 from ..conversation import StoreUnavailable, TranscriptTurn, recorded_url
 from ..observability import redact_pii
+from ..storage.keys import cluster_of
+from ..storage.s3 import StorageError
 from . import history
 from .auth import LEEWAY, TOKEN_EXPIRED, Rider, rider_from_header
 from .common import (
@@ -578,19 +583,36 @@ class ChatSocket:
         return Admission(duplicate=True)
 
     def _uploads(self, frame: MessageFrame) -> Tuple[Optional[str], bool]:
-        """(the refusal, a video among them), by a look that claims nothing.
-        prepare_turn checks each again as it claims it."""
+        """(the refusal, a video among them), by a look that claims nothing,
+        so that every refusal of an upload comes before `bot_typing` (the
+        final review's Important 2): unknown, expired or another rider's
+        (`upload_not_found`, and the upload stays its owner's), its PUT not
+        finished or not what was asked for (`upload_not_finished`), and no
+        media storage on this server or a bucket that cannot answer
+        (`storage_unavailable`, Ruling 15). The same checks prepare_turn makes
+        as it claims each one; it stays the final guard, so an upload taken
+        by another message in the moment between is still refused, after
+        `bot_typing`."""
         if not frame.upload_ids:
             return None, False
-        uploads = self.context.uploads
-        if uploads is None:
-            # No media storage on this server (Ruling 15).
+        context = self.context
+        uploads, media = context.uploads, context.media_store
+        if uploads is None or media is None or context.cluster_for_phone is None:
             return STORAGE_UNAVAILABLE, False
+        cluster = context.cluster_for_phone(self.rider.phone)
         video = False
         for upload_id in frame.upload_ids:
             pending = uploads.peek(upload_id)
-            if pending is None:
+            if pending is None or pending.tree != "customers" or cluster_of(pending.key) != cluster:
                 return UPLOAD_NOT_FOUND, False
+            try:
+                stored = media.head(pending.key)
+            except StorageError as exc:
+                # The class only: the error's text names the key.
+                self._noted("amiigo_upload_unchecked", "amiigo", error=type(exc).__name__)
+                return STORAGE_UNAVAILABLE, False
+            if stored is None or stored["size"] != pending.size or stored["mime"] != pending.mime:
+                return UPLOAD_NOT_FINISHED, False
             video = video or pending.kind == "videos"
         return None, video
 

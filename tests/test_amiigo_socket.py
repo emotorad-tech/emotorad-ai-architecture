@@ -60,7 +60,8 @@ from emotorad_ai.disclosure import DISCLOSURE_TEXT
 from emotorad_ai.llm import OfflinePlanner
 from emotorad_ai.observability import EventLog, redact_pii
 from emotorad_ai.runtime import SAFETY_NOT_RECORDED_MESSAGE
-from emotorad_ai.storage.uploads import UploadRegistry
+from emotorad_ai.storage.s3 import StorageError
+from emotorad_ai.storage.uploads import UploadError, UploadRegistry
 from emotorad_ai.stores.mongo import (
     AMIIGO_RECEIPTS,
     INDEXES,
@@ -1211,25 +1212,64 @@ class AttachmentTests(SocketCase):
         self.assertEqual(self.turns.calls, [])
         self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1))))
 
+    def assert_refused_before_anything(self, ws, body, detail):
+        """Refused before `bot_typing` (the final review's Important 2): no
+        frame but the error, no receipt, no turn."""
+        self.refused(ws, body, detail)
+        quiet(ws)
+        self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, body["client_message_id"])))
+        self.assertIsNone(self.ctx.receipts.in_flight(body["conversation_id"]))
+        self.assertEqual(self.turns.calls, [])
+
     def test_another_riders_upload_is_upload_not_found_and_stays_theirs(self):
         theirs = self.rider_upload(phone=OTHER_PHONE)
         with self.socket() as ws:
-            self.send(ws, message(attachments=[{"upload_id": theirs.upload_id}]))
-            self.assertEqual(frame(ws)["type"], "bot_typing")
-            self.assertEqual(frame(ws), {"type": "error", "client_message_id": cmid(1), "detail": "upload_not_found"})
+            self.assert_refused_before_anything(ws, message(attachments=[{"upload_id": theirs.upload_id}]),
+                                                "upload_not_found")
         self.assertIsNotNone(self.api.UPLOADS.peek(theirs.upload_id))
-        self.assertEqual(self.turns.calls, [])
 
     def test_an_upload_whose_put_has_not_finished_can_be_sent_again_once_it_has(self):
         photo = self.rider_upload(finished=False)
         body = message(attachments=[{"upload_id": photo.upload_id}])
         with self.socket() as ws:
-            self.send(ws, body)
-            self.assertEqual(frame(ws)["type"], "bot_typing")
-            self.assertEqual(frame(ws)["detail"], "upload_not_finished")
+            self.assert_refused_before_anything(ws, body, "upload_not_finished")
             self.store.objects[photo.key] = {"size": 9, "mime": "image/jpeg"}
             self.exchange(ws, body)
         self.assertEqual(len(self.turns.calls), 1)
+
+    def test_an_upload_that_is_not_what_was_asked_for_is_upload_not_finished_before_anything(self):
+        for n, kept in enumerate(({"size": 10, "mime": "image/jpeg"}, {"size": 9, "mime": "image/png"}), start=1):
+            with self.subTest(kept=kept):
+                photo = self.rider_upload(finished=False)
+                self.store.objects[photo.key] = kept
+                with self.socket() as ws:
+                    self.assert_refused_before_anything(
+                        ws, message(n=n, attachments=[{"upload_id": photo.upload_id}]), "upload_not_finished")
+                self.assertIsNotNone(self.api.UPLOADS.peek(photo.upload_id))
+
+    def test_a_bucket_that_cannot_answer_is_storage_unavailable_before_anything(self):
+        photo = self.rider_upload()
+        with mock.patch.object(self.store, "head", side_effect=StorageError("head failed: SlowDown")):
+            with self.socket() as ws:
+                self.assert_refused_before_anything(ws, message(attachments=[{"upload_id": photo.upload_id}]),
+                                                    "storage_unavailable")
+        [logged] = self.events("amiigo_upload_unchecked")
+        self.assertEqual((logged["error"], logged["rider_hash"]), ("StorageError", rider_hash_of(RIDER_KEY)))
+        self.assertNotIn(photo.key, json.dumps(self.api.log.events))
+        self.assertIsNotNone(self.api.UPLOADS.peek(photo.upload_id))
+
+    def test_an_upload_taken_by_another_message_in_the_moment_between_is_refused_after_bot_typing(self):
+        # prepare_turn stays the final guard as it claims: the one refusal
+        # that can still follow bot_typing, and the message is let go.
+        photo = self.rider_upload()
+        body = message(attachments=[{"upload_id": photo.upload_id}])
+        with mock.patch.object(self.api.UPLOADS, "claim", side_effect=UploadError(404, "unknown or expired upload id")):
+            with self.socket() as ws:
+                self.send(ws, body)
+                self.assertEqual(frame(ws)["type"], "bot_typing")
+                self.assertEqual(frame(ws), error_of(cmid(1), "upload_not_found"))
+        self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1))))
+        self.assertEqual(self.turns.calls, [])
 
 
 class NoMediaTests(SocketCase):
@@ -1243,12 +1283,29 @@ class NoMediaTests(SocketCase):
             self.exchange(ws, message(n=2))
         self.assertEqual(len(self.turns.calls), 1)
 
-    def test_prepare_turns_503_for_missing_media_storage_is_storage_unavailable(self):
-        # An upload slot the socket can see, on a server whose turn has no
-        # bucket (prepare_turn's 503): the message is let go, to be sent again.
-        registry = UploadRegistry(MediaStore())
+    def test_an_upload_registry_with_no_bucket_is_storage_unavailable_before_anything(self):
+        # An upload slot the socket can see, on a server with no bucket: no
+        # bot_typing, and nothing to let go (the final review's Important 2).
+        store = MediaStore()
+        registry = UploadRegistry(store)
         pending, _ = registry.begin_customer(self.api._cluster_for_phone(RIDER_PHONE), CID, "image/jpeg", 9)
+        store.objects[pending.key] = {"size": 9, "mime": "image/jpeg"}
         self.ctx.uploads = registry
+        body = message(attachments=[{"upload_id": pending.upload_id}])
+        with self.socket() as ws:
+            self.refused(ws, body, "storage_unavailable")
+            quiet(ws)
+        self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1))))
+        self.assertEqual(self.turns.calls, [])
+
+    def test_prepare_turns_503_for_missing_media_storage_is_still_storage_unavailable(self):
+        # prepare_turn's own 503 stays the final guard, after bot_typing: the
+        # message is let go, to be sent again (the plan's Ruling 15).
+        store = MediaStore()
+        registry = UploadRegistry(store)
+        pending, _ = registry.begin_customer(self.api._cluster_for_phone(RIDER_PHONE), CID, "image/jpeg", 9)
+        store.objects[pending.key] = {"size": 9, "mime": "image/jpeg"}
+        self.ctx.uploads, self.ctx.media_store = registry, store
         body = message(attachments=[{"upload_id": pending.upload_id}])
         with self.socket() as ws:
             self.send(ws, body)
