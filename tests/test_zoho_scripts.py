@@ -1651,8 +1651,14 @@ class DocsTests(unittest.TestCase):
         self.assertNotIn("The Zoho Desk ticket number |", self.contract)
 
     def test_the_contract_keeps_the_zoho_heading_its_references_point_at(self):
-        self.assertIn("## What changes with the Zoho integration", self.contract)
-        self.assertIn('see "What changes with the Zoho integration"', self.contract)
+        # The v1 contract (4db4908, 6 October 2026) folded the old section "What changes
+        # with the Zoho integration", a Today / After Zoho table, into "Tickets and Zoho
+        # Desk": after v1 nothing is waiting to change, so the old name would mislead. The
+        # test keeps its job, that the heading exists and a reference in the contract
+        # points at it, with the v1 name.
+        self.assertIn("\n## Tickets and Zoho Desk\n", self.contract)
+        self.assertIn('see "Tickets and Zoho Desk"', self.contract)
+        self.assertNotIn("What changes with the Zoho integration", self.contract)
 
     def zoho_section(self):
         return self.runbook[self.runbook.index("## 7. Zoho Desk tickets"):]

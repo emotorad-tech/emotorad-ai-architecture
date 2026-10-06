@@ -534,7 +534,12 @@ class DocsTests(unittest.TestCase):
         self.assertIn("`escalated: false`", row)
         self.assertNotIn("comes with the next part", self.contract)
         self.assertNotIn('see "What changes with Zoho")', self.contract)
-        self.assertIn('(see "What changes with the Zoho integration")', self.contract)
+        # The v1 contract (4db4908, 6 October 2026) folded the old section "What changes
+        # with the Zoho integration", a Today / After Zoho table, into "Tickets and Zoho
+        # Desk", since after v1 nothing is waiting to change. The reference in the status
+        # table must still name a heading that exists, so it names the v1 one.
+        self.assertIn('(see "Tickets and Zoho Desk")', self.contract)
+        self.assertIn("\n## Tickets and Zoho Desk\n", self.contract)
 
 
 if __name__ == "__main__":

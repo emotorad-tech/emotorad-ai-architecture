@@ -18,7 +18,7 @@ Oct 6, 2026 · @Sagnik Mukherjee · v1, **Proposed**. Replaces the draft of 30 S
 | Who the rider is | A test session only | The rider's real Amiigo access token, checked by our server |
 | Real-time chat | None | `wss://…/amiigo/v1/chat` |
 | History | Kept on our server; no way for the app to read it | `GET /amiigo/v1/conversations` and `GET /amiigo/v1/conversations/{conversation_id}/messages` |
-| Tickets | Recorded with our `EM-` reference and sent to a Zoho Desk test department on staging | The same, plus the closed status from Zoho Desk |
+| Tickets | Recorded with our `EM-` reference and sent to a Zoho Desk test department on staging | The same, plus the closed status from Zoho Desk (see "Tickets and Zoho Desk") |
 | Photos and videos | Stored in our S3 bucket | The same, by upload |
 | Bike, warranty and service data | Test data in the app's test session | The rider's bikes and warranty from the OMS, and their Amiigo bikes, service status and recent rides |
 
@@ -383,12 +383,18 @@ The server sends no quick-reply chips of its own. Chips the app offers at the st
 
 ## Tickets and Zoho Desk
 
-- A ticket gets our own reference, `EM-` and seven digits, while the bot replies; the reply carries it in `ticket` at once, and the ticket reaches Zoho Desk shortly after. On staging it goes to a test department until engineering signs off real tickets.
+- A ticket gets our own reference while the bot replies: `EM-` and seven digits, from `EM-1000001`. Never the Zoho Desk ticket number: the Zoho Desk ticket carries our reference, so support finds it either way. The reply carries the reference in `ticket` at once, because it never waits for Zoho Desk, and the ticket reaches Zoho Desk shortly after. On staging it goes to a test department until engineering signs off real tickets.
+- A server run without Zoho Desk, such as one on a developer laptop, issues short test references like `EM-00001` instead. One more reason to treat the reference as an opaque string: do not parse it or assume a prefix or length.
 - When the support team closes the ticket in Zoho Desk, Zoho Desk calls our server (see "For the server team"). Our server marks the ticket closed, saves a `system` notice in the chat, and sends `ticket_update` to the rider's open sockets. A rider with the app closed sees it the next time the app loads the chat.
 - v1 reports two statuses, `open` and `closed`. Zoho's other states (on hold, escalated) show as `open`.
 - The rider can always write again after a ticket closes; the bot answers as usual.
 
-**When the bot hands a chat to the support team.** A signed-in rider always has a number on record, so the handover reply is: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket`. This wording is a draft until the support lead confirms it. Support contacts the rider from Zoho Desk; by phone or email is not decided, so the app promises no channel or time.
+**When the bot hands a chat to the support team.** Both wordings below are drafts until the support lead confirms them.
+
+| Area | What the server sends | What the app should do |
+| --- | --- | --- |
+| Handover wording | A signed-in rider always has a number on record, so the reply is: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket`. A chat with no number on record first gets "I can pass you to our support team. What mobile number can they reach you on?" with `escalated: false`; a signed-in rider is never asked, so this is written down only so that a website chat read from the history makes sense. | Show the text as sent. Treat `escalated: false` as a chat still open. |
+| Who contacts the rider | Support, from Zoho Desk; by phone or email is not decided | Promise no channel or time: say "our team will contact you" |
 
 **Evidence before a fault ticket.** For a fault with the bike (battery or motor), the bot raises a ticket, or hands the chat to a person, only after a video or photo shows the fault. It asks for a short video first, and a photo if the rider can't take one. After three asks with nothing that shows the fault, it raises no ticket and gives EMotorad's customer care contact instead. Safety reports, delivery and order questions, and warranty registration never wait for evidence.
 
@@ -470,5 +476,6 @@ The version is in the path, `/amiigo/v1/`, and in `ready.protocol`. Within v1, c
 Not for the app. Recorded here so the ticket statuses above have a source.
 
 - Zoho Desk calls `POST /webhooks/zoho/tickets` on our API when a ticket's status changes. It is set up in Zoho Desk by a person, for the department our tickets go to, and authenticated with a shared secret we give Zoho Desk when it is set up; requests without it are refused. The exact payload and how the secret is carried are confirmed against Zoho Desk when the webhook is configured, and captured in `docs/api-shapes/` before any code reads them.
+- Support finds a chatbot ticket by its subject, which contains `[AI chat]` and ends with our environment and reference in square brackets, for example `[AI chat] Battery: charging - EMX Plus [stage:EM-1000001]`. A ticket for a number nobody verified starts `[Unverified] [AI chat]`. There is no custom field for it, so a Zoho Desk rule or webhook filter on the subject must test that it contains `[AI chat]`: a filter on how the subject starts misses the unverified tickets.
 - Our server finds the ticket by its Zoho Desk ticket id in our `tickets` records, ignores tickets that are not the chatbot's, records the new status once (a repeat of the same event changes nothing), saves the `system` notice in the chat, and sends `ticket_update` to the rider's open sockets.
 - Open sockets are held by the API process. Staging runs one container; running more than one needs a shared channel between them (for example Redis) so a webhook reaches the container holding the rider's socket.
