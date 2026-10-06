@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import unquote, urlsplit
 
-from ..conversation import ConversationSummaryItem, TranscriptTurn
+from ..conversation import SHARED_OWNER, ConversationSummaryItem, TranscriptTurn
 from ..storage.keys import is_asset_key, is_valid_key
 from ..tickets.record import SUPPORT_OPEN
 from .auth import Rider
@@ -323,6 +323,27 @@ def is_new_conversation(conversations: Any, conversation_id: str) -> bool:
     return (conversations.count_turns(conversation_id) == 0
             and conversations.owner_of(conversation_id) is None
             and not conversations.origins_of(conversation_id))
+
+
+def is_app_chat(conversations: Any, conversation_id: str) -> bool:
+    """Whether any run of this conversation came from the Amiigo app, from
+    the permanent records only (the plan's Rulings 8 and 9): the record of
+    where each run came from (`origins_of`), and the summaries of the person
+    the conversation belongs to (`owner_of`, `runs_of`). Never the working
+    state, which expires after 48 hours: a website message under an expired
+    app chat's id would otherwise start a website run in the rider's chat.
+
+    The store reads summaries by person, so a conversation whose summaries
+    name two people (SHARED_OWNER) is decided by its origins alone. Every
+    run records where it came from, tried again each turn until it is
+    written (Runtime._note_origin), and its channel is the app's for as long
+    as only the rider writes in it."""
+    if any(origin.get("channel") == APP_CHANNEL for origin in conversations.origins_of(conversation_id)):
+        return True
+    owner = conversations.owner_of(conversation_id)
+    if owner is None or owner == SHARED_OWNER:
+        return False
+    return any(run.conversation_id == conversation_id for run in conversations.runs_of(owner, channel=APP_CHANNEL))
 
 
 def rider_may_use(stores: Any, rider: Rider, conversation_id: str) -> bool:

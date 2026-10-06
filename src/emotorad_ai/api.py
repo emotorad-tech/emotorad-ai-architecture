@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
+from .amiigo import history as amiigo_history
 from .amiigo import routes as amiigo_routes
 from .amiigo.auth import token_check_from_env
 from .amiigo.common import AmiigoContext, NoStoreMiddleware
@@ -66,12 +67,12 @@ from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
-from .contract import new_conversation_id
+from .contract import VERIFIED, Attachment, Identity, InboundMessage, Reply, new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .media import sendable as media_sendable
 from .guardrails import check_safety, check_safety_in_description
-from .identity import PHONE, IdentityResolver
+from .identity import PHONE, IdentityResolver, normalise
 from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
@@ -670,8 +671,21 @@ def _persist_media(
         )
 
 
+class _TurnIn(NamedTuple):
+    """What the attachment and evidence steps read of a turn, whichever way
+    it arrived (prepare_turn): the words as typed, the chip, the pinned
+    agent, the attachments as sent, and the caller's identity-graph cluster,
+    a call that raises HTTPException when the caller resolves to none."""
+
+    text: str
+    pill: Optional[str]
+    agent: Optional[str]
+    attachments: Optional[List[dict]]
+    cluster: Callable[[], str]
+
+
 def _inbound_attachments(
-    body: MessageIn, conversation_id: str
+    turn: _TurnIn, conversation_id: str
 ) -> Tuple[List[Dict[str, Any]], int, Optional[Dict[str, Any]]]:
     """What the customer sent, in the shape the adapter takes, in the order they
     sent it.
@@ -685,9 +699,10 @@ def _inbound_attachments(
     longer "stored nowhere" once a bucket exists. With no bucket, or no
     cluster to key it under, it stays inline and unstored, as before. An
     `{"upload_id": ...}` is an object already PUT to S3 through
-    `POST /uploads`; it is checked against this session and claimed once, and
-    becomes an `s3://` key the runtime reads with the instance role. No S3
-    URL ever reaches the model either way.
+    `POST /uploads` (or the app's `POST /amiigo/v1/uploads`); it is checked
+    against the caller's cluster (`turn.cluster`: the session's, or the
+    rider's phone's) and claimed once, and becomes an `s3://` key the runtime
+    reads with the instance role. No S3 URL ever reaches the model either way.
 
     The count limit is on the total, not on each path, so adding the presigned
     route cannot be used to send more pictures than the inline one allows.
@@ -696,7 +711,7 @@ def _inbound_attachments(
     evidence check's verdict on a fault chat's photos and videos (None when
     nothing was checked).
     """
-    items = [item for item in (body.attachments or []) if item]
+    items = [item for item in (turn.attachments or []) if item]
     if not items:
         return [], 0, None
     if len(items) > MAX_ATTACHMENTS:
@@ -734,7 +749,7 @@ def _inbound_attachments(
     stored: Dict[int, Dict[str, Any]] = {}
     if MEDIA_STORE is not None and inline:
         try:
-            inline_cluster = _cluster_for_session(body.session_token, body.em_aid)
+            inline_cluster = turn.cluster()
         except HTTPException:
             # No session, no cookie: nowhere to derive a customer key from.
             # Not the customer's fault and not worth a 400 for: the photo
@@ -782,7 +797,7 @@ def _inbound_attachments(
     videos: List[Tuple[str, str, str]] = []
     if uploaded:
         _require_media()
-        caller_cluster = _cluster_for_session(body.session_token, body.em_aid)
+        caller_cluster = turn.cluster()
         try:
             for item in uploaded:
                 upload_id = item["upload_id"]
@@ -831,7 +846,7 @@ def _inbound_attachments(
     # The evidence check starts now, and runs while the clips are described
     # and the photos safety-checked below. A turn that fails before it reads
     # the verdict tells the check to stop.
-    evidence = _start_evidence_check(body, conversation_id, sorted(evidence_jobs, key=lambda job: job[0]))
+    evidence = _start_evidence_check(turn, conversation_id, sorted(evidence_jobs, key=lambda job: job[0]))
     try:
         attachments, unchecked, hazard_seen = _described(items, claims, stored, videos, photo_jobs,
                                                          conversation_id)
@@ -895,7 +910,7 @@ def _described(
     return attachments, unchecked, hazard_seen
 
 
-def _evidence_subject(body: MessageIn, conversation_id: str) -> Optional[Tuple[str, str]]:
+def _evidence_subject(turn: _TurnIn, conversation_id: str) -> Optional[Tuple[str, str]]:
     """(the customer's complaint, "battery" or "motor") when this turn's
     media is evidence of a bike fault, else None.
 
@@ -913,13 +928,13 @@ def _evidence_subject(body: MessageIn, conversation_id: str) -> Optional[Tuple[s
         # A tester's pin (/chat?agent=battery_support) routes this turn to
         # that agent, so its media is the fault's evidence; then the pill or
         # the words, as triage reads them.
-        topic = (evidence_check.FAULT_AGENTS.get(body.agent or "") or topic_from_pill(body.pill)
-                 or classify_issue(body.text or ""))
+        topic = (evidence_check.FAULT_AGENTS.get(turn.agent or "") or topic_from_pill(turn.pill)
+                 or classify_issue(turn.text or ""))
         component = topic if topic in evidence_check.COMPONENTS else None
     if component is None:
         return None
     said = customer_texts(state.history) if state is not None else []
-    return evidence_check.complaint_from(said + [body.text or ""]), component
+    return evidence_check.complaint_from(said + [turn.text or ""]), component
 
 
 # One item for the evidence check: its position in the message, how to get
@@ -956,7 +971,7 @@ def _copy_object(key: str, handle: IO[bytes]) -> None:
 
 
 def _start_evidence_check(
-    body: MessageIn, conversation_id: str, jobs: Sequence[_EvidenceJob],
+    turn: _TurnIn, conversation_id: str, jobs: Sequence[_EvidenceJob],
 ) -> Optional[_EvidenceRun]:
     """The check, started on its own thread, and the moment the turn stops
     waiting for it: the photo check's deadline, or the video summary's when a
@@ -966,12 +981,12 @@ def _start_evidence_check(
     off, no photo or video, or a chat that is not about a bike fault."""
     if not runtime.evidence_check or not jobs:
         return None
-    if check_safety(body.text or "").triggered:
+    if check_safety(turn.text or "").triggered:
         # A safety report (battery or motor terms, the safety gate's own plain
         # scan): immediate, and exempt from evidence, so nothing is checked
         # and the turn never waits (the review of 6 October 2026).
         return None
-    subject = _evidence_subject(body, conversation_id)
+    subject = _evidence_subject(turn, conversation_id)
     if subject is None:
         return None
     if EVIDENCE_CHECKER is None:
@@ -1119,67 +1134,116 @@ def _one_photo(load: Callable[[], bytes], mime: str, conversation_id: str) -> Li
     return PHOTO_CHECKER.check(data, mime)
 
 
-@app.post("/message", response_model=MessageOut)
-def post_message(body: MessageIn, request: Request) -> MessageOut:
-    if not message_limiter.allow(client_ip(request, TRUSTED_PROXIES)):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many messages. Wait a moment and try again.",
-        )
-    # Before the attachments: `_inbound_attachments` stores and records inline
-    # photos and claims uploads, and a request refused here must leave no
-    # object, no record and no spent upload id behind.
-    if body.agent and body.agent not in CHAT_AGENTS:
-        raise HTTPException(
-            status_code=400,
-            detail="Unknown agent %r. Expected one of: %s"
-            % (body.agent, ", ".join(CHAT_AGENTS)),
-        )
-    conversation_id = body.conversation_id or new_conversation_id()
-    try:
-        attachments, unchecked, evidence_verdict = _inbound_attachments(body, conversation_id)
-    except AttachmentError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    text = body.text
-    if body.location is not None:
+# The ways a turn arrives through prepare_turn: the website chat's
+# POST /message, and the Amiigo app's chat socket, whose turns are always a
+# rider's, proved by the token.
+WEBSITE_CHANNEL = "website_chat"
+APP_CHANNEL = amiigo_history.APP_CHANNEL
+TURN_CHANNELS = (WEBSITE_CHANNEL, APP_CHANNEL)
+
+
+def prepare_turn(
+    *,
+    conversation_id: str,
+    text: str,
+    attachments: Optional[List[dict]] = None,
+    pill: Optional[str] = None,
+    screen: Optional[str] = None,
+    location: Optional[LocationIn] = None,
+    channel: str = WEBSITE_CHANNEL,
+    session_token: Optional[str] = None,
+    em_aid: Optional[str] = None,
+    rider_phone: Optional[str] = None,
+    agent: Optional[str] = None,
+    client_ip: Optional[str] = None,
+) -> InboundMessage:
+    """The turn `runtime.handle` takes, from what a message carried, for
+    every way one arrives: POST /message and the Amiigo app's chat socket.
+
+    In this order, as POST /message always did it: the attachments (inline
+    photos stored and recorded, uploads claimed and recorded, each photo
+    safety-checked, each clip described, the evidence check started at
+    ingest beside them), then a shared location turned into the customer's
+    words, then the identity and the cluster that started the conversation,
+    then the pinned agent, the screen, the place and the checks' results in
+    `entry_metadata` for the runtime to apply inside the turn.
+
+    Who is writing: with `rider_phone` (the phone an Amiigo token proved),
+    a verified customer with that phone and its cluster, on the identity
+    itself, as a website session's phone is (IdentityResolver.
+    resolve_website); no session or cookie is looked up, and nothing is
+    added to the session table. Otherwise the website's own path: the
+    session or the cookie, then a number this chat proved
+    (apply_verified_identity).
+
+    The caller refuses what it must before this (the rate limit, an unknown
+    agent, a conversation that is not the caller's): an attachment is stored
+    or an upload claimed here, and a refused message must leave neither.
+    Raises AttachmentError for attachments outside `attachments.validate`;
+    HTTPException for an upload that cannot be claimed (404 unknown or
+    expired, 403 not the caller's, 409 not finished or not as presigned, 503
+    no media storage) or uploads from a caller with no cluster (400); and
+    ValueError for a channel it does not serve, or an app turn with no rider.
+    `client_ip` is used for the place only, and goes no further.
+    """
+    if channel not in TURN_CHANNELS:
+        raise ValueError("prepare_turn serves %s, not %r" % (" and ".join(TURN_CHANNELS), channel))
+    if channel == APP_CHANNEL and not rider_phone:
+        raise ValueError("an Amiigo app turn is a rider's: rider_phone, from the token, is required")
+    phone = normalise(PHONE, rider_phone) if rider_phone else None
+    if phone is not None:
+        def cluster() -> str:
+            return _cluster_for_phone(phone)
+    else:
+        def cluster() -> str:
+            return _cluster_for_session(session_token, em_aid)
+    turn = _TurnIn(text=text, pill=pill, agent=agent, attachments=attachments, cluster=cluster)
+    found, unchecked, evidence_verdict = _inbound_attachments(turn, conversation_id)
+    said = text
+    if location is not None:
         # Resolved here, before the message exists, so the coordinates never
         # become part of anything that is logged or handed to the model.
-        located = resolve_location(
-            body.location.latitude, body.location.longitude, geocoder, pincode_directory
-        )
-        text = describe_location(located)
+        located = resolve_location(location.latitude, location.longitude, geocoder, pincode_directory)
+        said = describe_location(located)
 
-    # Record which cluster started this conversation, the first time we see
-    # it, so a later presign under the same conversation id can be checked
-    # against who actually owns it (see post_upload). Best-effort: a session
-    # that does not resolve to a customer is a legitimate anonymous chat and
-    # must not 400 here just because we tried to attribute a cluster to it.
-    try:
-        message_cluster = _cluster_for_session(body.session_token)
-    except HTTPException:
-        message_cluster = None
-    message = adapter.to_message(
-        {
-            "conversation_id": conversation_id,
-            "session_token": body.session_token,
-            "em_aid": body.em_aid,
-            "text": text,
-            "pill": body.pill,
-            "attachments": attachments,
-        }
-    )
+    if phone is not None:
+        message_cluster: Optional[str] = cluster()
+        message = _rider_message(conversation_id, channel, phone, message_cluster, said, pill, found)
+    else:
+        # Record which cluster started this conversation, the first time we
+        # see it, so a later presign under the same conversation id can be
+        # checked against who actually owns it (see post_upload).
+        # Best-effort: a session that does not resolve to a customer is a
+        # legitimate anonymous chat and must not 400 here just because we
+        # tried to attribute a cluster to it.
+        try:
+            message_cluster = _cluster_for_session(session_token)
+        except HTTPException:
+            message_cluster = None
+        message = adapter.to_message(
+            {
+                "conversation_id": conversation_id,
+                "session_token": session_token,
+                "em_aid": em_aid,
+                "text": said,
+                "pill": pill,
+                "attachments": found,
+            }
+        )
     # The proof this conversation has already given. Without this the customer
     # types a correct code and the very next turn still resolves anonymous, so
     # the warranty lookup is refused for want of a phone exactly as it was
-    # before they bothered.
+    # before they bothered. A rider's turn already carries its phone, which
+    # this never overwrites.
     message = apply_verified_identity(message, verification_store)
     # The cluster that started this conversation, and a pinned agent, are
     # applied by the runtime inside the turn (Runtime._node_prepare), not
     # written to the state here: with a durable store, a change made outside
     # the turn is to a copy the turn never saves.
-    extra = {key: value for key, value in (("cluster_id", message_cluster), ("pinned_agent", body.agent)) if value}
+    extra = {key: value for key, value in (("cluster_id", message_cluster), ("pinned_agent", agent),
+                                           ("screen", screen)) if value}
     # Where the customer is, as a place: the runtime keeps the run's first one.
-    place = IP_LOCATOR.place(client_ip(request, TRUSTED_PROXIES)) if IP_LOCATOR is not None else None
+    place = IP_LOCATOR.place(client_ip) if IP_LOCATOR is not None else None
     if place is not None:
         extra["origin"] = place.as_dict()
     if unchecked:
@@ -1190,7 +1254,35 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         extra["evidence_verdict"] = evidence_verdict
     if extra:
         message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
-    reply = runtime.handle(message)
+    return message
+
+
+def _rider_message(
+    conversation_id: str, channel: str, phone: str, cluster_id: str, text: str, pill: Optional[str],
+    attachments: List[Dict[str, Any]],
+) -> InboundMessage:
+    """A rider's turn, shaped as the website adapter shapes a turn
+    (WebsiteChatAdapter.to_message), with the identity the token proved: a
+    verified customer, their phone and its cluster, and no session, cookie or
+    token on it (the plan's Ruling 2)."""
+    return InboundMessage(
+        conversation_id=conversation_id,
+        persona="customer",
+        identity=Identity(cluster_id=cluster_id, strength=VERIFIED, phone=phone),
+        channel=channel,
+        message_text=(text or "").strip(),
+        entry_metadata={"pill_clicked": pill} if pill else {},
+        attachments=[
+            Attachment(kind=a.get("kind", "image"), url=a["url"], mime_type=a.get("mime_type"),
+                       summary=a.get("summary"))
+            for a in attachments
+            if a.get("url")
+        ],
+    )
+
+
+def _message_out(conversation_id: str, reply: Reply) -> MessageOut:
+    """The reply as POST /message answers it."""
     return MessageOut(
         conversation_id=conversation_id,
         text=reply.text,
@@ -1209,6 +1301,60 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         ],
         actions=list(reply.actions),
     )
+
+
+def _is_app_chat(conversation_id: str) -> bool:
+    """Whether this conversation is an Amiigo app chat, which the website
+    never writes in (the plan's Rulings 8 and 9; amiigo_history.is_app_chat
+    reads the permanent records). A store that cannot answer is logged and
+    counts as no: the turn then meets the same store and answers as it does
+    any outage (a handover, or a safety report's steps), and a safety report
+    never gets a 503 instead."""
+    try:
+        return amiigo_history.is_app_chat(stores.conversations, conversation_id)
+    except StoreUnavailable as exc:
+        log.emit("app_chat_check_failed", conversation_id, error=type(exc).__name__)
+        return False
+
+
+@app.post("/message", response_model=MessageOut)
+def post_message(body: MessageIn, request: Request) -> MessageOut:
+    caller_ip = client_ip(request, TRUSTED_PROXIES)
+    if not message_limiter.allow(caller_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many messages. Wait a moment and try again.",
+        )
+    # Before the attachments: `prepare_turn` stores and records inline photos
+    # and claims uploads, and a request refused here must leave no object, no
+    # record and no spent upload id behind.
+    if body.agent and body.agent not in CHAT_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown agent %r. Expected one of: %s"
+            % (body.agent, ", ".join(CHAT_AGENTS)),
+        )
+    if body.conversation_id and _is_app_chat(body.conversation_id):
+        # A rider's app chat is written in only through the app, with the
+        # rider's token: anyone else holding its id could otherwise add to
+        # the rider's history from here.
+        raise HTTPException(status_code=403, detail="not your conversation")
+    conversation_id = body.conversation_id or new_conversation_id()
+    try:
+        message = prepare_turn(
+            conversation_id=conversation_id,
+            text=body.text,
+            attachments=body.attachments,
+            pill=body.pill,
+            location=body.location,
+            session_token=body.session_token,
+            em_aid=body.em_aid,
+            agent=body.agent,
+            client_ip=caller_ip,
+        )
+    except AttachmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _message_out(conversation_id, runtime.handle(message))
 
 
 class ErasureIn(BaseModel):
