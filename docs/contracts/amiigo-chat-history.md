@@ -62,7 +62,7 @@ The rider's chats, most recent activity first.
     {
       "conversation_id": "9b1f0c6e-2d4a-4c51-9a0e-3f7d2b8e41c2",
       "channel": "amiigo_app",
-      "title": "Battery will not charge",
+      "title": "Battery charges very slowly",
       "started_at": "2026-10-05T09:12:44Z",
       "last_message_at": "2026-10-05T09:31:02Z",
       "bike": { "product_name": "EMX Plus", "frame_number": "EMXP2025004417" },
@@ -80,7 +80,7 @@ The rider's chats, most recent activity first.
 | --- | --- | --- |
 | `conversation_id` | string | The chat's id, the same one `POST /message` returned |
 | `channel` | string | `amiigo_app` or `website_chat` |
-| `title` | string | What the chat was about, written by the server, for example "Battery will not charge" or "General question". Show as it is. |
+| `title` | string | What the chat was about, written by the server: the title of the problem the bot worked through, for example "Battery charges very slowly" or "Range has dropped", or a general one: "Battery issue", "Motor issue", "Warranty registration" or "General question". Show as it is. |
 | `started_at`, `last_message_at` | string | ISO 8601 times in UTC |
 | `bike` | object or `null` | The bike the chat was about. `null` when no bike was chosen. |
 | `status` | string | `open`, or `handed_to_support` when the chat was passed to EMotorad's support team |
@@ -142,7 +142,7 @@ The messages of one chat. The first call returns the newest messages; scroll bac
 | `sent_at` | string | ISO 8601 time in UTC |
 | `attachments` | array | Photos and videos in that message, in order |
 | `attachments[].kind` | string | `image` or `video` |
-| `attachments[].url` | string or `null` | A temporary link to the file. `null` when the file cannot be shown (for example a photo from an older chat that was not kept, or one that was deleted): show a placeholder such as "Photo". |
+| `attachments[].url` | string or `null` | A temporary link to the file. `null` when the file cannot be shown (a photo sent while photo storage was unavailable, so it was not kept, or one that has been deleted): show a placeholder such as "Photo". |
 | `attachments[].url_expires_at` | string or `null` | When the link stops working, about 15 minutes after the response. Fetch the page again for fresh links. |
 | `older_cursor` | string or `null` | Pass as `before` to load older messages. `null` when there are none. |
 
@@ -186,7 +186,7 @@ Retrying any of these requests is safe: they only read.
 
 The same token check replaces the test-session table on the chat server. When this ships, the existing endpoints accept a real Amiigo access token where they take `session_token` today:
 
-- `POST /message`: `"session_token": "<Amiigo access token>"` in the body identifies the rider, so their chats are saved under their number and appear in history.
+- `POST /message`: `"session_token": "<Amiigo access token>"` in the body identifies the rider, so their chats are saved under their number and appear in history, with `channel: "amiigo_app"`. (Today every chat through `POST /message` is recorded as `website_chat`; chats identified by an Amiigo token are recorded as `amiigo_app` from this release.)
 - `POST /erasure-requests`, `/status` and `/cancel`: the same.
 
 `sess-amiigo-test` keeps working on staging for prototyping, but it has no history: the history endpoints need a real token in the header.
