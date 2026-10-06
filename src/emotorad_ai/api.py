@@ -56,6 +56,7 @@ from starlette.background import BackgroundTask
 from .adapters import WebsiteChatAdapter
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
+from . import evidence_check
 from . import photo_check
 from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
@@ -70,7 +71,7 @@ from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
-from .conversation import StoreUnavailable, utc_now_iso
+from .conversation import StoreUnavailable, customer_texts, utc_now_iso
 from .media_records import media_record
 from .runtime import Runtime
 from .storage import keys
@@ -84,6 +85,8 @@ from .tools import fixtures
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
 from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity
+from .triage import classify_issue, topic_from_pill
+from .video_summary import TIMEOUT_SECONDS as VIDEO_SUMMARY_SECONDS
 from .video_summary import VideoSummaryError, summariser_from_env
 from .wiring import build_models, build_stores
 from .zoho.wiring import build_zoho, ticket_health, zoho_status
@@ -135,6 +138,13 @@ PHOTO_CHECKER = photo_check.photo_checker_from_env()
 # under a 15-second deadline timed out on staging and a smoking bike went
 # unseen (2026-10-01).
 PHOTO_CHECK_DEADLINE_SECONDS = 30.0
+# Evidence is checked before a ticket (evidence_check.py, the person's brief of
+# 6 October 2026): Gemini says whether a fault chat's photos and videos show
+# the problem. None unless EMOTORAD_EVIDENCE_CHECK is on and the OpenRouter key
+# is set. The runtime's switch (runtime.evidence_check, below) is the one that
+# matters: on with no checker, nothing can pass, so no fault ticket goes
+# through unchecked.
+EVIDENCE_CHECKER = evidence_check.evidence_checker_from_env()
 
 _logger = logging.getLogger(__name__)
 
@@ -302,6 +312,11 @@ runtime = Runtime(
     phone_resolver=verification_store.verified_phone,
     otp_verified_at=verification_store.verified_on,
     media_store=MEDIA_STORE,
+    # Evidence before a ticket (evidence_check.py): on with
+    # EMOTORAD_EVIDENCE_CHECK=on, and EMotorad's customer care contact for
+    # when the evidence never passes. Off, every path is as before.
+    evidence_check=evidence_check.switch_on(),
+    customer_care_contact=evidence_check.customer_care_contact(),
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -498,6 +513,10 @@ def health() -> dict:
     # 2026-10-05, section 6), since it started. Alarmed by their event too.
     if runtime.safety_not_recorded > 0:
         report["safety_tickets_not_recorded"] = runtime.safety_not_recorded
+    if runtime.evidence_check:
+        # Shown only while the switch is on: who checks, or that nothing can pass.
+        report["evidence_check"] = (EVIDENCE_CHECKER.provider if EVIDENCE_CHECKER is not None
+                                    else "on, no checker: nothing can pass")
     return report
 
 
@@ -610,7 +629,9 @@ def _persist_media(
         )
 
 
-def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Dict[str, Any]], int]:
+def _inbound_attachments(
+    body: MessageIn, conversation_id: str
+) -> Tuple[List[Dict[str, Any]], int, Optional[Dict[str, Any]]]:
     """What the customer sent, in the shape the adapter takes, in the order they
     sent it.
 
@@ -630,11 +651,13 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
     The count limit is on the total, not on each path, so adding the presigned
     route cannot be used to send more pictures than the inline one allows.
 
-    Also returns how many photos the safety check could not answer.
+    Also returns how many photos the safety check could not answer, and the
+    evidence check's verdict on a fault chat's photos and videos (None when
+    nothing was checked).
     """
     items = [item for item in (body.attachments or []) if item]
     if not items:
-        return [], 0
+        return [], 0, None
     if len(items) > MAX_ATTACHMENTS:
         raise AttachmentError(
             "Too many attachments: %d sent, %d allowed." % (len(items), MAX_ATTACHMENTS)
@@ -655,6 +678,15 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
     # whether or not it can be stored. Gathered here, checked together below.
     photo_jobs: List[Tuple[Tuple[str, Any], Callable[[], bytes], str]] = [
         (("inline", id(raw_item)), (lambda data=item["data"]: base64.b64decode(data)), item["media_type"])
+        for raw_item, item in zip(inline, validated) if item["media_type"].startswith("image/")
+    ]
+    # The evidence check's media, in the order the customer sent it: each
+    # item's position, how to read it, its type, name and size (None for an
+    # inline photo, already within its 4 MB limit).
+    position = {id(item): n for n, item in enumerate(items)}
+    evidence_jobs: List[Tuple[int, Callable[[], bytes], str, str, Optional[int]]] = [
+        (position[id(raw_item)], (lambda data=item["data"]: base64.b64decode(data)), item["media_type"], "photo",
+         None)
         for raw_item, item in zip(inline, validated) if item["media_type"].startswith("image/")
     ]
     stored: Dict[int, Dict[str, Any]] = {}
@@ -703,6 +735,9 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
 
     uploaded = [item for item in items if item.get("upload_id")]
     claims: Dict[str, Dict[str, Any]] = {}
+    # Described after every upload is claimed, so the evidence check can start
+    # first and run beside them.
+    videos: List[Tuple[str, str, str]] = []
     if uploaded:
         _require_media()
         caller_cluster = _cluster_for_session(body.session_token, body.em_aid)
@@ -736,27 +771,36 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
                     size_bytes=claimed.size, source="upload",
                 )
                 if claimed.kind == "videos":
-                    summary = _summarise_video(claimed.key, claimed.mime)
-                    if summary is not None:
-                        claims[upload_id]["summary"] = summary
-                        # The description is customer content — a picture of
-                        # their bike, their garage, whoever is standing in it,
-                        # narrated to text — so it belongs in the log only on a
-                        # staging box with dev codes on. Production must never
-                        # write it, not even its length.
-                        if DEV_CODES:
-                            log.emit(
-                                "video_summary",
-                                conversation_id,
-                                key=claimed.key.rsplit("/", 1)[-1],
-                                chars=len(summary),
-                                text=summary,
-                            )
+                    videos.append((upload_id, claimed.key, claimed.mime))
                 if claimed.kind == "images":
                     photo_jobs.append(
                         (("upload", upload_id), (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)), claimed.mime))
+                if claimed.kind in ("images", "videos"):
+                    evidence_jobs.append((position[id(item)], (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)),
+                                          claimed.mime, claimed.key.rsplit("/", 1)[-1], claimed.size))
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
+
+    # The evidence check starts now, and runs while the clips are described
+    # and the photos safety-checked below.
+    evidence = _start_evidence_check(body, conversation_id, sorted(evidence_jobs, key=lambda job: job[0]))
+    for upload_id, key, mime in videos:
+        summary = _summarise_video(key, mime)
+        if summary is not None:
+            claims[upload_id]["summary"] = summary
+            # The description is customer content — a picture of
+            # their bike, their garage, whoever is standing in it,
+            # narrated to text — so it belongs in the log only on a
+            # staging box with dev codes on. Production must never
+            # write it, not even its length.
+            if DEV_CODES:
+                log.emit(
+                    "video_summary",
+                    conversation_id,
+                    key=key.rsplit("/", 1)[-1],
+                    chars=len(summary),
+                    text=summary,
+                )
 
     # The description of a live hazard becomes the attachment's summary,
     # which the safety gate scans; a photo with none gets no summary.
@@ -773,7 +817,100 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
         note = notes.get(("inline", id(item)))
         # A copy: the customer's own item is never changed.
         attachments.append(dict(base, summary=note) if note else base)
-    return attachments, unchecked
+    return attachments, unchecked, _evidence_verdict(evidence, conversation_id)
+
+
+def _evidence_subject(body: MessageIn, conversation_id: str) -> Optional[Tuple[str, str]]:
+    """(the customer's complaint, "battery" or "motor") when this turn's
+    media is evidence of a bike fault, else None.
+
+    A fault chat by evidence_check.is_fault_chat, read with `peek`, which never
+    creates a conversation: nothing is written outside the turn. A first
+    message, before triage has run, counts when its pill or its words name the
+    battery or the motor."""
+    try:
+        state = stores.conversations.peek(conversation_id)
+    except StoreUnavailable as exc:
+        log.emit("evidence_check_skipped", conversation_id, error="store", why=type(exc).__name__)
+        state = None
+    component = evidence_check.fault_component(state)
+    if component is None and (state is None or state.agent is None):
+        topic = topic_from_pill(body.pill) or classify_issue(body.text or "")
+        component = topic if topic in evidence_check.COMPONENTS else None
+    if component is None:
+        return None
+    said = customer_texts(state.history) if state is not None else []
+    return evidence_check.complaint_from(said + [body.text or ""]), component
+
+
+def _start_evidence_check(
+    body: MessageIn, conversation_id: str, jobs: Sequence[Tuple[int, Callable[[], bytes], str, str, Optional[int]]],
+) -> Optional[Tuple[Any, float]]:
+    """The check, started on its own thread, and the moment the turn stops
+    waiting for it: the photo check's deadline, or the video summary's when a
+    clip is among the media, so a turn waits no longer than it does today.
+    None when nothing is checked: the switch off, no photo or video, or a
+    chat that is not about a bike fault."""
+    if not runtime.evidence_check or not jobs:
+        return None
+    subject = _evidence_subject(body, conversation_id)
+    if subject is None:
+        return None
+    if EVIDENCE_CHECKER is None:
+        return _done({"error": "not_configured"}), 0.0
+    complaint, component = subject
+    sizes = [size for _, _, _, _, size in jobs if size is not None]
+    if sum(sizes) > evidence_check.INLINE_LIMIT:
+        # Refused before anything is fetched, as the checker would refuse it.
+        return _done({"error": "too_large"}), 0.0
+    has_video = any(mime.startswith("video/") for _, _, mime, _, _ in jobs)
+    wait_for = VIDEO_SUMMARY_SECONDS if has_video else PHOTO_CHECK_DEADLINE_SECONDS
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence-check")
+    future = pool.submit(_check_evidence, list(jobs), complaint, component)
+    # A check still running at the deadline is abandoned, not waited for.
+    pool.shutdown(wait=False)
+    return future, time.monotonic() + wait_for
+
+
+def _done(result: Dict[str, Any]) -> Any:
+    """A finished future holding `result`."""
+    from concurrent.futures import Future
+
+    future: Any = Future()
+    future.set_result(result)
+    return future
+
+
+def _check_evidence(jobs: Sequence[Tuple[int, Callable[[], bytes], str, str, Optional[int]]], complaint: str,
+                    component: str) -> Dict[str, Any]:
+    media = [(load(), mime, name) for _, load, mime, name, _ in jobs]
+    return EVIDENCE_CHECKER.check(media, complaint, component).as_dict()
+
+
+def _evidence_verdict(started: Optional[Tuple[Any, float]], conversation_id: str) -> Optional[Dict[str, Any]]:
+    """The verdict as the turn carries it, or {"error": code} when the check
+    could not be made: never a pass. Logged by outcome and code only; what
+    Gemini wrote is customer content and never reaches the log."""
+    if started is None:
+        return None
+    future, deadline = started
+    done, _ = wait([future], timeout=max(0.0, deadline - time.monotonic()))
+    if not done:
+        log.emit("evidence_check_skipped", conversation_id, error="timeout")
+        return {"error": "timeout"}
+    try:
+        verdict = future.result()
+    except evidence_check.EvidenceCheckError as exc:
+        verdict = {"error": str(exc)}
+    except StorageError as exc:
+        verdict = {"error": "store", "why": type(exc).__name__}
+    except Exception as exc:  # the class only: a provider message can echo the request
+        verdict = {"error": type(exc).__name__}
+    if "error" in verdict:
+        log.emit("evidence_check_skipped", conversation_id, error=verdict["error"])
+        return {"error": verdict["error"]}
+    log.emit("evidence_check_done", conversation_id, passed=verdict.get("passed") is True)
+    return verdict
 
 
 def _summarise_video(key: str, mime: str) -> Optional[str]:
@@ -870,7 +1007,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     conversation_id = body.conversation_id or new_conversation_id()
     try:
-        attachments, unchecked = _inbound_attachments(body, conversation_id)
+        attachments, unchecked, evidence_verdict = _inbound_attachments(body, conversation_id)
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     text = body.text
@@ -918,6 +1055,9 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     if unchecked:
         # The runtime tells the agent (Runtime._run); never a summary.
         extra["photos_unchecked"] = unchecked
+    if evidence_verdict is not None:
+        # The runtime keeps it on the conversation, inside the turn.
+        extra["evidence_verdict"] = evidence_verdict
     if extra:
         message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
     reply = runtime.handle(message)
