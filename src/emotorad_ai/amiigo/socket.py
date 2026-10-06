@@ -35,7 +35,9 @@ checks again as it claims, so only an upload taken by another message in
 the moment between is refused after it. At most two of a rider's messages
 are answered at once, across all their sockets (`too_many_in_flight`,
 common.TurnsInFlight): each holds its place until its turn ends, even when
-its socket has closed; a resend waiting on another socket's turn holds none.
+its socket has closed; a resend waiting on another socket's turn holds none;
+a safety report, by the runtime's own scan of its text, is never held by the
+cap (Ruling 28).
 When the store cannot answer, the ownership check
 and the receipts fail open (the plan's Rulings 13 and 23): the turn runs,
 without a receipt if need be, and the runtime's outage path answers, so a
@@ -80,6 +82,7 @@ from fastapi import HTTPException, WebSocket
 
 from ..attachments import AttachmentError
 from ..conversation import StoreUnavailable, TranscriptTurn, recorded_url
+from ..guardrails import check_safety
 from ..observability import redact_pii
 from ..storage.keys import cluster_of
 from ..storage.s3 import StorageError
@@ -552,7 +555,7 @@ class ChatSocket:
         else:
             error, video = self._uploads(frame)
             if error is None:
-                slot = self.context.turns_in_flight.take(self.rider.user_key)
+                slot = self._place(frame)
                 if slot is None:
                     error = TOO_MANY_IN_FLIGHT
         if error is not None:
@@ -577,7 +580,7 @@ class ChatSocket:
             return Admission(error=error)
         # A place under the rider's cap, held from here and given back
         # unless the message is admitted to start a turn.
-        slot = context.turns_in_flight.take(rider.user_key)
+        slot = self._place(frame)
         if slot is None:
             return Admission(error=TOO_MANY_IN_FLIGHT)
         admitted = False
@@ -614,6 +617,23 @@ class ChatSocket:
         finally:
             if not admitted:
                 slot.give_back()
+
+    def _place(self, frame: MessageFrame) -> Optional[TurnSlot]:
+        """A place under the rider's cap on turns in flight, or None
+        (`too_many_in_flight`). A safety report is never held by the cap
+        (Ruling 28, for the reason of Rulings 13 and 23: a smoke report is
+        always answered): before refusing, the text gets the runtime's own
+        safety scan of typed text (guardrails.check_safety: battery and motor
+        terms, no store, no model), and a report gets a place past the cap.
+        A video's description is scanned only once the turn has it, so a
+        report made only by video waits like any other message."""
+        turns = self.context.turns_in_flight
+        slot = turns.take(self.rider.user_key)
+        if slot is None and check_safety(frame.text).triggered:
+            # The fact only: never the text or what it matched.
+            self._noted("amiigo_turn_cap_passed", "amiigo", reason="safety_report")
+            slot = turns.take(self.rider.user_key, over_cap=True)
+        return slot
 
     def _may_use(self, conversation_id: str) -> bool:
         """history.rider_may_use, failing open when the store cannot answer

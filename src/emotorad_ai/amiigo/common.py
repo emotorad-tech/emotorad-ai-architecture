@@ -137,11 +137,13 @@ class TurnsInFlight:
         self._held: Dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def take(self, user_key: str) -> Optional[TurnSlot]:
-        """A place for one more of the rider's messages, or None at the cap."""
+    def take(self, user_key: str, over_cap: bool = False) -> Optional[TurnSlot]:
+        """A place for one more of the rider's messages, or None at the cap.
+        `over_cap` grants one past the cap (a safety report, Ruling 28): it is
+        counted like any other while its turn runs."""
         with self._lock:
             held = self._held.get(user_key, 0)
-            if held >= self.cap:
+            if held >= self.cap and not over_cap:
                 return None
             self._held[user_key] = held + 1
         return TurnSlot(self, user_key)

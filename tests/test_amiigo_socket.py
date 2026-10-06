@@ -1185,6 +1185,85 @@ class TurnsInFlightTests(SocketCase):
         wait_until(lambda: self.ctx.turns_in_flight.held(RIDER_KEY) == 0)
 
 
+class SafetyPastTheCapTests(SocketCase):
+    """Ruling 28: the cap on turns in flight never holds a safety report.
+    Two turns are held open in front of the real runtime, which then answers
+    the third chat's message as it answers any other."""
+
+    use_fake_turns = False
+    with_media = False
+
+    def setUp(self):
+        super().setUp()
+        self.gate = threading.Event()
+        self.addCleanup(self.gate.set)
+        real = self.ctx.handle_turn
+        self.held = []
+
+        def handle(message):
+            if message.conversation_id in (CID, CID_2):
+                self.held.append(message.conversation_id)
+                if not self.gate.wait(TIMEOUT):
+                    raise AssertionError("the test never opened the gate")
+            return real(message)
+
+        self.ctx.handle_turn = handle
+
+    def two_in_flight(self, ws):
+        self.send(ws, message(n=1, cid=CID))
+        self.send(ws, message(n=2, cid=CID_2))
+        self.assertEqual([frame(ws)["type"], frame(ws)["type"]], ["bot_typing", "bot_typing"])
+        wait_until(lambda: len(self.held) == 2)
+
+    def assert_safety_reply(self, ws, body):
+        self.send(ws, body)
+        typing = frame(ws)
+        self.assertEqual(typing["type"], "bot_typing", typing)
+        ack, reply = frame(ws), frame(ws)
+        self.assertEqual([ack["type"], reply["type"]], ["ack", "reply"], (ack, reply))
+        self.assertEqual(reply["conversation_id"], body["conversation_id"])
+        self.assertTrue(reply["escalated"], reply)
+        self.assertTrue(reply["handled_by"].startswith("guardrail"), reply["handled_by"])
+        return reply
+
+    def test_a_third_chats_smoke_report_gets_the_safety_reply(self):
+        with mock.patch.object(OfflinePlanner, "create", autospec=True) as model:
+            with self.socket() as ws:
+                self.two_in_flight(ws)
+                reply = self.assert_safety_reply(ws, message(n=3, cid=CID_3, text="my battery is smoking"))
+                model.assert_not_called()
+                self.gate.set()
+                self.assertEqual(sorted(frame(ws)["type"] for _ in range(4)), ["ack", "ack", "reply", "reply"])
+        self.assertIn("112", reply["message"]["text"])
+        [passed] = self.events("amiigo_turn_cap_passed")
+        self.assertEqual((passed["reason"], passed["rider_hash"]), ("safety_report", rider_hash_of(RIDER_KEY)))
+        self.assertNotIn("smoking", json.dumps(self.events("amiigo_turn_cap_passed")))
+
+    def test_a_third_message_that_is_not_a_safety_report_is_still_refused(self):
+        with self.socket() as ws:
+            self.two_in_flight(ws)
+            self.refused(ws, message(n=3, cid=CID_3, text="my battery isn't charging"), "too_many_in_flight")
+            quiet(ws)
+            self.gate.set()
+            self.assertEqual(sorted(frame(ws)["type"] for _ in range(4)), ["ack", "ack", "reply", "reply"])
+        self.assertEqual(self.events("amiigo_turn_cap_passed"), [])
+
+    def test_a_safety_report_in_hinglish_or_hindi_is_never_held_either(self):
+        # The phrases the safety golden tests use (test_safety_without_phone):
+        # Devanagari hazard words are not safety terms today, so the Hindi
+        # report carries the English word, as there.
+        reports = ((3, CID_3, "battery se dhuan aa raha hai"), (4, CID_4, "battery smoking, मदद करो"))
+        with self.socket() as ws:
+            self.two_in_flight(ws)
+            for n, cid, text in reports:
+                with self.subTest(text=text):
+                    self.assert_safety_reply(ws, message(n=n, cid=cid, text=text))
+            self.refused(ws, message(n=5, cid="8f7b4f6d-0a2c-4d3f-8b76-2c9d0e1f3a45", text="haan switch on hai"),
+                         "too_many_in_flight")
+            self.gate.set()
+            self.assertEqual(sorted(frame(ws)["type"] for _ in range(4)), ["ack", "ack", "reply", "reply"])
+
+
 class AdmissionRaceTests(SocketCase):
     """`ChatSocket._admit` on its own, with the race made to happen."""
 
