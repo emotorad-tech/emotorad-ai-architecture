@@ -67,6 +67,10 @@ UNVERIFIED = "Identity: number given in chat, not verified"
 UTC_LINE = "Chat with the AI chatbot for %s. Times are in UTC."
 CUT = "\n[cut to fit Zoho's limit]"
 COVERAGE_PREFIX = "Warranty, from our systems, not the AI:"
+# A support or handover ticket raised after the evidence check passed
+# (evidence_check.py). Written by code from Gemini's one sentence, redacted.
+EVIDENCE_LINE = "Evidence checked by Gemini: %s. Shows the problem and matches the complaint."
+EVIDENCE_LIMIT = 200
 
 CHANNELS = {"whatsapp": "WhatsApp", "amiigo_app": "Amiigo app", "website_chat": "website chat", "voice": "phone call"}
 # What each coverage outcome means to a person reading the ticket. The code
@@ -211,6 +215,9 @@ def description(record: Dict[str, Any]) -> str:
         # Only the model's own tickets: a safety ticket's severity is set by
         # code, and calling it the AI's view would be untrue.
         lines.append("AI's view of severity: %s" % _one_line(record["ai_severity"]))
+    seen = redact_pii(_one_line(record.get("evidence_check")))[:EVIDENCE_LIMIT].rstrip(" .")
+    if seen:
+        lines.append(EVIDENCE_LINE % seen)
     claims = _claim_lines(record.get("claims"))
     if claims:
         lines += ["", "Customer's claims, not checked:"] + claims

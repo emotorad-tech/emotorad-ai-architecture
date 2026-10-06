@@ -28,8 +28,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from .agents.battery_support import AGENT_NAME as BATTERY_SUPPORT
-from .agents.motor_support import AGENT_NAME as MOTOR_SUPPORT
 from .observability import redact_pii
 from .photo_check import OPENROUTER_PHOTO_MODEL
 from .video_summary import INLINE_LIMIT as VIDEO_INLINE_LIMIT
@@ -106,8 +104,10 @@ FINAL_TEXT_NO_CONTACT_HI = ("समस्या दिखाने वाले 
 # What the ticket tool tells the model when no better sentence is known.
 DEFAULT_MISSING = "a short video that shows the problem itself"
 
-# The agents whose conversations are about a bike fault, by component.
-_FAULT_AGENTS = {BATTERY_SUPPORT: "battery", MOTOR_SUPPORT: "motor"}
+# The agents whose conversations are about a bike fault, by component. Their
+# names, not an import: the agents import the tools, and the tools and the
+# ticket seam import this module (a test holds them equal).
+FAULT_AGENTS = {"battery_support": "battery", "motor_support": "motor"}
 
 
 class EvidenceCheckError(Exception):
@@ -259,7 +259,7 @@ def fault_component(state: Any) -> Optional[str]:
     issue as battery or motor while the bike is chosen."""
     if state is None:
         return None
-    by_agent = _FAULT_AGENTS.get(getattr(state, "agent", None) or "")
+    by_agent = FAULT_AGENTS.get(getattr(state, "agent", None) or "")
     if by_agent:
         return by_agent
     topic = getattr(state, "pending_topic", None)

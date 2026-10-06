@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
+from ..evidence_check import clean_sentence
 from ..observability import redact_pii
 from .clock import now_iso
 from .kinds import KINDS, is_desk_reference
@@ -107,6 +108,9 @@ class DeskTicketSystem:
             coverage=fields.get("coverage"),
             customer_name=fields.get("customer_name"),
             created_at=self._clock(),
+            # What Gemini saw in media that passed the evidence check, set by
+            # code only (evidence_check.py); cleaned again before it is kept.
+            evidence_check=clean_sentence(fields.get("evidence_check")) or None,
         )
 
     def attach_transcript(self, ticket_id: str, transcript: str) -> None:

@@ -16,6 +16,7 @@ from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
 from ..contract import ASSERTED, VERIFIED
 from ..conversation import StoreUnavailable, address_tokens
+from ..evidence_check import DEFAULT_MISSING
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..knowledge import BatteryKnowledgeBase
 from ..tickets.caps import CAP_TEXTS, cap_reached
@@ -1083,8 +1084,13 @@ def build_registry(
         # is known (absent: unverified), the cover code worked out, and the
         # kind, which only the safety branch sets. None is in the model's
         # schema, and anything it sends under these names is dropped.
+        # With the evidence check on (evidence_check.py), whether media that
+        # shows the problem has passed it, what a better video would need, and
+        # what Gemini saw; absent with it off, when the old evidence_seen rule
+        # applies.
         optional_injects=("evidence_seen", "selected_bike", "unlisted_bike", "persona", "started_at",
-                          "cluster_id", "channel", "identity_strength", "coverage", "ticket_kind"),
+                          "cluster_id", "channel", "identity_strength", "coverage", "ticket_kind",
+                          "evidence_accepted", "evidence_missing", "evidence_checked"),
         write=True,
     )
     def create_support_ticket(
@@ -1105,12 +1111,28 @@ def build_registry(
         identity_strength: Optional[str] = None,
         coverage: Optional[str] = None,
         ticket_kind: Optional[str] = None,
+        evidence_accepted: Optional[bool] = None,
+        evidence_missing: Optional[str] = None,
+        evidence_checked: Optional[str] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
         if severity not in TICKET_SEVERITIES:
             raise ToolError("invalid_severity", "Unknown severity %r." % severity)
-        if evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES:
+        if evidence_accepted is not None:
+            # The evidence check is on (the person's brief, 6 October 2026):
+            # a passing verdict replaces the evidence_seen test below. Never
+            # for a hazard, which is raised on the customer's word.
+            if evidence_accepted is not True and category not in EVIDENCE_EXEMPT_CATEGORIES:
+                raise ToolError(
+                    "evidence_not_accepted",
+                    "The customer's photos and videos have not shown the problem itself, so a fault ticket "
+                    "cannot be raised yet. What is missing: %s. Ask the customer for a short video that shows "
+                    "it, or a clear photo if they cannot take a video."
+                    % ((evidence_missing or "").strip().rstrip(".") or DEFAULT_MISSING),
+                    remedy="collect_evidence",
+                )
+        elif evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES:
             # The rule the evidence post-check enforces on the reply, enforced
             # here on the write too: before, the ticket was created and only the
             # reply saying so was blocked, so the customer never heard of it.
@@ -1161,6 +1183,10 @@ def build_registry(
             # someone proved.
             coverage=coverage if verified else None,
             customer_name=_record_name(bike) if verified else None,
+            # What Gemini saw, only after a pass (zoho/payload.py says so).
+            **({"evidence_check": evidence_checked}
+               if evidence_accepted is True and evidence_checked and category not in EVIDENCE_EXEMPT_CATEGORIES
+               else {}),
         )
         return ok(
             {

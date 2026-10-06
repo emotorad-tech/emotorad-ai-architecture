@@ -52,8 +52,13 @@ def new_record(
     coverage: Optional[str],
     customer_name: Optional[str],
     created_at: str,
+    evidence_check: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """A new record: waiting, nothing posted, first due two minutes on."""
+    """A new record: waiting, nothing posted, first due two minutes on.
+
+    `evidence_check` is what Gemini saw in media that passed the evidence
+    check (evidence_check.py), on a support or handover ticket raised after
+    one. The field exists only on such a record."""
     if kind not in KINDS:
         raise ValueError("unknown ticket kind: %r" % (kind,))
     if mode not in MODES:
@@ -64,7 +69,7 @@ def new_record(
         raise ValueError("a ticket record needs a source_key")
     if not conversation_id:
         raise ValueError("a ticket record needs a conversation_id")
-    return {
+    record = {
         "_id": reference,
         "chat_reference": chat_reference,
         "source_key": source_key,
@@ -102,3 +107,6 @@ def new_record(
         "intent": None,
         "last_error": None,
     }
+    if evidence_check:
+        record["evidence_check"] = evidence_check
+    return record

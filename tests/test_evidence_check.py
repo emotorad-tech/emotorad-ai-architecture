@@ -293,6 +293,13 @@ class FaultChatTests(unittest.TestCase):
                 self.assertTrue(is_fault_chat(state))
                 self.assertEqual(fault_component(state), topic)
 
+    def test_the_fault_agents_are_named_as_the_agents_name_themselves(self):
+        from emotorad_ai.agents.battery_support import AGENT_NAME as BATTERY
+        from emotorad_ai.agents.motor_support import AGENT_NAME as MOTOR
+        from emotorad_ai.evidence_check import FAULT_AGENTS
+
+        self.assertEqual(FAULT_AGENTS, {BATTERY: "battery", MOTOR: "motor"})
+
     def test_anything_else_is_not(self):
         late = ConversationState(conversation_id="c1")
         late.route_to("late_warranty")
