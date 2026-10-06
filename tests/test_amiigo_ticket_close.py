@@ -688,8 +688,14 @@ class WebhookTests(SocketCase):
         self.assertEqual((answer.status_code, answer.json()), (503, {"detail": "store_unavailable"}))
         [entry] = self.logged()
         self.assertEqual((entry["outcome"], entry["ticket_hash"]), ("store_unavailable", ticket_hash(ZOHO_ID)))
+        # Ruling 25: Zoho documents no retry, so the loss is its own alarmed
+        # event (infra/zoho-alarms.yaml), with the hash and the error class.
+        [lost] = [e for e in self.api.log.events if e["event"] == "zoho_webhook_store_unavailable"]
+        self.assertEqual((lost["ticket_hash"], lost["error"]), (ticket_hash(ZOHO_ID), "MongoDB down"))
+        self.assertNotIn("code", lost)
         self.assertEqual(self.post(closure_body()).status_code, 200)
         self.assertEqual(self.tickets.ticket_status(reference)["status"], "closed")
+        self.assertEqual(len([e for e in self.api.log.events if e["event"] == "zoho_webhook_store_unavailable"]), 1)
 
     def test_the_log_never_carries_the_payload_the_secret_or_the_zoho_id(self):
         self.app_chat()

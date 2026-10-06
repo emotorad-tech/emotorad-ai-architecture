@@ -272,7 +272,7 @@ and counts only. With the token shared, the person's steps start at the probe.
    ```
 
    AWS emails that address to confirm the subscription. No alarm reaches it until they confirm.
-   The stack emails on eight events, each named in the alarm:
+   The stack emails on nine events, each named in the alarm:
 
    | Event | What it means |
    | --- | --- |
@@ -284,6 +284,7 @@ and counts only. With the token shared, the person's steps start at the probe.
    | `safety_ticket_late` | A safety ticket has waited 10 minutes: ask the support lead to call the customer now |
    | `safety_ticket_not_recorded` | A safety report has no ticket: read the conversation and reach the customer |
    | `unverified_ticket_capped` | The daily cap on unverified tickets refused one: check for abuse, or whether the cap is too low |
+   | `zoho_webhook_store_unavailable` | Support closed a ticket in Zoho Desk and MongoDB could not record it. Zoho documents no retry, so the rider may still see it as open: tell the support lead, and check Atlas |
 7. **Live** (person step 11 only, after Sachin's sign-off, in an environment with real phone
    verification): add `EMOTORAD_ZOHO_DEPARTMENT_ID`, `EMOTORAD_ZOHO_UNVERIFIED_CONTACT_ID` and
    `EMOTORAD_ZOHO_LIVE=yes` by step 4, with the OMS's refresh token as on staging. That makes a

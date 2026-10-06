@@ -1750,7 +1750,7 @@ class DocsTests(unittest.TestCase):
 # The events the spec alarms on (section 8), and those it logs without an alarm.
 ALARMED = ("zoho_misconfigured", "zoho_token_refused", "zoho_worker_error", "zoho_ticket_stuck",
            "safety_ticket_late", "safety_ticket_not_recorded", "unverified_ticket_capped",
-           "zoho_worker_store_unavailable")
+           "zoho_worker_store_unavailable", "zoho_webhook_store_unavailable")
 # An Atlas blip is not worth an email; an outage is. These alarm only when the
 # event is logged in each of three consecutive five-minute periods.
 PERSISTENT = ("zoho_worker_store_unavailable",)
@@ -1779,9 +1779,9 @@ NOT_ALARMED = {
     "lockout_ticket_not_recorded": "with Zoho on the reply promises nothing: it says the hand-over was not "
                                    "passed on",
     "close_runs_failed": "the earlier run's record stays open, and its ticket goes to support only; " + STORE_ALARMS,
-    "zoho_webhook": "one line per event Zoho Desk sends; a closure the store could not record (outcome "
-                    "store_unavailable) leaves the ticket shown as open, not wrong, and is answered 503 for Zoho "
-                    "to send again",
+    "zoho_webhook": "one line per event Zoho Desk sends. Zoho documents no retry: a closure the store could "
+                    "not record is still answered 503 (Ruling 19), and its loss alarms as "
+                    "zoho_webhook_store_unavailable",
     "zoho_webhook_misconfigured": "the webhook answers 503 and /health says why; tickets are still sent",
 }
 _EMITTED = re.compile(
@@ -1885,6 +1885,14 @@ class AlarmStackTests(unittest.TestCase):
         worker = (ROOT / "src" / "emotorad_ai" / "zoho" / "worker.py").read_text(encoding="utf-8")
         self.assertIn("zoho_worker_store_unavailable", _EMITTED.findall(worker))
         self.assertNotIn("store's own alarms", worker)
+
+    def test_a_lost_ticket_closure_alarms_at_once_from_the_webhook(self):
+        # Ruling 25: Zoho documents no retry, so each event is one closure
+        # the rider will not hear about. One in a period is an email.
+        webhooks = (ROOT / "src" / "emotorad_ai" / "amiigo" / "webhooks.py").read_text(encoding="utf-8")
+        self.assertIn("zoho_webhook_store_unavailable", _EMITTED.findall(webhooks))
+        self.assertNotIn("zoho_webhook_store_unavailable", PERSISTENT)
+        self.assertIn("FilterPattern: '{ $.event = \"zoho_webhook_store_unavailable\" }'", self.text)
 
     def test_no_event_is_both_alarmed_and_not(self):
         self.assertEqual(set(ALARMED) & set(NOT_ALARMED), set())

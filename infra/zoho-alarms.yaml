@@ -19,8 +19,10 @@
 # The one exception is zoho_worker_store_unavailable: the worker logs it on each
 # pass MongoDB Atlas cannot be reached, and a blip is not worth an email, so it
 # alarms only when it is logged in each of three consecutive five-minute periods.
+# zoho_webhook_store_unavailable alarms at once: Zoho Desk documents no retry
+# of a webhook, so each one is a ticket closure the rider may never hear about.
 #
-# Eight events are alarmed. Every other ticket event the code logs is an end
+# Nine events are alarmed. Every other ticket event the code logs is an end
 # state, or is followed by an alarmed event when it matters. Each is listed
 # with its reason in NOT_ALARMED in tests/test_zoho_scripts.py, which keeps
 # that list, this template and the code's events in step.
@@ -253,6 +255,32 @@ Resources:
       Period: 300
       EvaluationPeriods: 3
       DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoWebhookStoreUnavailableFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_webhook_store_unavailable" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_webhook_store_unavailable
+          MetricValue: "1"
+
+  ZohoWebhookStoreUnavailableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_webhook_store_unavailable"
+      AlarmDescription: "Support closed a ticket in Zoho Desk and MongoDB could not record it. Zoho documents no retry, so the rider may still see the ticket as open: find it by the logged ticket_hash and the time, and tell the support lead."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_webhook_store_unavailable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching

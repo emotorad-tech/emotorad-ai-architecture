@@ -27,9 +27,12 @@ closure; `status` is a name each department chooses, so it is never read),
 Answers (Ruling 19): 200 for every event handled, whatever its outcome, and
 for a body it cannot read (logged); 401 `secret_invalid` for a wrong or
 missing secret, before the body is read; 503 `not_configured` without a
-secret; 503 `store_unavailable` when the store fails, so Zoho tries again
+secret; 503 `store_unavailable` when the store fails, so Zoho may try again
 (every step is safe to repeat). Zoho counts anything but a 200 within 5
-seconds as a failed delivery.
+seconds as a failed delivery, but documents no retry: a closure the store
+could not record may never come back, so each one is also logged as
+`zoho_webhook_store_unavailable`, which infra/zoho-alarms.yaml alarms on at
+once (Ruling 25).
 
 Logs: `zoho_webhook` with the `outcome` and `ticket_hash`, the first 12 hex
 characters of the SHA-256 of the Zoho ticket id; never the payload, the id
@@ -230,6 +233,10 @@ def _handle(context: Any, events: List[WebhookEvent]) -> None:
                                            closed_at=event.closed_at, now=context.clock(), log=context.log)
         except StoreUnavailable as exc:
             _logged(context, STORE_UNAVAILABLE, event.zoho_ticket_id, error=str(exc))
+            # One closure the rider may never hear about: Zoho documents no
+            # retry. Alarmed on its own (Ruling 25).
+            context.log.emit("zoho_webhook_store_unavailable", "zoho", ticket_hash=ticket_hash(event.zoho_ticket_id),
+                             error=str(exc))
             raise
         _logged(context, outcome, event.zoho_ticket_id)
 
