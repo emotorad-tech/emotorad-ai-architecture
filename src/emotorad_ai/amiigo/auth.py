@@ -26,9 +26,11 @@ payload), so an expired token is `token_expired` whatever its payload holds:
   seconds. The minute is for two servers' clocks disagreeing.
 * `token_type` exactly "access". A refresh or OTP token proves something else:
   `token_type_not_allowed`.
-* `phone` an Indian mobile, kept as the runtime keeps a verified number ("+91"
-  and ten digits, tools/verification.py), so the rider's user key is the one a
-  verified web chat with the same number gets.
+* `phone` an Indian mobile, read by the identity layer's normaliser
+  (identity.normalise), which keeps a number written with another country's
+  "+" code foreign, and then exactly "+91" and ten digits. That is how the
+  runtime keeps a verified number (tools/verification.py), so the rider's user
+  key is the one a verified web chat with the same number gets.
 
 Anything malformed is `token_invalid`, never an exception. Nothing here logs a
 token, a phone or the key; logs tell riders apart by `rider_hash`.
@@ -50,7 +52,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from ..tools.oms import OMSConfigError, normalise_mobile
+from ..identity import PHONE, normalise
 
 _logger = logging.getLogger(__name__)
 
@@ -81,8 +83,8 @@ _RFC3339 = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 # A verified number as the runtime keeps one: "+91" and ten ASCII digits, the
-# first 6 to 9. normalise_mobile reads digits with \d, which a Devanagari
-# digit matches too, so this has the last word.
+# first 6 to 9. identity.normalise keeps any digit \d matches, a Devanagari
+# one included, so this has the last word.
 _RIDER_PHONE = re.compile(r"\+91[6-9][0-9]{9}")
 
 
@@ -201,10 +203,14 @@ def _time(value: Any) -> datetime:
 def _rider_phone(value: Any) -> str:
     if not isinstance(value, str):
         raise TokenInvalid("no phone")
+    # Not tools.oms.normalise_mobile: it drops the "+" with the other non-digits,
+    # so a foreign number of ten digits in all ("+6591234567", Singapore)
+    # would read as an Indian mobile and give the rider another person's chats.
     try:
-        phone = "+91" + normalise_mobile(value)
-    except OMSConfigError:
-        raise TokenInvalid("not an Indian mobile") from None
+        phone = normalise(PHONE, value)
+    except ValueError:
+        # Nothing but whitespace.
+        raise TokenInvalid("no phone") from None
     if not _RIDER_PHONE.fullmatch(phone):
         raise TokenInvalid("not an Indian mobile")
     return phone

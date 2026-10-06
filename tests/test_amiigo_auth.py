@@ -28,6 +28,16 @@ from emotorad_ai.amiigo.auth import (
     token_check_from_env,
     verify_v4_public,
 )
+from emotorad_ai.contract import VERIFIED, Identity
+from emotorad_ai.identity import ResolvedIdentity
+from emotorad_ai.runtime import Runtime
+from emotorad_ai.tools.registry import ToolContext, ToolRegistry
+from emotorad_ai.tools.verification import (
+    REQUEST_IDENTITY_VERIFICATION,
+    VERIFY_IDENTITY,
+    VerificationStore,
+    register_verification_tools,
+)
 from tests.amiigo_tokens import DROP, EMUSER_ID, HEADER, RIDER_PHONE, Keypair, b64, rfc3339
 
 NOW = datetime(2026, 10, 6, 10, 0, 0, tzinfo=timezone.utc)
@@ -122,6 +132,32 @@ class CheckTests(unittest.TestCase):
         for given in ("+919700000010", "9700000010", "919700000010", "09700000010", "+91 97000-00010"):
             with self.subTest(given):
                 self.assertEqual(self.check(self.keys.token(now=NOW, phone=given)).phone, "+919700000010")
+
+    def test_the_user_key_is_the_one_a_verified_web_chat_with_that_number_gets(self):
+        # The same person through the website: the verification tool stores the
+        # proved number, and the runtime keys the conversation on it.
+        for given in ("+919700000010", "9700000010", "919700000010", "09700000010", "+91 97000-00010"):
+            with self.subTest(given):
+                store = VerificationStore()
+                registry = ToolRegistry()
+                register_verification_tools(registry, store, code_factory=lambda: "111111")
+                ctx = ToolContext(conversation_id="c1")
+                registry.call(REQUEST_IDENTITY_VERIFICATION, {"phone": given}, ctx)
+                registry.call(VERIFY_IDENTITY, {"code": "111111"}, ctx)
+                web = Runtime._user_key(ResolvedIdentity(
+                    persona="customer", method="verified",
+                    identity=Identity(strength=VERIFIED, phone=store.verified_phone("c1"))))
+                rider = rider_from_header("Bearer " + self.keys.token(now=NOW, phone=given), self.checker)
+                self.assertEqual(rider.user_key, web)
+                self.assertEqual(web, "PHONE#+919700000010")
+
+    def test_a_foreign_number_is_never_read_as_an_indian_one(self):
+        # Ten digits in all after the country code's "+": Singapore, the
+        # Maldives, Lebanon. Read with the "+" dropped, each is a valid Indian
+        # mobile, and the rider would get another person's chats and bikes.
+        for phone in ("+6591234567", "+9607771234", "+9613123456", "+65 9123 4567", "+1 6505550123"):
+            with self.subTest(phone=phone):
+                self.assertRefused(self.keys.token(now=NOW, phone=phone), "token_invalid")
 
     def test_exp_in_another_offset_is_read_as_the_same_instant(self):
         ist = timezone(timedelta(hours=5, minutes=30))
@@ -258,8 +294,8 @@ class CheckTests(unittest.TestCase):
                 self.assertRefused(self.keys.token(now=NOW, token_type=kind), "token_type_not_allowed")
 
     def test_no_phone_or_a_malformed_phone_is_invalid(self):
-        for phone in (DROP, None, "", "12345", "+449700000010", "5700000010", "97000000101", 9700000010,
-                      "+91९७००००००१०", "9७००००००१०"):
+        for phone in (DROP, None, "", "   ", "12345", "+449700000010", "5700000010", "97000000101", 9700000010,
+                      "+91९७००००००१०", "9७००००००१०", "+6591234567", "+9607771234", "+9613123456"):
             with self.subTest(phone=phone):
                 self.assertRefused(self.keys.token(now=NOW, phone=phone), "token_invalid")
 
