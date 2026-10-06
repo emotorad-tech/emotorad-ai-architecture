@@ -393,5 +393,24 @@ class FixedTextTests(unittest.TestCase):
         self.assertFalse(writes_hindi(None))
 
 
+class StagingTests(unittest.TestCase):
+    def test_staging_runs_with_the_switch_on_in_the_docker_run_line(self):
+        from pathlib import Path
+
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy-staging.yml").read_text(
+            encoding="utf-8")
+        (line,) = [line for line in workflow.splitlines() if "docker run -d --name emotorad-ai" in line]
+        self.assertIn(" -e EMOTORAD_EVIDENCE_CHECK=on ", line)
+
+    def test_the_settings_are_in_the_config_store_runbook(self):
+        from pathlib import Path
+
+        runbook = (Path(__file__).resolve().parents[1] / "docs" / "runbooks" / "config-store.md").read_text(
+            encoding="utf-8")
+        for name in ("EMOTORAD_EVIDENCE_CHECK", "EMOTORAD_EVIDENCE_MODEL", "EMOTORAD_CUSTOMER_CARE_CONTACT"):
+            with self.subTest(name=name):
+                self.assertIn("| `%s` |" % name, runbook)
+
+
 if __name__ == "__main__":
     unittest.main()
