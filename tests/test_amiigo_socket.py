@@ -13,6 +13,7 @@ The receipts run on both stores, in memory and MongoDB (mongomock, its TTL
 clock pinned to the store's: the plan's Ruling 3).
 """
 
+import asyncio
 import importlib
 import json
 import os
@@ -26,13 +27,15 @@ from unittest import mock
 
 import anyio
 import mongomock
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
 from pymongo.errors import DuplicateKeyError
 
 from emotorad_ai.amiigo import auth as auth_module
 from emotorad_ai.amiigo import history
 from emotorad_ai.amiigo import receipts as receipts_module
-from emotorad_ai.amiigo.auth import LEEWAY, rider_hash_of
+from emotorad_ai.amiigo.auth import LEEWAY, rider_from_header, rider_hash_of
+from emotorad_ai.amiigo.socket import ChatSocket, MessageFrame
 from emotorad_ai.amiigo.receipts import (
     BUSY,
     CLAIMED,
@@ -44,17 +47,20 @@ from emotorad_ai.amiigo.receipts import (
     InMemoryAmiigoReceipts,
     receipt_id,
 )
-from emotorad_ai.amiigo.sockets import SocketRegistry
+from emotorad_ai.amiigo.sockets import OpenSocket, SocketRegistry
 from emotorad_ai.config import Settings
 from emotorad_ai.contract import VERIFIED, Attachment, Identity, InboundMessage, Reply
 from emotorad_ai.conversation import (
     SHARED_OWNER,
     ConversationSummaryItem,
+    InMemoryConversationStore,
     StoreUnavailable,
     summary_key,
 )
 from emotorad_ai.disclosure import DISCLOSURE_TEXT
-from emotorad_ai.observability import EventLog
+from emotorad_ai.llm import OfflinePlanner
+from emotorad_ai.observability import EventLog, redact_pii
+from emotorad_ai.runtime import SAFETY_NOT_RECORDED_MESSAGE
 from emotorad_ai.storage.uploads import UploadRegistry
 from emotorad_ai.stores.mongo import (
     AMIIGO_RECEIPTS,
@@ -90,6 +96,29 @@ def cmid(n):
 
 def message(n=1, cid=CID, text="my battery isn't charging", **extra):
     return dict({"type": "message", "client_message_id": cmid(n), "conversation_id": cid, "text": text}, **extra)
+
+
+def error_of(client_message_id, detail):
+    return {"type": "error", "client_message_id": client_message_id, "detail": detail}
+
+
+class CountingReceipts:
+    """The receipts store, counting every call made to it."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = 0
+
+    def __getattr__(self, name):
+        found = getattr(self.inner, name)
+        if not callable(found):
+            return found
+
+        def counted(*args, **kwargs):
+            self.calls += 1
+            return found(*args, **kwargs)
+
+        return counted
 
 
 # -- the socket from the app's side, with a timeout on every receive -----------
@@ -367,6 +396,22 @@ class ConnectingTests(SocketCase):
             wait_until(lambda: len(self.ctx.sockets.of(RIDER_KEY)) == 1)
         wait_until(lambda: self.ctx.sockets.of(RIDER_KEY) == [])
 
+    def test_a_socket_joins_the_registry_only_once_ready_has_gone_out(self):
+        # Ticket closure (Task 6) pushes through the registry: nothing may
+        # reach a socket before its ready.
+        seen_at_ready = []
+        real_send = OpenSocket.send
+
+        async def send(sock, frame):
+            if frame.get("type") == "ready":
+                seen_at_ready.append(len(self.ctx.sockets.of(RIDER_KEY)))
+            return await real_send(sock, frame)
+
+        with mock.patch.object(OpenSocket, "send", send):
+            with self.socket():
+                self.assertEqual(len(self.ctx.sockets.of(RIDER_KEY)), 1)
+        self.assertEqual(seen_at_ready, [0])
+
     def test_a_frame_pushed_from_another_thread_reaches_every_open_socket_of_the_rider(self):
         # The seam ticket closure (Task 6) sends ticket_update through.
         update = {"type": "ticket_update", "conversation_id": CID}
@@ -499,6 +544,52 @@ class MessageTests(SocketCase):
                         "sent_at": reply["message"]["sent_at"], "attachments": []},
             "actions": [], "escalated": False, "ticket": None, "handled_by": "narrow_support"})
         self.assertEqual(bot_turn.text, BOT_TEXT)
+
+    def test_the_live_reply_is_as_sent_and_history_keeps_it_masked(self):
+        # The plan's Ruling 16: what POST /message would have returned, live;
+        # the stored, masked text in history; the same on a resend.
+        said = "Call us on 9876543210 or write to help@emotorad.com."
+        self.turns.text = said
+        with self.socket() as ws:
+            _, ack, reply = self.exchange(ws, message())
+        self.assertEqual(reply["message"]["text"], said)
+        read = self.client.get("/amiigo/v1/conversations/%s/messages" % CID, headers=self.auth()).json()
+        [_, stored] = read["messages"]
+        self.assertEqual(stored["id"], reply["message"]["id"])
+        self.assertEqual(stored["text"], "Call us on [phone] or write to [email].")
+        self.assertEqual(stored["text"], redact_pii(said))
+        with self.socket() as ws:
+            self.assertEqual(self.resend(ws, message()), (ack, reply))
+
+    def test_a_receipt_keeps_none_of_the_riders_words(self):
+        with self.socket() as ws:
+            _, ack, reply = self.exchange(ws, message(text="my secret words"))
+        receipt = self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1)))
+        self.assertEqual(receipt["ack"], {"id": ack["message"]["id"]})
+        self.assertEqual((receipt["reply"]["id"], receipt["reply"]["text"]), (reply["message"]["id"], BOT_TEXT))
+        self.assertNotIn("my secret words", json.dumps(receipt, default=str))
+
+    def test_turns_run_on_the_sockets_own_threads(self):
+        # A dedicated limiter, not anyio's default pool that POST /message
+        # shares: with one turn thread, a second chat's turn waits its turn
+        # while the socket goes on answering.
+        self.assertEqual((self.ctx.socket_turn_threads, self.ctx.socket_store_threads), (16, 8))
+        self.ctx.socket_turn_threads = 1
+        gate = self.gated()
+        with self.socket() as ws:
+            self.send(ws, message(n=1, cid=CID))
+            self.assertEqual(frame(ws)["type"], "bot_typing")
+            self.assertTrue(self.turns.started.wait(TIMEOUT))
+            self.send(ws, message(n=2, cid=CID_2))
+            self.assertEqual(frame(ws), {"type": "bot_typing", "conversation_id": CID_2, "state": "thinking"})
+            self.send(ws, {"type": "ping"})
+            self.assertEqual(frame(ws), {"type": "pong"})
+            time.sleep(0.3)
+            self.assertEqual(len(self.turns.calls), 1)
+            gate.set()
+            answers = [frame(ws) for _ in range(4)]
+        self.assertEqual(sorted(f["type"] for f in answers), ["ack", "ack", "reply", "reply"])
+        self.assertEqual(len(self.turns.calls), 2)
 
     def test_the_turn_is_the_riders_on_the_app_channel(self):
         with self.socket() as ws:
@@ -670,12 +761,49 @@ class WhoseChatTests(SocketCase):
             _, ack, reply = self.exchange(ws, message(n=2, text="yes it is on"))
         self.assertEqual((ack["message"]["id"], reply["message"]["id"]), (CID + "#00003", CID + "#00004"))
 
-    def test_storage_that_cannot_say_whose_chat_it_is_closes_1011(self):
+    def test_the_riders_own_website_chat_is_not_found(self):
+        # Ruling 6: the app writes in app chats only, even where the rider
+        # proved this number in a website chat.
+        cid = CID_OTHER
+        inbound = InboundMessage(conversation_id=cid, persona="customer", channel="website_chat",
+                                 message_text="typed on the website",
+                                 identity=Identity(strength=VERIFIED, phone=RIDER_PHONE))
+        record_like_the_runtime(self.conversations, inbound, Reply(cid, "a reply", "narrow_support"))
+        self.assertEqual(self.conversations.owner_of(cid), RIDER_KEY)
+        with self.socket() as ws:
+            self.assert_nothing_of_theirs(ws, cid, said="typed on the website")
+
+    def test_storage_that_cannot_say_whose_chat_it_is_lets_the_turn_answer(self):
+        # The plan's Ruling 13: the ownership check fails open, so the
+        # runtime's own outage path answers.
         down = StoreUnavailable("MongoDB find failed")
         with mock.patch.object(self.conversations, "origins_of", side_effect=down):
             with self.socket() as ws:
+                self.exchange(ws, message())
+        self.assertEqual(len(self.turns.calls), 1)
+        failed = self.events("amiigo_owner_check_failed")
+        self.assertTrue(failed)
+        self.assertEqual({(e["error"], e["rider_hash"]) for e in failed},
+                         {("StoreUnavailable", rider_hash_of(RIDER_KEY))})
+
+    def test_a_receipts_store_that_cannot_answer_closes_1011_and_runs_nothing(self):
+        # Exactly once rests on the receipts: they never fail open.
+        down = StoreUnavailable("MongoDB find failed")
+        for method in ("answering", "in_flight", "claim"):
+            with self.subTest(method=method):
+                with mock.patch.object(self.ctx.receipts, method, side_effect=down):
+                    with self.socket() as ws:
+                        self.send(ws, message())
+                        self.assertEqual(closed(ws)[0], 1011)
+        self.assertEqual(self.turns.calls, [])
+
+    def test_a_fault_while_admitting_a_message_closes_1011(self):
+        with mock.patch.object(history, "rider_may_use", side_effect=RuntimeError("a bug")):
+            with self.socket() as ws:
                 self.send(ws, message())
                 self.assertEqual(closed(ws)[0], 1011)
+        [fault] = [e for e in self.events("amiigo_message") if e["outcome"] == "fault"]
+        self.assertEqual(fault["error"], "RuntimeError")
         self.assertEqual(self.turns.calls, [])
 
 
@@ -715,6 +843,31 @@ class OneAtATimeTests(SocketCase):
         self.assertEqual(len(self.turns.calls), 1)
         self.assertEqual(self.conversations.count_turns(CID), 2)
 
+    def test_resends_of_a_message_in_flight_are_coalesced_and_refused_past_the_allowance(self):
+        # The review's Important 1: one waiter per message per socket, and
+        # every message frame counts against the 20 a minute.
+        gate = self.gated()
+        counting = CountingReceipts(self.ctx.receipts)
+        self.ctx.receipts = counting
+        with self.socket() as ws:
+            self.send(ws, message())
+            self.assertEqual(frame(ws)["type"], "bot_typing")
+            self.assertTrue(self.turns.started.wait(TIMEOUT))
+            before = counting.calls
+            for _ in range(30):
+                self.send(ws, message())
+            refusals = [frame(ws) for _ in range(11)]
+            quiet(ws)
+            self.assertEqual(counting.calls, before, "a coalesced resend touches no store")
+            gate.set()
+            ack, reply = frame(ws), frame(ws)
+            quiet(ws)
+        self.assertEqual(refusals, [error_of(cmid(1), "rate_limited")] * 11)
+        self.assertEqual((ack["type"], reply["type"]), ("ack", "reply"))
+        self.assertEqual(len(self.turns.calls), 1)
+        outcomes = [e["outcome"] for e in self.events("amiigo_message")]
+        self.assertEqual((outcomes.count("coalesced"), outcomes.count("rate_limited")), (19, 11))
+
     def test_the_same_message_on_two_sockets_at_once_is_handled_once_and_both_get_its_answer(self):
         # Review Focus 2.
         gate = self.gated()
@@ -746,10 +899,21 @@ class OneAtATimeTests(SocketCase):
         self.assertEqual((ack["message"]["id"], reply["message"]["id"]), (CID + "#00001", CID + "#00002"))
         self.assertEqual(len(self.turns.calls), 1)
 
-    def test_a_message_sent_again_after_its_chat_was_deleted_is_not_found(self):
+    def test_a_message_sent_again_after_its_chat_was_erased_starts_afresh(self):
+        # Erasure takes the receipts with the chat (Ruling 14): the id is new again.
         with self.socket() as ws:
             self.exchange(ws, message())
             self.conversations.delete_conversation(CID)
+            _, ack, _ = self.exchange(ws, message())
+        self.assertEqual(len(self.turns.calls), 2)
+        self.assertEqual(ack["message"]["id"], CID + "#00001")
+
+    def test_a_receipt_whose_turns_are_gone_answers_not_found(self):
+        # A receipt another process could not reach (in memory, in the API)
+        # outlives the transcript an erasure removed.
+        with self.socket() as ws:
+            self.exchange(ws, message())
+            self.conversations._turns.pop(CID)
             self.refused(ws, message(), "conversation_not_found")
         self.assertEqual(len(self.turns.calls), 1)
         self.assertEqual([e["conversation_id"] for e in self.events("amiigo_message")
@@ -794,6 +958,61 @@ class OneAtATimeTests(SocketCase):
         self.assertEqual(len(self.turns.calls), 2)
         [fault] = [e for e in self.events("amiigo_message") if e["outcome"] == "fault"]
         self.assertEqual(fault["error"], "RuntimeError")
+
+
+class AdmissionRaceTests(SocketCase):
+    """`ChatSocket._admit` on its own, with the race made to happen."""
+
+    def chat(self):
+        rider = rider_from_header("Bearer " + self.token, self.ctx.tokens)
+        return ChatSocket(websocket=None, context=self.ctx, rider=rider, sock=None)
+
+    def test_the_same_message_claimed_a_moment_ago_on_another_socket_is_a_duplicate_not_busy(self):
+        rid = receipt_id(RIDER_KEY, cmid(1))
+        receipts = self.ctx.receipts
+        real = receipts.answering
+        asked = []
+
+        def answering(r):
+            asked.append(r)
+            if len(asked) == 1:
+                receipts.claim(rid, RIDER_KEY, CID)  # the other socket's claim lands now
+                return None
+            return real(r)
+
+        with mock.patch.object(receipts, "answering", side_effect=answering):
+            admission = self.chat()._admit(MessageFrame(cmid(1), CID, "hi"), rid)
+        self.assertEqual((admission.duplicate, admission.error), (True, None))
+
+    def test_a_chat_taken_between_the_check_and_the_claim_is_refused_and_the_claim_let_go(self):
+        rid = receipt_id(RIDER_KEY, cmid(1))
+        with mock.patch.object(history, "rider_may_use", side_effect=[True, False]):
+            admission = self.chat()._admit(MessageFrame(cmid(1), CID, "hi"), rid)
+        self.assertEqual(admission.error, "conversation_not_found")
+        self.assertIsNone(self.ctx.receipts.get(rid))
+        self.assertIsNone(self.ctx.receipts.in_flight(CID))
+
+
+class OpenSocketTests(unittest.TestCase):
+    def test_a_push_from_its_own_loop_keeps_its_task_until_the_frame_is_out(self):
+        sent = []
+
+        class FakeWebSocket:
+            async def send_json(self, frame):
+                sent.append(frame)
+
+        async def scenario():
+            sock = OpenSocket(FakeWebSocket(), "hash", asyncio.get_running_loop())
+            self.assertTrue(sock.push({"type": "ticket_update"}))
+            self.assertEqual(len(sock.pushing), 1)
+            for _ in range(20):
+                if not sock.pushing:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(sock.pushing, set())
+
+        asyncio.run(scenario())
+        self.assertEqual(sent, [{"type": "ticket_update"}])
 
 
 # -- the token running out ----------------------------------------------------------
@@ -912,16 +1131,15 @@ class AttachmentTests(SocketCase):
 class NoMediaTests(SocketCase):
     with_media = False
 
-    def test_an_upload_on_a_server_without_media_storage_is_upload_not_found(self):
-        # No code of its own on the socket: uploading again meets POST
-        # /amiigo/v1/uploads, which answers 503 storage_unavailable to retry.
+    def test_an_upload_on_a_server_without_media_storage_is_storage_unavailable(self):
+        # The plan's Ruling 15.
         self.assertIsNone(self.ctx.uploads)
         with self.socket() as ws:
-            self.refused(ws, message(attachments=[{"upload_id": "upl_1"}]), "upload_not_found")
+            self.refused(ws, message(attachments=[{"upload_id": "upl_1"}]), "storage_unavailable")
             self.exchange(ws, message(n=2))
         self.assertEqual(len(self.turns.calls), 1)
 
-    def test_prepare_turns_503_for_missing_media_storage_is_upload_not_found_and_sent_again(self):
+    def test_prepare_turns_503_for_missing_media_storage_is_storage_unavailable(self):
         # An upload slot the socket can see, on a server whose turn has no
         # bucket (prepare_turn's 503): the message is let go, to be sent again.
         registry = UploadRegistry(MediaStore())
@@ -931,7 +1149,7 @@ class NoMediaTests(SocketCase):
         with self.socket() as ws:
             self.send(ws, body)
             self.assertEqual(frame(ws)["type"], "bot_typing")
-            self.assertEqual(frame(ws), {"type": "error", "client_message_id": cmid(1), "detail": "upload_not_found"})
+            self.assertEqual(frame(ws), error_of(cmid(1), "storage_unavailable"))
         self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1))))
         self.assertEqual(self.turns.calls, [])
 
@@ -944,6 +1162,28 @@ class EndToEndTests(SocketCase):
     # No bucket: a guide picture's link would be signed again, a moment apart,
     # by the reply and by the history.
     with_media = False
+
+    def test_a_smoke_report_gets_the_safety_reply_and_the_model_is_never_called(self):
+        with mock.patch.object(OfflinePlanner, "create", autospec=True) as model:
+            with self.socket() as ws:
+                _, _, reply = self.exchange(ws, message(text="my battery is smoking"))
+        model.assert_not_called()
+        self.assertEqual([e for e in self.api.log.events if e["event"] == "llm_request"], [])
+        self.assertTrue(reply["escalated"], reply)
+        self.assertTrue(reply["message"]["text"].startswith(DISCLOSURE_TEXT), reply["message"]["text"])
+        self.assertTrue(reply["handled_by"].startswith("guardrail"), reply["handled_by"])
+
+    def test_a_smoke_report_during_a_store_outage_gets_the_safety_steps(self):
+        # Ruling 13: the ownership check fails open, and the runtime's outage
+        # path answers with the safety steps and 112.
+        down = StoreUnavailable("MongoDB find failed")
+        with mock.patch.object(self.conversations, "origins_of", side_effect=down), \
+                mock.patch.object(self.conversations, "get", side_effect=down):
+            with self.socket() as ws:
+                _, _, reply = self.exchange(ws, message(text="my battery is smoking"))
+        self.assertEqual(reply["handled_by"], "store_unavailable")
+        self.assertIn(SAFETY_NOT_RECORDED_MESSAGE.split("\n")[0], reply["message"]["text"])
+        self.assertIn("112", reply["message"]["text"])
 
     def test_a_chat_on_the_socket_comes_back_whole_from_the_history(self):
         with self.socket() as ws:
@@ -959,7 +1199,10 @@ class EndToEndTests(SocketCase):
         self.assertEqual((chat["conversation_id"], chat["channel"]), (CID, "amiigo_app"))
         read = self.client.get("/amiigo/v1/conversations/%s/messages" % CID, headers=headers)
         self.assertEqual(read.status_code, 200, read.text)
-        self.assertEqual(read.json()["messages"], [ack["message"], reply["message"]])
+        rider_said, bot_said = read.json()["messages"]
+        self.assertEqual(rider_said, ack["message"])
+        # Live as sent (Ruling 16); history as stored.
+        self.assertEqual(bot_said, dict(reply["message"], text=redact_pii(reply["message"]["text"])))
         state = self.api.runtime.conversations.peek(CID)
         self.assertEqual((state.channel, state.user_key), ("amiigo_app", RIDER_KEY))
 
@@ -1073,23 +1316,37 @@ class MongoReceiptsTests(ReceiptsContract, unittest.TestCase):
         self.receipts = MongoAmiigoReceipts(self.db, now=self.clock)
 
     def test_the_collection_expires_and_holds_one_processing_message_per_conversation(self):
-        [(ttl_keys, ttl), (busy_keys, busy)] = INDEXES[AMIIGO_RECEIPTS]
+        named = {options["name"]: (keys, options) for keys, options in INDEXES[AMIIGO_RECEIPTS]}
+        ttl_keys, ttl = named["expires_at_ttl"]
         self.assertEqual((ttl_keys, ttl["expireAfterSeconds"]), ([("expires_at", 1)], 0))
+        busy_keys, busy = named["one_processing_per_conversation"]
         self.assertEqual((busy_keys, busy["unique"], busy["partialFilterExpression"]),
                          ([("conversation_id", 1)], True, {"state": PROCESSING}))
-        self.assertTrue(self.receipts.has_ttl_index())
+        # Erasure finds a person's receipts, and a conversation's, by index.
+        self.assertEqual(named["user_key"][0], [("user_key", 1)])
+        self.assertEqual(named["conversation_at"][0], [("conversation_id", 1), ("at", 1)])
+        self.assertTrue(self.receipts.has_indexes())
         # Two servers racing: the database refuses the second processing message.
         collection = self.db[AMIIGO_RECEIPTS]
         collection.insert_one(receipts_module.new_receipt(self.RID, RIDER_KEY, CID, NOW))
         with self.assertRaises(DuplicateKeyError):
             collection.insert_one(receipts_module.new_receipt(self.RID_2, RIDER_KEY, CID, NOW))
 
-    def test_a_receipt_holds_no_text_of_a_recorded_turn(self):
+    def test_a_receipt_is_its_message_its_answer_and_its_times(self):
         self.receipts.claim(self.RID, RIDER_KEY, CID)
         self.receipts.finish(self.RID, {"id": CID + "#00001"}, {"id": CID + "#00002", "actions": []})
         doc = self.db[AMIIGO_RECEIPTS].find_one({"_id": self.RID})
         self.assertEqual(set(doc), {"_id", "user_key", "conversation_id", "state", "ack", "reply", "at",
                                     "expires_at"})
+
+    def test_without_either_index_the_check_says_so(self):
+        for missing in ("expires_at_ttl", "one_processing_per_conversation"):
+            with self.subTest(missing=missing):
+                db = mongomock.MongoClient()["emotorad_ai"]
+                for keys, options in INDEXES[AMIIGO_RECEIPTS]:
+                    if options["name"] != missing:
+                        db[AMIIGO_RECEIPTS].create_index(keys, **options)
+                self.assertFalse(MongoAmiigoReceipts(db, now=self.clock).has_indexes())
 
     def test_storage_that_is_down_is_store_unavailable(self):
         from pymongo.errors import ServerSelectionTimeoutError
@@ -1098,6 +1355,58 @@ class MongoReceiptsTests(ReceiptsContract, unittest.TestCase):
                                side_effect=ServerSelectionTimeoutError("no servers")):
             with self.assertRaises(StoreUnavailable):
                 self.receipts.get(self.RID)
+
+
+class ErasureContract:
+    """The plan's Ruling 14: erasing a person, or a conversation, takes
+    their receipts, counted in a dry run first."""
+
+    R1, R2, R3 = receipt_id(RIDER_KEY, cmid(1)), receipt_id(RIDER_KEY, cmid(2)), receipt_id(OTHER_KEY, cmid(3))
+
+    def setUp(self):
+        self.make()
+
+    def test_erasing_a_person_or_a_conversation_takes_the_receipts(self):
+        inbound = InboundMessage(conversation_id=CID, persona="customer", channel="amiigo_app", message_text="hi",
+                                 identity=Identity(strength=VERIFIED, phone=RIDER_PHONE))
+        record_like_the_runtime(self.conversations, inbound, Reply(CID, "hello", "narrow_support"))
+        self.receipts.claim(self.R1, RIDER_KEY, CID)
+        self.receipts.finish(self.R1, {"id": CID + "#00001"}, {"id": CID + "#00002"})
+        self.receipts.claim(self.R2, RIDER_KEY, CID_2)  # a chat known by its receipt alone
+        self.receipts.claim(self.R3, OTHER_KEY, CID_OTHER)
+        dry = self.conversations.delete_person(RIDER_KEY, dry_run=True)
+        self.assertEqual(dry["amiigo_receipts"], 2)
+        self.assertIsNotNone(self.receipts.get(self.R1))
+        real = self.conversations.delete_person(RIDER_KEY)
+        self.assertEqual(real, dry)
+        self.assertEqual([self.receipts.get(rid) is None for rid in (self.R1, self.R2, self.R3)],
+                         [True, True, False])
+        self.assertEqual(self.conversations.delete_conversation(CID_OTHER)["amiigo_receipts"], 1)
+        self.assertIsNone(self.receipts.get(self.R3))
+
+
+class MemoryErasureTests(ErasureContract, unittest.TestCase):
+    def make(self):
+        self.clock = Clock(self, pin=False)
+        self.receipts = InMemoryAmiigoReceipts(now=self.clock)
+        self.conversations = InMemoryConversationStore(receipts=self.receipts)
+
+
+class MongoErasureTests(ErasureContract, unittest.TestCase):
+    def make(self):
+        self.clock = Clock(self, pin=True)
+        db = mongomock.MongoClient()["emotorad_ai"]
+        ensure_indexes(db)
+        self.receipts = MongoAmiigoReceipts(db, now=self.clock)
+        self.conversations = MongoConversationStore(db, now=self.clock)
+
+
+class ApiErasureTests(SocketCase):
+    def test_the_apis_conversations_erase_the_sockets_receipts(self):
+        with self.socket() as ws:
+            self.exchange(ws, message())
+        self.assertEqual(self.conversations.delete_person(RIDER_KEY)["amiigo_receipts"], 1)
+        self.assertIsNone(self.ctx.receipts.get(receipt_id(RIDER_KEY, cmid(1))))
 
 
 class MongoSocketTests(SocketCase):
@@ -1162,6 +1471,17 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(event["level"], "error")
         self.assertIn("amiigo_receipts_ttl_missing", "\n".join(logged.output))
         self.assertNotIn(AMIIGO_RECEIPTS, client["emotorad_ai"].list_collection_names())
+
+    def test_without_the_one_processing_index_receipts_stay_in_memory_too(self):
+        client = mongomock.MongoClient()
+        ensure_indexes(client["emotorad_ai"])
+        client["emotorad_ai"][AMIIGO_RECEIPTS].drop_index("one_processing_per_conversation")
+        log = EventLog(path=None)
+        with self.assertLogs("emotorad_ai.wiring", level="ERROR"):
+            stores = build_stores(Settings(store="mongodb"), log=log, client=client)
+        self.assertIsInstance(stores.amiigo_receipts, InMemoryAmiigoReceipts)
+        [event] = self.missing(log)
+        self.assertEqual(event["reason"], "indexes_missing")
 
     def test_the_api_hands_the_socket_its_receipts_its_turns_and_its_limits(self):
         with mock.patch.object(auth_module, "_not_configured_logged", True):

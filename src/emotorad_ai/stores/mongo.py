@@ -175,6 +175,9 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
         # finds the message in flight.
         ([("conversation_id", 1)], {"name": "one_processing_per_conversation", "unique": True,
                                     "partialFilterExpression": {"state": PROCESSING}}),
+        # Erasure: a person's receipts, and a conversation's (Ruling 14).
+        ([("user_key", 1)], {"name": "user_key"}),
+        ([("conversation_id", 1), ("at", 1)], {"name": "conversation_at"}),
     ],
 }
 
@@ -545,7 +548,8 @@ class MongoConversationStore:
         found = set()
         for name, field in ((CONVERSATIONS, "_id"), (TRANSCRIPT_TURNS, "conversation_id"),
                             (CONVERSATION_SUMMARIES, "conversation_id"), (CONVERSATION_ORIGINS, "conversation_id"),
-                            (CONVERSATION_NOTICES, "conversation_id"), (VERIFICATION_SESSIONS, "_id")):
+                            (CONVERSATION_NOTICES, "conversation_id"), (VERIFICATION_SESSIONS, "_id"),
+                            (AMIIGO_RECEIPTS, "conversation_id")):
             collection = self._collection(name)
             found.update(self._guard("distinct", lambda: collection.distinct(field, {"user_key": user_key})))
         return sorted(found)
@@ -555,12 +559,14 @@ class MongoConversationStore:
 
         Every conversation that is theirs, whole: turns recorded before they
         signed in carry no user key, so conversations are found by any record
-        that does, then removed by id. Their idempotency receipts go too, and
-        their verified sessions: found by the phone, removed with each
-        conversation. With `dry_run`, counts what would go and deletes nothing.
+        that does, then removed by id. Their idempotency receipts go too,
+        their verified sessions (found by the phone) and the chat socket's
+        receipts of their messages, each removed with its conversation. With
+        `dry_run`, counts what would go and deletes nothing.
         """
         counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA,
-                                       CONVERSATION_ORIGINS, VERIFICATION_SESSIONS, CONVERSATION_NOTICES)}
+                                       CONVERSATION_ORIGINS, VERIFICATION_SESSIONS, CONVERSATION_NOTICES,
+                                       AMIIGO_RECEIPTS)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -578,6 +584,8 @@ class MongoConversationStore:
             CONVERSATION_ORIGINS: self._remove(CONVERSATION_ORIGINS, {"conversation_id": conversation_id}, dry_run),
             VERIFICATION_SESSIONS: self._remove(VERIFICATION_SESSIONS, {"_id": conversation_id}, dry_run),
             CONVERSATION_NOTICES: self._remove(CONVERSATION_NOTICES, {"conversation_id": conversation_id}, dry_run),
+            # The chat socket's receipts (Ruling 14): their ids name the phone.
+            AMIIGO_RECEIPTS: self._remove(AMIIGO_RECEIPTS, {"conversation_id": conversation_id}, dry_run),
         }
 
     def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:
@@ -741,6 +749,13 @@ class MongoAmiigoReceipts:
     def get(self, rid: str) -> Optional[Dict[str, Any]]:
         return self._read(rid, self._now())
 
+    def answering(self, rid: str) -> Optional[Dict[str, Any]]:
+        """The receipt when it answers for its message (done, or running
+        within its lease), else None. One read."""
+        now = self._now()
+        doc = self._read(rid, now)
+        return doc if answers(doc, now, self._lease) else None
+
     def in_flight(self, conversation_id: str) -> Optional[str]:
         now = self._now()
         doc = self._guard("find_one", lambda: self._receipts.find_one(
@@ -785,15 +800,18 @@ class MongoAmiigoReceipts:
         # Only a processing claim is released; a finished receipt is never undone.
         self._guard("delete_one", lambda: self._receipts.delete_one({"_id": rid, "state": PROCESSING}))
 
-    def has_ttl_index(self) -> bool:
-        """Whether mongo_setup.py has made the index that removes a receipt
-        at its `expires_at` (and the one that holds a conversation busy).
-        Without it the service keeps receipts in memory instead
-        (wiring.build_stores). Raises StoreUnavailable when the index list
-        cannot be read."""
-        info = self._guard("index_information", lambda: self._receipts.index_information())
-        return any([name for name, _ in spec.get("key", [])] == ["expires_at"]
-                   and spec.get("expireAfterSeconds") == 0 for spec in info.values())
+    def has_indexes(self) -> bool:
+        """Whether mongo_setup.py has made the two indexes the receipts rest
+        on: the one that removes a receipt at its `expires_at`, and the one
+        that holds a conversation busy across servers. Without either the
+        service keeps receipts in memory instead (wiring.build_stores).
+        Raises StoreUnavailable when the index list cannot be read."""
+        info = self._guard("index_information", lambda: self._receipts.index_information()).values()
+        expires = any([name for name, _ in spec.get("key", [])] == ["expires_at"]
+                      and spec.get("expireAfterSeconds") == 0 for spec in info)
+        busy = any([name for name, _ in spec.get("key", [])] == ["conversation_id"] and spec.get("unique")
+                   and spec.get("partialFilterExpression") == {"state": PROCESSING} for spec in info)
+        return expires and busy
 
 
 class MongoTicketStore:

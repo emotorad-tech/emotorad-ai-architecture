@@ -19,6 +19,7 @@ media bucket, the log, the clock and the limiters) is one `AmiigoContext` on
 from __future__ import annotations
 
 import time
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -58,6 +59,12 @@ MESSAGES_PER_MINUTE = 20
 SOCKET_IDLE_SECONDS = 600.0
 # How often a socket waiting on the same message's turn elsewhere looks again.
 SOCKET_POLL_SECONDS = 0.25
+# The chat socket's own worker threads, apart from anyio's default pool that
+# the sync HTTP routes (POST /message among them) share: turns, which can
+# take a minute or two, and the short reads and writes of the receipts and
+# the conversation's records, so long turns never hold up an admission.
+SOCKET_TURN_THREADS = 16
+SOCKET_STORE_THREADS = 8
 
 # A chat's id: a UUID the app makes ("Conversation lifecycle"), in either case
 # (iOS writes capitals), used exactly as sent. An explicit ASCII class, so no
@@ -101,7 +108,9 @@ class AmiigoContext:
     message a rider sent (receipts.py); `sockets`, the open sockets by rider
     (sockets.py); `prepare_turn` and `handle_turn`, api.prepare_turn and the
     runtime's handle, set by api.py (the socket closes 1011 without them);
-    and its limit and timings."""
+    and its limit, its thread allowances and timings. `thread_limiters`
+    holds the socket's anyio CapacityLimiters, one pair per event loop
+    (socket.py makes them)."""
 
     stores: Any
     tokens: TokenCheck
@@ -119,6 +128,9 @@ class AmiigoContext:
     message_limiter: RiderLimiter = field(default_factory=lambda: RiderLimiter(MESSAGES_PER_MINUTE))
     socket_idle_seconds: float = SOCKET_IDLE_SECONDS
     socket_poll_seconds: float = SOCKET_POLL_SECONDS
+    socket_turn_threads: int = SOCKET_TURN_THREADS
+    socket_store_threads: int = SOCKET_STORE_THREADS
+    thread_limiters: Any = field(default_factory=weakref.WeakKeyDictionary, repr=False)
 
 
 def context_of(request: Request) -> AmiigoContext:

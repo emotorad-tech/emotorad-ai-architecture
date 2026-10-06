@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 class OpenSocket:
@@ -31,6 +31,9 @@ class OpenSocket:
         self._log = log
         self._lock = asyncio.Lock()
         self.closed = False
+        # Pushes made from the socket's own loop, held until their frame is
+        # out: the loop keeps only a weak reference to a task.
+        self.pushing: Set["asyncio.Task[bool]"] = set()
 
     async def send(self, frame: Dict[str, Any]) -> bool:
         """Whether the frame went out."""
@@ -78,7 +81,9 @@ class OpenSocket:
         except RuntimeError:
             running = None
         if running is self._loop:
-            self._loop.create_task(self.send(frame))
+            task = self._loop.create_task(self.send(frame))
+            self.pushing.add(task)
+            task.add_done_callback(self.pushing.discard)
             return True
         try:
             asyncio.run_coroutine_threadsafe(self.send(frame), self._loop)

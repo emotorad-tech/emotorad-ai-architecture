@@ -13,13 +13,17 @@ exists." One receipt per message, `_id` `<user_key>#<client_message_id>`
 * removed (`release`) when the message could not be handled at all (an
   upload that is not there), so the app can send it again.
 
-A turn that was recorded leaves no text in its receipt: `ack` and `reply`
-name the stored turns by message id, with what only a live reply carries
-(actions, escalated, the ticket, which part answered, each attachment's
-type, caption and poster). The frames are built again from the transcript
-each time they are sent, with fresh links (amiigo/socket.py). Only a turn
-the store could not record keeps its two messages here, as the rider was
-shown them, for the 24 hours.
+A turn that was recorded leaves none of the rider's words in its receipt:
+`ack` names the stored turn by message id, and `reply` names the bot's,
+with what only a live reply carries: the reply's text as sent (the plan's
+Ruling 16; history keeps it masked), actions, escalated, the ticket, which
+part answered, and each attachment's type, caption and poster. The frames
+are built again each time they are sent, with fresh links
+(amiigo/socket.py). Only a turn the store could not record keeps the
+rider's message here too, masked as a transcript masks it. Erasing a
+person or a conversation takes their receipts (the plan's Ruling 14:
+`conversations_of`, `delete_conversation`, called by the conversation
+store's own erasure).
 
 One message at a time per conversation ("conversation_busy"): a claim is
 refused while another message of the same conversation is processing. A
@@ -36,7 +40,7 @@ from __future__ import annotations
 import copy
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 RECEIPT_TTL = timedelta(hours=24)
 # Longer than any turn: a video's description and the reply are allowed 150
@@ -102,6 +106,15 @@ class InMemoryAmiigoReceipts:
             doc = self._docs.get(rid)
             return copy.deepcopy(doc) if doc is not None else None
 
+    def answering(self, rid: str) -> Optional[Dict[str, Any]]:
+        """The receipt when it answers for its message (done, or running
+        within its lease), else None."""
+        with self._lock:
+            now = self._now()
+            self._sweep(now)
+            doc = self._docs.get(rid)
+            return copy.deepcopy(doc) if answers(doc, now, self._lease) else None
+
     def in_flight(self, conversation_id: str) -> Optional[str]:
         """The user key whose message of this conversation is processing, or None."""
         with self._lock:
@@ -143,6 +156,21 @@ class InMemoryAmiigoReceipts:
             doc = self._docs.get(rid)
             if doc is not None and doc["state"] == PROCESSING:
                 del self._docs[rid]
+
+    # -- erasure (the conversation store calls these) ---------------------------
+
+    def conversations_of(self, user_key: str) -> Set[str]:
+        with self._lock:
+            return {doc["conversation_id"] for doc in self._docs.values() if doc["user_key"] == user_key}
+
+    def delete_conversation(self, conversation_id: str, dry_run: bool = False) -> int:
+        """Every receipt of one conversation, whoever sent it: how many."""
+        with self._lock:
+            mine = [rid for rid, doc in self._docs.items() if doc["conversation_id"] == conversation_id]
+            if not dry_run:
+                for rid in mine:
+                    del self._docs[rid]
+            return len(mine)
 
     def __len__(self) -> int:
         with self._lock:

@@ -81,9 +81,10 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
 
         from .tickets.store import InMemoryTicketStore
 
-        return Stores(conversations=InMemoryConversationStore(), idempotency=IdempotencyStore(),
+        receipts = InMemoryAmiigoReceipts()
+        return Stores(conversations=InMemoryConversationStore(receipts=receipts), idempotency=IdempotencyStore(),
                       tickets=InMemoryTicketStore(), verified_sessions=InMemoryVerifiedSessions(),
-                      amiigo_receipts=InMemoryAmiigoReceipts())
+                      amiigo_receipts=receipts)
     from .stores.mongo import (
         MongoAmiigoReceipts, MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, MongoVerifiedSessions,
         connect,
@@ -102,19 +103,20 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
 
 
 def _amiigo_receipts(mongo: Any, log: Any) -> Any:
-    """MongoDB's receipts only when their TTL index exists, as the proved
-    numbers (`_verified_sessions`): without it a receipt, which names the
-    rider's phone in its id, would never be removed. Until a person runs
-    mongo_setup.py and restarts, receipts stay in this process's memory (a
-    restart forgets which messages were answered), and
-    `amiigo_receipts_ttl_missing` is logged at error level."""
+    """MongoDB's receipts only when both their indexes exist, as the
+    proved numbers (`_verified_sessions`): without the TTL index a receipt,
+    which names the rider's phone in its id, would never be removed, and
+    without the one-processing index a conversation is not held busy across
+    servers. Until a person runs mongo_setup.py and restarts, receipts stay
+    in this process's memory (a restart forgets which messages were
+    answered), and `amiigo_receipts_ttl_missing` is logged at error level."""
     from .conversation import StoreUnavailable
 
     error = None
     try:
-        if mongo.has_ttl_index():
+        if mongo.has_indexes():
             return mongo
-        status = "ttl_missing"
+        status = "indexes_missing"
     except StoreUnavailable as exc:
         status, error = "index_unreadable", type(exc).__name__
     _logger.error("amiigo_receipts_ttl_missing: %s", status)

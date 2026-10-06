@@ -510,8 +510,12 @@ class InMemoryConversationStore:
     them) and must raise ConversationConflict on a stale save.
     """
 
-    def __init__(self, clock: Callable[[], str] = utc_now_iso, max_conversations: int = 10_000) -> None:
+    def __init__(self, clock: Callable[[], str] = utc_now_iso, max_conversations: int = 10_000,
+                 receipts: Any = None) -> None:
         self._clock = clock
+        # The chat socket's receipts in this process (amiigo/receipts.py), when
+        # wired: erased with the person or the conversation (Ruling 14).
+        self.receipts = receipts
         # Bounded, so a long-running process does not grow without limit: past
         # `max_conversations`, the least recently used conversation goes, whole
         # (state, transcript, summaries). Everything here is lost on restart
@@ -624,6 +628,8 @@ class InMemoryConversationStore:
                  if any(r.get("user_key") == user_key for r in runs.values())}
         mine |= {cid for cid, notices in self._notices.items()
                  if any(n.get("user_key") == user_key for n in notices.values())}
+        if self.receipts is not None:
+            mine |= self.receipts.conversations_of(user_key)
         return sorted(mine)
 
     def pending_erasure_of(self, user_key: str) -> Optional[Dict[str, Any]]:
@@ -721,12 +727,14 @@ class InMemoryConversationStore:
                 "media": sum(len(self._media.get(cid, {})) for cid in mine),
                 "conversation_origins": sum(len(self._origins.get(cid, {})) for cid in mine),
                 "conversation_notices": sum(len(self._notices.get(cid, {})) for cid in mine),
+                "amiigo_receipts": sum(self._receipts_of(cid, dry_run=True) for cid in mine),
                 "conversation_summaries": len(self._summaries.get(user_key, {})) + sum(
                     1 for key, items in self._summaries.items() if key != user_key
                     for item in items.values() if item.conversation_id in mine),
             }
         counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
-                  "conversation_notices": 0, "conversation_summaries": len(self._summaries.pop(user_key, {}))}
+                  "conversation_notices": 0, "amiigo_receipts": 0,
+                  "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
             for name, count in self.delete_conversation(cid).items():
                 counts[name] += count
@@ -747,7 +755,13 @@ class InMemoryConversationStore:
             "media": len(self._media.pop(conversation_id, {})),
             "conversation_origins": len(self._origins.pop(conversation_id, {})),
             "conversation_notices": len(self._notices.pop(conversation_id, {})),
+            "amiigo_receipts": self._receipts_of(conversation_id),
         }
+
+    def _receipts_of(self, conversation_id: str, dry_run: bool = False) -> int:
+        if self.receipts is None:
+            return 0
+        return self.receipts.delete_conversation(conversation_id, dry_run=dry_run)
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history

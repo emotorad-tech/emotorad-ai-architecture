@@ -51,6 +51,7 @@ phone, text, link or the app's message id.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import math
 import re
@@ -65,8 +66,14 @@ from ..conversation import StoreUnavailable, TranscriptTurn, recorded_url
 from ..observability import redact_pii
 from . import history
 from .auth import LEEWAY, TOKEN_EXPIRED, Rider, rider_from_header
-from .common import CONVERSATION_ID_PATTERN, CONVERSATION_NOT_FOUND, RATE_LIMITED, AmiigoContext
-from .receipts import BUSY, CLAIMED, DONE, DUPLICATE, PROCESSING, receipt_id
+from .common import (
+    CONVERSATION_ID_PATTERN,
+    CONVERSATION_NOT_FOUND,
+    RATE_LIMITED,
+    STORAGE_UNAVAILABLE,
+    AmiigoContext,
+)
+from .receipts import BUSY, DONE, DUPLICATE, receipt_id
 from .sockets import OpenSocket
 
 PROTOCOL = 1
@@ -99,10 +106,10 @@ OPEN = "open"
 
 # api.prepare_turn's refusals of an upload, as the socket's details. Unknown
 # or expired (404) and another rider's (403) are both upload_not_found, as
-# the contract has it. No media storage on this server (503) has no code of
-# its own on the socket: upload_not_found sends the app to upload again, and
-# POST /amiigo/v1/uploads then answers 503 storage_unavailable, which it retries.
-_UPLOAD_REFUSALS = {404: UPLOAD_NOT_FOUND, 403: UPLOAD_NOT_FOUND, 409: UPLOAD_NOT_FINISHED, 503: UPLOAD_NOT_FOUND}
+# the contract has it; no media storage on this server (503) is
+# storage_unavailable, the HTTP endpoints' code for it (the plan's Ruling 15).
+_UPLOAD_REFUSALS = {404: UPLOAD_NOT_FOUND, 403: UPLOAD_NOT_FOUND, 409: UPLOAD_NOT_FINISHED,
+                    503: STORAGE_UNAVAILABLE}
 # What each refusal is logged as.
 _OUTCOMES = {CONVERSATION_NOT_FOUND: "not_found", CONVERSATION_BUSY: "busy"}
 
@@ -111,6 +118,23 @@ _UUID = re.compile(CONVERSATION_ID_PATTERN)
 PING = "ping"
 # Put on the frame queue to wake the socket's loop when a turn ends.
 _WAKE = {"type": "amiigo.wake"}
+# The socket's two thread allowances (AmiigoContext.socket_turn_threads and
+# socket_store_threads).
+TURN_THREADS = "turns"
+STORE_THREADS = "store"
+
+
+def _threads(context: AmiigoContext, kind: str) -> anyio.CapacityLimiter:
+    """The socket's own worker threads on this event loop. One pair per
+    loop, made on first use: an anyio limiter belongs to the loop it waits
+    on. A server runs one loop, so one pair."""
+    loop = asyncio.get_running_loop()
+    mine = context.thread_limiters.get(loop)
+    if mine is None:
+        mine = {TURN_THREADS: anyio.CapacityLimiter(context.socket_turn_threads),
+                STORE_THREADS: anyio.CapacityLimiter(context.socket_store_threads)}
+        context.thread_limiters[loop] = mine
+    return mine[kind]
 
 
 # -- frames the app sends ----------------------------------------------------------
@@ -266,17 +290,18 @@ def _live_fields(reply: Any) -> Dict[str, Any]:
 def receipt_of(frame: MessageFrame, message: Any, reply: Any,
                recorded: Optional[Tuple[TranscriptTurn, TranscriptTurn]], at: str) -> Tuple[Dict, Dict]:
     """The receipt's `ack` and `reply`. A recorded turn: the stored turns'
-    ids and the live reply's fields, no text. A turn not recorded: the two
-    messages as the rider is shown them, masked as a transcript masks them."""
+    ids, the reply's text as sent and the live reply's fields; none of the
+    rider's words. A turn not recorded: the rider's message too, masked as a
+    transcript masks it."""
     live = _live_fields(reply)
     if recorded is not None:
         rider_turn, bot_turn = recorded
-        return {"id": history.turn_id(rider_turn)}, dict(live, id=history.turn_id(bot_turn))
+        return {"id": history.turn_id(rider_turn)}, dict(live, id=history.turn_id(bot_turn), text=reply.text or "")
     rider_id, bot_id = unrecorded_ids(frame.conversation_id, frame.client_message_id)
     said = reply.metadata.get("transcript_text", message.message_text) or ""
     ack = {"id": rider_id, "role": "customer", "text": redact_pii(said), "at": at,
            "attachments": [{"kind": a.kind, "url": recorded_url(a.url)} for a in message.attachments]}
-    answer = dict(live, id=bot_id, role="bot", text=redact_pii(reply.text or ""), at=at,
+    answer = dict(live, id=bot_id, role="bot", text=reply.text or "", at=at,
                   attachments=[{"kind": a.kind, "url": recorded_url(a.url)} for a in reply.attachments])
     return ack, answer
 
@@ -289,7 +314,9 @@ def _unrecorded_turn(kept: Dict[str, Any], conversation_id: str) -> TranscriptTu
 def answer_frames(frame: MessageFrame, ack: Dict[str, Any], reply: Dict[str, Any],
                   turns: Optional[Tuple[TranscriptTurn, TranscriptTurn]], signer: history.Signer,
                   now: Any) -> List[Dict[str, Any]]:
-    """The `ack` and the `reply`, with fresh links."""
+    """The `ack` and the `reply`, with fresh links. The reply's text is as
+    it was sent, what POST /message would have returned (the plan's Ruling
+    16); history shows it as stored, masked."""
     if turns is not None:
         rider_view = history.message_view(turns[0], signer, now)
         bot_view = history.message_view(turns[1], signer, now)
@@ -298,6 +325,7 @@ def answer_frames(frame: MessageFrame, ack: Dict[str, Any], reply: Dict[str, Any
                           id=ack["id"])
         bot_view = dict(history.message_view(_unrecorded_turn(reply, frame.conversation_id), signer, now),
                         id=reply["id"])
+    bot_view["text"] = reply["text"]
     media = list(reply.get("media") or [])
     for n, shown in enumerate(bot_view["attachments"]):
         extra = media[n] if n < len(media) else {}
@@ -340,6 +368,8 @@ class ChatSocket:
         self.sock = sock
         self.frames: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
         self.answering: Set["asyncio.Task[None]"] = set()
+        # The message each answering task is for: one per message per socket.
+        self.working: Dict[str, "asyncio.Task[None]"] = {}
         self.bad_in_a_row = 0
         self.fault = False
 
@@ -415,18 +445,33 @@ class ChatSocket:
             # Not handled: the app sends it again on its next socket.
             self._logged("amiigo", TOKEN_EXPIRED)
         else:
-            await self._admit_message(read)
+            await self._message(read)
         return None
 
     # -- admitting a message -------------------------------------------------------
 
-    async def _admit_message(self, frame: MessageFrame) -> None:
+    async def _message(self, frame: MessageFrame) -> None:
+        """Every message frame counts against the rider's allowance, resends
+        too; a resend this socket is already answering is folded into that
+        answer, so each socket waits on a message at most once."""
+        if not self.context.message_limiter.allow(self.rider):
+            await self._refuse(frame.client_message_id, RATE_LIMITED)
+            return
         rid = receipt_id(self.rider.user_key, frame.client_message_id)
+        if rid in self.working:
+            self._logged("amiigo", "coalesced")
+            return
         try:
-            admission = await anyio.to_thread.run_sync(self._admit, frame, rid)
+            admission = await self._store(self._admit, frame, rid)
         except StoreUnavailable as exc:
-            # Whose chat it is cannot be told: refused whole, never guessed.
+            # The receipts cannot be read: exactly once cannot be kept, so
+            # nothing runs (only the ownership check fails open, Ruling 13).
             self._logged("amiigo", "store_unavailable", error=type(exc).__name__)
+            self._fail()
+            return
+        except Exception as exc:
+            # A fault while admitting: logged by its class, the socket closes 1011.
+            self._logged("amiigo", "fault", error=type(exc).__name__)
             self._fail()
             return
         if admission.error is not None:
@@ -434,37 +479,57 @@ class ChatSocket:
             return
         task = asyncio.create_task(self._answer(frame, rid, admission))
         self.answering.add(task)
-        task.add_done_callback(self._answered)
+        self.working[rid] = task
+        task.add_done_callback(functools.partial(self._answered, rid))
 
     def _admit(self, frame: MessageFrame, rid: str) -> Admission:
         """Blocking: the receipts and the conversation's records."""
-        context, rider = self.context, self.rider
+        context, rider, conversation_id = self.context, self.rider, frame.conversation_id
         receipts = context.receipts
-        existing = receipts.get(rid)
-        if existing is not None and existing["state"] in (PROCESSING, DONE):
+        existing = receipts.answering(rid)
+        if existing is not None:
             return self._same_message(existing, frame)
-        if not context.message_limiter.allow(rider):
-            return Admission(error=RATE_LIMITED)
-        holder = receipts.in_flight(frame.conversation_id)
+        holder = receipts.in_flight(conversation_id)
         if holder is not None:
-            # Another rider writing here is not found; the rider's own
-            # message without its reply yet is busy.
-            return Admission(error=CONVERSATION_BUSY if holder == rider.user_key else CONVERSATION_NOT_FOUND)
-        if not history.rider_may_use(context.stores, rider, frame.conversation_id):
+            return self._held(frame, rid, holder)
+        if not self._may_use(conversation_id):
             return Admission(error=CONVERSATION_NOT_FOUND)
-        video, missing = self._uploads(frame)
-        if missing:
-            return Admission(error=UPLOAD_NOT_FOUND)
-        outcome, doc = receipts.claim(rid, rider.user_key, frame.conversation_id)
+        error, video = self._uploads(frame)
+        if error is not None:
+            return Admission(error=error)
+        outcome, doc = receipts.claim(rid, rider.user_key, conversation_id)
         if outcome == DUPLICATE:
             return self._same_message(doc, frame)
         if outcome == BUSY:
-            return Admission(error=self._busy(frame.conversation_id))
+            return self._held(frame, rid, receipts.in_flight(conversation_id))
+        # The chat may have become someone else's between the check and the
+        # claim: looked at again, and the claim let go if so.
+        if not self._may_use(conversation_id):
+            receipts.release(rid)
+            return Admission(error=CONVERSATION_NOT_FOUND)
         return Admission(video=video)
 
-    def _busy(self, conversation_id: str) -> str:
-        holder = self.context.receipts.in_flight(conversation_id)
-        return CONVERSATION_NOT_FOUND if holder not in (None, self.rider.user_key) else CONVERSATION_BUSY
+    def _may_use(self, conversation_id: str) -> bool:
+        """history.rider_may_use, failing open when the store cannot answer
+        (the plan's Ruling 13): the turn then meets the same store, and the
+        runtime's outage path answers, a handover or a safety report's steps
+        and 112, rather than the socket closing on a rider reporting smoke."""
+        try:
+            return history.rider_may_use(self.context.stores, self.rider, conversation_id)
+        except StoreUnavailable as exc:
+            self._noted("amiigo_owner_check_failed", "amiigo", error=type(exc).__name__)
+            return True
+
+    def _held(self, frame: MessageFrame, rid: str, holder: Optional[str]) -> Admission:
+        """The conversation has a message in flight. Another rider's: not
+        found. The rider's own: this very message, claimed a moment ago on
+        another socket, or another one, and busy."""
+        if holder is not None and holder != self.rider.user_key:
+            return Admission(error=CONVERSATION_NOT_FOUND)
+        existing = self.context.receipts.answering(rid)
+        if existing is not None:
+            return self._same_message(existing, frame)
+        return Admission(error=CONVERSATION_BUSY)
 
     @staticmethod
     def _same_message(receipt: Dict[str, Any], frame: MessageFrame) -> Admission:
@@ -474,47 +539,55 @@ class ChatSocket:
             return Admission(error=BAD_FRAME)
         return Admission(duplicate=True)
 
-    def _uploads(self, frame: MessageFrame) -> Tuple[bool, bool]:
-        """(a video among them, one is not there), by a look that claims
-        nothing. prepare_turn checks each again as it claims it."""
+    def _uploads(self, frame: MessageFrame) -> Tuple[Optional[str], bool]:
+        """(the refusal, a video among them), by a look that claims nothing.
+        prepare_turn checks each again as it claims it."""
         if not frame.upload_ids:
-            return False, False
+            return None, False
         uploads = self.context.uploads
         if uploads is None:
-            return False, True
+            # No media storage on this server (Ruling 15).
+            return STORAGE_UNAVAILABLE, False
         video = False
         for upload_id in frame.upload_ids:
             pending = uploads.peek(upload_id)
             if pending is None:
-                return False, True
+                return UPLOAD_NOT_FOUND, False
             video = video or pending.kind == "videos"
-        return video, False
+        return None, video
 
     # -- answering a message -----------------------------------------------------------
+
+    async def _store(self, fn: Any, *args: Any) -> Any:
+        """Short blocking work (the receipts, the conversation's records) on
+        the socket's own store threads."""
+        return await anyio.to_thread.run_sync(fn, *args, limiter=_threads(self.context, STORE_THREADS))
 
     async def _answer(self, frame: MessageFrame, rid: str, admission: Admission) -> None:
         if not admission.duplicate:
             await self._turn(frame, rid, admission.video, typed=False)
             return
         # Accepted already, here or on another socket: wait for its answer,
-        # or take it over when the first attempt let it go.
+        # reading the receipt once a poll, or admit it afresh when the first
+        # attempt let it go or died with its server.
         typed = False
         receipts = self.context.receipts
         while not self.sock.closed:
-            outcome, doc = await anyio.to_thread.run_sync(receipts.claim, rid, self.rider.user_key,
-                                                          frame.conversation_id)
-            if outcome == CLAIMED:
-                await self._turn(frame, rid, False, typed=typed)
-                return
-            if outcome == BUSY:
-                await self._refuse(frame.client_message_id, await anyio.to_thread.run_sync(
-                    self._busy, frame.conversation_id))
-                return
+            doc = await self._store(receipts.answering, rid)
+            if doc is None:
+                again = await self._store(self._admit, frame, rid)
+                if again.error is not None:
+                    await self._refuse(frame.client_message_id, again.error)
+                    return
+                if not again.duplicate:
+                    await self._turn(frame, rid, again.video, typed=typed)
+                    return
+                continue
             if doc["conversation_id"] != frame.conversation_id:
                 await self._refuse(frame.client_message_id, BAD_FRAME)
                 return
             if doc["state"] == DONE:
-                result = await anyio.to_thread.run_sync(self._replay, frame, doc)
+                result = await self._store(self._replay, frame, doc)
                 await self._deliver(frame, result)
                 return
             if not typed:
@@ -525,9 +598,11 @@ class ChatSocket:
     async def _turn(self, frame: MessageFrame, rid: str, video: bool, typed: bool) -> None:
         if not typed:
             await self.sock.send(typing_frame(frame.conversation_id, video))
-        # Abandoned, not cancelled, when the socket goes: the turn finishes
-        # and its receipt is written in the worker thread.
-        result = await anyio.to_thread.run_sync(self._run_turn, frame, rid, abandon_on_cancel=True)
+        # On the socket's own turn threads, never anyio's default pool that
+        # POST /message shares. Abandoned, not cancelled, when the socket
+        # goes: the turn finishes and its receipt is written in the thread.
+        result = await anyio.to_thread.run_sync(self._run_turn, frame, rid, abandon_on_cancel=True,
+                                                limiter=_threads(self.context, TURN_THREADS))
         await self._deliver(frame, result)
 
     async def _deliver(self, frame: MessageFrame, result: TurnResult) -> None:
@@ -537,8 +612,10 @@ class ChatSocket:
         for sent in result.frames:
             await self.sock.send(sent)
 
-    def _answered(self, task: "asyncio.Task[None]") -> None:
+    def _answered(self, rid: str, task: "asyncio.Task[None]") -> None:
         self.answering.discard(task)
+        if self.working.get(rid) is task:
+            del self.working[rid]
         if not task.cancelled() and task.exception() is not None:
             # A fault in the turn (_run_turn released the message, so it may
             # be sent again): the socket closes 1011.
@@ -677,9 +754,10 @@ async def serve(websocket: WebSocket, context: AmiigoContext) -> None:
     chat = ChatSocket(websocket, context, rider, sock)
     code: Optional[int] = None
     reason = "ended"
-    context.sockets.add(rider.user_key, sock)
     try:
         await sock.send({"type": "ready", "protocol": PROTOCOL, "server_time": history.utc_text(context.clock())})
+        # Only after ready: nothing pushed (ticket_update) may come before it.
+        context.sockets.add(rider.user_key, sock)
         log.emit("amiigo_socket_open", "amiigo", rider_hash=rider.rider_hash)
         code, reason = await chat.run()
     except asyncio.CancelledError:
