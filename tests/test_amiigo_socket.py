@@ -34,7 +34,8 @@ from emotorad_ai.amiigo import auth as auth_module
 from emotorad_ai.amiigo import history
 from emotorad_ai.amiigo import receipts as receipts_module
 from emotorad_ai.amiigo.auth import LEEWAY, rider_from_header, rider_hash_of
-from emotorad_ai.amiigo.socket import ChatSocket, MessageFrame
+from emotorad_ai.amiigo.common import AmiigoContext
+from emotorad_ai.amiigo.socket import ChatSocket, MessageFrame, next_poll
 from emotorad_ai.amiigo.receipts import (
     BUSY,
     CLAIMED,
@@ -960,6 +961,26 @@ class OneAtATimeTests(SocketCase):
         self.assertEqual(len(self.turns.calls), 1)
         self.assertEqual([f["type"] for f in answers_first], ["ack", "reply"])
         self.assertEqual(answers_second, answers_first)
+
+    def test_a_waiting_socket_sleeps_as_next_poll_says(self):
+        gate = self.gated()
+        slept = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(seconds):
+            slept.append(seconds)
+            await real_sleep(0.01)
+
+        with self.socket() as ws, self.socket() as second:
+            self.send(ws, message())
+            self.assertTrue(self.turns.started.wait(TIMEOUT))
+            with mock.patch("emotorad_ai.amiigo.socket._pause", side_effect=sleep):
+                self.send(second, message())
+                self.assertEqual(frame(second)["type"], "bot_typing")
+                wait_until(lambda: len(slept) >= 4)
+                gate.set()
+                self.assertEqual([frame(second)["type"], frame(second)["type"]], ["ack", "reply"])
+        self.assertEqual(slept[:4], [0.005, 0.01, 0.02, 0.02])
 
     def test_a_message_whose_socket_closed_mid_turn_is_saved_and_answered_on_resend(self):
         gate = self.gated()
@@ -2000,6 +2021,18 @@ class WiringTests(unittest.TestCase):
         self.assertIsInstance(stores.amiigo_receipts, InMemoryAmiigoReceipts)
         [event] = self.missing(log)
         self.assertEqual(event["reason"], "indexes_missing")
+
+    def test_a_waiting_socket_backs_off_to_a_poll_a_second(self):
+        # The final review's Minor 9: a resend waiting on another socket's
+        # turn reads the receipt at 0.25, 0.5, then every 1 s, not 4 a second
+        # for the turn's whole minute on the socket's 8 store threads.
+        self.assertEqual(AmiigoContext(stores=None, tokens=None, log=None).socket_poll_seconds, 1.0)
+        delays, delay = [], None
+        for _ in range(5):
+            delay = next_poll(delay, 1.0)
+            delays.append(delay)
+        self.assertEqual(delays, [0.25, 0.5, 1.0, 1.0, 1.0])
+        self.assertEqual(next_poll(None, 0.02), 0.005)
 
     def test_the_api_hands_the_socket_its_receipts_its_turns_and_its_limits(self):
         with mock.patch.object(auth_module, "_not_configured_logged", True):

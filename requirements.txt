@@ -7,6 +7,10 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 httpx>=0.27
 websockets>=12.0
+# The Amiigo chat socket (src/emotorad_ai/amiigo/socket.py) runs each turn with
+# anyio.to_thread.run_sync(..., abandon_on_cancel=True), added in anyio 4.1.
+# FastAPI brings anyio in already; this says which version the socket needs.
+anyio>=4.1
 
 # Claude on Bedrock, once EMOTORAD_AI_MODE=bedrock is set (see api.py).
 anthropic>=0.40

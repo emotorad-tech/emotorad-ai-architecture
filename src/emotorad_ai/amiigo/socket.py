@@ -146,6 +146,18 @@ TURN_THREADS = "turns"
 STORE_THREADS = "store"
 
 
+# The waiter's pause between two looks at a receipt (a seam for the tests).
+_pause = asyncio.sleep
+
+
+def next_poll(delay: Optional[float], cap: float) -> float:
+    """The next pause of a socket waiting on the same message's turn
+    elsewhere: a quarter of `cap` first, then doubled each time up to `cap`
+    (AmiigoContext.socket_poll_seconds, a second), so a turn that takes a
+    minute costs about 60 reads, not 240 (the final review's Minor 9)."""
+    return cap / 4 if delay is None else min(delay * 2, cap)
+
+
 def _threads(context: AmiigoContext, kind: str) -> anyio.CapacityLimiter:
     """The socket's own worker threads on this event loop. One pair per
     loop, made on first use: an anyio limiter belongs to the loop it waits
@@ -687,6 +699,7 @@ class ChatSocket:
             # reading the receipt once a poll, or admit it afresh when the first
             # attempt let it go or died with its server.
             typed = False
+            delay: Optional[float] = None
             receipts = self.context.receipts
             while not self.sock.closed:
                 doc = await self._store(receipts.answering, rid)
@@ -718,7 +731,8 @@ class ChatSocket:
                 if not typed:
                     await self.sock.send(typing_frame(frame.conversation_id, False))
                     typed = True
-                await asyncio.sleep(self.context.socket_poll_seconds)
+                delay = next_poll(delay, self.context.socket_poll_seconds)
+                await _pause(delay)
         finally:
             if slot is not None:
                 slot.give_back()

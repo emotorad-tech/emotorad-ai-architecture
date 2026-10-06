@@ -58,8 +58,10 @@ UPLOADS_PER_MINUTE = 20
 MESSAGES_PER_MINUTE = 20
 # "The server closes a socket that sends nothing for 10 minutes."
 SOCKET_IDLE_SECONDS = 600.0
-# How often a socket waiting on the same message's turn elsewhere looks again.
-SOCKET_POLL_SECONDS = 0.25
+# How often, at most, a socket waiting on the same message's turn elsewhere
+# looks again: it starts at a quarter of this and backs off to it
+# (socket.next_poll; the final review's Minor 9).
+SOCKET_POLL_SECONDS = 1.0
 # A rider's messages being answered at once, across all their sockets (the
 # final review's Minor 3): a third is `too_many_in_flight`.
 TURNS_IN_FLIGHT = 2
