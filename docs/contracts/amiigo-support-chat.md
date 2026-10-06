@@ -4,7 +4,7 @@ Oct 6, 2026 · @Sagnik Mukherjee · v1, **Proposed**. Replaces the draft of 30 S
 
 ## What changed from the earlier drafts
 
-- **The chat runs over a WebSocket.** The app sends the rider's messages and receives the bot's replies, a typing state and ticket updates on one connection. The proposed `POST /amiigo/v1/message` is withdrawn.
+- **The chat runs over a WebSocket.** The app sends the rider's messages and receives the bot's replies, a typing state and ticket updates on one connection. There is no HTTP endpoint for sending a message: the proposed `POST /amiigo/v1/message` is withdrawn, and messages are sent only as `message` frames on the socket.
 - **The server keeps the history.** When the connection has closed (the rider left the chat, the app went to the background, the network dropped), the app restores the chat with a `GET` when the rider comes back. Uninstalling the app or changing phone loses nothing.
 - **Ticket closure comes from Zoho Desk.** When the support team closes a ticket in Zoho Desk, Zoho tells our server; the app gets a `ticket_update` on the socket, and the chat's history shows the ticket as closed.
 - **Every app call carries the rider's Amiigo access token** in the `Authorization` header, including the socket's opening handshake. There is no test session in this contract.
@@ -20,6 +20,7 @@ Oct 6, 2026 · @Sagnik Mukherjee · v1, **Proposed**. Replaces the draft of 30 S
 | History | Kept on our server; no way for the app to read it | `GET /amiigo/v1/conversations` and `GET /amiigo/v1/conversations/{conversation_id}/messages` |
 | Tickets | Recorded with our `EM-` reference and sent to a Zoho Desk test department on staging | The same, plus the closed status from Zoho Desk |
 | Photos and videos | Stored in our S3 bucket | The same, by upload |
+| Bike, warranty and service data | Test data in the app's test session | The rider's bikes and warranty from the OMS, and their Amiigo bikes, service status and recent rides |
 
 None of v1 is built yet. We build it next and tell you when it is on staging. Until it ships, anything here can change; once it ships, v1 only gains things (see "Versioning").
 
@@ -33,6 +34,23 @@ The app must not go to real riders until two things are done: engineering signs 
 4. **The socket closes.** Nothing is lost: a reply the bot was still working on is finished and saved on the server.
 5. **The rider comes back.** Call `GET …/messages?after=<id of the last message the app holds>` to fetch everything that arrived while the socket was closed, then open the socket again. After a reinstall, step 1 restores the chat from scratch.
 6. **Support closes the ticket in Zoho Desk.** If the socket is open, the app gets `ticket_update`. Either way the chat's history shows the ticket as closed, with a notice message.
+
+If the socket cannot be opened, keep retrying with the back-off in "Close codes" and show the rider that the chat is reconnecting; the history stays readable with `GET` meanwhile.
+
+## What the bot knows about the rider
+
+- From the token, the bot knows the rider's verified phone number. From that number it looks up their bikes and warranty in EMotorad's order system, and their bikes, service status and recent rides in the Amiigo app.
+- So the bot never asks a signed-in rider for their bike model, frame number or purchase date, and never asks for a one-time code.
+- A rider with several bikes is asked which one the chat is about.
+- A rider with no registered bike can still chat; the bot offers to help register the warranty.
+
+## Conversation lifecycle
+
+- A chat is one `conversation_id`, a UUID the app makes when the rider starts a new chat. The app sends it with every message of that chat.
+- The bot reads the last 12 exchanges of the chat when it answers.
+- For each rider, the bot also remembers a one-line summary of their last 3 chats (topic, bike, outcome, ticket), so it can say "last time we spoke about…".
+- The server keeps a chat's working state for 48 hours after its last message, and the messages themselves permanently (until the rider asks for them to be deleted). After 48 hours of silence the same `conversation_id` still works, but the bot starts that chat afresh, so offer the rider a new chat instead (`can_continue` says which).
+- One message at a time per chat: send the next message only after the reply to the previous one has arrived.
 
 ## Base URLs
 
@@ -370,6 +388,12 @@ The server sends no quick-reply chips of its own. Chips the app offers at the st
 - v1 reports two statuses, `open` and `closed`. Zoho's other states (on hold, escalated) show as `open`.
 - The rider can always write again after a ticket closes; the bot answers as usual.
 
+**When the bot hands a chat to the support team.** A signed-in rider always has a number on record, so the handover reply is: "I've passed this conversation to our support team, so you won't need to repeat yourself. They will be in touch. Your reference is EM-…", with `escalated: true` and the reference in `ticket`. This wording is a draft until the support lead confirms it. Support contacts the rider from Zoho Desk; by phone or email is not decided, so the app promises no channel or time.
+
+**Evidence before a fault ticket.** For a fault with the bike (battery or motor), the bot raises a ticket, or hands the chat to a person, only after a video or photo shows the fault. It asks for a short video first, and a photo if the rider can't take one. After three asks with nothing that shows the fault, it raises no ticket and gives EMotorad's customer care contact instead. Safety reports, delivery and order questions, and warranty registration never wait for evidence.
+
+**Safety reports.** Smoke, fire, swelling, a burning smell, brakes that do not work and similar reports skip everything else: the bot raises a top-priority ticket at once, with no evidence needed, and the reply carries stop-using instructions. Show them prominently.
+
 ## Deleting conversation data
 
 The app's "Delete my conversation data" button lets a signed-in rider ask for everything the support chat holds about them to be deleted: their past chats, the photos and videos they sent, and the record of where they chatted from. It does not delete their warranty registration, orders, invoices or service tickets. Our team checks each request and deletes the data within 30 days. A rider can also ask in the chat ("delete my data"); both make the same request, and a rider has at most one pending request. Once the deletion is done, history returns nothing for those chats.
@@ -437,6 +461,8 @@ The version is in the path, `/amiigo/v1/`, and in `ready.protocol`. Within v1, c
 | When a rider writes again after their ticket closed and needs help again, does the same ticket reopen or a new one start? | Support lead | A new ticket, with the old reference noted on it |
 | Wording of the closed-ticket notice | Support lead | The draft in `ticket_update` |
 | When a rider changes their number, should history follow the account? | Both | Not in v1: history belongs to the number in the token |
+| Which `screen` names will the app send? | App team | A short fixed list, for example `battery_health`, `bike_home`, `service`, `help` |
+| Should a chat opened from one bike's screen name that bike? | Both | An optional `vin` field on `message`, so a rider with several bikes is not asked which one |
 | Are the page sizes right for the app's screens? | App team | 20 chats and 50 messages a page |
 
 ## For the server team: the Zoho Desk webhook
