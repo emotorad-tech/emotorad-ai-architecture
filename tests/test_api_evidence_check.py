@@ -18,7 +18,7 @@ from emotorad_ai.contract import Reply
 from emotorad_ai.evidence_check import INLINE_LIMIT, EvidenceCheckError, EvidenceVerdict
 from tests.test_api_media_persistence import jpeg_data_url
 from tests.test_api_photo_check import FakeChecker as FakePhotoChecker
-from tests.test_api_uploads import _Store, fresh_api
+from tests.test_api_uploads import _Store, _Summariser, fresh_api
 
 PASS = EvidenceVerdict(shows_part=True, fault_visible=True, matches_complaint=True,
                        seen="The charger light stays red.", missing="")
@@ -47,6 +47,17 @@ def photo():
     return {"kind": "image", "url": jpeg_data_url()}
 
 
+class SlowSummariser(_Summariser):
+    def __init__(self, text="the pack is on a table", delay=0.0):
+        super().__init__(text)
+        self.delay = delay
+
+    def summarise(self, data, mime, name="video"):
+        if self.delay:
+            time.sleep(self.delay)
+        return super().summarise(data, mime, name)
+
+
 class EvidenceAtIngestTests(unittest.TestCase):
     def setUp(self):
         self.store = _Store()
@@ -72,9 +83,9 @@ class EvidenceAtIngestTests(unittest.TestCase):
             state.history.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
         return state
 
-    def post(self, text="here is the charger light", attachments=None, cid="c1"):
+    def post(self, text="here is the charger light", attachments=None, cid="c1", **extra):
         body = {"conversation_id": cid, "session_token": "sess-ananya", "text": text,
-                "attachments": attachments if attachments is not None else [photo()]}
+                "attachments": attachments if attachments is not None else [photo()], **extra}
         r = self.client.post("/message", json=body)
         self.assertEqual(r.status_code, 200, r.text)
         return self.seen[-1]
@@ -203,6 +214,37 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.5)
         self.assertEqual(self.verdict(message), {"error": "timeout"})
 
+    def test_with_a_clip_it_waits_as_long_as_the_video_summary_may(self):
+        self.checker.delay = 0.5
+        self.route()
+        video = self.upload()
+        with mock.patch.object(self.api, "PHOTO_CHECK_DEADLINE_SECONDS", 0.2), \
+                mock.patch.object(self.api, "VIDEO_SUMMARY_SECONDS", 3.0):
+            message = self.post(attachments=[{"upload_id": video["upload_id"]}])
+        self.assertEqual(self.verdict(message)["passed"], True)
+
+    def test_with_a_clip_past_the_video_deadline_it_is_not_waited_for(self):
+        self.checker.delay = 2.0
+        self.route()
+        video = self.upload()
+        with mock.patch.object(self.api, "PHOTO_CHECK_DEADLINE_SECONDS", 0.1), \
+                mock.patch.object(self.api, "VIDEO_SUMMARY_SECONDS", 0.3):
+            started = time.monotonic()
+            message = self.post(attachments=[{"upload_id": video["upload_id"]}])
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(self.verdict(message), {"error": "timeout"})
+
+    def test_it_runs_beside_the_video_summary(self):
+        self.api.VIDEO_SUMMARISER = SlowSummariser(delay=0.5)
+        self.checker.delay = 0.5
+        self.route()
+        video = self.upload()
+        started = time.monotonic()
+        message = self.post(attachments=[{"upload_id": video["upload_id"]}])
+        self.assertLess(time.monotonic() - started, 0.95)  # one after the other would be 1 s
+        self.assertEqual(self.verdict(message)["passed"], True)
+        self.assertEqual(len(self.api.VIDEO_SUMMARISER.calls), 1)
+
     def test_it_runs_beside_the_photo_check(self):
         self.api.PHOTO_CHECKER = FakePhotoChecker(answers=([],), delay=0.5)
         self.checker.delay = 0.5
@@ -212,6 +254,20 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 0.95)  # one after the other would be 1 s
         self.assertEqual(self.verdict(message)["passed"], True)
 
+    def test_a_tester_pinned_to_a_fault_agent_is_checked_on_the_first_message(self):
+        message = self.post(text="here it is", cid="c-pin", agent="motor_support")
+        self.assertEqual(self.checker.calls[0]["component"], "motor")
+        self.assertEqual(self.verdict(message)["passed"], True)
+
+    def test_a_pill_naming_the_fault_is_checked_on_the_first_message(self):
+        self.post(text="here it is", cid="c-pill", pill="battery_issue")
+        self.assertEqual(self.checker.calls[0]["component"], "battery")
+
+    def test_a_pin_to_an_agent_that_is_not_a_fault_agent_is_not_checked(self):
+        message = self.post(text="here it is", cid="c-pin", agent="late_warranty")
+        self.assertEqual(self.checker.calls, [])
+        self.assertIsNone(self.verdict(message))
+
     def test_what_gemini_wrote_is_never_logged(self):
         self.checker.verdict = FAIL
         self.route()
@@ -220,6 +276,76 @@ class EvidenceAtIngestTests(unittest.TestCase):
         self.assertNotIn("SECRET", repr(self.api.log.events))
         (event,) = [e for e in self.api.log.events if e["event"] == "evidence_check_done"]
         self.assertEqual(event["passed"], False)
+
+
+class SafetyDoesNotWaitTests(unittest.TestCase):
+    """A safety report is immediate (the person's decision): it never waits
+    for the evidence check, which safety does not use (the review of 6
+    October 2026)."""
+
+    def setUp(self):
+        self.store = _Store()
+        self.api = fresh_api(self.store)
+        self.addCleanup(lambda: fresh_api(None))
+        self.client = TestClient(self.api.app)
+        self.api.VIDEO_SUMMARISER = None
+        self.api.PHOTO_CHECKER = None
+        self.checker = FakeEvidenceChecker(delay=2.0)
+        self.api.EVIDENCE_CHECKER = self.checker
+        self.api.runtime.evidence_check = True
+        self.seen = []
+        scripted = Reply(conversation_id="c1", text="ok", handled_by="test")
+        patch = mock.patch.object(self.api.runtime, "handle", side_effect=lambda m: self.seen.append(m) or scripted)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.api.stores.conversations.get("c1").route_to("battery_support")
+
+    def post(self, text, attachments):
+        started = time.monotonic()
+        r = self.client.post("/message", json={"conversation_id": "c1", "session_token": "sess-ananya",
+                                               "text": text, "attachments": attachments})
+        self.assertEqual(r.status_code, 200, r.text)
+        return self.seen[-1], time.monotonic() - started
+
+    def upload(self):
+        body = self.client.post("/uploads", json={
+            "session_token": "sess-ananya", "conversation_id": "c1", "tree": "customers",
+            "mime_type": "video/mp4", "size_bytes": 9,
+        }).json()
+        self.store.objects[body["key"]] = {"size": 9, "mime": "video/mp4"}
+        return body
+
+    def test_a_safety_text_with_a_photo_is_not_held_for_the_check(self):
+        message, took = self.post("my battery is smoking", [photo()])
+        self.assertLess(took, 1.0)
+        self.assertEqual(self.checker.calls, [])
+        self.assertNotIn("evidence_verdict", message.entry_metadata)
+
+    def test_a_motor_hazard_in_the_text_is_not_held_either(self):
+        message, took = self.post("the brakes are not working at all", [photo()])
+        self.assertLess(took, 1.0)
+        self.assertNotIn("evidence_verdict", message.entry_metadata)
+
+    def test_a_photo_the_photo_check_finds_a_hazard_in_is_not_held(self):
+        self.api.PHOTO_CHECKER = FakePhotoChecker(answers=(["swelling"],))
+        message, took = self.post("here is the battery", [photo()])
+        self.assertLess(took, 1.5)
+        self.assertNotIn("evidence_verdict", message.entry_metadata)
+        self.assertTrue(message.attachments[0].summary)
+
+    def test_a_clip_whose_description_names_a_hazard_is_not_held(self):
+        self.api.VIDEO_SUMMARISER = _Summariser("Smoke rises from the battery pack while it charges.")
+        video = self.upload()
+        message, took = self.post("here is the video", [{"upload_id": video["upload_id"]}])
+        self.assertLess(took, 1.5)
+        self.assertNotIn("evidence_verdict", message.entry_metadata)
+
+    def test_a_clip_that_shows_no_hazard_is_still_checked(self):
+        self.checker.delay = 0.0
+        self.api.VIDEO_SUMMARISER = _Summariser("No smoke or swelling is visible; the charger light stays red.")
+        video = self.upload()
+        message, _ = self.post("here is the video", [{"upload_id": video["upload_id"]}])
+        self.assertEqual(message.entry_metadata["evidence_verdict"]["passed"], True)
 
 
 class RuntimeKeepsItTests(unittest.TestCase):

@@ -66,6 +66,7 @@ from .contract import new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue
 from .media import sendable as media_sendable
+from .guardrails import check_safety, check_safety_in_description
 from .identity import IdentityResolver
 from .address import PincodeDirectory
 from .location import NominatimGeocoder, describe_location, resolve_location
@@ -805,6 +806,13 @@ def _inbound_attachments(
     # The description of a live hazard becomes the attachment's summary,
     # which the safety gate scans; a photo with none gets no summary.
     notes, unchecked = _check_photos(photo_jobs, conversation_id)
+    hazard_seen = bool(notes) or any(
+        check_safety_in_description(claim.get("summary") or "").triggered for claim in claims.values())
+    if evidence is not None and hazard_seen:
+        # A safety report is immediate and never needs evidence: the turn
+        # does not wait for the check (the review of 6 October 2026).
+        log.emit("evidence_check_skipped", conversation_id, error="safety")
+        evidence = None
     for (where, key), note in notes.items():
         if where == "upload":
             claims[key]["summary"] = note
@@ -835,7 +843,11 @@ def _evidence_subject(body: MessageIn, conversation_id: str) -> Optional[Tuple[s
         state = None
     component = evidence_check.fault_component(state)
     if component is None and (state is None or state.agent is None):
-        topic = topic_from_pill(body.pill) or classify_issue(body.text or "")
+        # A tester's pin (/chat?agent=battery_support) routes this turn to
+        # that agent, so its media is the fault's evidence; then the pill or
+        # the words, as triage reads them.
+        topic = (evidence_check.FAULT_AGENTS.get(body.agent or "") or topic_from_pill(body.pill)
+                 or classify_issue(body.text or ""))
         component = topic if topic in evidence_check.COMPONENTS else None
     if component is None:
         return None
@@ -852,6 +864,11 @@ def _start_evidence_check(
     None when nothing is checked: the switch off, no photo or video, or a
     chat that is not about a bike fault."""
     if not runtime.evidence_check or not jobs:
+        return None
+    if check_safety(body.text or "").triggered:
+        # A safety report (battery or motor terms, the safety gate's own plain
+        # scan): immediate, and exempt from evidence, so nothing is checked
+        # and the turn never waits (the review of 6 October 2026).
         return None
     subject = _evidence_subject(body, conversation_id)
     if subject is None:

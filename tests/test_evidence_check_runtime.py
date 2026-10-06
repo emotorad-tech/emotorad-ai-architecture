@@ -23,7 +23,7 @@ from emotorad_ai.evidence_check import (
     final_text,
     is_fault_chat,
 )
-from emotorad_ai.guardrails import HANDOFF_MESSAGE, HANDOVER_RECORDED_MESSAGE
+from emotorad_ai.guardrails import HANDOFF_MESSAGE, HANDOVER_RECORDED_MESSAGE, SAFETY_MESSAGE
 from emotorad_ai.identity import IdentityResolver
 from emotorad_ai.llm import ScriptedClaude, call_tool, say
 from emotorad_ai.observability import EventLog
@@ -468,6 +468,10 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(reply.handled_by, "guardrail:battery_safety")
         (record,) = chat.records()
         self.assertEqual(record["kind"], "safety")
+        # The fixed safety text, with the case's reference; never an evidence ask.
+        self.assertIn(SAFETY_MESSAGE, reply.text)
+        self.assertIn(record["_id"], reply.text)
+        self.assertNotIn("video", reply.text.lower())
         self.assertNotIn("evidence_check", record)
         self.assertEqual(chat.state().evidence_asks, 0)
 
@@ -476,6 +480,8 @@ class SafetyTests(unittest.TestCase):
         reply = chat.say("my battery is swollen", FAIL, [PHOTO])
         self.assertEqual(chat.llm.requests, [])
         self.assertEqual(reply.handled_by, "guardrail:battery_safety")
+        self.assertIn(SAFETY_MESSAGE, reply.text)
+        self.assertNotIn("Thanks for sending that", reply.text)
         self.assertEqual(len(chat.records()), 1)
 
 
