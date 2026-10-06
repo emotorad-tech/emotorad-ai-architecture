@@ -136,7 +136,7 @@ Show `text` as one chat bubble, then any `attachments`, then any `actions`; use 
 | Part | What to show | Notes |
 | --- | --- | --- |
 | `text` | The bubble | Formatting used: `**bold**`, `*italic*`, `` `code` ``, bullet lines starting ` -  `, numbered lines ` 1.  `, and line breaks. Links and headings are not used: show any `[...]` or `#` as plain text. Escape the text before formatting it. |
-| First reply of a chat | As sent | It opens with a line saying the bot is an AI, not a person. That line is required; keep it. |
+| First reply of a chat | As sent | It opens with a line saying the bot is an AI, not a person. That line is required; keep it. Do not add your own "I'm an AI" greeting in the app: the server's line is the disclosure, and a second one tells the rider twice. A plain greeting such as "Hi! How can I help with your EMotorad bike today?" is fine. |
 | Languages | As sent | The bot answers in the rider's language: English, Hindi (Devanagari script) or Hinglish. Fonts must render Devanagari. |
 | `attachments[]` | An image or a video player under the bubble | `kind` is `image` or `video`. `url` is a signed link valid for 15 minutes: load it when the reply arrives and keep the image itself, not the link. Use `caption` as the caption and alt text, and `poster` as a video's still. |
 | `actions[]` | A button under the bubble | Today only `{"kind": "request_location", "label": "Share my location"}`. On tap, ask for location permission and send the next message with `location`. If the rider refuses, let them type their pincode instead. Ignore any `kind` you do not know. |
