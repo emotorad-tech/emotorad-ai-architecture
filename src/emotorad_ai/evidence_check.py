@@ -116,6 +116,22 @@ PROMPT = (
     "When unsure, answer false. Do not diagnose, do not guess at causes, and do not give advice."
 )
 
+# EMotorad's own reference pictures (the library's melted and normal
+# comparisons, 7 October 2026), sent before the customer's media for the
+# components that have them. Labelled as ours, so Gemini compares with them
+# and never counts them as evidence.
+REFERENCE_KEYS: Mapping[str, Tuple[str, ...]] = {
+    "battery": ("battery_terminals_melted_vs_normal", "controller_connector_melted_vs_normal",
+                "controller_connector_not_melted"),
+}
+REFERENCES_INTRO = (
+    "The pictures after this line are EMotorad's own reference pictures, not the customer's. Each shows what "
+    "a part looks like when it is normal or when it has melted. Use them only to compare with the customer's "
+    "media when it shows the same part. They are never evidence: judge shows_part, fault_visible and "
+    "matches_complaint on the customer's photos and videos alone."
+)
+CUSTOMER_MEDIA_LINE = "The customer's photos and videos:"
+
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 _SPACE = re.compile(r"\s+")
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
@@ -454,7 +470,8 @@ class OpenRouterEvidenceChecker:
         self.last_usage: Optional[Dict[str, Any]] = None
 
     def check(self, media: Sequence[Tuple[Media, str, str]], complaint: str, component: str, *,
-              deadline_at: Optional[float] = None, cancel: Optional[threading.Event] = None) -> EvidenceVerdict:
+              deadline_at: Optional[float] = None, cancel: Optional[threading.Event] = None,
+              references: Sequence[Tuple[bytes, str, str]] = ()) -> EvidenceVerdict:
         """Whether the media (bytes or a StoredClip, mime, name) shows the
         problem described.
 
@@ -464,7 +481,11 @@ class OpenRouterEvidenceChecker:
         takes at most half of what is left, the request the rest, and with
         less than MIN_REQUEST_SECONDS left the request is not sent
         (`timeout`). Once `cancel` is set, nothing more is done (`cancelled`):
-        ffmpeg is stopped and nothing is sent."""
+        ffmpeg is stopped and nothing is sent.
+
+        `references` (bytes, mime, caption) are EMotorad's reference pictures
+        (References.for_component), sent first under REFERENCES_INTRO; their
+        size comes off the customer's media's share of the inline limit."""
         from .llm import from_openai_response
         from .openrouter import CHAT_PATH, OpenRouterError
 
@@ -480,7 +501,8 @@ class OpenRouterEvidenceChecker:
         # this request: the customer's original is what is stored and sent
         # to Zoho, and the copy is never logged or kept.
         budget = min(self.shrink_budget, (ends - time.monotonic()) / 2)
-        media, shrunk = fit_inline(media, self.inline_limit, budget=budget, ffmpeg=self.ffmpeg, cancel=cancel)
+        limit = self.inline_limit - sum(len(data) for data, _, _ in references)
+        media, shrunk = fit_inline(media, limit, budget=budget, ffmpeg=self.ffmpeg, cancel=cancel)
         _stop_if(cancel)
         # The request has what is left of the deadline; with no caller's
         # deadline and nothing done first, the whole of its own.
@@ -495,6 +517,13 @@ class OpenRouterEvidenceChecker:
             {"type": "text", "text": PROMPT},
             {"type": "text", "text": "Component: %s\n<complaint>%s</complaint>" % (component, said)},
         ]
+        if references:
+            content.append({"type": "text", "text": REFERENCES_INTRO})
+            for data, mime, caption in references:
+                content.append({"type": "text", "text": caption})
+                content.append({"type": "image_url", "image_url": {
+                    "url": "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii"))}})
+            content.append({"type": "text", "text": CUSTOMER_MEDIA_LINE})
         for data, mime, _name in media:
             url = "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii"))
             if mime.startswith("video/"):
@@ -515,6 +544,41 @@ class OpenRouterEvidenceChecker:
             raise EvidenceCheckError(exc.code) from None
         self.last_usage = response.usage
         return _verdict(response.text or "")
+
+
+class References:
+    """The reference pictures for a component, read from the media bucket
+    once and kept in memory. Each is the library picture's 900 px WebP
+    copy; a picture missing from the catalogue or the bucket is left out
+    and named, never a reason to stop the check."""
+
+    def __init__(self, catalogue: Mapping[str, Mapping[str, Any]], store: Any) -> None:
+        self._catalogue = catalogue
+        self._store = store
+        self._kept: Dict[str, Tuple[bytes, str, str]] = {}
+        self._lock = threading.Lock()
+
+    def for_component(self, component: str) -> Tuple[List[Tuple[bytes, str, str]], List[str]]:
+        """([(bytes, mime, caption)], the keys that could not be read)."""
+        from .storage import keys as storage_keys
+
+        found: List[Tuple[bytes, str, str]] = []
+        missing: List[str] = []
+        for key in REFERENCE_KEYS.get(component, ()):
+            with self._lock:
+                kept = self._kept.get(key)
+            if kept is None:
+                item = self._catalogue.get(key) or {}
+                try:
+                    copy = storage_keys.derivative_keys("assets/" + str(item["id"]).lstrip("/"))["w900"]
+                    kept = (self._store.get_bytes(copy), "image/webp", str(item.get("caption") or ""))
+                except Exception:
+                    missing.append(key)
+                    continue
+                with self._lock:
+                    self._kept[key] = kept
+            found.append(kept)
+        return found, missing
 
 
 def _verdict(text: str) -> EvidenceVerdict:

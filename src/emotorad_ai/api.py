@@ -253,6 +253,10 @@ SERIAL_READER = (serial_read.serial_reader_from_env()
                  if SERIAL_ASK is not None and MEDIA_STORE is not None else None)
 # Two at a time across the server; the reply never waits for them.
 SERIAL_READ_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="serial-read")
+# The library's melted and normal comparisons, sent with a battery chat's
+# evidence (evidence_check.REFERENCE_KEYS), read from the bucket on first use.
+EVIDENCE_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE)
+                       if EVIDENCE_CHECKER is not None and MEDIA_STORE is not None else None)
 
 # conversation_id -> the keys already shown in it. Module-level because "already
 # sent" only means anything across turns, and a request-scoped dict would let
@@ -1085,7 +1089,14 @@ def _check_evidence(jobs: Sequence[_EvidenceJob], complaint: str, component: str
     # Photos are read here (14 MiB at most together, or refused above); a
     # clip stays in the bucket until the checker streams or reads it.
     media = [(load(), mime, name) for _, load, mime, name, _ in jobs]
-    verdict = EVIDENCE_CHECKER.check(media, complaint, component, deadline_at=deadline, cancel=cancel)
+    extra: Dict[str, Any] = {}
+    if EVIDENCE_REFERENCES is not None:
+        references, missing = EVIDENCE_REFERENCES.for_component(component)
+        if missing:
+            log.emit("evidence_references_missing", "evidence_check", keys=missing)
+        if references:
+            extra["references"] = references
+    verdict = EVIDENCE_CHECKER.check(media, complaint, component, deadline_at=deadline, cancel=cancel, **extra)
     # With the fault it was checked for: the runtime keeps a pass to it.
     return dict(verdict.as_dict(), component=component)
 
