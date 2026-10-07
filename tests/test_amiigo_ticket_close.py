@@ -683,6 +683,22 @@ class WebhookTests(SocketCase):
         self.assertEqual([(e["outcome"], e["ticket_hash"]) for e in self.logged()],
                          [("ignored", ticket_hash(ZOHO_ID))])
 
+    def test_zoho_desks_check_on_creation_is_200_behind_the_secret_and_changes_nothing(self):
+        reference = self.app_chat()
+        answer = self.client.get("%s/%s" % (WEBHOOK, SECRET))
+        self.assertEqual((answer.status_code, answer.json()), (200, {"status": "ok"}))
+        self.assertEqual(self.tickets.ticket_status(reference)["status"], "open")
+        self.assertEqual(self.conversations.notices_of(CID), [])
+        self.assertEqual([e["outcome"] for e in self.logged()], ["validated"])
+
+    def test_the_check_without_the_secret_is_refused(self):
+        for path in (WEBHOOK, "%s/%s" % (WEBHOOK, SECRET[:-1] + "x")):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 401)
+        self.ctx.zoho_webhook_secret = None
+        self.assertEqual(self.client.get("%s/%s" % (WEBHOOK, SECRET)).status_code, 503)
+        self.assertEqual([e["outcome"] for e in self.logged()], ["secret_invalid", "secret_invalid", "not_configured"])
+
     def test_a_payload_it_cannot_read_is_200_and_logged(self):
         self.app_chat()
         for raw in (b"not json", b"{}", b""):

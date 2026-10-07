@@ -24,6 +24,11 @@ documentation): a JSON list of events, each `{"eventType", "payload",
 closure; `status` is a name each department chooses, so it is never read),
 `payload.closedTime`, and `eventTime` when the ticket carries no closing time.
 
+Zoho Desk checks the address when the webhook is created: a GET first, and a
+POST when the GET is not answered 200. The GET is answered 200 behind the
+secret (`validated` in the log), with nothing read or written; without the
+secret it is refused as the POST is.
+
 Answers (Ruling 19): 200 for every event handled, whatever its outcome, and
 for a body it cannot read (logged); 401 `secret_invalid` for a wrong or
 missing secret, before the body is read; 503 `not_configured` without a
@@ -76,6 +81,8 @@ STORE_UNAVAILABLE = "store_unavailable"
 
 # Outcomes logged besides close_ticket's.
 IGNORED = "ignored"
+# Zoho Desk's GET when the webhook is created.
+VALIDATED = "validated"
 UNPARSABLE = "unparsable"
 TOO_LARGE = "too_large"
 
@@ -252,8 +259,8 @@ async def _read(request: Request) -> Optional[bytes]:
     return b"".join(chunks)
 
 
-async def _answer(request: Request, given: Optional[str]) -> dict:
-    context = context_of(request)
+def _check_secret(context: Any, given: Optional[str]) -> None:
+    """Raises the 503 or the 401 for a call that may not be answered."""
     secret = context.zoho_webhook_secret
     if not secret:
         _logged(context, UNAVAILABLE)
@@ -261,6 +268,11 @@ async def _answer(request: Request, given: Optional[str]) -> dict:
     if given is None or not hmac.compare_digest(given.encode("utf-8"), secret.encode("utf-8")):
         _logged(context, SECRET_INVALID)
         raise _refused(401, SECRET_INVALID)
+
+
+async def _answer(request: Request, given: Optional[str]) -> dict:
+    context = context_of(request)
+    _check_secret(context, given)
     raw = await _read(request)
     if raw is None:
         _logged(context, TOO_LARGE)
@@ -285,3 +297,18 @@ async def zoho_tickets_without_secret(request: Request) -> dict:
 @router.post(WEBHOOK_PATH + "/{secret}")
 async def zoho_tickets(request: Request, secret: str) -> dict:
     return await _answer(request, secret)
+
+
+@router.get(WEBHOOK_PATH)
+async def zoho_check_without_secret(request: Request) -> dict:
+    _check_secret(context_of(request), None)
+    return {"status": "ok"}
+
+
+@router.get(WEBHOOK_PATH + "/{secret}")
+async def zoho_check(request: Request, secret: str) -> dict:
+    """Zoho Desk's check when the webhook is created: 200 behind the secret."""
+    context = context_of(request)
+    _check_secret(context, secret)
+    _logged(context, VALIDATED)
+    return {"status": "ok"}
