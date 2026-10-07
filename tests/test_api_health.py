@@ -52,8 +52,8 @@ class HealthTests(unittest.TestCase):
         self.assertTrue(api.health()["melt_ask"].startswith("off: missing melt_battery_serial"), api.health())
         self.assertIsNone(api.runtime.melt_ask)
         self.assertEqual(len(api.GUIDE_MEDIA), 2)
-        # 2 offered to the model, 2 melt pictures, 8 reference-library photos.
-        self.assertEqual(len(api.CATALOGUE), 12)
+        # 2 offered to the model, 2 melt pictures, 16 reference-library files.
+        self.assertEqual(len(api.CATALOGUE), 20)
 
     def test_the_runtime_is_given_the_melt_ask_when_it_is_on(self):
         from emotorad_ai import melt_ask

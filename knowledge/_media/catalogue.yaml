@@ -61,9 +61,10 @@ melt_terminals:
 # so every entry here is code_only until then.
 #
 # domain: battery, controller, motor, display or frame.
-# use: customer_example (shown to the customer: "a photo like this") or
-#   checker_reference (sent to the AI checker with the customer's photo, never
-#   to the customer).
+# use: customer_guide (sent to the customer while the bot helps: "this is the
+#   switch"), customer_example (shown with the request for the customer's own
+#   photo: "a photo like this") or checker_reference (sent to the AI checker
+#   with the customer's photo, never to the customer).
 # about: what the photo shows, for the people maintaining this file and for the
 #   checker.
 
@@ -167,3 +168,110 @@ frame_number_sticker:
     The seat tube of a bike, below the seat clamp. A white barcode sticker
     running down the tube carries the frame number (a letter followed by
     digits).
+
+# The second batch (7 October 2026): battery help, and the melted checks.
+# Uploaded byte for byte from the files the person sent.
+
+battery_onoff_switch_photo:
+  id: library/battery/photos/onoff-switch.jpg
+  kind: image
+  caption: "The battery On/Off switch, at the top of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack on a desk, with an arrow and the label "Battery
+    On/Off Switch" pointing to the round switch at the top end of the pack.
+
+battery_soc_button_photo:
+  id: library/battery/photos/soc-button.jpg
+  kind: image
+  caption: "The SOC button and its charge lights, on the side of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack on a desk, with an arrow and the label "SOC
+    Button" pointing to the button above the row of charge lights on the
+    side of the pack. The same picture as battery_soc_button_non_doodle,
+    as WhatsApp re-saved it.
+
+battery_soc_button_non_doodle:
+  id: library/battery/photos/soc-button-non-doodle.png
+  kind: image
+  caption: "The SOC button and its charge lights, on the side of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    The SOC button of a battery on any bike except the Doodle (the Doodle has
+    no SOC button): a downtube pack with an arrow and the label "SOC Button"
+    pointing to the button above the row of charge lights. The original of
+    battery_soc_button_photo.
+
+battery_switch_on_position:
+  id: library/battery/photos/switch-on-position.jpg
+  kind: image
+  caption: "The battery switch in the ON position"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack with a circled close-up of the switch at its top
+    end, set to ON, and the words "Battery Switch is On".
+
+battery_revival_steps:
+  id: library/battery/videos/revival-steps.mp4
+  kind: video
+  caption: "How to wake a battery from deep sleep"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    19 seconds, with sound. The charger is plugged into a downtube pack and
+    the pack's On/Off switch is pressed again and again, then the pack is
+    turned and the SOC button pressed to check its charge lights. The battery
+    revival process: used when a battery may be in deep sleep, to tell a
+    sleeping battery from a dead one.
+
+battery_terminals_melted_vs_normal:
+  id: library/battery/photos/terminals-melted-vs-normal.png
+  kind: image
+  caption: "Reference: a melted battery terminal next to a normal one"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    Two labelled panels of a battery's terminal: on top a melted terminal
+    with fused metal pins, below a normal one with clean, evenly spaced
+    contacts. The AI checker compares the customer's photo or video with it
+    to judge whether the battery terminal has melted. An AI-made illustration
+    (it carries a generator's mark), not a photo of a real battery: replace
+    it with a real melted terminal when one is available.
+
+controller_connector_not_melted:
+  id: library/controller/photos/connector-not-melted.jpg
+  kind: image
+  caption: "Reference: a controller's battery connector that has not melted"
+  code_only: true
+  domain: controller
+  use: checker_reference
+  about: >-
+    The controller on the frame with the battery removed, with a circled
+    close-up of its four straight battery pins and the words "Non Melted
+    Controller". What a normal connector looks like.
+
+controller_connector_melted_vs_normal:
+  id: library/controller/photos/connector-melted-vs-normal.png
+  kind: image
+  caption: "Reference: a melted controller connector next to a normal one"
+  code_only: true
+  domain: controller
+  use: checker_reference
+  about: >-
+    Two labelled panels of the controller's battery connector: on the left
+    a normal one (intact, distinct pins and a clean housing), on the right a
+    melted one (melted and fused pins, severe heat damage, warped plastic).
+    The AI checker compares the customer's photo or video with it to judge
+    whether the controller has melted. An AI-made illustration, not a photo
+    of a real controller: replace it with a real one when available.

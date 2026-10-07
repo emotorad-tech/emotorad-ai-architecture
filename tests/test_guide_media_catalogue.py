@@ -41,7 +41,20 @@ LIBRARY = {
     "motor_serial_number": ("library/motor/photos/serial-number.jpg", "motor", "customer_example"),
     "display_serial_label": ("library/display/photos/serial-label-back.jpg", "display", "customer_example"),
     "frame_number_sticker": ("library/frame/photos/frame-number-sticker.jpg", "frame", "customer_example"),
+    # The second batch (7 October 2026): battery help and the melted checks.
+    "battery_onoff_switch_photo": ("library/battery/photos/onoff-switch.jpg", "battery", "customer_guide"),
+    "battery_soc_button_photo": ("library/battery/photos/soc-button.jpg", "battery", "customer_guide"),
+    "battery_soc_button_non_doodle": ("library/battery/photos/soc-button-non-doodle.png", "battery", "customer_guide"),
+    "battery_switch_on_position": ("library/battery/photos/switch-on-position.jpg", "battery", "customer_guide"),
+    "battery_revival_steps": ("library/battery/videos/revival-steps.mp4", "battery", "customer_guide"),
+    "battery_terminals_melted_vs_normal": ("library/battery/photos/terminals-melted-vs-normal.png", "battery",
+                                           "checker_reference"),
+    "controller_connector_not_melted": ("library/controller/photos/connector-not-melted.jpg", "controller",
+                                        "checker_reference"),
+    "controller_connector_melted_vs_normal": ("library/controller/photos/connector-melted-vs-normal.png", "controller",
+                                              "checker_reference"),
 }
+USES = ("customer_guide", "customer_example", "checker_reference")
 
 
 class CatalogueTests(unittest.TestCase):
@@ -56,7 +69,7 @@ class CatalogueTests(unittest.TestCase):
             self.assertEqual((catalogue[key]["id"], catalogue[key]["caption"]), (asset_id, caption), key)
         for key, item in catalogue.items():
             self.assertIs(item["code_only"], True, key)
-            self.assertEqual(item["kind"], "image", key)
+            self.assertEqual(item["kind"], "video" if item["id"].endswith(".mp4") else "image", key)
 
     def test_every_library_photo_is_catalogued_by_domain_and_use(self):
         catalogue = load_catalogue()
@@ -65,6 +78,7 @@ class CatalogueTests(unittest.TestCase):
             self.assertEqual((item["id"], item["domain"], item["use"]), (asset_id, domain, use), key)
             self.assertTrue(is_valid_key("assets/" + asset_id), asset_id)
             self.assertTrue(item["about"].strip(), key)
+            self.assertIn(item["use"], USES, key)
 
     def test_the_library_is_never_offered_to_the_model(self):
         self.assertFalse(set(LIBRARY) & set(model_offered(load_catalogue())))
