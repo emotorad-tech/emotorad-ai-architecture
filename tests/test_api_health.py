@@ -35,14 +35,16 @@ class HealthTests(unittest.TestCase):
         api = fresh_api(dict({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
                               "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
                               "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb",
-                              "EMOTORAD_AMIIGO_PUBLIC_KEY": ""}, **zoho_blank()))
+                              "EMOTORAD_AMIIGO_PUBLIC_KEY": "", "EMOTORAD_OMS_API_KEY": "",
+                              "EMOTORAD_WARRANTY_API_KEY": ""}, **zoho_blank()))
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
              "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory",
-             "amiigo_receipts": "memory", "amiigo_tokens": "not configured", "zoho_webhook": "not configured"},
+             "amiigo_receipts": "memory", "amiigo_tokens": "not configured", "zoho_webhook": "not configured",
+             "warranty_source": "fixtures"},
         )
 
     def test_safety_reports_not_recorded_are_counted_once_there_are_any(self):

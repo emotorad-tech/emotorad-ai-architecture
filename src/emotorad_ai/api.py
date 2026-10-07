@@ -89,6 +89,7 @@ from .storage.assets import finish_asset
 from .storage.uploads import UploadError, UploadRegistry
 from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
+from .tools import warranty_api as warranty_api_tools
 from .tools import fixtures
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
@@ -240,10 +241,16 @@ sent_media: dict = {}
 replacement_orders = ReplacementOrders()
 
 
-def _build_registry():
-    """Real OMS reads when a key is configured, fixtures when it is not.
+def _warranty_source_label() -> str:
+    if warranty_api_tools.configured():
+        return "warranty_api: %s" % warranty_api_tools.WarrantyAPIClient().host
+    return "oms" if os.environ.get("EMOTORAD_OMS_API_KEY") else "fixtures"
 
-    The key is the only switch. Without it every lookup is a fixture, which is
+
+def _build_registry():
+    """The warranty API, the real OMS or the fixtures, by which key is set.
+
+    The keys are the only switch. Without it every lookup is a fixture, which is
     what the tests and a fresh clone get, and `/chat` will happily name a bike
     that belongs to nobody. With it, a phone number reaches the live purchase
     table and the bikes, frame numbers and purchase dates are the customer's own.
@@ -255,35 +262,30 @@ def _build_registry():
     followed by a ticket number that exists nowhere is more convincing, and
     therefore worse, than fixtures all the way through.
     """
-    if not os.environ.get("EMOTORAD_OMS_API_KEY"):
-        return build_registry(
-            verification=verification_store,
-            send_code=OTP_SENDER,
-            # Test order numbers (fixtures.ORDER_CODES), so the fallback can
-            # be tried without the OMS key.
-            account_finder=fixtures.find_account_by_order_code,
-            # The fixture bikes merged with the rider's app bikes, when Amigo
-            # can be read; the fixtures alone otherwise.
-            warranty_source=amigo_tools.merged_source(fixtures.WARRANTY_RECORDS.get, AMIGO) if AMIGO else None,
-            amigo=AMIGO,
-            guide_media=SENDABLE_MEDIA,
-            sent_media=sent_media,
-            replacement_orders=replacement_orders,
-            item_codes=ItemCodes(),
-            approval_mode=settings.approval_mode,
-            location_sharing=True,
-            idempotency=stores.idempotency,
-            # None while Zoho is off: build_registry then makes the mock.
-            ticket_system=ZOHO.router,
-        )
-    client = OMSClient()
+    # Registered bikes and their coverage come from the warranty API when its
+    # key is set (7 October 2026: it replaces the OMS warranty lookup), else
+    # from the OMS when its key is set, else from the fixtures. The order or
+    # invoice code look-up stays with the OMS, which alone holds orders.
+    oms = OMSClient() if os.environ.get("EMOTORAD_OMS_API_KEY") else None
+    if warranty_api_tools.configured():
+        source = warranty_api_tools.api_warranty_source(warranty_api_tools.WarrantyAPIClient())
+    elif oms is not None:
+        source = live_warranty_source(oms)
+    else:
+        source = fixtures.WARRANTY_RECORDS.get
+    if AMIGO:
+        # The rider's app bikes merged in, when Amigo can be read.
+        source = amigo_tools.merged_source(source, AMIGO)
+    elif source is fixtures.WARRANTY_RECORDS.get:
+        source = None  # build_registry's own default: the fixtures
     return build_registry(
         verification=verification_store,
         send_code=OTP_SENDER,
-        warranty_source=(amigo_tools.merged_source(live_warranty_source(client), AMIGO)
-                         if AMIGO else live_warranty_source(client)),
+        warranty_source=source,
         amigo=AMIGO,
-        account_finder=live_account_finder(client),
+        # Test order numbers (fixtures.ORDER_CODES) without the OMS key, so the
+        # fallback can be tried.
+        account_finder=live_account_finder(oms) if oms is not None else fixtures.find_account_by_order_code,
         guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
         replacement_orders=replacement_orders,
@@ -296,6 +298,8 @@ def _build_registry():
 
 
 registry = _build_registry()
+# Read once, with the registry, so /health names the source actually in use.
+WARRANTY_SOURCE = _warranty_source_label()
 
 # The reverse geocoder behind "Share my location". OpenStreetMap's public
 # service for this LAN test server; a production provider swaps in here. The
@@ -554,6 +558,8 @@ def health() -> dict:
         "photo_check": PHOTO_CHECKER.provider if PHOTO_CHECKER is not None else "off",
         "tracing": "on" if TRACING is not None else "off",
         "amigo": "configured" if AMIGO is not None else "not configured",
+        # Where bikes and coverage come from; the warranty API's host, never its key.
+        "warranty_source": WARRANTY_SOURCE,
         "build": BUILD,
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
         # Zoho Desk: on, off, or why not (zoho/wiring.py).

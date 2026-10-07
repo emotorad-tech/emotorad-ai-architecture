@@ -135,6 +135,14 @@ def _coverage_line(bike: Dict[str, Any]) -> str:
             "  Coverage: CANNOT BE CHECKED RIGHT NOW. The warranty system is not responding. Say so "
             "plainly; do not state or estimate coverage."
         )
+    if bike.get("coverage_status") == "pending_review":
+        return (
+            "  Coverage: UNDER REVIEW. EMotorad is still reviewing this bike's warranty registration "
+            "(usually the invoice). Do not state or estimate coverage. Say the registration is being "
+            "reviewed and that the support team will confirm the warranty once it is done."
+        )
+    if bike.get("coverage_status") == "from_warranty_api":
+        return _api_coverage_line(bike)
     if bike.get("coverage_status") == "purchase_date_missing":
         # The one case where saying nothing is not enough — the agent has to know
         # what to *do*, or it will apologise and stop rather than ask for the
@@ -173,6 +181,33 @@ def _coverage_line(bike: Dict[str, Any]) -> str:
         "  Coverage: out of warranty (%d month term from %s). Say so plainly and kindly if it "
         "becomes relevant; any repair would be chargeable." % (bike["term_months"], bike["warranty_start"])
     )
+
+
+def _api_coverage_line(bike: Dict[str, Any]) -> str:
+    """Coverage the warranty service computed (tools/warranty_api.py): the
+    battery's own answer first, then every part's date, because the parts run
+    different terms (the frame far longer than the charger)."""
+    if bike.get("in_warranty") and bike.get("term_months"):
+        lead = "battery in warranty until %s, about %d month(s) left of a %d month term" % (
+            bike["warranty_end"], bike["months_remaining"], bike["term_months"])
+    elif bike.get("in_warranty"):
+        lead = "in warranty"
+    elif bike.get("warranty_end"):
+        lead = "battery out of warranty since %s" % bike["warranty_end"]
+    else:
+        lead = "out of warranty"
+    parts = ", ".join(
+        "%s until %s%s" % (part["component"], part["valid_until"], "" if part["active"] else " (ended)")
+        for part in bike.get("components") or []
+        if part.get("valid_until")
+    )
+    line = "  Coverage: %s (from EMotorad's warranty service)." % lead
+    if parts:
+        line += (" Per part: %s. A question about another part is answered from its own date, never "
+                 "from the battery's." % parts)
+    if not bike.get("in_warranty"):
+        line += " If a repair becomes relevant to a part that has ended, it would be chargeable; say so plainly and kindly."
+    return line
 
 
 def _facts_block(resolved: ResolvedIdentity) -> str:

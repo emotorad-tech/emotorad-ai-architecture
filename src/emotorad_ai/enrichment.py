@@ -204,6 +204,8 @@ class ContextEnricher:
                 coverage = "warranty cannot be checked right now"
             elif bike.get("coverage_status") == "warranty_unknown":
                 coverage = "warranty cannot be matched to this bike"
+            elif bike.get("coverage_status") == "pending_review":
+                coverage = "registration under review (do not state coverage)"
             # A bike registered in the app by IMEI has no frame number on
             # record; its IMEI and VIN are never shown.
             frame = ("frame %s" % bike["frame_number"] if bike.get("frame_number") else

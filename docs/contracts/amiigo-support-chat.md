@@ -22,7 +22,7 @@ v1 is built on the branch `feat/amiigo-history`. It is not on staging yet: it go
 | History | Kept on our server; no way for the app to read it | `GET /amiigo/v1/conversations` and `GET /amiigo/v1/conversations/{conversation_id}/messages`, for the rider's Amiigo app chats |
 | Tickets | Recorded with our `EM-` reference and sent to a Zoho Desk test department on staging | The same, plus the closed status from Zoho Desk (see "Tickets and Zoho Desk") |
 | Photos and videos | Stored in our S3 bucket | The same, by upload |
-| Bike, warranty and service data | Test data in the app's test session | The rider's bikes and warranty from the OMS, and their Amiigo bikes, service status and recent rides |
+| Bike, warranty and service data | Test data in the app's test session | The rider's bikes and warranty from EMotorad's warranty service (per part, with dates), and their Amiigo bikes, service status and recent rides |
 
 The app must not go to real riders until two things are done: engineering signs off sending chat text to our model provider (it runs outside AWS today), and the token check has been tried with a real staging token. We read Amiigo's token format from Amiigo's code and checked it with tokens made for our tests; a real token is the only proof that the phone number is read as the app expects.
 
@@ -53,7 +53,7 @@ If the socket cannot be opened, keep retrying with the back-off in "Close codes"
 
 ## What the bot knows about the rider
 
-- From the token, the bot knows the rider's verified phone number. From that number it looks up their bikes and warranty in EMotorad's order system, and their bikes, service status and recent rides in the Amiigo app.
+- From the token, the bot knows the rider's verified phone number. From that number it looks up their bikes and warranty in EMotorad's warranty service (each part's cover and its end date, or that the registration is still under review), and their bikes, service status and recent rides in the Amiigo app.
 - So the bot never asks a signed-in rider for their bike model, frame number or purchase date, and never asks for a one-time code.
 - A rider with several bikes is asked which one the chat is about.
 - A rider with no registered bike can still chat; the bot offers to help register the warranty.

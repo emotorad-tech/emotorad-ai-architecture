@@ -84,6 +84,8 @@ COVERAGE_TEXT = {
     "warranty_unavailable": "the warranty system did not answer",
     "no_warranty_record": "no warranty record for this number",
     "oms_unavailable": "the warranty system did not answer",
+    "from_warranty_api": "from EMotorad's warranty service, per part",
+    "pending_review": "registered, with the registration still under review",
 }
 # The customer's claims, in the order a person reads them. Nothing else in
 # `claims` reaches Zoho.

@@ -203,6 +203,9 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         })
         return bike
 
+    if "warranty_api" in record:
+        return _api_coverage(bike, record, today)
+
     # `purchase_date` is the right answer and `created_at` is the available one.
     # Verified against live OMS 2026-08-29: purchase_date and ocr_date were null
     # on every row returned, and docs/api-shapes/warranty.json (recorded
@@ -258,6 +261,71 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
             "registered, and that the exact date can be confirmed from their invoice. Do "
             "not refuse a claim on this basis alone."
         )
+    return bike
+
+
+# The part the bike-level answer follows. The battery agent came first, and the
+# OMS path used the battery's term too. Reading the bike's overall status
+# instead would be unsafe: the frame runs 60 months and the battery 12, so a
+# bike whose battery cover has ended is still "active" as a whole.
+_LEAD_COMPONENT = "battery"
+
+
+def _api_coverage(bike: Dict[str, Any], record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
+    """One bike from the warranty API (tools/warranty_api.py): the service's own
+    coverage, quoted rather than computed."""
+    coverage = record.get("warranty_api") or {}
+    if record.get("registration_status") != "active":
+        # pending_review, or anything new the service adds: only an active
+        # registration may lead to a coverage answer.
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "pending_review",
+            "note": ("EMotorad is still reviewing this bike's warranty registration (usually the invoice). "
+                     "Do not state or estimate coverage. Say the registration is being reviewed and that "
+                     "the support team will confirm the warranty once it is done."),
+        })
+        return bike
+    if coverage.get("status") not in ("active", "expired"):
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "purchase_date_missing",
+            "remedy": coverage.get("remedy") or "collect_purchase_proof",
+            "note": (
+                "This bike is registered but its purchase date is not on record, so coverage cannot be "
+                "known. Ask for the invoice or any proof of purchase showing the date it was bought. Do "
+                "not state or estimate a coverage date."
+            ),
+        })
+        return bike
+
+    components = [
+        {
+            "component": part.get("component"),
+            "months": part.get("months"),
+            "valid_until": _date_only(part.get("validUntil")),
+            "active": part.get("active") is True,
+        }
+        for part in coverage.get("components") or []
+        if isinstance(part, dict)
+    ]
+    lead = next((part for part in components if part["component"] == _LEAD_COMPONENT), None)
+    on = today or date.today()
+    bike.update({
+        "in_warranty": lead["active"] if lead else coverage.get("status") == "active",
+        "coverage_status": "from_warranty_api",
+        "warranty_start": bike["purchase_date"],
+        "warranty_start_source": "purchase_date",
+        "term_source": "warranty_api",
+        "components": components,
+    })
+    if lead and lead["valid_until"]:
+        ends = fixtures.parse_date(lead["valid_until"])
+        bike.update({
+            "warranty_end": ends.isoformat(),
+            "term_months": lead["months"],
+            "months_remaining": max(fixtures.months_between(on, ends), 0) if ends > on else 0,
+        })
     return bike
 
 

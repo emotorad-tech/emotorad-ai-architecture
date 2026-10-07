@@ -1,0 +1,77 @@
+{
+  "_source": "The example of searchRegistrationsByPhone in docs/api-shapes/warranty-ai-openapi.json (EMotorad warranty API 1.0.0, downloaded 7 October 2026 from the staging docs). From the documentation, not a live capture.",
+  "request": {
+    "phone": "+919000000042",
+    "country": "IN"
+  },
+  "response_200": [
+    {
+      "frameNumber": "ZZ.EXAMPLE.0001",
+      "productName": "T-Rex Pro",
+      "purchaseDate": "2027-03-15",
+      "status": "active",
+      "coverage": {
+        "status": "active",
+        "components": [
+          {
+            "component": "frame",
+            "months": 60,
+            "validUntil": "2032-03-15",
+            "active": true
+          },
+          {
+            "component": "motor",
+            "months": 12,
+            "validUntil": "2028-03-15",
+            "active": true
+          },
+          {
+            "component": "battery",
+            "months": 12,
+            "validUntil": "2028-03-15",
+            "active": true
+          },
+          {
+            "component": "controller",
+            "months": 12,
+            "validUntil": "2028-03-15",
+            "active": true
+          },
+          {
+            "component": "display",
+            "months": 12,
+            "validUntil": "2028-03-15",
+            "active": true
+          },
+          {
+            "component": "charger",
+            "months": 6,
+            "validUntil": "2027-09-15",
+            "active": true
+          },
+          {
+            "component": "other",
+            "months": 6,
+            "validUntil": "2027-09-15",
+            "active": true
+          }
+        ],
+        "extendedEligibleUntil": "2027-04-14"
+      }
+    }
+  ],
+  "response_400": {
+    "error": {
+      "code": "PHONE_INVALID",
+      "message": "phone invalid",
+      "errorId": "0198f2b4-a1b2-7c3d-8e4f-5a6b7c8d9e0f"
+    }
+  },
+  "response_401": {
+    "error": {
+      "code": "TOKEN_INVALID",
+      "message": "token invalid",
+      "errorId": "0198f2b4-a1b2-7c3d-8e4f-5a6b7c8d9e0f"
+    }
+  }
+}
