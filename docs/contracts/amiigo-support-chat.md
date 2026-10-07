@@ -64,7 +64,7 @@ If the socket cannot be opened, keep retrying with the back-off in "Close codes"
 - The bot reads the last 12 exchanges of the chat when it answers.
 - For each rider, the bot also remembers a one-line summary of their last 3 chats (topic, bike, outcome, ticket), so it can say "last time we spoke about…".
 - The server keeps a chat's working state for 48 hours after its last message, and the messages themselves permanently (until the rider asks for them to be deleted). After 48 hours of silence the same `conversation_id` still works, but the bot starts that chat afresh, so offer the rider a new chat instead (`can_continue` says which).
-- One message at a time per chat: send the next message only after the reply to the previous one has arrived. (A message sent while the previous one has no reply yet is refused with `conversation_busy`.) And at most two of a rider's messages are answered at once, across all their chats and sockets: a third is refused with `too_many_in_flight`, unless it reports a safety issue (smoke, fire, swelling and the like), which is always answered.
+- One message at a time per chat: send the next message only after the reply to the previous one has arrived. (A message sent while the previous one has no reply yet is refused with `conversation_busy`.) And at most two of a rider's messages are answered at once, across all their chats and sockets: a third is refused with `too_many_in_flight`, unless its text reports a safety issue in words the server recognises (smoke, fire, swelling and the like, in English or Hinglish today), which is always answered. A report made only by video, or typed only in Hindi script, can still be refused while two replies are pending.
 
 ## Base URLs
 
@@ -229,7 +229,7 @@ Replies arrive whole, never word by word. Every reply is checked (the safety che
 | `detail` | When | What the app should do |
 | --- | --- | --- |
 | `conversation_busy` | A message for a chat whose previous message has no reply yet | Wait for the reply, then send it again with the same `client_message_id` |
-| `too_many_in_flight` | Two of this rider's messages, in any of their chats and on any of their sockets, are still being answered. The message is not handled. A message that reports a safety issue is never refused for this. | Wait for one of those replies, then send it again with the same `client_message_id` |
+| `too_many_in_flight` | Two of this rider's messages, in any of their chats and on any of their sockets, are still being answered. The message is not handled. A message whose text reports a safety issue is never refused for this. | Wait for one of those replies, then send it again with the same `client_message_id` |
 | `conversation_not_found` | `conversation_id` is not a chat this rider may write in: another rider's, or a website chat. (For a message sent again, also a chat whose data has been deleted since.) The server does not say which. | Start a new chat with a new UUID |
 | `upload_not_found` | An `upload_id` that is unknown, another rider's, or older than an hour | Upload the file again |
 | `upload_not_finished` | The `PUT` to S3 has not completed, or the file does not match what was requested | Finish the `PUT`, or upload again |
@@ -254,7 +254,7 @@ Every message frame counts against the 20 a minute, a resend too. A resend over 
 
 While our server cannot read or write its store, the chat still answers, and the socket stays open. (A socket that was already waiting on, or replaying, the answer to a message sent again can still close `1011`: reconnect and send it again.) The bot cannot carry on the conversation, so its reply says it is passing the chat to our support team. A safety report (smoke, swelling, heat) is the exception that matters: it gets the safety steps and the emergency number in the `reply`, never a closed socket or a wait. Two things differ from normal:
 
-- The turn may not be saved. A message sent then may be missing from history, and the `ack` and `reply` for it carry ids history does not know. `after` with such an id is `400 cursor_invalid`: load the newest page instead (see "Catching up"). The rider can carry on in the chat. If nothing in it has been saved yet, it is left out of `GET /amiigo/v1/conversations` until a later message in it is saved, but `GET …/messages` for it still answers.
+- The turn may not be saved. A message sent then may be missing from history, and the `ack` and `reply` for it carry ids history does not know. `after` with such an id is `400 cursor_invalid`: load the newest page instead (see "Catching up"). The rider can carry on in the chat. If the chat itself has not been fully saved yet (even when some of its messages were), it is left out of `GET /amiigo/v1/conversations` until a later message in it is saved, but `GET …/messages` for it still answers.
 - The server cannot tell it has already answered a message. A message sent again on another socket during such an outage can be answered twice, so the app may get two replies to one message.
 
 ### Close codes
