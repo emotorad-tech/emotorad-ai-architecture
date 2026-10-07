@@ -32,14 +32,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src")]
 
 from emotorad_ai.stores.mongo import (  # noqa: E402
-    CONVERSATION_NOTICES, CONVERSATION_SUMMARIES, COUNTERS, MEDIA, MONGO_URI_ENV, TICKETS, TRANSCRIPT_TURNS, connect,
-    ensure_indexes,
+    CONVERSATION_NOTICES, CONVERSATION_SUMMARIES, COUNTERS, MEDIA, MONGO_URI_ENV, SERIAL_READINGS, TICKETS,
+    TRANSCRIPT_TURNS, connect, ensure_indexes,
 )
 
 # Tickets are permanent like the transcript, and so is the counter that
 # numbers them: a counter that expired would hand out EM-1000001 again. The
 # notices in a chat (a ticket closed in Zoho Desk) are part of the chat.
-PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA, TICKETS, COUNTERS, CONVERSATION_NOTICES)
+PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA, TICKETS, COUNTERS, CONVERSATION_NOTICES,
+             SERIAL_READINGS)
 
 
 def main() -> int:

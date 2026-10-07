@@ -565,6 +565,9 @@ class InMemoryConversationStore:
         # the lock, so one notice is never written twice.
         self._notices: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._notice_lock = threading.Lock()
+        # Serials read off the customer's photos (serial_read.py), permanent:
+        # conversation id -> reading id -> reading.
+        self._serials: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Self-service erasure requests (erasure.py): reference -> request.
         self._erasures: Dict[str, Dict[str, Any]] = {}
         # One pending request per person, even for two requests at once.
@@ -653,6 +656,15 @@ class InMemoryConversationStore:
             mine[notice["_id"]] = notice
             return dict(notice), True
 
+    def add_serial_reading(self, reading: Dict[str, Any]) -> None:
+        """A serial read off a customer's photo (serial_read.reading_doc), by
+        its `_id`: the same photo read twice keeps one reading."""
+        self._serials.setdefault(reading["conversation_id"], {})[reading["_id"]] = dict(reading)
+
+    def serial_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        readings = self._serials.get(conversation_id, {}).values()
+        return [dict(r) for r in sorted(readings, key=lambda r: (r["read_at"], r["_id"]))]
+
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice
         (a retried claim) replaces its record rather than duplicating it."""
@@ -678,6 +690,8 @@ class InMemoryConversationStore:
                  if any(r.get("user_key") == user_key for r in runs.values())}
         mine |= {cid for cid, notices in self._notices.items()
                  if any(n.get("user_key") == user_key for n in notices.values())}
+        mine |= {cid for cid, readings in self._serials.items()
+                 if any(r.get("user_key") == user_key for r in readings.values())}
         if self.receipts is not None:
             mine |= self.receipts.conversations_of(user_key)
         return sorted(mine)
@@ -777,13 +791,14 @@ class InMemoryConversationStore:
                 "media": sum(len(self._media.get(cid, {})) for cid in mine),
                 "conversation_origins": sum(len(self._origins.get(cid, {})) for cid in mine),
                 "conversation_notices": sum(len(self._notices.get(cid, {})) for cid in mine),
+                "serial_readings": sum(len(self._serials.get(cid, {})) for cid in mine),
                 "amiigo_receipts": sum(self._receipts_of(cid, dry_run=True) for cid in mine),
                 "conversation_summaries": len(self._summaries.get(user_key, {})) + sum(
                     1 for key, items in self._summaries.items() if key != user_key
                     for item in items.values() if item.conversation_id in mine),
             }
         counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
-                  "conversation_notices": 0, "amiigo_receipts": 0,
+                  "conversation_notices": 0, "serial_readings": 0, "amiigo_receipts": 0,
                   "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
             for name, count in self.delete_conversation(cid).items():
@@ -805,6 +820,7 @@ class InMemoryConversationStore:
             "media": len(self._media.pop(conversation_id, {})),
             "conversation_origins": len(self._origins.pop(conversation_id, {})),
             "conversation_notices": len(self._notices.pop(conversation_id, {})),
+            "serial_readings": len(self._serials.pop(conversation_id, {})),
             "amiigo_receipts": self._receipts_of(conversation_id),
         }
 

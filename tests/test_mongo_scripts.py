@@ -117,7 +117,7 @@ class SetupScriptTests(unittest.TestCase):
         kept = dict(line.split()[:2] for line in out.getvalue().splitlines() if line.startswith("  "))
         expiring = {name for name, label in kept.items() if label == "expires"}
         self.assertEqual(expiring, {"conversations", "idempotency_keys", "verification_sessions", "amiigo_receipts"})
-        for name in ("conversation_notices", "conversation_origins", "erasure_requests"):
+        for name in ("conversation_notices", "conversation_origins", "erasure_requests", "serial_readings"):
             self.assertEqual(kept[name], "permanent", name)
         db = client["emotorad_ai"]
         for name, label in kept.items():

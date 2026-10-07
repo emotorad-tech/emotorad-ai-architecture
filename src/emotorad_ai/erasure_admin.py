@@ -38,7 +38,7 @@ FILES = "s3_objects"
 # transcript turns either way. A ticket closed in Zoho Desk after the review
 # adds a notice to the chat (amiigo/tickets.py), which counts too.
 PERMANENT = ("transcript_turns", "conversation_summaries", "media", "conversation_origins",
-             "conversation_notices", FILES)
+             "conversation_notices", "serial_readings", FILES)
 
 
 class Refused(Exception):

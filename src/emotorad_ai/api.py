@@ -65,6 +65,7 @@ from . import origin as origin_place
 from . import evidence_check
 from . import melt_ask as melt_ask_module
 from . import serial_ask as serial_ask_module
+from . import serial_read
 from . import photo_check
 from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
@@ -246,6 +247,12 @@ MELT_ASK, MELT_ASK_STATUS = melt_ask_module.from_env(CATALOGUE, MEDIA_STORE)
 # The battery serial-photo ask (serial_ask.py, 7 October 2026): on with
 # EMOTORAD_SERIAL_ASK=on and its three library pictures in the catalogue.
 SERIAL_ASK, SERIAL_ASK_STATUS = serial_ask_module.from_env(CATALOGUE, MEDIA_STORE)
+# Reads the serial off each photo the customer sends once asked (serial_read.py),
+# after the reply. On with the ask, the media bucket and the OpenRouter key.
+SERIAL_READER = (serial_read.serial_reader_from_env()
+                 if SERIAL_ASK is not None and MEDIA_STORE is not None else None)
+# Two at a time across the server; the reply never waits for them.
+SERIAL_READ_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="serial-read")
 
 # conversation_id -> the keys already shown in it. Module-level because "already
 # sent" only means anything across turns, and a request-scoped dict would let
@@ -598,6 +605,8 @@ def health() -> dict:
         "melt_ask": MELT_ASK_STATUS,
         # The battery serial-photo ask: on, off, or off and why.
         "serial_ask": SERIAL_ASK_STATUS,
+        # Who reads the serial photos: the provider, or off.
+        "serial_read": SERIAL_READER.provider if SERIAL_READER is not None else "off",
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.
@@ -1316,7 +1325,30 @@ def prepare_turn(
 
 def _handle_app_turn(message: InboundMessage) -> Reply:
     """The chat socket's turn: the same runtime, read when the turn runs."""
-    return runtime.handle(message)
+    reply = runtime.handle(message)
+    _read_serials_after(message)
+    return reply
+
+
+def _read_serials_after(message: InboundMessage) -> None:
+    """Hands the turn's stored photos to the serial reader, after the reply,
+    when the bike the chat is about was asked for its serial photos. Never
+    raises and never delays the reply (serial_read.py)."""
+    if SERIAL_READER is None or MEDIA_STORE is None or not message.attachments:
+        return
+    try:
+        state = stores.conversations.peek(message.conversation_id)
+        photos = serial_read.photos_to_read(message.attachments, state)
+    except Exception as exc:
+        log.emit("serial_read_failed", message.conversation_id, error="state:" + type(exc).__name__)
+        return
+    if not photos:
+        return
+    SERIAL_READ_POOL.submit(
+        serial_read.read_photos, SERIAL_READER, photos, MEDIA_STORE.get_bytes, stores.conversations,
+        conversation_id=message.conversation_id, user_key=state.user_key, frame_number=state.selected_frame,
+        emit=log.emit,
+    )
 
 
 # The chat socket's turn (amiigo/socket.py): prepare_turn with the app's
@@ -1422,7 +1454,9 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return _message_out(conversation_id, runtime.handle(message))
+    reply = runtime.handle(message)
+    _read_serials_after(message)
+    return _message_out(conversation_id, reply)
 
 
 class ErasureIn(BaseModel):
