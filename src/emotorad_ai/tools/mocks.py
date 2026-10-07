@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 from datetime import date
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
@@ -73,11 +73,61 @@ TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "batt
                      "other")
 # A hazard is raised on the customer's word, never held behind a photograph.
 EVIDENCE_EXEMPT_CATEGORIES = ("battery_safety",)
-# A motor jam needs a workshop, and AFS asks for no photo or video for it
-# (§5f4): its ticket never waits for evidence. The category alone opens it,
-# unlike the safety category: what it buys is a workshop visit the Service
-# team arranges, not a replacement.
-NO_EVIDENCE_CATEGORIES = ("motor_jam",)
+# Categories whose ticket never waits for evidence. None since 8 October 2026:
+# a motor jam is a motor replacement ticket now, with its video like the rest.
+NO_EVIDENCE_CATEGORIES: Tuple[str, ...] = ()
+# Every motor ticket waits for photos of these parts (the person's rule, 8
+# October 2026), for the serials' OCR and the evidence check: a reading of each
+# in the conversation's serial_readings (serial_read.py), legible or not. A
+# hazard is never held back. Only with the serial ask on (the runtime injects
+# the readings; None means off).
+SERIAL_PHOTOS_REQUIRED = {
+    category: ("motor", "controller", "frame")
+    for category in ("motor_fault", "motor_damage", "motor_jam", "motor_under_load")
+}
+_SERIAL_LABELS = {"battery": "Battery serial", "motor": "Motor serial", "controller": "Controller S/N",
+                  "frame": "Frame number", "warranty_seal": "Battery warranty seal"}
+_SERIAL_ASKED_FOR = {"motor": "the serial number printed on the rear hub motor",
+                     "controller": "the controller's label, on the frame where the battery slots in",
+                     "frame": "the frame number sticker on the seat tube"}
+
+
+def _serial_photos_missing(category: str, readings: Optional[Sequence[Mapping[str, Any]]]) -> List[str]:
+    if readings is None:
+        return []
+    seen = {r.get("part") for r in readings}
+    return [part for part in SERIAL_PHOTOS_REQUIRED.get(category, ()) if part not in seen]
+
+
+def serials_line(readings: Optional[Sequence[Mapping[str, Any]]]) -> Optional[str]:
+    """What the photos showed, for the ticket: each part once, the confirmed
+    or latest reading, and how it is known. Never the model's words."""
+    if not readings:
+        return None
+    best: Dict[str, Mapping[str, Any]] = {}
+    for reading in readings:
+        part = reading.get("part")
+        if part not in _SERIAL_LABELS:
+            continue
+        kept = best.get(part)
+        if kept is None or reading.get("confirmed") or not kept.get("confirmed"):
+            best[part] = reading
+    pieces = []
+    for part in ("battery", "motor", "controller", "frame", "warranty_seal"):
+        reading = best.get(part)
+        if reading is None:
+            continue
+        if part == "warranty_seal":
+            pieces.append("%s: %s (read by AI)" % (_SERIAL_LABELS[part], reading.get("seal") or "unclear"))
+        elif not reading.get("serial"):
+            pieces.append("%s: photo received, not readable" % _SERIAL_LABELS[part])
+        elif reading.get("source") == "typed":
+            pieces.append("%s: %s (typed by the customer)" % (_SERIAL_LABELS[part], reading["serial"]))
+        elif reading.get("confirmed"):
+            pieces.append("%s: %s (read by AI, confirmed by the customer)" % (_SERIAL_LABELS[part], reading["serial"]))
+        else:
+            pieces.append("%s: %s (read by AI, not confirmed)" % (_SERIAL_LABELS[part], reading["serial"]))
+    return "From the customer's photos: " + "; ".join(pieces) + "." if pieces else None
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
 
 
@@ -1213,7 +1263,8 @@ def build_registry(
         # applies.
         optional_injects=("evidence_seen", "selected_bike", "unlisted_bike", "persona", "started_at",
                           "cluster_id", "channel", "identity_strength", "coverage", "ticket_kind",
-                          "evidence_accepted", "evidence_missing", "evidence_checked", "hazard_reported"),
+                          "evidence_accepted", "evidence_missing", "evidence_checked", "hazard_reported",
+                          "serial_readings"),
         write=True,
     )
     def create_support_ticket(
@@ -1238,6 +1289,7 @@ def build_registry(
         evidence_missing: Optional[str] = None,
         evidence_checked: Optional[str] = None,
         hazard_reported: Optional[bool] = None,
+        serial_readings: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
@@ -1262,6 +1314,19 @@ def build_registry(
                 "(a voice call, or they say they cannot), hand the conversation to a person instead.",
                 remedy="collect_evidence",
             )
+        missing_photos = [] if hazard else _serial_photos_missing(category, serial_readings)
+        if missing_photos:
+            raise ToolError(
+                "serial_photos_required",
+                "A motor ticket needs a clear photo of each of these first, and they have not arrived: %s. Ask "
+                "the customer for them, one message with all of them, saying the example pictures already sent "
+                "show where each is. If a photo arrived but was not of the right part, ask for that one again."
+                % "; ".join(_SERIAL_ASKED_FOR[part] for part in missing_photos),
+                remedy="collect_serial_photos",
+            )
+        serials = serials_line(serial_readings)
+        if serials:
+            description = description.rstrip() + "\n\n" + serials
         verified = identity_strength == VERIFIED
         if identity_strength == ASSERTED:
             # Caller ID, which anyone can send (identity.resolve_voice): no

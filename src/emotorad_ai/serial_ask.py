@@ -10,6 +10,9 @@ The model never writes it and cannot leave it out.
 - A battery issue, besides: the battery's serial sticker, the controller's
   label and, on any bike but a Doodle, the battery's warranty seal (the
   example shows a downtube pack's).
+- A motor issue, besides: the motor's serial and the controller's label
+  (8 October 2026). Every motor ticket waits for all three photos
+  (tools/mocks.py, SERIAL_PHOTOS_REQUIRED).
 
 A Doodle owner is shown the Doodle battery's sticker; anyone else, the
 downtube battery's. On a bike the melt ask (melt_ask.py) was sent for, the
@@ -38,13 +41,15 @@ BATTERY_DOODLE_KEY = "battery_serial_label_doodle"
 CONTROLLER_KEY = "controller_serial_label"
 SEAL_KEY = "battery_warranty_seal_intact"
 FRAME_KEY = "frame_number_sticker"
-KEYS = (BATTERY_KEY, BATTERY_DOODLE_KEY, CONTROLLER_KEY, SEAL_KEY, FRAME_KEY)
+MOTOR_KEY = "motor_serial_number"
+KEYS = (BATTERY_KEY, BATTERY_DOODLE_KEY, CONTROLLER_KEY, SEAL_KEY, FRAME_KEY, MOTOR_KEY)
 
 # serials_asked_frames' entry while no bike is chosen.
 NO_BIKE = "-"
 
 # The parts, as serial_read.py names what a photo shows.
 BATTERY = "battery"
+MOTOR = "motor"
 CONTROLLER = "controller"
 SEAL = "warranty_seal"
 FRAME = "frame"
@@ -52,6 +57,7 @@ FRAME = "frame"
 # What each part is called in the ask, in the order they are listed.
 _ITEMS_EN = {
     BATTERY: "the serial number sticker on your battery",
+    MOTOR: "the serial number printed on your rear hub motor",
     CONTROLLER: "the controller's label, on the frame where the battery slots in",
     SEAL: "the warranty seal sticker on your battery",
     FRAME: "your bike's frame number sticker, on the seat tube below the seat",
@@ -60,6 +66,7 @@ _ITEMS_EN = {
 # reply is in Devanagari (the rule evidence_asks uses).
 _ITEMS_HI = {
     BATTERY: "आपकी बैटरी पर लगा सीरियल नंबर स्टिकर",
+    MOTOR: "आपकी पिछली हब मोटर पर छपा सीरियल नंबर",
     CONTROLLER: "फ़्रेम पर, जहाँ बैटरी लगती है, वहाँ कंट्रोलर का लेबल",
     SEAL: "आपकी बैटरी पर लगा वारंटी सील स्टिकर",
     FRAME: "सीट के नीचे सीट ट्यूब पर लगा आपकी बाइक का फ़्रेम नंबर स्टिकर",
@@ -77,16 +84,19 @@ def is_doodle(product_name: Optional[str]) -> bool:
     return "doodle" in (product_name or "").lower()
 
 
-def parts_for(battery_issue: bool, product_name: Optional[str], melt_asked: bool = False) -> List[str]:
-    """The parts to ask for, in order: the battery's for a battery issue (less
-    what the melt ask already asked for, and the seal on a Doodle), then the
-    frame number for every issue."""
+def parts_for(issue: str, product_name: Optional[str], melt_asked: bool = False) -> List[str]:
+    """The parts to ask for, in order: the battery's for a "battery" issue
+    (less what the melt ask already asked for, and the seal on a Doodle), the
+    motor's and the controller's for a "motor" issue, then the frame number
+    for every issue."""
     parts: List[str] = []
-    if battery_issue:
+    if issue == BATTERY:
         if not melt_asked:
             parts += [BATTERY, CONTROLLER]
         if not is_doodle(product_name):
             parts.append(SEAL)
+    elif issue == MOTOR:
+        parts += [MOTOR, CONTROLLER]
     parts.append(FRAME)
     return parts
 
@@ -122,7 +132,7 @@ class SerialAsk:
     def key_for(part: str, product_name: Optional[str]) -> str:
         if part == BATTERY:
             return BATTERY_DOODLE_KEY if is_doodle(product_name) else BATTERY_KEY
-        return {CONTROLLER: CONTROLLER_KEY, SEAL: SEAL_KEY, FRAME: FRAME_KEY}[part]
+        return {MOTOR: MOTOR_KEY, CONTROLLER: CONTROLLER_KEY, SEAL: SEAL_KEY, FRAME: FRAME_KEY}[part]
 
     def pictures(self, parts: Sequence[str], product_name: Optional[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
         """One picture per part as a turn's attachments (the dicts

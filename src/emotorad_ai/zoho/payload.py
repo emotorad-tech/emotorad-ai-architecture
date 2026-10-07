@@ -121,13 +121,14 @@ def _channel(channel: Optional[str]) -> str:
 
 
 # Who acts next on a motor case (AFS §5f, 8 October 2026). The bot never
-# approves or rejects: a fault or damage waits for the Approval team, a jam or a
-# motor that fails under load goes to the Service team.
+# approves or rejects: a fault, damage or a jam (a motor replacement since 8
+# October 2026) waits for the Approval team; a motor that fails under load
+# goes to the Service team.
 NEXT_ACTIONS = {
     "motor_fault": "Pending: routed to the Approval team",
     "motor_damage": ("Pending: routed to the Approval team, who decide the warranty position (physical damage); "
                      "a paid repair was offered"),
-    "motor_jam": "Service team: arrange a workshop visit",
+    "motor_jam": "Pending: routed to the Approval team (motor jam, motor replacement recommended)",
     "motor_under_load": "Service team",
 }
 

@@ -1,8 +1,9 @@
 """Reading serials and the warranty seal off a customer's photo (the person's rules, 7 October 2026).
 
 The serial ask (serial_ask.py) and the melt ask ask for photos of the bike's
-frame number sticker and, for a battery issue, the battery's serial sticker,
-the controller's label and the battery's warranty seal. Each photo the
+frame number sticker; for a battery issue, the battery's serial sticker,
+the controller's label and the battery's warranty seal; and for a motor
+issue, the motor's serial and the controller's label. Each photo the
 customer sends on that bike after the ask is read here by Gemini and the
 reading kept in the conversation store's `serial_readings`, one per photo,
 with the bike's frame number and the photo's S3 key (never a link).
@@ -44,15 +45,16 @@ TIMEOUT_SECONDS = 20
 # Uploaded photos are capped at 10 MB (storage/keys.py); a backstop.
 INLINE_LIMIT = 12 * 1024 * 1024
 
-PARTS = ("battery", "controller", "frame", "warranty_seal")
+PARTS = ("battery", "motor", "controller", "frame", "warranty_seal")
 # The parts with a serial; the seal has none.
-SERIAL_PARTS = ("battery", "controller", "frame")
+SERIAL_PARTS = ("battery", "motor", "controller", "frame")
 SEALS = ("intact", "torn", "unclear")
 
 # EMotorad's reference pictures, shown before the customer's photo
 # (evidence_check.References reads them, as the 900 px WebP copies).
-REFERENCE_KEYS = {"serial": ("battery_serial_label", "battery_serial_label_doodle", "controller_serial_label",
-                             "frame_number_sticker", "battery_warranty_seal_intact", "battery_warranty_seal_torn")}
+REFERENCE_KEYS = {"serial": ("battery_serial_label", "battery_serial_label_doodle", "motor_serial_number",
+                             "controller_serial_label", "frame_number_sticker", "battery_warranty_seal_intact",
+                             "battery_warranty_seal_torn")}
 REFERENCES_INTRO = (
     "The pictures after this line are EMotorad's own reference pictures, not the customer's: where each label "
     "is on the bike, and what an intact and a torn battery warranty seal look like. Use them only to recognise "
@@ -62,13 +64,16 @@ CUSTOMER_PHOTO_LINE = "The customer's photo:"
 
 PROMPT = (
     "You are reading a photo a customer sent to an electric cycle company's support chat. It should show one "
-    "of: the battery's serial number sticker, the controller's label, the bike's frame number sticker, or the "
-    "battery's warranty seal. Answer with JSON only, with exactly these keys: part, serial, legible, seal. "
-    "part is \"battery\" for the battery's sticker, \"controller\" for the controller's label, \"frame\" for "
+    "of: the battery's serial number sticker, the serial printed on the rear hub motor, the controller's label, "
+    "the bike's frame number sticker, or the battery's warranty seal. Answer with JSON only, with exactly these "
+    "keys: part, serial, legible, seal. part is \"battery\" for the battery's sticker, \"motor\" for the hub "
+    "motor's printed serial, \"controller\" for the controller's label, \"frame\" for "
     "the frame number sticker, \"warranty_seal\" for the battery's warranty seal, or \"none\" for anything "
     "else. For the battery, serial is the serial number printed under the barcode, which often starts EMIN or "
     "ABADAASHA; never the number after \"Patent No\". For the controller, serial is the number after \"S/N\" "
-    "on its label; never the model or part code. For the frame, serial is the frame number on the sticker, a "
+    "on its label; never the model or part code. For the motor, serial is the serial digits printed on the motor "
+    "casing after the rating and wheel size (for example after 36V250W and the wheel size); never the rating or "
+    "the wheel size. For the frame, serial is the frame number on the sticker, a "
     "letter or letters followed by digits. Copy the serial exactly as printed, with no spaces added. legible "
     "is true only when every character of the serial is clearly readable; otherwise false, and serial is your "
     "best reading or null. For the warranty seal, serial is null, legible is false, and seal is \"intact\" "

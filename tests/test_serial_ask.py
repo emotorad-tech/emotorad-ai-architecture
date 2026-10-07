@@ -34,6 +34,7 @@ DOODLE_URL = "https://signed.test/assets/library/battery/photos/serial-label-doo
 CONTROLLER_URL = "https://signed.test/assets/library/controller/photos/serial-label.w900.webp"
 SEAL_URL = "https://signed.test/assets/library/battery/photos/warranty-seal-intact.w900.webp"
 FRAME_URL = "https://signed.test/assets/library/frame/photos/frame-number-sticker.w900.webp"
+MOTOR_URL = "https://signed.test/assets/library/motor/photos/serial-number.w900.webp"
 ALL_BATTERY = ["battery", "controller", "warranty_seal", "frame"]
 
 
@@ -109,16 +110,19 @@ class SwitchTests(unittest.TestCase):
 
 class PartsTests(unittest.TestCase):
     def test_a_battery_issue_asks_for_all_four(self):
-        self.assertEqual(serial_ask.parts_for(True, "EMX Plus"), ALL_BATTERY)
+        self.assertEqual(serial_ask.parts_for("battery", "EMX Plus"), ALL_BATTERY)
 
     def test_a_doodle_has_no_seal_ask(self):
-        self.assertEqual(serial_ask.parts_for(True, "Doodle V3"), ["battery", "controller", "frame"])
+        self.assertEqual(serial_ask.parts_for("battery", "Doodle V3"), ["battery", "controller", "frame"])
 
     def test_after_the_melt_ask_the_battery_and_controller_are_not_asked_again(self):
-        self.assertEqual(serial_ask.parts_for(True, "EMX Plus", melt_asked=True), ["warranty_seal", "frame"])
+        self.assertEqual(serial_ask.parts_for("battery", "EMX Plus", melt_asked=True), ["warranty_seal", "frame"])
+
+    def test_a_motor_issue_asks_for_the_motor_the_controller_and_the_frame(self):
+        self.assertEqual(serial_ask.parts_for("motor", "EMX Plus"), ["motor", "controller", "frame"])
 
     def test_every_other_issue_asks_for_the_frame_number(self):
-        self.assertEqual(serial_ask.parts_for(False, "EMX Plus"), ["frame"])
+        self.assertEqual(serial_ask.parts_for("other", "EMX Plus"), ["frame"])
 
     def test_the_text_lists_several_and_names_one(self):
         several = serial_ask.text_for(ALL_BATTERY, False)
@@ -177,11 +181,11 @@ class AskTests(unittest.TestCase):
         self.assertTrue(reply.text.endswith(serial_ask.text_for(["warranty_seal", "frame"], False)), reply.text)
         self.assertEqual([a.url for a in reply.attachments], [SEAL_URL, FRAME_URL])
 
-    def test_a_motor_chat_is_asked_for_the_frame_number_only(self):
+    def test_a_motor_chat_is_asked_for_the_motor_the_controller_and_the_frame(self):
         chat = Chat([say(ASKS_VIDEO)], agent="motor_support")
         reply = chat.say("my motor makes a noise")
-        self.assertTrue(reply.text.endswith(serial_ask.text_for(["frame"], False)), reply.text)
-        self.assertEqual([a.url for a in reply.attachments], [FRAME_URL])
+        self.assertTrue(reply.text.endswith(serial_ask.text_for(["motor", "controller", "frame"], False)), reply.text)
+        self.assertEqual([a.url for a in reply.attachments], [MOTOR_URL, CONTROLLER_URL, FRAME_URL])
         self.assertEqual(chat.state().serials_asked_frames, ["EMXP2025004417"])
 
     def test_switched_off_nothing_is_added(self):

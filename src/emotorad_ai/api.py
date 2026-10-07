@@ -251,8 +251,10 @@ SERIAL_ASK, SERIAL_ASK_STATUS = serial_ask_module.from_env(CATALOGUE, MEDIA_STOR
 # after the reply. On with the ask, the media bucket and the OpenRouter key.
 SERIAL_READER = (serial_read.serial_reader_from_env()
                  if SERIAL_ASK is not None and MEDIA_STORE is not None else None)
-# Two at a time across the server; the reply never waits for them.
-SERIAL_READ_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="serial-read")
+# Four at a time across the server; a turn waits for its own photos' reads
+# at most this long (each read is one Gemini call on one photo).
+SERIAL_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="serial-read")
+SERIAL_READ_WAIT_SECONDS = 15.0
 # Where each label is, and an intact and a torn seal, shown to the reader
 # before the customer's photo (serial_read.REFERENCE_KEYS).
 SERIAL_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE, keys=serial_read.REFERENCE_KEYS)
@@ -1348,11 +1350,13 @@ def _handle_app_turn(message: InboundMessage) -> Reply:
 
 
 def _start_serial_reads(message: InboundMessage) -> None:
-    """Hands the turn's stored photos to the serial reader as the turn
-    starts, when the bike the chat is about was asked for its serial photos
-    (read from the state before the turn). They run beside the turn: a
-    reading done by its end is confirmed in its reply (serial_confirm.py),
-    a later one in the next. Never raises and never delays the reply."""
+    """Reads the turn's stored photos with the serial reader before the turn
+    runs, when the bike the chat is about was asked for its serial photos
+    (read from the state before the turn): each photo at the same time, and
+    the turn waits for them up to SERIAL_READ_WAIT_SECONDS, so the ticket
+    tool sees a motor photo that has just arrived and the reply can confirm
+    what was read (serial_confirm.py). A read still running then finishes on
+    its own and is confirmed on a later turn. Never raises."""
     if SERIAL_READER is None or MEDIA_STORE is None or not message.attachments:
         return
     try:
@@ -1363,11 +1367,14 @@ def _start_serial_reads(message: InboundMessage) -> None:
         return
     if not photos:
         return
-    SERIAL_READ_POOL.submit(
-        serial_read.read_photos, SERIAL_READER, photos, MEDIA_STORE.get_bytes, stores.conversations,
+    futures = [SERIAL_READ_POOL.submit(
+        serial_read.read_photos, SERIAL_READER, [photo], MEDIA_STORE.get_bytes, stores.conversations,
         conversation_id=message.conversation_id, user_key=state.user_key, frame_number=state.selected_frame,
         emit=log.emit, references=SERIAL_REFERENCES,
-    )
+    ) for photo in photos]
+    done, pending = wait(futures, timeout=SERIAL_READ_WAIT_SECONDS)
+    if pending:
+        log.emit("serial_read_late", message.conversation_id, photos=len(pending))
 
 
 # The chat socket's turn (amiigo/socket.py): prepare_turn with the app's

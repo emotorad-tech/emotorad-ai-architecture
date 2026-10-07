@@ -2005,18 +2005,18 @@ class Runtime:
         """The serial-photo ask (serial_ask.py), added by code to a fault
         agent's reply that asks for the customer's media, once per bike (by
         its frame number or reference, or "-" while none is chosen): the frame
-        number sticker for every issue, and for a battery issue the battery's
+        number sticker for every issue; for a battery issue the battery's
         sticker, the controller's label and the warranty seal too, less what
-        the melt ask already asked for."""
+        the melt ask already asked for; for a motor issue the motor's serial
+        and the controller's label."""
         if self.serial_ask is None:
             return turn
-        battery = (turn.agent == BATTERY_SUPPORT
-                   or (turn.agent == NARROW_SUPPORT and state.fault_topic == FAULT_AGENTS[BATTERY_SUPPORT]))
+        issue = self._serial_issue(turn.agent, state)
         frame = state.selected_frame or serial_ask_module.NO_BIKE
         if frame in state.serials_asked_frames:
             return turn
         bike = self._selected_bike(resolved, state) or {}
-        parts = serial_ask_module.parts_for(battery, bike.get("product_name"),
+        parts = serial_ask_module.parts_for(issue, bike.get("product_name"),
                                             melt_asked=frame in state.melt_asked_frames)
         pictures, missing = self.serial_ask.pictures(parts, bike.get("product_name"))
         if missing:
@@ -2029,6 +2029,26 @@ class Runtime:
                       language="hi" if hindi else "en")
         replace_turn_text(state.history, text)
         return replace(turn, text=text, attachments=list(turn.attachments) + pictures)
+
+    def _serial_readings(self, conversation_id: str) -> Optional[List[Dict[str, Any]]]:
+        """This conversation's readings, for the ticket tool; None with the
+        serial ask off, or a store that cannot say (never a refusal for that)."""
+        reader = getattr(self.conversations, "serial_readings_of", None)
+        if self.serial_ask is None or reader is None:
+            return None
+        try:
+            return reader(conversation_id)
+        except Exception as exc:
+            self.log.emit("serial_confirm_store_failed", conversation_id, error=type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _serial_issue(agent: str, state: ConversationState) -> str:
+        """"battery", "motor" or "other": which parts the serial ask asks for."""
+        for name in (BATTERY_SUPPORT, MOTOR_SUPPORT):
+            if agent == name or (agent == NARROW_SUPPORT and state.fault_topic == FAULT_AGENTS[name]):
+                return FAULT_AGENTS[name]
+        return "other"
 
     @staticmethod
     def _melt_asked(agent_name: str, state: ConversationState) -> bool:
@@ -2403,6 +2423,11 @@ class Runtime:
                 # what Gemini saw. None outside a fault chat, where the
                 # ticket tool's evidence_seen rule applies as before.
                 **self._evidence_facts(state),
+                # The serials read off the customer's photos (serial_read.py),
+                # with the serial ask on: a motor ticket waits for photos of
+                # the motor, the controller and the frame, and every ticket
+                # carries what was read. None with the ask off.
+                "serial_readings": lambda: self._serial_readings(message.conversation_id),
             },
             # Recorded as the loop runs, not only once the turn ends: a model
             # that calls lookup_warranty_record and place_replacement_order in

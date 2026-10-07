@@ -1,7 +1,7 @@
 """Confirming a serial read off the customer's photo (the person's rule, 7 October 2026).
 
-serial_read.py reads the battery serial, the controller's S/N and the frame
-number off the photos the serial ask asked for, and keeps each reading
+serial_read.py reads the battery serial, the motor serial, the controller's
+S/N and the frame number off the photos the serial ask asked for, and keeps each reading
 unconfirmed. This puts each reading to the customer once: "We read your
 frame number as X. Is that right?". Yes confirms it. No asks them to type it
 exactly as printed, and what they type replaces the reading (the photo's
@@ -31,12 +31,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .serial_read import looks_like_serial
 
 # The parts confirmed with the customer, in the order they are asked.
-PARTS = ("battery", "controller", "frame")
+PARTS = ("battery", "motor", "controller", "frame")
 
-LABELS_EN = {"battery": "battery serial number", "controller": "controller serial number (S/N)",
-             "frame": "frame number"}
+LABELS_EN = {"battery": "battery serial number", "motor": "motor serial number",
+             "controller": "controller serial number (S/N)", "frame": "frame number"}
 # DRAFT: for a Hindi speaker to check before real traffic.
-LABELS_HI = {"battery": "बैटरी सीरियल नंबर", "controller": "कंट्रोलर सीरियल नंबर (S/N)", "frame": "फ़्रेम नंबर"}
+LABELS_HI = {"battery": "बैटरी सीरियल नंबर", "motor": "मोटर सीरियल नंबर", "controller": "कंट्रोलर सीरियल नंबर (S/N)",
+             "frame": "फ़्रेम नंबर"}
 
 # Words, lowercased. Matched as whole tokens of the explicit class below,
 # never with \b or \w alone (Devanagari vowel signs fall outside \w).

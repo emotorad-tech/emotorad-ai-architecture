@@ -129,8 +129,14 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parse(text), {"part": "controller", "serial": "KT36-2210-0456", "legible": True, "seal": None})
 
     def test_an_unknown_part_is_none_and_keeps_no_serial(self):
-        self.assertEqual(parse(json.dumps({"part": "motor", "serial": "ABC12345", "legible": True})),
+        self.assertEqual(parse(json.dumps({"part": "display", "serial": "ABC12345", "legible": True})),
                          {"part": "none", "serial": None, "legible": False, "seal": None})
+
+    def test_a_motor_serial(self):
+        self.assertEqual(parse(json.dumps({"part": "motor", "serial": "220516001234", "legible": True})),
+                         {"part": "motor", "serial": "220516001234", "legible": True, "seal": None})
+        self.assertIn("rear hub motor", serial_read.PROMPT)
+        self.assertIn("motor_serial_number", serial_read.REFERENCE_KEYS["serial"])
 
     def test_something_that_is_not_a_serial_is_dropped(self):
         for serial in ("Patent No. 2023 1 0456", "EM", "<script>", "x" * 41, 12345678):
@@ -315,10 +321,15 @@ class MongoErasureTests(StoreErasureContract, unittest.TestCase):
 
 
 class InlinePool:
-    """Runs the reader at once, so the test sees what the server's pool does later."""
+    """Runs the reader at once and hands back a finished future, as the
+    server's pool does once the read is done."""
 
     def submit(self, fn, *args, **kwargs):
-        fn(*args, **kwargs)
+        from concurrent.futures import Future
+
+        future = Future()
+        future.set_result(fn(*args, **kwargs))
+        return future
 
 
 class ApiTests(unittest.TestCase):

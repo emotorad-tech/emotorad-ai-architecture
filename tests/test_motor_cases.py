@@ -30,6 +30,10 @@ TODAY = date(2026, 10, 8)
 MOTOR_CASES = ("motor_fault", "motor_damage", "motor_jam", "motor_under_load")
 
 
+def reading(part, serial="X12345", confirmed=False, source="ocr"):
+    return {"part": part, "serial": serial, "confirmed": confirmed, "source": source}
+
+
 def ticket(category, key="k1"):
     return {"category": category, "severity": "normal", "idempotency_key": key,
             "description": "Wheel does not turn at PAS 1 with the throttle applied; no error code."}
@@ -42,14 +46,8 @@ class TicketTests(unittest.TestCase):
     def test_the_motor_categories_exist(self):
         self.assertTrue(set(MOTOR_CASES) <= set(TICKET_CATEGORIES))
 
-    def test_a_motor_jam_is_raised_with_no_evidence_with_the_check_on_or_off(self):
-        on = self.registry.call(CREATE_SUPPORT_TICKET, ticket("motor_jam"), context(accepted=False, seen=False))
-        self.assertIn("ticket_id", on["data"], on)
-        off = self.registry.call(CREATE_SUPPORT_TICKET, ticket("motor_jam", "k2"), context(seen=False))
-        self.assertIn("ticket_id", off["data"], off)
-
-    def test_every_other_motor_case_still_waits_for_evidence(self):
-        for category in ("motor_fault", "motor_damage", "motor_under_load"):
+    def test_every_motor_case_waits_for_evidence_the_jam_too(self):
+        for category in MOTOR_CASES:
             with self.subTest(category=category):
                 refused = self.registry.call(CREATE_SUPPORT_TICKET, ticket(category), context(accepted=False))
                 self.assertEqual(refused["error"]["code"], "evidence_not_accepted")
@@ -58,13 +56,45 @@ class TicketTests(unittest.TestCase):
 
     def test_zoho_says_who_acts_next(self):
         expected = {"motor_fault": "Approval team", "motor_damage": "Approval team",
-                    "motor_jam": "Service team", "motor_under_load": "Service team"}
+                    "motor_jam": "Approval team", "motor_under_load": "Service team"}
         for category, team in expected.items():
             with self.subTest(category=category):
                 text = description(payload_record(category=category))
                 self.assertIn("Category: %s. Next action: %s" % (category, NEXT_ACTIONS[category]), text)
                 self.assertIn(team, NEXT_ACTIONS[category])
                 self.assertTrue(subject_label("support", category).startswith("Motor: "))
+
+    def test_a_motor_ticket_waits_for_the_motor_the_controller_and_the_frame(self):
+        for readings, missing in (([], ("rear hub motor", "controller's label", "frame number sticker")),
+                                  ([reading("motor"), reading("frame")], ("controller's label",))):
+            with self.subTest(parts=[r["part"] for r in readings]):
+                refused = self.registry.call(CREATE_SUPPORT_TICKET, ticket("motor_fault"),
+                                             context(accepted=True, seen=True, serial_readings=readings))
+                self.assertEqual(refused["error"]["code"], "serial_photos_required")
+                self.assertEqual(refused["error"]["remedy"], "collect_serial_photos")
+                for words in missing:
+                    self.assertIn(words, refused["error"]["message"])
+        self.assertEqual(self.registry.tickets.tickets, {})
+
+    def test_with_all_three_the_ticket_carries_what_was_read(self):
+        readings = [reading("motor", "220516001234", confirmed=True), reading("controller", None),
+                    reading("frame", "EMXP2025004417", source="typed", confirmed=True)]
+        made = self.registry.call(CREATE_SUPPORT_TICKET, ticket("motor_fault"),
+                                  context(accepted=True, seen=True, serial_readings=readings))
+        stored = self.registry.tickets.tickets[made["data"]["ticket_id"]]
+        self.assertIn("From the customer's photos: Motor serial: 220516001234 (read by AI, confirmed by the customer); "
+                      "Controller S/N: photo received, not readable; Frame number: EMXP2025004417 (typed by the "
+                      "customer).", stored["description"])
+
+    def test_with_the_serial_ask_off_nothing_is_asked_for(self):
+        made = self.registry.call(CREATE_SUPPORT_TICKET, ticket("motor_fault"), context(accepted=True, seen=True))
+        self.assertIn("ticket_id", made["data"])
+
+    def test_a_battery_ticket_never_waits_for_motor_photos(self):
+        battery = dict(ticket("battery_charging"), description="Light stays red.")
+        made = self.registry.call(CREATE_SUPPORT_TICKET, battery,
+                                  context(accepted=True, seen=True, serial_readings=[]))
+        self.assertIn("ticket_id", made["data"])
 
     def test_a_battery_ticket_has_no_next_action(self):
         self.assertNotIn("Next action", description(payload_record(category="battery_charging")))
