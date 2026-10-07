@@ -552,9 +552,12 @@ class References:
     copy; a picture missing from the catalogue or the bucket is left out
     and named, never a reason to stop the check."""
 
-    def __init__(self, catalogue: Mapping[str, Mapping[str, Any]], store: Any) -> None:
+    def __init__(self, catalogue: Mapping[str, Mapping[str, Any]], store: Any,
+                 keys: Mapping[str, Sequence[str]] = REFERENCE_KEYS) -> None:
         self._catalogue = catalogue
         self._store = store
+        # The pictures per component; serial_read.py passes its own.
+        self._keys = keys
         self._kept: Dict[str, Tuple[bytes, str, str]] = {}
         self._lock = threading.Lock()
 
@@ -564,7 +567,7 @@ class References:
 
         found: List[Tuple[bytes, str, str]] = []
         missing: List[str] = []
-        for key in REFERENCE_KEYS.get(component, ()):
+        for key in self._keys.get(component, ()):
             with self._lock:
                 kept = self._kept.get(key)
             if kept is None:

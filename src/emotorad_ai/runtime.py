@@ -142,6 +142,8 @@ from .evidence_check import (
 )
 from .melt_ask import ASKED_NOTE as MELT_ASKED_NOTE
 from .melt_ask import MeltAsk
+from . import serial_ask as serial_ask_module
+from . import serial_confirm
 from .serial_ask import SerialAsk
 from .one_step import is_too_long, replace_turn_text
 from .one_step import sentences as one_step_sentences
@@ -461,7 +463,9 @@ TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callba
                     # A pass on either side stands (_merge_onto_fresh).
                     "evidence_verdict", "evidence_check_errors",
                     # A melt ask waiting for a bike (melt_ask.py).
-                    "melt_pending")
+                    "melt_pending",
+                    # A confirmation of a serial read off a photo, under way (serial_confirm.py).
+                    "serial_confirm")
 
 # Triage's replies that end a turn for want of a bike (triage.py): which bike,
 # asked or asked again, and a bike not in the list collected or confirmed. A
@@ -630,6 +634,7 @@ class Runtime:
                 erasure_gate=self._node_erasure,
                 verify_gate=self._node_verify,
                 persona_route=self._node_persona,
+                serial_confirm=self._node_serial_confirm,
                 melt_ask=self._node_melt_ask,
                 jev_classify=self._node_classify,
                 standard_reply=self._node_standard,
@@ -1090,6 +1095,7 @@ class Runtime:
         # A bike the melt ask went out for on either server is not asked again.
         fresh.melt_asked_frames += [f for f in ours.melt_asked_frames if f not in fresh.melt_asked_frames]
         fresh.serials_asked_frames += [f for f in ours.serials_asked_frames if f not in fresh.serials_asked_frames]
+        fresh.serial_asked_ids += [r for r in ours.serial_asked_ids if r not in fresh.serial_asked_ids]
         # What this turn read and kept (spec 2026-10-05, section 6): a number
         # the customer typed, a failed look-up, a wait for a number to call,
         # the number a code went to. Where this turn changed one, its value
@@ -1898,6 +1904,65 @@ class Runtime:
         if not waiting:
             state.melt_pending = False
 
+    def _node_serial_confirm(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 4b. The customer's answer to a serial confirmation (serial_confirm.py):
+        #     yes, no, which one, or the number typed, read by code and
+        #     answered by code. Anything else goes on to the agent as usual.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        if state.serial_confirm is None or resolved.persona != "customer":
+            return {}
+        outcome = serial_confirm.answer(state.serial_confirm, message.message_text or "", utc_now_iso())
+        if outcome.reply is None:
+            return {}
+        cid = message.conversation_id
+        for reading_id, fields in outcome.updates:
+            try:
+                self.conversations.update_serial_reading(cid, reading_id, fields)
+            except Exception as exc:
+                # The customer's answer is lost for the record, never the turn.
+                self.log.emit("serial_confirm_store_failed", cid, error=type(exc).__name__)
+        state.serial_confirm = outcome.confirm
+        # What happened, never a value.
+        self.log.emit("serial_confirm", cid, outcome=outcome.event, updated=len(outcome.updates),
+                      done=outcome.confirm is None)
+        return {"reply": self._finish(message, state, outcome.reply, "serial_confirm")}
+
+    def _with_serial_confirm(self, message: InboundMessage, state: ConversationState, turn: Any) -> Any:
+        """The serial confirmation's question (serial_confirm.py), added by
+        code to a fault agent's reply: a confirmation under way whose answer
+        did not come (once more, then dropped), or a new one for readings not
+        yet put to the customer. Never on a reply about a hazard."""
+        if (self.serial_ask is None or turn.agent not in _FAULT_AGENTS
+                or check_safety_in_description(turn.text).triggered):
+            return turn
+        cid = message.conversation_id
+        confirm = state.serial_confirm
+        if confirm is not None:
+            if confirm.get("asks", 0) >= serial_confirm.MAX_ASKS:
+                state.serial_confirm = None
+                self.log.emit("serial_confirm", cid, outcome="dropped", updated=0, done=True)
+                return turn
+        else:
+            reader = getattr(self.conversations, "serial_readings_of", None)
+            if reader is None:
+                return turn
+            try:
+                readings = reader(cid)
+            except Exception as exc:
+                self.log.emit("serial_confirm_store_failed", cid, error=type(exc).__name__)
+                return turn
+            fresh = [r for r in readings if not r.get("confirmed") and r["_id"] not in state.serial_asked_ids]
+            confirm = serial_confirm.start(fresh)
+            if confirm is None:
+                return turn
+            state.serial_asked_ids += [r["_id"] for r in fresh if r.get("part") in serial_confirm.PARTS]
+            self.log.emit("serial_confirm", cid, outcome="asked", updated=0, done=False,
+                          readings=len(confirm["confirm"]) + len(confirm["typing"]))
+        state.serial_confirm = dict(confirm, asks=confirm.get("asks", 0) + 1)
+        text = turn.text.rstrip() + "\n\n" + serial_confirm.question(state.serial_confirm, writes_hindi(turn.text))
+        replace_turn_text(state.history, text)
+        return replace(turn, text=text)
+
     def _node_melt_ask(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 5. The melt ask (melt_ask.py, the person's brief of 6 October 2026):
         #    once a customer's bike is chosen and routed, a melt gets one fixed
@@ -1937,26 +2002,30 @@ class Runtime:
 
     def _with_serial_ask(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
                          turn: Any) -> Any:
-        """The battery serial-photo ask (serial_ask.py), added by code to a
-        reply that asks for the customer's media: in a battery chat, once per
-        chosen bike, and never for a bike the melt ask already asked about."""
+        """The serial-photo ask (serial_ask.py), added by code to a fault
+        agent's reply that asks for the customer's media, once per bike (by
+        its frame number or reference, or "-" while none is chosen): the frame
+        number sticker for every issue, and for a battery issue the battery's
+        sticker, the controller's label and the warranty seal too, less what
+        the melt ask already asked for."""
         if self.serial_ask is None:
             return turn
         battery = (turn.agent == BATTERY_SUPPORT
                    or (turn.agent == NARROW_SUPPORT and state.fault_topic == FAULT_AGENTS[BATTERY_SUPPORT]))
-        frame = state.selected_frame
-        if (not battery or not frame or frame in state.serials_asked_frames
-                or frame in state.melt_asked_frames):
+        frame = state.selected_frame or serial_ask_module.NO_BIKE
+        if frame in state.serials_asked_frames:
             return turn
         bike = self._selected_bike(resolved, state) or {}
-        pictures, missing = self.serial_ask.pictures(bike.get("product_name"))
+        parts = serial_ask_module.parts_for(battery, bike.get("product_name"),
+                                            melt_asked=frame in state.melt_asked_frames)
+        pictures, missing = self.serial_ask.pictures(parts, bike.get("product_name"))
         if missing:
             # Keys only, never a URL.
             self.log.emit("serial_ask_media_missing", message.conversation_id, keys=missing)
         hindi = writes_hindi(turn.text)
-        text = turn.text.rstrip() + "\n\n" + self.serial_ask.text(hindi)
+        text = turn.text.rstrip() + "\n\n" + self.serial_ask.text(parts, hindi)
         state.serials_asked_frames.append(frame)
-        self.log.emit("serial_ask", message.conversation_id, pictures=len(pictures),
+        self.log.emit("serial_ask", message.conversation_id, parts=list(parts), pictures=len(pictures),
                       language="hi" if hindi else "en")
         replace_turn_text(state.history, text)
         return replace(turn, text=text, attachments=list(turn.attachments) + pictures)
@@ -2555,6 +2624,7 @@ class Runtime:
                 replace_turn_text(state.history, text)
                 turn = replace(turn, text=text)
             turn = self._with_serial_ask(message, resolved, state, turn)
+        turn = self._with_serial_confirm(message, state, turn)
 
         return Reply(
             conversation_id=message.conversation_id,

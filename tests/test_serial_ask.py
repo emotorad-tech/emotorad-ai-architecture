@@ -1,7 +1,8 @@
-"""The battery serial-photo ask (serial_ask.py, the person's rule of 7 October 2026).
+"""The serial-photo ask (serial_ask.py, the person's rules of 7 October 2026).
 
-When the battery bot asks for the customer's media, code adds a request for
-the battery's serial sticker and the controller's serial label, once per
+When a fault agent asks for the customer's media, code adds a request for
+the frame number sticker and, for a battery issue, the battery's serial
+sticker, the controller's label and the battery's warranty seal, once per
 bike, with an example of each from the reference library. The model never
 writes it and cannot leave it out.
 """
@@ -31,6 +32,9 @@ NO_ASK = "Please check the wall socket works by plugging in another appliance."
 BATTERY_URL = "https://signed.test/assets/library/battery/photos/serial-label-downtube.w900.webp"
 DOODLE_URL = "https://signed.test/assets/library/battery/photos/serial-label-doodle.w900.webp"
 CONTROLLER_URL = "https://signed.test/assets/library/controller/photos/serial-label.w900.webp"
+SEAL_URL = "https://signed.test/assets/library/battery/photos/warranty-seal-intact.w900.webp"
+FRAME_URL = "https://signed.test/assets/library/frame/photos/frame-number-sticker.w900.webp"
+ALL_BATTERY = ["battery", "controller", "warranty_seal", "frame"]
 
 
 class FakeStore:
@@ -91,6 +95,8 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(status, "on")
         self.assertEqual(ask.items[serial_ask.BATTERY_KEY]["id"], "library/battery/photos/serial-label-downtube.jpg")
         self.assertEqual(ask.items[serial_ask.CONTROLLER_KEY]["id"], "library/controller/photos/serial-label.jpg")
+        self.assertEqual(ask.items[serial_ask.SEAL_KEY]["id"], "library/battery/photos/warranty-seal-intact.jpg")
+        self.assertEqual(ask.items[serial_ask.FRAME_KEY]["id"], "library/frame/photos/frame-number-sticker.jpg")
 
     def test_a_missing_or_offered_picture_keeps_it_off_and_says_why(self):
         catalogue = load_catalogue()
@@ -101,33 +107,57 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(serial_ask.from_env(catalogue, FakeStore(), ON), (None, "off: not code_only battery_serial_label"))
 
 
+class PartsTests(unittest.TestCase):
+    def test_a_battery_issue_asks_for_all_four(self):
+        self.assertEqual(serial_ask.parts_for(True, "EMX Plus"), ALL_BATTERY)
+
+    def test_a_doodle_has_no_seal_ask(self):
+        self.assertEqual(serial_ask.parts_for(True, "Doodle V3"), ["battery", "controller", "frame"])
+
+    def test_after_the_melt_ask_the_battery_and_controller_are_not_asked_again(self):
+        self.assertEqual(serial_ask.parts_for(True, "EMX Plus", melt_asked=True), ["warranty_seal", "frame"])
+
+    def test_every_other_issue_asks_for_the_frame_number(self):
+        self.assertEqual(serial_ask.parts_for(False, "EMX Plus"), ["frame"])
+
+    def test_the_text_lists_several_and_names_one(self):
+        several = serial_ask.text_for(ALL_BATTERY, False)
+        self.assertIn("four photos", several)
+        self.assertIn("\n1. the serial number sticker on your battery", several)
+        self.assertIn("\n4. your bike's frame number sticker", several)
+        one = serial_ask.text_for(["frame"], False)
+        self.assertTrue(one.startswith("Along with that, please send a photo of your bike's frame number sticker"))
+        self.assertIn("फ़्रेम नंबर", serial_ask.text_for(["frame"], True))
+
+
 class AskTests(unittest.TestCase):
-    def test_the_first_media_ask_gets_the_serial_request_and_both_examples(self):
+    def test_the_first_media_ask_gets_the_serial_request_and_every_example(self):
         chat = Chat([say(ASKS_VIDEO)])
         reply = chat.say("my battery won't charge")
+        text = serial_ask.text_for(ALL_BATTERY, False)
         # After the bot's first-reply disclosure line, its own ask, then ours.
-        self.assertIn(ASKS_VIDEO + "\n\n" + serial_ask.TEXT_EN, reply.text)
-        self.assertTrue(reply.text.endswith(serial_ask.TEXT_EN), reply.text)
-        self.assertEqual([a.url for a in reply.attachments], [BATTERY_URL, CONTROLLER_URL])
+        self.assertIn(ASKS_VIDEO + "\n\n" + text, reply.text)
+        self.assertTrue(reply.text.endswith(text), reply.text)
+        self.assertEqual([a.url for a in reply.attachments], [BATTERY_URL, CONTROLLER_URL, SEAL_URL, FRAME_URL])
         self.assertEqual(chat.state().serials_asked_frames, ["EMXP2025004417"])
         # The model wrote none of it, and the next turn sees it as the bot's own words.
         self.assertEqual(len(chat.llm.requests), 1)
-        self.assertIn(serial_ask.TEXT_EN, chat.state().history[-1]["content"][0]["text"])
+        self.assertIn(text, chat.state().history[-1]["content"][0]["text"])
         (event,) = chat.events("serial_ask")
-        self.assertEqual((event["pictures"], event["language"]), (2, "en"))
+        self.assertEqual((event["parts"], event["pictures"], event["language"]), (ALL_BATTERY, 4, "en"))
 
     def test_it_goes_once_per_bike(self):
         chat = Chat([say(ASKS_VIDEO), say(ASKS_VIDEO)])
         chat.say("my battery won't charge")
         second = chat.say("here")
-        self.assertNotIn(serial_ask.TEXT_EN, second.text)
+        self.assertNotIn("Along with that", second.text)
         self.assertEqual(second.attachments, [])
         self.assertEqual(chat.state().serials_asked_frames, ["EMXP2025004417"])
 
-    def test_a_doodle_owner_is_shown_the_doodle_battery_sticker(self):
+    def test_a_doodle_owner_is_shown_the_doodle_battery_sticker_and_no_seal(self):
         chat = Chat([say(ASKS_VIDEO)], phone=DOODLE, frame="DDL32022119302", label="Doodle V3")
         reply = chat.say("battery not charging")
-        self.assertEqual([a.url for a in reply.attachments], [DOODLE_URL, CONTROLLER_URL])
+        self.assertEqual([a.url for a in reply.attachments], [DOODLE_URL, CONTROLLER_URL, FRAME_URL])
 
     def test_a_reply_that_asks_for_nothing_gets_nothing(self):
         chat = Chat([say(NO_ASK)])
@@ -138,32 +168,33 @@ class AskTests(unittest.TestCase):
     def test_a_hindi_reply_gets_the_hindi_request(self):
         chat = Chat([say(ASKS_VIDEO_HI)])
         reply = chat.say("बैटरी चार्ज नहीं हो रही")
-        self.assertTrue(reply.text.endswith(serial_ask.TEXT_HI), reply.text)
+        self.assertTrue(reply.text.endswith(serial_ask.text_for(ALL_BATTERY, True)), reply.text)
 
-    def test_a_bike_the_melt_ask_asked_about_is_not_asked_again(self):
+    def test_after_the_melt_ask_only_the_seal_and_the_frame_are_asked(self):
         chat = Chat([say(ASKS_VIDEO)])
-        state = chat.conversations.get("c1")
-        state.melt_asked_frames.append("EMXP2025004417")
+        chat.conversations.get("c1").melt_asked_frames.append("EMXP2025004417")
         reply = chat.say("here is the video")
-        self.assertNotIn(serial_ask.TEXT_EN, reply.text)
+        self.assertTrue(reply.text.endswith(serial_ask.text_for(["warranty_seal", "frame"], False)), reply.text)
+        self.assertEqual([a.url for a in reply.attachments], [SEAL_URL, FRAME_URL])
 
-    def test_a_motor_chat_is_not_asked_for_the_battery_serial(self):
+    def test_a_motor_chat_is_asked_for_the_frame_number_only(self):
         chat = Chat([say(ASKS_VIDEO)], agent="motor_support")
         reply = chat.say("my motor makes a noise")
-        self.assertNotIn(serial_ask.TEXT_EN, reply.text)
-        self.assertEqual(chat.state().serials_asked_frames, [])
+        self.assertTrue(reply.text.endswith(serial_ask.text_for(["frame"], False)), reply.text)
+        self.assertEqual([a.url for a in reply.attachments], [FRAME_URL])
+        self.assertEqual(chat.state().serials_asked_frames, ["EMXP2025004417"])
 
     def test_switched_off_nothing_is_added(self):
         chat = Chat([say(ASKS_VIDEO)], ask=False)
         reply = chat.say("my battery won't charge")
-        self.assertNotIn(serial_ask.TEXT_EN, reply.text)
+        self.assertNotIn("Along with that", reply.text)
         self.assertEqual(reply.attachments, [])
 
     def test_a_picture_that_will_not_sign_is_left_out_and_named(self):
         chat = Chat([say(ASKS_VIDEO)], store=FakeStore(fail=("controller/photos/serial-label",)))
         reply = chat.say("my battery won't charge")
-        self.assertTrue(reply.text.endswith(serial_ask.TEXT_EN))
-        self.assertEqual([a.url for a in reply.attachments], [BATTERY_URL])
+        self.assertTrue(reply.text.endswith(serial_ask.text_for(ALL_BATTERY, False)))
+        self.assertEqual([a.url for a in reply.attachments], [BATTERY_URL, SEAL_URL, FRAME_URL])
         (missing,) = chat.events("serial_ask_media_missing")
         self.assertEqual(missing["keys"], ["controller_serial_label"])
 

@@ -253,6 +253,10 @@ SERIAL_READER = (serial_read.serial_reader_from_env()
                  if SERIAL_ASK is not None and MEDIA_STORE is not None else None)
 # Two at a time across the server; the reply never waits for them.
 SERIAL_READ_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="serial-read")
+# Where each label is, and an intact and a torn seal, shown to the reader
+# before the customer's photo (serial_read.REFERENCE_KEYS).
+SERIAL_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE, keys=serial_read.REFERENCE_KEYS)
+                     if SERIAL_READER is not None else None)
 # The library's melted and normal comparisons, sent with a battery chat's
 # evidence (evidence_check.REFERENCE_KEYS), read from the bucket on first use.
 EVIDENCE_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE)
@@ -1336,15 +1340,16 @@ def prepare_turn(
 
 def _handle_app_turn(message: InboundMessage) -> Reply:
     """The chat socket's turn: the same runtime, read when the turn runs."""
-    reply = runtime.handle(message)
-    _read_serials_after(message)
-    return reply
+    _start_serial_reads(message)
+    return runtime.handle(message)
 
 
-def _read_serials_after(message: InboundMessage) -> None:
-    """Hands the turn's stored photos to the serial reader, after the reply,
-    when the bike the chat is about was asked for its serial photos. Never
-    raises and never delays the reply (serial_read.py)."""
+def _start_serial_reads(message: InboundMessage) -> None:
+    """Hands the turn's stored photos to the serial reader as the turn
+    starts, when the bike the chat is about was asked for its serial photos
+    (read from the state before the turn). They run beside the turn: a
+    reading done by its end is confirmed in its reply (serial_confirm.py),
+    a later one in the next. Never raises and never delays the reply."""
     if SERIAL_READER is None or MEDIA_STORE is None or not message.attachments:
         return
     try:
@@ -1358,7 +1363,7 @@ def _read_serials_after(message: InboundMessage) -> None:
     SERIAL_READ_POOL.submit(
         serial_read.read_photos, SERIAL_READER, photos, MEDIA_STORE.get_bytes, stores.conversations,
         conversation_id=message.conversation_id, user_key=state.user_key, frame_number=state.selected_frame,
-        emit=log.emit,
+        emit=log.emit, references=SERIAL_REFERENCES,
     )
 
 
@@ -1465,9 +1470,8 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
         )
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    reply = runtime.handle(message)
-    _read_serials_after(message)
-    return _message_out(conversation_id, reply)
+    _start_serial_reads(message)
+    return _message_out(conversation_id, runtime.handle(message))
 
 
 class ErasureIn(BaseModel):

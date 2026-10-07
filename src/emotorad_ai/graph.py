@@ -45,6 +45,7 @@ class TurnNodes:
     erasure_gate: Node
     verify_gate: Node
     persona_route: Node
+    serial_confirm: Node
     melt_ask: Node
     jev_classify: Node
     standard_reply: Node
@@ -54,7 +55,7 @@ class TurnNodes:
 
 NODE_NAMES = (
     "prepare", "safety_gate", "callback_gate", "navigation_gate", "handoff_gate", "erasure_gate", "verify_gate",
-    "persona_route", "melt_ask", "jev_classify", "standard_reply", "narrow_agent", "full_agent",
+    "persona_route", "serial_confirm", "melt_ask", "jev_classify", "standard_reply", "narrow_agent", "full_agent",
 )
 
 _PATH_NODES = {"standard": "standard_reply", "narrow": "narrow_agent", "full": "full_agent"}
@@ -91,7 +92,10 @@ def build_turn_graph(nodes: TurnNodes):
     graph.add_conditional_edges("handoff_gate", _replied_or("erasure_gate"), ["erasure_gate", END])
     graph.add_conditional_edges("erasure_gate", _replied_or("verify_gate"), ["verify_gate", END])
     graph.add_conditional_edges("verify_gate", _replied_or("persona_route"), ["persona_route", END])
-    graph.add_conditional_edges("persona_route", _replied_or("melt_ask"), ["melt_ask", END])
+    graph.add_conditional_edges("persona_route", _replied_or("serial_confirm"), ["serial_confirm", END])
+    # The customer's answer to a serial confirmation (serial_confirm.py): a
+    # reply by code, or on to the melt ask when the message is not an answer.
+    graph.add_conditional_edges("serial_confirm", _replied_or("melt_ask"), ["melt_ask", END])
     # The melt ask (melt_ask.py): a fixed reply by code once the bike is
     # chosen and routed, so it comes after triage and before Jev or any model.
     graph.add_conditional_edges("melt_ask", _replied_or("jev_classify"), ["jev_classify", END])

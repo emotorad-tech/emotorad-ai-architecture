@@ -459,6 +459,12 @@ class MongoConversationStore:
         readings = self._collection(SERIAL_READINGS)
         self._guard("replace_one", lambda: readings.replace_one({"_id": reading["_id"]}, dict(reading), upsert=True))
 
+    def update_serial_reading(self, conversation_id: str, reading_id: str, fields: Dict[str, Any]) -> None:
+        """Sets `fields` on one reading (serial_confirm.py: confirmed, or typed)."""
+        readings = self._collection(SERIAL_READINGS)
+        self._guard("update_one", lambda: readings.update_one(
+            {"_id": reading_id, "conversation_id": conversation_id}, {"$set": dict(fields)}))
+
     def serial_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         readings = self._collection(SERIAL_READINGS)
         return self._guard(

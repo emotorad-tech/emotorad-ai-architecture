@@ -26,7 +26,7 @@ from emotorad_ai.stores.mongo import MongoConversationStore, ensure_indexes
 from tests.test_api_media_persistence import _Store, fresh_api, jpeg_data_url
 
 FRAME = "EMXP2025004417"  # Ananya's EMX Plus (fixtures)
-BATTERY = {"part": "battery", "serial": "EMIN2407150123", "legible": True}
+BATTERY = {"part": "battery", "serial": "EMIN2407150123", "legible": True, "seal": None}
 NOW = datetime(2026, 10, 7, 9, 30, tzinfo=timezone.utc)
 
 
@@ -50,8 +50,9 @@ class FakeReader:
     def __init__(self, answers=(BATTERY,), error=None):
         self.answers, self.error, self.seen = list(answers), error, []
 
-    def read(self, data, mime):
+    def read(self, data, mime, references=None):
         self.seen.append((data, mime))
+        self.references = references
         if self.error is not None:
             raise self.error
         return self.answers[min(len(self.seen), len(self.answers)) - 1]
@@ -92,6 +93,20 @@ class ReaderTests(unittest.TestCase):
         self.assertIn("Patent No", serial_read.PROMPT)
         self.assertIn("S/N", serial_read.PROMPT)
 
+    def test_references_go_first_labelled_as_ours_then_the_customers_photo(self):
+        transport = FakeTransport()
+        ref = (b"RIFFref", "image/webp", "Example: the frame number sticker on the seat tube")
+        OpenRouterSerialReader(transport).read(b"jpeg", "image/jpeg", references=[ref])
+        content = transport.posts[0]["body"]["messages"][0]["content"]
+        self.assertEqual([part.get("text") for part in content if part["type"] == "text"],
+                         [serial_read.PROMPT, serial_read.REFERENCES_INTRO, ref[2], serial_read.CUSTOMER_PHOTO_LINE])
+        self.assertEqual(content[-1]["image_url"]["url"], "data:image/jpeg;base64," + base64.b64encode(b"jpeg").decode())
+        self.assertIn("Never read a serial from them", serial_read.REFERENCES_INTRO)
+
+    def test_the_prompt_names_the_frame_and_the_seal(self):
+        for words in ("frame number sticker", "warranty_seal", "intact", "torn", "unclear"):
+            self.assertIn(words, serial_read.PROMPT)
+
     def test_a_provider_failure_is_its_code_only(self):
         reader = OpenRouterSerialReader(FakeTransport(error=OpenRouterRateLimited("rate_limited")))
         with self.assertRaises(SerialReadError) as caught:
@@ -111,16 +126,30 @@ class ParseTests(unittest.TestCase):
 
     def test_json_in_a_code_fence_is_read(self):
         text = "```json\n" + json.dumps({"part": "controller", "serial": "KT36-2210-0456", "legible": True}) + "\n```"
-        self.assertEqual(parse(text), {"part": "controller", "serial": "KT36-2210-0456", "legible": True})
+        self.assertEqual(parse(text), {"part": "controller", "serial": "KT36-2210-0456", "legible": True, "seal": None})
 
     def test_an_unknown_part_is_none_and_keeps_no_serial(self):
         self.assertEqual(parse(json.dumps({"part": "motor", "serial": "ABC12345", "legible": True})),
-                         {"part": "none", "serial": None, "legible": False})
+                         {"part": "none", "serial": None, "legible": False, "seal": None})
 
     def test_something_that_is_not_a_serial_is_dropped(self):
         for serial in ("Patent No. 2023 1 0456", "EM", "<script>", "x" * 41, 12345678):
             self.assertEqual(parse(json.dumps({"part": "battery", "serial": serial, "legible": True})),
-                             {"part": "battery", "serial": None, "legible": False}, serial)
+                             {"part": "battery", "serial": None, "legible": False, "seal": None}, serial)
+
+    def test_a_frame_number(self):
+        self.assertEqual(parse(json.dumps({"part": "frame", "serial": "EMXP2025004417", "legible": True})),
+                         {"part": "frame", "serial": "EMXP2025004417", "legible": True, "seal": None})
+
+    def test_the_seal_is_intact_torn_or_unclear_and_never_has_a_serial(self):
+        for said, kept in (("intact", "intact"), ("torn", "torn"), ("unclear", "unclear"), ("broken", "unclear"),
+                           (None, "unclear")):
+            reading = parse(json.dumps({"part": "warranty_seal", "serial": "EMIN123456", "legible": True,
+                                        "seal": said}))
+            self.assertEqual(reading, {"part": "warranty_seal", "serial": None, "legible": False, "seal": kept}, said)
+
+    def test_a_seal_on_another_part_is_dropped(self):
+        self.assertIsNone(parse(json.dumps(dict(BATTERY, seal="torn")))["seal"])
 
     def test_only_a_real_true_is_legible(self):
         for legible in ("yes", 1, None):
@@ -139,10 +168,15 @@ class PhotosToReadTests(unittest.TestCase):
     def test_the_melt_ask_counts_as_asked(self):
         self.assertEqual(len(photos_to_read([photo()], asked_state(serial=False, melt=True))), 1)
 
-    def test_nothing_before_the_ask_or_without_a_bike(self):
+    def test_nothing_before_the_ask(self):
         self.assertEqual(photos_to_read([photo()], asked_state(serial=False)), [])
-        self.assertEqual(photos_to_read([photo()], asked_state(frame=None)), [])
         self.assertEqual(photos_to_read([photo()], None), [])
+
+    def test_with_no_bike_chosen_the_conversations_ask_counts(self):
+        state = SimpleNamespace(selected_frame=None, serials_asked_frames=["-"], melt_asked_frames=[])
+        self.assertEqual(len(photos_to_read([photo()], state)), 1)
+        state.serials_asked_frames = []
+        self.assertEqual(photos_to_read([photo()], state), [])
 
     def test_a_video_or_an_unstored_photo_is_not_read(self):
         unstored = Attachment(kind="image", url=jpeg_data_url(), mime_type="image/jpeg")
@@ -164,12 +198,33 @@ class ReadPhotosTests(unittest.TestCase):
         self.assertEqual(kept, 1)
         self.assertEqual(store.serial_readings_of("c1"), [{
             "_id": "customers/cl/c1/images/a.jpg", "conversation_id": "c1", "user_key": "cluster-1",
-            "frame_number": FRAME, "part": "battery", "serial": "EMIN2407150123", "legible": True,
+            "frame_number": FRAME, "part": "battery", "serial": "EMIN2407150123", "legible": True, "seal": None,
             "media_key": "customers/cl/c1/images/a.jpg", "model": "google/gemini-3.8-flash",
             "read_at": NOW.isoformat(), "confirmed": False, "source": "ocr",
         }])
         self.assertEqual(events, [{"event": "serial_read", "conversation_id": "c1", "part": "battery",
-                                   "legible": True}])
+                                   "legible": True, "seal": None}])
+
+    def test_the_references_are_shown_and_a_missing_one_is_named(self):
+        class Refs:
+            def for_component(self, component):
+                assert component == "serial"
+                return [(b"r", "image/webp", "ref")], ["frame_number_sticker"]
+
+        reader = FakeReader()
+        events = Events()
+        read_photos(reader, [("k.jpg", "image/jpeg")], lambda key: b"x", InMemoryConversationStore(),
+                    conversation_id="c1", user_key="u", frame_number=FRAME, emit=events, references=Refs())
+        self.assertEqual(reader.references, [(b"r", "image/webp", "ref")])
+        self.assertEqual(events.events[0], {"event": "serial_read_references_missing", "conversation_id": "c1",
+                                            "keys": ["frame_number_sticker"]})
+
+    def test_a_seal_reading_is_kept_with_its_state(self):
+        seal = {"part": "warranty_seal", "serial": None, "legible": False, "seal": "torn"}
+        kept, store, events = self.run_it(FakeReader(answers=(seal,)), [("k1.jpg", "image/jpeg")])
+        self.assertEqual(kept, 1)
+        [reading] = store.serial_readings_of("c1")
+        self.assertEqual((reading["part"], reading["seal"], reading["serial"]), ("warranty_seal", "torn", None))
 
     def test_the_serial_is_never_logged(self):
         _, _, events = self.run_it(FakeReader(), [("k1.jpg", "image/jpeg")])

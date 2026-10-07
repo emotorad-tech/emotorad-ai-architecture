@@ -128,6 +128,11 @@ class ConversationState:
     # added to a reply for, by the frame number or reference, so it goes once
     # per bike.
     serials_asked_frames: List[str] = field(default_factory=list)
+    # Confirming serials read off the customer's photos (serial_confirm.py):
+    # the readings already put to the customer, by their id, so each is
+    # asked once; and the confirmation under way, or None.
+    serial_asked_ids: List[str] = field(default_factory=list)
+    serial_confirm: Optional[Dict[str, Any]] = None
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool
@@ -664,6 +669,12 @@ class InMemoryConversationStore:
     def serial_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         readings = self._serials.get(conversation_id, {}).values()
         return [dict(r) for r in sorted(readings, key=lambda r: (r["read_at"], r["_id"]))]
+
+    def update_serial_reading(self, conversation_id: str, reading_id: str, fields: Dict[str, Any]) -> None:
+        """Sets `fields` on one reading (serial_confirm.py: confirmed, or typed)."""
+        reading = self._serials.get(conversation_id, {}).get(reading_id)
+        if reading is not None:
+            reading.update(fields)
 
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice
