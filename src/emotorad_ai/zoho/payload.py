@@ -120,10 +120,24 @@ def _channel(channel: Optional[str]) -> str:
     return CHANNELS.get(channel, _one_line(channel))
 
 
+# Who acts next on a motor case (AFS §5f, 8 October 2026). The bot never
+# approves or rejects: a fault or damage waits for the Approval team, a jam or a
+# motor that fails under load goes to the Service team.
+NEXT_ACTIONS = {
+    "motor_fault": "Pending: routed to the Approval team",
+    "motor_damage": ("Pending: routed to the Approval team, who decide the warranty position (physical damage); "
+                     "a paid repair was offered"),
+    "motor_jam": "Service team: arrange a workshop visit",
+    "motor_under_load": "Service team",
+}
+
+
 def _kind_line(kind: str, category: Optional[str]) -> str:
     line = "Kind: %s" % kind
     if category:
         line += ". Category: %s" % _one_line(category)
+        if category in NEXT_ACTIONS:
+            line += ". Next action: %s" % NEXT_ACTIONS[category]
     return line
 
 

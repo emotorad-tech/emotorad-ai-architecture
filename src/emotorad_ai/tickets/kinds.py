@@ -47,6 +47,10 @@ _CATEGORY_LABELS = {
     "battery_range": "Battery: range",
     "battery_power": "Battery: power",
     "battery_safety": "Battery: safety",
+    "motor_fault": "Motor: fault",
+    "motor_damage": "Motor: physical damage",
+    "motor_jam": "Motor: jam",
+    "motor_under_load": "Motor: not working under load",
     "other": "Other",
 }
 

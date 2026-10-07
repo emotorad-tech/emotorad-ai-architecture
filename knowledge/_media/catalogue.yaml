@@ -282,3 +282,101 @@ controller_connector_melted_vs_normal:
     The AI checker compares the customer's photo or video with it to judge
     whether the controller has melted. An AI-made illustration, not a photo
     of a real controller: replace it with a real one when available.
+
+# Motor reference clips (8 October 2026), from AFS's "Motor issue evidences"
+# and the AFS chatbot team's motor diagnosis (§5f). They have been in
+# emotorad-ai-stage-media under assets/afs/motor/ since the first upload, each
+# with its .poster.jpg, and were held until AFS said what each shows and when it
+# is sent. Each is offered to the model (send_guide_media) and named in the
+# motor knowledge record of the one case it belongs to; the motor agent's prompt
+# lists them. Five originals are iPhone HEVC 10-bit HDR recordings (9 to 81
+# MB) that play on an iPhone and in Safari but not on every Android phone or in
+# Chrome, so each id below is an H.264 720p SDR copy with its sound (the
+# person allowed format and quality changes for size, 8 October 2026), beside
+# the untouched original (.mov, or -web.mp4 for the bearing clip's copy). The
+# freewheel clip was already H.264 and is the original.
+# Every motor clip is also a reference: the motor agent compares the
+# description of the customer's clip with the `about` below.
+
+motor_e07_reference:
+  id: afs/motor/videos/motor-e007-reference.mp4
+  kind: video
+  caption: "Reference: the motor cable and its connection, in the correct state"
+  domain: motor
+  use: customer_guide
+  about: >-
+    46 seconds. A T-Rex Air showing E 007 on the display, then the motor cable
+    and its connector under the chain stay, plugged in throughout. AFS's
+    reference for the E-07 case (and E-24, the T-Rex Pro's equivalent): the
+    wire condition and the connections in their correct state, in one clip.
+    The customer films the same on their bike, and the bot compares.
+
+motor_noise_reference:
+  id: afs/motor/videos/motor-noise.mp4
+  kind: video
+  caption: "Reference: motor noise, with and without load"
+  domain: motor
+  use: customer_guide
+  about: >-
+    33 seconds. The rear hub motor and the display, then the bike on its stand
+    with no rider: motor noise with and without load. The default clip for a
+    general noise complaint.
+
+motor_noise_no_load_reference:
+  id: afs/motor/videos/motor-noise-without-load.mp4
+  kind: video
+  caption: "Reference: motor noise with the wheel off the ground"
+  domain: motor
+  use: customer_guide
+  about: >-
+    8 seconds. The rear wheel spinning off the ground, with no load. Sent when
+    the customer says the noise comes with the wheel stationary or while not
+    riding. Noise with the wheel stationary points at the planetary gears.
+
+motor_bearing_noise_reference:
+  id: afs/motor/videos/motor-bearing-noise-under-load-web.mp4
+  kind: video
+  caption: "Reference: motor bearing noise while riding"
+  domain: motor
+  use: customer_guide
+  about: >-
+    51 seconds, filmed while riding. Bearing noise under load. Sent when the
+    customer says the noise only happens while riding, which points at the
+    bearings only.
+
+motor_threading_reference:
+  id: afs/motor/videos/motor-threading.mp4
+  kind: video
+  caption: "Reference: a loose brake disc and the bolt-tightening check"
+  domain: motor
+  use: customer_guide
+  about: >-
+    71 seconds. The brake disc turned by hand, then a hex key on a disc bolt
+    again and again: a loose or misaligned disc rotor and the bolt-tightening
+    check. A bolt that tightens firmly and holds is normal; one that keeps
+    turning without gripping is a threading fault. Also the reference for
+    axle threading.
+
+freewheel_threading_reference:
+  id: afs/motor/videos/freewheel-threading.mp4
+  kind: video
+  caption: "Reference: a freewheel that is out of alignment"
+  domain: motor
+  use: customer_guide
+  about: >-
+    28 seconds, portrait. A freewheel with a threading problem: out of
+    alignment. Sent when the bike works on the throttle but not in pedal
+    assist (PAS) or when pedalling.
+
+display_odometer_reading:
+  id: afs/motor/photos/odometer-reading.jpg
+  kind: image
+  caption: "Example: the display's main screen, with the odometer (ODO)"
+  code_only: true
+  domain: display
+  use: customer_example
+  about: >-
+    The display's main screen: energy bar, speed, assist level (PAS) and the
+    ODO reading. No case sends it yet (AFS §5f, 8 October 2026). The AFS
+    folder's frame number and motor serial photos are the library's
+    frame_number_sticker and motor_serial_number.

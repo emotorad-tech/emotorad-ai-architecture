@@ -45,11 +45,11 @@ class FakeEvidenceChecker:
         self.until_cancelled = until_cancelled
         self.calls = []
 
-    def check(self, media, complaint, component, deadline_at=None, cancel=None):
+    def check(self, media, complaint, component, deadline_at=None, cancel=None, reference_notes=None):
         # As the real checker does: a clip still in the bucket is read.
         self.calls.append({"media": [(len(read_media(data)), mime) for data, mime, _ in media],
                            "complaint": complaint, "component": component, "deadline_at": deadline_at,
-                           "cancel": cancel})
+                           "cancel": cancel, "reference_notes": reference_notes})
         if self.delay:
             time.sleep(self.delay)
         if self.until_cancelled:

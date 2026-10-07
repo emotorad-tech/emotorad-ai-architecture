@@ -55,6 +55,11 @@ TOPIC_KEYWORDS: Dict[str, Sequence[str]] = {
         "cuts out", "cutting out", "cuts off", "cutting off", "power cut",
         "stops while riding", "while riding",
         "मोटर", "आवाज", "awaz",
+        # AFS's motor cases (8 October 2026). Never bare "disc": it is inside
+        # "discharge", a battery word, and two topics mean asking.
+        "e-07", "e07", "e 07", "e-24", "e24", "freewheel", "disc rotor", "brake disc", "disc bolt",
+        "loose disc", "disc loose", "rotor", "threading", "motor jam", "jammed motor", "wheel not",
+        "not moving", "speedometer",
     ),
 }
 

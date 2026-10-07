@@ -109,8 +109,10 @@ class ReferencesTests(unittest.TestCase):
 
 
 class TakesReferences(FakeEvidenceChecker):
-    def check(self, media, complaint, component, deadline_at=None, cancel=None, references=None):
-        verdict = super().check(media, complaint, component, deadline_at=deadline_at, cancel=cancel)
+    def check(self, media, complaint, component, deadline_at=None, cancel=None, references=None,
+              reference_notes=None):
+        verdict = super().check(media, complaint, component, deadline_at=deadline_at, cancel=cancel,
+                                reference_notes=reference_notes)
         self.calls[-1]["references"] = references
         return verdict
 
@@ -144,9 +146,15 @@ class ApiTests(unittest.TestCase):
         call = self.post("battery_support", Bucket())
         self.assertEqual([data for data, _, _ in call["references"]], [b"terminals", b"connector", b"not-melted"])
 
-    def test_a_motor_chats_is_checked_without(self):
+    def test_a_motor_chats_is_checked_without_pictures_but_with_the_clips_described(self):
         call = self.post("motor_support", Bucket())
         self.assertIsNone(call["references"])
+        notes = call["reference_notes"]
+        self.assertEqual(len(notes), 6)
+        self.assertTrue(notes[0].startswith("Reference: the motor cable and its connection, in the correct state: "))
+
+    def test_a_battery_chat_gets_no_clip_descriptions(self):
+        self.assertIsNone(self.post("battery_support", Bucket())["reference_notes"])
 
     def test_with_none_readable_the_check_still_runs_and_the_gap_is_logged(self):
         call = self.post("battery_support", Bucket({}))

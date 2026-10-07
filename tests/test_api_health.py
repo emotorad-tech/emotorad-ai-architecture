@@ -57,9 +57,10 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(api.health()["melt_ask"],
                          "off: unresolvable melt_battery_serial, melt_controller_label, melt_terminals")
         self.assertIsNone(api.runtime.melt_ask)
-        self.assertEqual(len(api.GUIDE_MEDIA), 4)
-        # 4 offered to the model (2 of them the library's), 3 melt pictures, 14 more library files.
-        self.assertEqual(len(api.CATALOGUE), 21)
+        self.assertEqual(len(api.GUIDE_MEDIA), 10)
+        # 10 offered to the model (2 of them the library's, 6 the motor clips), 3 melt pictures,
+        # 14 more library files and the odometer photo.
+        self.assertEqual(len(api.CATALOGUE), 28)
 
     def test_the_runtime_is_given_the_melt_ask_when_it_is_on(self):
         from emotorad_ai import melt_ask

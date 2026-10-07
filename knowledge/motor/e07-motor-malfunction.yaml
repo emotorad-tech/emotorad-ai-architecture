@@ -1,0 +1,54 @@
+id: motor-e07-malfunction
+title: "E-07 or E-24 on the display: motor malfunction"
+topic: motor
+# Reached straight from the code: E-07 (and E-24, the T-Rex Pro's equivalent)
+# is a motor code, so no part identification runs first.
+symptoms: [E-07, E07, E 07, E-007, E007, E 007, E-24, E24, error 07, error code 07, error 7,
+           motor error, motor malfunction, motor error code, display shows E07,
+           E07 aa raha hai, E07 dikha raha hai]
+applies_to: {}
+source: AFS chatbot team, motor diagnosis §5f1 (8 October 2026)
+# The reference clip is the catalogue's motor_e07_reference, sent with
+# send_guide_media in step 2.
+media: []
+steps:
+  - >-
+    E-07 on the display is a motor code. E-24 is the same code on a T-Rex Pro: treat the two
+    exactly alike. Do not ask which part is at fault first; go straight to the check below.
+  - >-
+    SEND THE REFERENCE AND ASK FOR ONE VIDEO. Send the motor_e07_reference clip with
+    send_guide_media, and say in words what it shows: the motor cable and its connector, under
+    the chain stay, plugged in and in the correct state. Ask the customer to record one short
+    video showing the same on their bike: the motor wire along its length, and the connector,
+    close enough to see how it is plugged in.
+  - >-
+    COMPARE THEIR VIDEO WITH THE REFERENCE YOURSELF, using the description of their video:
+    is the wire sound, and is the connector plugged in the same way? Your read decides which
+    branch you follow. It never decides the outcome: that is the Approval team's.
+  - >-
+    IF BOTH MATCH (the wire is sound and the connection is correct): the motor itself is the
+    likely fault. Tell them what the video shows and that you are sending it to the Approval
+    team for review. Raise create_support_ticket with category motor_fault, and in the
+    description the symptom (E-07 or E-24), what the video showed, and the conclusion "motor
+    replacement recommended". Tell them the Approval team will review it and update them.
+  - >-
+    IF THE CONNECTION DOES NOT MATCH (unplugged, loose, or not fully seated): walk them
+    through reconnecting it. With the bike switched off, push the two halves of the connector
+    fully together until they seat, the way the reference shows it. Then switch on and ask
+    whether E-07 is still showing. If it has gone, the issue is resolved. If it is still
+    showing after reconnecting, treat it as matching: the branch above, motor replacement
+    recommended, to the Approval team.
+  - >-
+    IF THE CONNECTION IS RIGHT BUT THE WIRE OR CONNECTOR IS PHYSICALLY DAMAGED (cut, crushed,
+    frayed, melted, or bent or broken pins; pin damage counts as connector damage): this is
+    physical damage, not a manufacturing fault. Tell them what the video shows and that you
+    are sending it to the Approval team, who decide the warranty position. Never tell them the
+    claim is rejected. Raise create_support_ticket with category motor_damage, and offer a
+    paid repair (on cost) if they want one; note their answer in the description.
+  - >-
+    Never say a replacement or repair is approved, rejected or confirmed, and never give a
+    timeline you cannot know.
+escalate_when: >-
+  Every branch that does not end with E-07 gone after reconnecting goes to the Approval team
+  on a ticket: motor_fault for a sound, correctly connected wire, motor_damage for a damaged
+  wire or connector.

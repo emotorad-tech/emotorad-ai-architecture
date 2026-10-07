@@ -65,9 +65,19 @@ PLACE_ORDER = "place_order"
 # --- replacement fulfilment --------------------------------------------------
 PLACE_REPLACEMENT_ORDER = "place_replacement_order"
 
-TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety", "other")
+TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety",
+                     # The motor cases (AFS §5f, 8 October 2026): a fault or physical damage
+                     # goes to the Approval team; a jam or a motor that fails under load to
+                     # the Service team (zoho/payload.NEXT_ACTIONS).
+                     "motor_fault", "motor_damage", "motor_jam", "motor_under_load",
+                     "other")
 # A hazard is raised on the customer's word, never held behind a photograph.
 EVIDENCE_EXEMPT_CATEGORIES = ("battery_safety",)
+# A motor jam needs a workshop, and AFS asks for no photo or video for it
+# (§5f4): its ticket never waits for evidence. The category alone opens it,
+# unlike the safety category: what it buys is a workshop visit the Service
+# team arranges, not a replacement.
+NO_EVIDENCE_CATEGORIES = ("motor_jam",)
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
 
 
@@ -1238,9 +1248,10 @@ def build_registry(
             # The evidence check is on (the person's brief, 6 October 2026):
             # a passing verdict replaces the evidence_seen test below. Never
             # for a hazard, which is raised on the customer's word.
-            if evidence_accepted is not True and not hazard:
+            if evidence_accepted is not True and not hazard and category not in NO_EVIDENCE_CATEGORIES:
                 raise _evidence_refusal(evidence_missing)
-        elif evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES:
+        elif (evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES
+              and category not in NO_EVIDENCE_CATEGORIES):
             # The rule the evidence post-check enforces on the reply, enforced
             # here on the write too: before, the ticket was created and only the
             # reply saying so was blocked, so the customer never heard of it.

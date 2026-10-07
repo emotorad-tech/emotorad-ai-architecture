@@ -23,7 +23,25 @@ KEPT = {
     # 7 October 2026: two battery guides from the reference library.
     "battery_switch_on_position": "library/battery/photos/switch-on-position.jpg",
     "battery_revival_steps": "library/battery/videos/revival-steps.mp4",
+    # 8 October 2026: the motor reference clips, AFS §5f.
+    "motor_e07_reference": "afs/motor/videos/motor-e007-reference.mp4",
+    "motor_noise_reference": "afs/motor/videos/motor-noise.mp4",
+    "motor_noise_no_load_reference": "afs/motor/videos/motor-noise-without-load.mp4",
+    "motor_bearing_noise_reference": "afs/motor/videos/motor-bearing-noise-under-load-web.mp4",
+    "motor_threading_reference": "afs/motor/videos/motor-threading.mp4",
+    "freewheel_threading_reference": "afs/motor/videos/freewheel-threading.mp4",
 }
+# Each motor clip and the one knowledge record that sends it.
+MOTOR_CLIPS = {
+    "motor_e07_reference": "motor-e07-malfunction",
+    "motor_noise_reference": "motor-noise",
+    "motor_noise_no_load_reference": "motor-noise",
+    "motor_bearing_noise_reference": "motor-noise",
+    "motor_threading_reference": "motor-disc-threading",
+    "freewheel_threading_reference": "motor-freewheel-threading",
+}
+# AFS: the odometer photo exists, and no case sends it yet.
+HELD = {"display_odometer_reading": "afs/motor/photos/odometer-reading.jpg"}
 # The library entries the model is offered; the rest stay code-only.
 OFFERED_LIBRARY = {"battery_switch_on_position", "battery_revival_steps"}
 # The melt ask's pictures, code-only (the person's brief, 6 October 2026). The
@@ -71,12 +89,12 @@ class CatalogueTests(unittest.TestCase):
 
     def test_the_code_only_pictures_are_the_melt_pictures_and_the_library(self):
         catalogue = code_only(load_catalogue())
-        self.assertEqual(set(catalogue), set(CODE_ONLY) | (set(LIBRARY) - OFFERED_LIBRARY))
+        self.assertEqual(set(catalogue), set(CODE_ONLY) | (set(LIBRARY) - OFFERED_LIBRARY) | set(HELD))
         for key, (asset_id, caption) in CODE_ONLY.items():
             self.assertEqual((catalogue[key]["id"], catalogue[key]["caption"]), (asset_id, caption), key)
         for key, item in catalogue.items():
             self.assertIs(item["code_only"], True, key)
-            self.assertEqual(item["kind"], "video" if item["id"].endswith(".mp4") else "image", key)
+            self.assertEqual(item["kind"], "video" if item["id"].endswith((".mp4", ".mov")) else "image", key)
 
     def test_every_library_photo_is_catalogued_by_domain_and_use(self):
         catalogue = load_catalogue()
@@ -86,6 +104,20 @@ class CatalogueTests(unittest.TestCase):
             self.assertTrue(is_valid_key("assets/" + asset_id), asset_id)
             self.assertTrue(item["about"].strip(), key)
             self.assertIn(item["use"], USES, key)
+
+    def test_each_motor_clip_is_a_guide_named_by_its_record_and_the_motor_prompt(self):
+        from emotorad_ai.agents.motor_support import _BASE_PROMPT
+
+        catalogue = load_catalogue()
+        records = {record.id: " ".join(record.steps) for record in load_records()}
+        for key, record_id in MOTOR_CLIPS.items():
+            item = catalogue[key]
+            self.assertEqual((item["kind"], item["domain"], item["use"]), ("video", "motor", "customer_guide"), key)
+            self.assertTrue(item["about"].strip(), key)
+            self.assertEqual([rid for rid, body in records.items() if key in body], [record_id], key)
+            self.assertIn(key, _BASE_PROMPT, key)
+        self.assertEqual(catalogue["display_odometer_reading"]["id"], HELD["display_odometer_reading"])
+        self.assertIs(catalogue["display_odometer_reading"]["code_only"], True)
 
     def test_only_the_two_battery_guides_of_the_library_are_offered_to_the_model(self):
         self.assertEqual(set(LIBRARY) & set(model_offered(load_catalogue())), OFFERED_LIBRARY)

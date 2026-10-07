@@ -1,0 +1,32 @@
+id: motor-jam
+title: "Motor jam: the wheel does not turn although the display works"
+topic: motor
+symptoms: [wheel not rotating, wheel not turning, wheel not moving, cycle not moving, bike not moving,
+           motor jam, motor jammed, motor stuck, display on but not moving, display working but bike not moving,
+           throttle not moving the bike, cycle chal nahi rahi, wheel ghoom nahi raha, पहिया नहीं घूम रहा]
+applies_to: {}
+source: AFS chatbot team, motor diagnosis §5f4 (8 October 2026)
+media: []
+steps:
+  - >-
+    CONFIRM: the wheel does not turn and the cycle does not move, even though the display is
+    on and working.
+  - >-
+    ASK THEM TO SET PAS (pedal assist) TO LEVEL 1 AND APPLY THE THROTTLE. If a motor error
+    code appears on the display (E-07, or E-24 on a T-Rex Pro), follow motor-e07-malfunction
+    instead: search for it.
+  - >-
+    IF AT PAS LEVEL 1 WITH THE THROTTLE APPLIED IT STILL DOES NOT MOVE: this is a motor jam,
+    and it needs a workshop to diagnose, not a remote conclusion. DO NOT ASK FOR A PHOTO OR A
+    VIDEO in this case.
+  - >-
+    Raise create_support_ticket with category motor_jam, the symptom and what they tried (PAS
+    1 and the throttle, no movement, no error code). It goes to the Service team, who will
+    arrange the workshop visit.
+  - >-
+    Tell them a workshop visit is needed and that the Service team will be in touch to arrange
+    it. Do not book a service slot yourself in this case: the Service team does the
+    scheduling.
+escalate_when: >-
+  No movement at PAS 1 with the throttle applied and no error code: a motor_jam ticket to the
+  Service team, no photo or video asked for.

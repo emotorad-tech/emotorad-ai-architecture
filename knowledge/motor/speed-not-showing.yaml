@@ -1,0 +1,41 @@
+id: motor-speed-not-showing
+title: Motor works but the speed does not show on the display
+topic: motor
+symptoms: [speed not showing, speed not showing on display, speed shows zero, speed stuck at 0,
+           speedometer not working, display not showing speed, no speed reading, speed 0 while riding,
+           speed nahi dikha raha, speed zero dikha raha, स्पीड नहीं दिख रही]
+applies_to: {}
+source: AFS chatbot team, motor diagnosis §5f3 (8 October 2026)
+# AFS's text says to share a reference video and image for this case, but its
+# media table names none (8 October 2026): no reference is sent until one is
+# catalogued. The steps say what to film instead.
+media: []
+steps:
+  - >-
+    CONFIRM THE SYMPTOM: the motor works fine, but the speed does not show on the display
+    while riding.
+  - >-
+    ASK FOR ONE SHORT VIDEO AND ONE PHOTO. The video: the bike running with the display in
+    view, so the speed reading can be seen while the wheel turns. The photo: the motor cable
+    and its connector, close and in focus. There is no reference clip for this case yet, so
+    describe what to film rather than sending one.
+  - >-
+    COMPARE YOURSELF, from their video and photo, and branch. Your read decides the branch,
+    never the outcome: that is the Approval team's.
+  - >-
+    VIDEO SHOWS THE SPEED NOT READING, AND THE WIRE AND CONNECTOR LOOK FINE: conclusion "motor
+    replacement recommended". Tell them what the video and photo show and that you are
+    sending it to the Approval team for review, and raise create_support_ticket with category
+    motor_fault, the symptom, what was seen and that conclusion.
+  - >-
+    VIDEO SHOWS THE SPEED NOT READING, BUT THE PHOTO SHOWS PHYSICAL DAMAGE to the wire or
+    connector: conclusion "physical damage". Tell them what the photo shows and that you are
+    sending it to the Approval team, who decide the warranty position. Never tell them the
+    claim is rejected. Raise create_support_ticket with category motor_damage, and offer a
+    paid repair (on cost) if they want one; note their answer in the description.
+  - >-
+    Tell them the Approval team will review it and update them. Never say a replacement or
+    repair is approved, rejected or confirmed.
+escalate_when: >-
+  Both branches go to the Approval team: motor_fault when the wiring looks fine, motor_damage
+  when the wire or connector is physically damaged.

@@ -33,6 +33,13 @@ model_groups:
     label: X3 V1
     match: ["x3 v1", "x3v1"]
 
+  # AFS's motor diagnosis (§5f1, 8 October 2026): E-24 is the T-Rex Pro's
+  # motor code, the same as E-07. Before the standard group, which would not
+  # match it anyway; nothing else is documented for it yet.
+  - id: trex_pro
+    label: T-REX PRO
+    match: ["t-rex pro", "trex pro", "t-rex-pro"]
+
   - id: standard
     label: X2, X1 LTD ED, LEGEND 007, T-REX AIR, STX, EMX, TREX+, Doodle (all), Ranger, Cargo
     match:
@@ -84,8 +91,15 @@ codes:
     groups: [standard]
     disposition: diagnose
     customer_message: >-
-      E-07 points at the motor. Confirming it means swapping in a known-good part, which
-      needs a service centre.
+      E-07 points at the motor. The first thing to check is the motor cable and its
+      connection, which is visible in a short video.
+    # AFS's motor diagnosis (§5f1, 8 October 2026): the check is a video of the
+    # motor wire and its connector against the reference clip, and the record
+    # holds it; this line only says where. The outcome is the Approval team's.
+    verification: >-
+      The motor wire and its connector seen in the customer's video and compared with the
+      motor_e07_reference clip before any conclusion. Run that check from the record
+      motor-e07-malfunction: search for it.
     technician_chain: >-
       Motor first — replace with a working motor to confirm. If E-07 persists, controller
       and its connector. In rare cases a short circuit in the display.
@@ -151,6 +165,21 @@ codes:
     technician_chain: >-
       Display first — replace with a working display to confirm. If the code persists:
       harness, then controller, then motor. In the rarest case the PAS.
+
+  # --- T-REX PRO ------------------------------------------------------------
+  - code: E-24
+    groups: [trex_pro]
+    disposition: diagnose
+    customer_message: >-
+      E-24 on a T-Rex Pro points at the motor, the same as E-07 on other models. The first
+      thing to check is the motor cable and its connection, which is visible in a short video.
+    verification: >-
+      The motor wire and its connector seen in the customer's video and compared with the
+      motor_e07_reference clip before any conclusion. Run that check from the record
+      motor-e07-malfunction: search for it.
+    technician_chain: >-
+      Motor first, as for E-07: replace with a working motor to confirm. If E-24 persists,
+      controller and its connector.
 
   # --- X3 V1 ---------------------------------------------------------------
   # Permanent, and not a documentation gap: the X3 V1 is old enough that no code

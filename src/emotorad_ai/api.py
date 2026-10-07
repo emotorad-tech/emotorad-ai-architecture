@@ -1100,6 +1100,9 @@ def _check_evidence(jobs: Sequence[_EvidenceJob], complaint: str, component: str
             log.emit("evidence_references_missing", "evidence_check", keys=missing)
         if references:
             extra["references"] = references
+    notes = evidence_check.reference_notes(CATALOGUE, component)
+    if notes:
+        extra["reference_notes"] = notes
     verdict = EVIDENCE_CHECKER.check(media, complaint, component, deadline_at=deadline, cancel=cancel, **extra)
     # With the fault it was checked for: the runtime keeps a pass to it.
     return dict(verdict.as_dict(), component=component)

@@ -297,6 +297,7 @@ class SendGuideMediaToolTests(unittest.TestCase):
             "battery_onoff_switch_photo", "battery_soc_button_photo", "battery_soc_button_non_doodle",
             "battery_terminals_melted_vs_normal",
             "controller_connector_not_melted", "controller_connector_melted_vs_normal",
+            "display_odometer_reading",
         ]))
         spec = self.registry.specs["send_guide_media"]
         schema = spec.schema()

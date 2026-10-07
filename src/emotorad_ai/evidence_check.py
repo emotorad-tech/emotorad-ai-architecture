@@ -131,6 +131,29 @@ REFERENCES_INTRO = (
     "matches_complaint on the customer's photos and videos alone."
 )
 CUSTOMER_MEDIA_LINE = "The customer's photos and videos:"
+# The motor's references are video clips of 37 to 81 MB, over the inline limit,
+# so Gemini gets each one's catalogue description instead (8 October 2026).
+REFERENCE_NOTE_KEYS: Mapping[str, Tuple[str, ...]] = {
+    "motor": ("motor_e07_reference", "motor_noise_reference", "motor_noise_no_load_reference",
+              "motor_bearing_noise_reference", "motor_threading_reference", "freewheel_threading_reference"),
+}
+REFERENCE_NOTES_INTRO = (
+    "EMotorad's own reference clips for this component, described in words. They are not the customer's "
+    "media and never evidence: use them only to know what the correct state and each fault look and "
+    "sound like."
+)
+
+
+def reference_notes(catalogue: Mapping[str, Mapping[str, Any]], component: str) -> List[str]:
+    """One line per reference clip of the component: its caption and what it
+    shows, from the catalogue (ours, never the customer's words)."""
+    notes = []
+    for key in REFERENCE_NOTE_KEYS.get(component, ()):
+        item = catalogue.get(key) or {}
+        about = " ".join(str(item.get("about") or "").split())
+        if about:
+            notes.append("%s: %s" % (item.get("caption") or key, about))
+    return notes
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 _SPACE = re.compile(r"\s+")
@@ -471,7 +494,8 @@ class OpenRouterEvidenceChecker:
 
     def check(self, media: Sequence[Tuple[Media, str, str]], complaint: str, component: str, *,
               deadline_at: Optional[float] = None, cancel: Optional[threading.Event] = None,
-              references: Sequence[Tuple[bytes, str, str]] = ()) -> EvidenceVerdict:
+              references: Sequence[Tuple[bytes, str, str]] = (),
+              reference_notes: Sequence[str] = ()) -> EvidenceVerdict:
         """Whether the media (bytes or a StoredClip, mime, name) shows the
         problem described.
 
@@ -517,6 +541,9 @@ class OpenRouterEvidenceChecker:
             {"type": "text", "text": PROMPT},
             {"type": "text", "text": "Component: %s\n<complaint>%s</complaint>" % (component, said)},
         ]
+        if reference_notes:
+            content.append({"type": "text", "text": REFERENCE_NOTES_INTRO + "\n" + "\n".join(
+                "- " + note for note in reference_notes)})
         if references:
             content.append({"type": "text", "text": REFERENCES_INTRO})
             for data, mime, caption in references:
