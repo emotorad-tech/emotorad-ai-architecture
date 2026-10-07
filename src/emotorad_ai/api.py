@@ -64,6 +64,7 @@ from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
 from . import evidence_check
 from . import melt_ask as melt_ask_module
+from . import serial_ask as serial_ask_module
 from . import photo_check
 from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
@@ -242,6 +243,9 @@ if UNSENDABLE_MEDIA:
 # catalogue, code-only and resolvable. Until the battery serial sticker photo
 # exists it stays off, and /health says why.
 MELT_ASK, MELT_ASK_STATUS = melt_ask_module.from_env(CATALOGUE, MEDIA_STORE)
+# The battery serial-photo ask (serial_ask.py, 7 October 2026): on with
+# EMOTORAD_SERIAL_ASK=on and its three library pictures in the catalogue.
+SERIAL_ASK, SERIAL_ASK_STATUS = serial_ask_module.from_env(CATALOGUE, MEDIA_STORE)
 
 # conversation_id -> the keys already shown in it. Module-level because "already
 # sent" only means anything across turns, and a request-scoped dict would let
@@ -366,6 +370,7 @@ runtime = Runtime(
     customer_care_contact=evidence_check.customer_care_contact(),
     # The melt ask, or None (off).
     melt_ask=MELT_ASK,
+    serial_ask=SERIAL_ASK,
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -591,6 +596,8 @@ def health() -> dict:
         "zoho_webhook": ZOHO_WEBHOOK_STATUS,
         # The melt ask: on, off, or off and why (melt_ask.from_env).
         "melt_ask": MELT_ASK_STATUS,
+        # The battery serial-photo ask: on, off, or off and why.
+        "serial_ask": SERIAL_ASK_STATUS,
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.

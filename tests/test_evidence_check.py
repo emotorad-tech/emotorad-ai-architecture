@@ -539,6 +539,7 @@ class StagingTests(unittest.TestCase):
         self.assertIn(" -e EMOTORAD_EVIDENCE_CHECK=on ", line)
         # 7 October 2026: the melt ask is on in staging too.
         self.assertIn(" -e EMOTORAD_MELT_ASK=on ", line)
+        self.assertIn(" -e EMOTORAD_SERIAL_ASK=on ", line)
 
     def test_the_settings_are_in_the_config_store_runbook(self):
         from pathlib import Path

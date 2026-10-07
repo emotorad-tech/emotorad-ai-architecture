@@ -124,6 +124,10 @@ class ConversationState:
     # reference they are chosen by, so each bike is asked once.
     melt_pending: bool = False
     melt_asked_frames: List[str] = field(default_factory=list)
+    # The serial-photo ask (serial_ask.py, 7 October 2026): the bikes it was
+    # added to a reply for, by the frame number or reference, so it goes once
+    # per bike.
+    serials_asked_frames: List[str] = field(default_factory=list)
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool

@@ -142,6 +142,7 @@ from .evidence_check import (
 )
 from .melt_ask import ASKED_NOTE as MELT_ASKED_NOTE
 from .melt_ask import MeltAsk
+from .serial_ask import SerialAsk
 from .one_step import is_too_long, replace_turn_text
 from .one_step import sentences as one_step_sentences
 from .one_step import shorten as shorten_reply
@@ -530,6 +531,7 @@ class Runtime:
         evidence_check: bool = False,
         customer_care_contact: Optional[str] = None,
         melt_ask: Optional[MeltAsk] = None,
+        serial_ask: Optional[SerialAsk] = None,
     ) -> None:
         self.settings = settings or load_settings()
         # The melt ask (melt_ask.py, 6 October 2026): one fixed reply asking
@@ -537,6 +539,9 @@ class Runtime:
         # (the default) is off; api.py passes one only when EMOTORAD_MELT_ASK
         # is on and all three pictures resolve.
         self.melt_ask = melt_ask
+        # The battery serial-photo ask (serial_ask.py, 7 October 2026). None
+        # (the default) is off; api.py passes one when EMOTORAD_SERIAL_ASK is on.
+        self.serial_ask = serial_ask
         # Evidence is checked before a ticket (evidence_check.py, the person's
         # brief of 6 October 2026). Off unless asked for; api.py turns it on
         # with EMOTORAD_EVIDENCE_CHECK. Off, every path is exactly as before.
@@ -1084,6 +1089,7 @@ class Runtime:
         fresh.consumed_codes += [c for c in ours.consumed_codes if c not in fresh.consumed_codes]
         # A bike the melt ask went out for on either server is not asked again.
         fresh.melt_asked_frames += [f for f in ours.melt_asked_frames if f not in fresh.melt_asked_frames]
+        fresh.serials_asked_frames += [f for f in ours.serials_asked_frames if f not in fresh.serials_asked_frames]
         # What this turn read and kept (spec 2026-10-05, section 6): a number
         # the customer typed, a failed look-up, a wait for a number to call,
         # the number a code went to. Where this turn changed one, its value
@@ -1929,6 +1935,32 @@ class Runtime:
             return {}
         return {"reply": self._melt_reply(message, state)}
 
+    def _with_serial_ask(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
+                         turn: Any) -> Any:
+        """The battery serial-photo ask (serial_ask.py), added by code to a
+        reply that asks for the customer's media: in a battery chat, once per
+        chosen bike, and never for a bike the melt ask already asked about."""
+        if self.serial_ask is None:
+            return turn
+        battery = (turn.agent == BATTERY_SUPPORT
+                   or (turn.agent == NARROW_SUPPORT and state.fault_topic == FAULT_AGENTS[BATTERY_SUPPORT]))
+        frame = state.selected_frame
+        if (not battery or not frame or frame in state.serials_asked_frames
+                or frame in state.melt_asked_frames):
+            return turn
+        bike = self._selected_bike(resolved, state) or {}
+        pictures, missing = self.serial_ask.pictures(bike.get("product_name"))
+        if missing:
+            # Keys only, never a URL.
+            self.log.emit("serial_ask_media_missing", message.conversation_id, keys=missing)
+        hindi = writes_hindi(turn.text)
+        text = turn.text.rstrip() + "\n\n" + self.serial_ask.text(hindi)
+        state.serials_asked_frames.append(frame)
+        self.log.emit("serial_ask", message.conversation_id, pictures=len(pictures),
+                      language="hi" if hindi else "en")
+        replace_turn_text(state.history, text)
+        return replace(turn, text=text, attachments=list(turn.attachments) + pictures)
+
     @staticmethod
     def _melt_asked(agent_name: str, state: ConversationState) -> bool:
         """Whether the battery or narrow agent is told the customer was
@@ -2522,6 +2554,7 @@ class Runtime:
                 self.log.emit(event, message.conversation_id)
                 replace_turn_text(state.history, text)
                 turn = replace(turn, text=text)
+            turn = self._with_serial_ask(message, resolved, state, turn)
 
         return Reply(
             conversation_id=message.conversation_id,
