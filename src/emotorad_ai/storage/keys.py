@@ -19,7 +19,9 @@ import secrets
 import time
 from typing import Dict
 
-PROGRAMMES = ("afs", "presales", "dealer")
+# `library` (7 October 2026) is the reference library, rebuilt from scratch and
+# organised by domain: assets/library/<battery|controller|motor|display|frame>/.
+PROGRAMMES = ("afs", "presales", "dealer", "library")
 ASSET_KINDS = ("photos", "videos", "tips", "docs")
 CUSTOMER_KINDS = ("images", "videos", "docs")
 
@@ -160,7 +162,7 @@ def cluster_of(key: str) -> str:
 
 
 _CUSTOMER_KEY = re.compile(r"^customers/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/(?:images|videos|docs)/[A-Za-z0-9_-]+\.(?:jpg|png|webp|mp4|mov|3gp|pdf)$")
-_ASSET_KEY = re.compile(r"^assets/(?:afs|presales|dealer)/[a-z0-9][a-z0-9-]*/(?:photos|videos|tips|docs)/[a-z0-9][a-z0-9-]*(?:\.w900|\.poster)?\.(?:jpg|png|webp|mp4|mov|3gp|pdf)$")
+_ASSET_KEY = re.compile(r"^assets/(?:afs|presales|dealer|library)/[a-z0-9][a-z0-9-]*/(?:photos|videos|tips|docs)/[a-z0-9][a-z0-9-]*(?:\.w900|\.poster)?\.(?:jpg|png|webp|mp4|mov|3gp|pdf)$")
 
 
 def is_valid_key(key: str) -> bool:

@@ -672,6 +672,11 @@ def build_registry(
     """
 
     kb = knowledge_base or BatteryKnowledgeBase()
+    # A code-only picture (the melt ask's, 6 October 2026) is attached by code
+    # to its own fixed reply and is never offered to a model: not in the
+    # send_guide_media enum or description, not in the narrow prompt's list,
+    # not named by a search result. Dropped here, before any of them is built.
+    guide_media = media_module.model_offered(guide_media or {})
 
     def _default_knowledge_bike() -> Optional[Mapping[str, Any]]:
         # search_knowledge's own parameter shadows the name, so read it here.

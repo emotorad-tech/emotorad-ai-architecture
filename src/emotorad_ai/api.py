@@ -63,6 +63,7 @@ from .amiigo.common import AmiigoContext, NoStoreMiddleware
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
 from . import evidence_check
+from . import melt_ask as melt_ask_module
 from . import photo_check
 from . import erasure as erasure_rules
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
@@ -70,7 +71,7 @@ from .config import load_settings
 from .config_store import SECRET_ID_ENV
 from .contract import VERIFIED, Attachment, Identity, InboundMessage, Reply, new_conversation_id
 from .fulfilment import ItemCodes, ReplacementOrders
-from .media import load_catalogue
+from .media import load_catalogue, model_offered
 from .media import sendable as media_sendable
 from .guardrails import check_safety, check_safety_in_description
 from .identity import PHONE, IdentityResolver, normalise
@@ -220,7 +221,11 @@ ZOHO = build_zoho(
 # catalogue was ever passed here, so the tool was never registered and was
 # filtered straight back out of the slice. The prompt told the model to point at
 # the button it was describing, and it had nothing to point with.
-GUIDE_MEDIA = load_catalogue()
+CATALOGUE = load_catalogue()
+# What a model may be offered: the code-only pictures (the melt ask's, which
+# code attaches to its own reply) are left out here, and again by
+# media.sendable and build_registry.
+GUIDE_MEDIA = model_offered(CATALOGUE)
 # Only the pictures this server can actually send reach the model; with none,
 # the tool is not registered at all, so a picture it does not have is never
 # offered (the person's rule, 2026-09-29). /health says how many.
@@ -230,6 +235,13 @@ if UNSENDABLE_MEDIA:
         "guide pictures this server cannot send, left out: %d of %d (%s)",
         len(UNSENDABLE_MEDIA), len(GUIDE_MEDIA), "; ".join(sorted(UNSENDABLE_MEDIA.values()))[:500],
     )
+
+# The melt ask (melt_ask.py, the person's brief of 6 October 2026): one fixed
+# reply asking for all three items at once, with a picture of each. Decided
+# here, once: on only with EMOTORAD_MELT_ASK=on and all three pictures in the
+# catalogue, code-only and resolvable. Until the battery serial sticker photo
+# exists it stays off, and /health says why.
+MELT_ASK, MELT_ASK_STATUS = melt_ask_module.from_env(CATALOGUE, MEDIA_STORE)
 
 # conversation_id -> the keys already shown in it. Module-level because "already
 # sent" only means anything across turns, and a request-scoped dict would let
@@ -352,6 +364,8 @@ runtime = Runtime(
     # when the evidence never passes. Off, every path is as before.
     evidence_check=evidence_check.switch_on(),
     customer_care_contact=evidence_check.customer_care_contact(),
+    # The melt ask, or None (off).
+    melt_ask=MELT_ASK,
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -575,6 +589,8 @@ def health() -> dict:
         # Whether Zoho Desk can tell us a ticket closed: on, not configured,
         # or why the secret was refused. Never the secret.
         "zoho_webhook": ZOHO_WEBHOOK_STATUS,
+        # The melt ask: on, off, or off and why (melt_ask.from_env).
+        "melt_ask": MELT_ASK_STATUS,
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.

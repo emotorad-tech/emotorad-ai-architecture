@@ -19,6 +19,13 @@
 # looked up under `assets/` and signed through the store in
 # `src/emotorad_ai/storage/s3.py`. Upload new assets with
 # `scripts/upload_asset.py`, which writes the key back here.
+#
+# `code_only: true` (6 October 2026): the picture is never offered to the model
+# (not in send_guide_media's list, the narrow prompt or a search result). Code
+# attaches it to the melt ask, the one fixed reply that asks for all three
+# items at once (src/emotorad_ai/melt_ask.py), in this order: battery serial,
+# controller label, terminals. The ask stays off until all three exist.
+# melt_battery_serial is not here yet (no photo exists): upload assets/afs/battery/photos/battery-serial-label.jpg with its .w900.webp, add melt_battery_serial with id afs/battery/photos/battery-serial-label.jpg and code_only: true, then set EMOTORAD_MELT_ASK=on to turn the ask on.
 
 soc_button:
   id: afs/battery/photos/soc-button-non-doodle.png
@@ -29,3 +36,242 @@ battery_onoff_switch:
   id: afs/battery/photos/battery-onoff-switch.png
   kind: image
   caption: The battery On/Off switch, set it to ON before charging
+
+melt_controller_label:
+  id: afs/battery/photos/controller-pins-closeup.jpg
+  kind: image
+  caption: "Example: the controller's label, next to the battery pins on the frame"
+  code_only: true
+
+melt_terminals:
+  id: afs/battery/photos/battery-terminals.jpg
+  kind: image
+  caption: "Example: the battery's metal terminals, to film up close"
+  code_only: true
+
+# The reference library (7 October 2026): rebuilt from scratch under
+# assets/library/<domain>/ in emotorad-ai-stage-media, one photo at a time, each
+# with its .w900.webp copy. The old assets/afs/ files stay where they are until
+# everything they hold has a place here.
+#
+# The primary ask, by domain, when a customer reports an issue: controller ->
+# controller serial; battery -> battery serial and controller serial; motor ->
+# motor serial and controller serial; display -> display serial. OCR reads the
+# serial and stores it. When each photo is sent, and to whom, is the next step,
+# so every entry here is code_only until then.
+#
+# domain: battery, controller, motor, display or frame.
+# use: customer_guide (sent to the customer while the bot helps: "this is the
+#   switch"), customer_example (shown with the request for the customer's own
+#   photo: "a photo like this") or checker_reference (sent to the AI checker
+#   with the customer's photo, never to the customer).
+# about: what the photo shows, for the people maintaining this file and for the
+#   checker.
+
+battery_serial_label:
+  id: library/battery/photos/serial-label-downtube.jpg
+  kind: image
+  caption: "Example: the battery's serial number sticker, on the end of the pack"
+  code_only: true
+  domain: battery
+  use: customer_example
+  about: >-
+    A downtube battery pack (any model except the Doodle) held in a hand. The
+    white barcode sticker below the pack's rating label carries the battery
+    serial (EMIN followed by letters and digits) and the line "the interior
+    cell is EVE Li-ion battery".
+
+battery_serial_label_doodle:
+  id: library/battery/photos/serial-label-doodle.jpg
+  kind: image
+  caption: "Example: the Doodle battery's serial number sticker"
+  code_only: true
+  domain: battery
+  use: customer_example
+  about: >-
+    A Doodle battery held in a hand. The white barcode sticker carries the
+    battery serial (ABADAASHA followed by digits). The number moulded into the
+    case above it is a patent number, not the serial.
+
+battery_warranty_seal_intact:
+  id: library/battery/photos/warranty-seal-intact.jpg
+  kind: image
+  caption: "Reference: an intact warranty seal on the battery"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    The underside of a downtube battery pack, out of the bike. The white
+    "WARNING NO TEAR OFF" warranty seal sits flat and whole near a corner
+    screw. This is what an intact seal looks like.
+
+battery_warranty_seal_torn:
+  id: library/battery/photos/warranty-seal-torn.jpg
+  kind: image
+  caption: "Reference: a torn warranty seal on the battery"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    The same view of a downtube battery pack's underside. The "WARNING NO TEAR
+    OFF" seal is broken: the screw beneath it shows through the torn sticker,
+    so the pack has been opened. This is what a torn seal looks like.
+
+controller_serial_label:
+  id: library/controller/photos/serial-label.jpg
+  kind: image
+  caption: "Example: the controller's label, next to the battery pins on the frame"
+  code_only: true
+  domain: controller
+  use: customer_example
+  about: >-
+    The controller on the frame, seen with the battery removed, below the four
+    battery pins. The large label reads EMOTORAD BRUSHLESS MOTOR CONTROLLER,
+    with the model, maximum current, rated voltage 36 V and an S/N with a
+    barcode. A separate small barcode sticker beside it carries a second code
+    starting EMIN. Which of the two is the controller serial is still to be
+    confirmed.
+
+motor_serial_number:
+  id: library/motor/photos/serial-number.jpg
+  kind: image
+  caption: "Example: the serial number printed on the rear hub motor"
+  code_only: true
+  domain: motor
+  use: customer_example
+  about: >-
+    The rear hub motor, seen between the spokes on the chain side. The serial
+    is printed in white on the motor's casing as one line: the rating (36V250W)
+    and wheel size, then the serial digits.
+
+display_serial_label:
+  id: library/display/photos/serial-label-back.jpg
+  kind: image
+  caption: "Example: the serial number on the back of the display"
+  code_only: true
+  domain: display
+  use: customer_example
+  about: >-
+    The back of a display unit (model LCD-M5), held in a hand. The printed
+    text gives the model and an S/N, and a white barcode sticker below carries
+    a code starting EMIN. Where the serial sits on the back varies with the
+    display model.
+
+frame_number_sticker:
+  id: library/frame/photos/frame-number-sticker.jpg
+  kind: image
+  caption: "Example: the frame number sticker on the seat tube"
+  code_only: true
+  domain: frame
+  use: customer_example
+  about: >-
+    The seat tube of a bike, below the seat clamp. A white barcode sticker
+    running down the tube carries the frame number (a letter followed by
+    digits).
+
+# The second batch (7 October 2026): battery help, and the melted checks.
+# Uploaded byte for byte from the files the person sent.
+
+battery_onoff_switch_photo:
+  id: library/battery/photos/onoff-switch.jpg
+  kind: image
+  caption: "The battery On/Off switch, at the top of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack on a desk, with an arrow and the label "Battery
+    On/Off Switch" pointing to the round switch at the top end of the pack.
+
+battery_soc_button_photo:
+  id: library/battery/photos/soc-button.jpg
+  kind: image
+  caption: "The SOC button and its charge lights, on the side of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack on a desk, with an arrow and the label "SOC
+    Button" pointing to the button above the row of charge lights on the
+    side of the pack. The same picture as battery_soc_button_non_doodle,
+    as WhatsApp re-saved it.
+
+battery_soc_button_non_doodle:
+  id: library/battery/photos/soc-button-non-doodle.png
+  kind: image
+  caption: "The SOC button and its charge lights, on the side of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    The SOC button of a battery on any bike except the Doodle (the Doodle has
+    no SOC button): a downtube pack with an arrow and the label "SOC Button"
+    pointing to the button above the row of charge lights. The original of
+    battery_soc_button_photo.
+
+battery_switch_on_position:
+  id: library/battery/photos/switch-on-position.jpg
+  kind: image
+  caption: "The battery switch in the ON position"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack with a circled close-up of the switch at its top
+    end, set to ON, and the words "Battery Switch is On".
+
+battery_revival_steps:
+  id: library/battery/videos/revival-steps.mp4
+  kind: video
+  caption: "How to wake a battery from deep sleep"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    19 seconds, with sound. The charger is plugged into a downtube pack and
+    the pack's On/Off switch is pressed again and again, then the pack is
+    turned and the SOC button pressed to check its charge lights. The battery
+    revival process: used when a battery may be in deep sleep, to tell a
+    sleeping battery from a dead one.
+
+battery_terminals_melted_vs_normal:
+  id: library/battery/photos/terminals-melted-vs-normal.png
+  kind: image
+  caption: "Reference: a melted battery terminal next to a normal one"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    Two labelled panels of a battery's terminal: on top a melted terminal
+    with fused metal pins, below a normal one with clean, evenly spaced
+    contacts. The AI checker compares the customer's photo or video with it
+    to judge whether the battery terminal has melted. An AI-made illustration
+    (it carries a generator's mark), not a photo of a real battery: replace
+    it with a real melted terminal when one is available.
+
+controller_connector_not_melted:
+  id: library/controller/photos/connector-not-melted.jpg
+  kind: image
+  caption: "Reference: a controller's battery connector that has not melted"
+  code_only: true
+  domain: controller
+  use: checker_reference
+  about: >-
+    The controller on the frame with the battery removed, with a circled
+    close-up of its four straight battery pins and the words "Non Melted
+    Controller". What a normal connector looks like.
+
+controller_connector_melted_vs_normal:
+  id: library/controller/photos/connector-melted-vs-normal.png
+  kind: image
+  caption: "Reference: a melted controller connector next to a normal one"
+  code_only: true
+  domain: controller
+  use: checker_reference
+  about: >-
+    Two labelled panels of the controller's battery connector: on the left
+    a normal one (intact, distinct pins and a clean housing), on the right a
+    melted one (melted and fused pins, severe heat damage, warped plastic).
+    The AI checker compares the customer's photo or video with it to judge
+    whether the controller has melted. An AI-made illustration, not a photo
+    of a real controller: replace it with a real one when available.

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..knowledge import KnowledgeRecord
+from ..media import model_offered
 from ..tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
@@ -65,8 +66,9 @@ def _record_block(record: KnowledgeRecord, sendable: Optional[Mapping[str, Mappi
     # Only a picture this server can send, and by the catalogue key the tool
     # takes. The record names its media by file path, which the tool rejects,
     # and listing a picture that cannot be sent is how the bot came to offer
-    # one it did not have (2026-09-29).
-    key_for = {item.get("id"): key for key, item in (sendable or {}).items() if item.get("id")}
+    # one it did not have (2026-09-29). Never a code-only picture (the melt
+    # ask's, 6 October 2026): no model is offered one.
+    key_for = {item.get("id"): key for key, item in model_offered(sendable or {}).items() if item.get("id")}
     media = [(key_for[item["id"]], item) for item in record.media if item.get("id") in key_for]
     if media:
         lines.append("Guide media you can send with send_guide_media, by key:")

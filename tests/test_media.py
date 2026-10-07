@@ -241,6 +241,18 @@ class CatalogueTests(unittest.TestCase):
         with self.assertRaises(CatalogueError):
             self._catalogue_from("soc:\n  kind: image\n  caption: c\n")
 
+    def test_code_only_must_be_a_bool_when_present(self):
+        from emotorad_ai.media import CatalogueError
+
+        for value in ("'yes'", "1", "'true'", "[true]"):
+            with self.subTest(value=value), self.assertRaises(CatalogueError):
+                self._catalogue_from("soc:\n  id: X\n  caption: c\n  code_only: %s\n" % value)
+        loaded = self._catalogue_from("soc:\n  id: X\n  caption: c\n  code_only: true\n"
+                                      "other:\n  id: Y\n  caption: d\n  code_only: false\n")
+        self.assertIs(loaded["soc"]["code_only"], True)
+        self.assertEqual(sorted(media.code_only(loaded)), ["soc"])
+        self.assertEqual(sorted(media.model_offered(loaded)), ["other"])
+
 
 class SendGuideMediaToolTests(unittest.TestCase):
     """The model chooses a key from a set. It never names a file or a URL."""
@@ -261,11 +273,49 @@ class SendGuideMediaToolTests(unittest.TestCase):
 
     def test_the_keys_are_an_enum_in_the_schema(self):
         # So an invented key is rejected before it reaches the tool, and the
-        # model can see what it is allowed to pick.
+        # model can see what it is allowed to pick. Only the keys a model may
+        # be offered: the melt ask's code-only pictures never are.
         schema = self.registry.specs["send_guide_media"].schema()
         self.assertEqual(
-            sorted(schema["input_schema"]["properties"]["key"]["enum"]), sorted(self.catalogue)
+            sorted(schema["input_schema"]["properties"]["key"]["enum"]),
+            sorted(media.model_offered(self.catalogue)),
         )
+
+    def test_a_code_only_key_is_never_offered_to_the_model(self):
+        # The melt ask's pictures (6 October 2026): attached by code to its
+        # fixed reply, never in the tool's enum, its description or the
+        # registry's list, and refused by name if a model tries one.
+        from emotorad_ai.tools.registry import is_error
+
+        # The reference library's photos (7 October 2026) are code-only too.
+        hidden = sorted(media.code_only(self.catalogue))
+        self.assertEqual(hidden, sorted([
+            "melt_controller_label", "melt_terminals",
+            "battery_serial_label", "battery_serial_label_doodle", "battery_warranty_seal_intact",
+            "battery_warranty_seal_torn", "controller_serial_label", "motor_serial_number",
+            "display_serial_label", "frame_number_sticker",
+            "battery_onoff_switch_photo", "battery_soc_button_photo", "battery_soc_button_non_doodle",
+            "battery_switch_on_position", "battery_revival_steps", "battery_terminals_melted_vs_normal",
+            "controller_connector_not_melted", "controller_connector_melted_vs_normal",
+        ]))
+        spec = self.registry.specs["send_guide_media"]
+        schema = spec.schema()
+        for key in hidden:
+            self.assertNotIn(key, schema["input_schema"]["properties"]["key"]["enum"])
+            self.assertNotIn(key, schema["description"])
+            self.assertNotIn(key, self.registry.guide_media)
+            envelope = self._send(key)
+            self.assertTrue(is_error(envelope))
+            self.assertNotIn(key, envelope["error"]["message"].split("Choose one of:")[-1])
+
+    def test_with_only_code_only_pictures_the_tool_is_not_there(self):
+        from datetime import date
+
+        from emotorad_ai.tools.mocks import build_registry
+
+        only = media.code_only(self.catalogue)
+        self.assertTrue(only)
+        self.assertNotIn("send_guide_media", build_registry(today=date.today(), guide_media=only).specs)
 
     def test_the_schema_offers_no_way_to_supply_a_file_or_url(self):
         properties = self.registry.specs["send_guide_media"].schema()["input_schema"]["properties"]

@@ -20,6 +20,18 @@ class GraphShapeTests(unittest.TestCase):
     def test_the_callback_number_then_going_back_come_after_safety_and_before_the_handoff(self):
         self.assertEqual(NODE_NAMES[1:5], ("safety_gate", "callback_gate", "navigation_gate", "handoff_gate"))
 
+    def test_the_melt_ask_comes_after_persona_routing_and_before_jev(self):
+        # The melt ask (6 October 2026): after triage has chosen the bike and
+        # routed, before Jev or any agent, so no model runs on that turn.
+        self.assertEqual(NODE_NAMES[NODE_NAMES.index("persona_route") + 1], "melt_ask")
+        self.assertEqual(NODE_NAMES[NODE_NAMES.index("melt_ask") + 1], "jev_classify")
+        runtime, _, _ = make_runtime([])
+        edges = {(edge.source, edge.target) for edge in runtime.graph.get_graph().edges}
+        self.assertIn(("persona_route", "melt_ask"), edges)
+        self.assertIn(("melt_ask", "jev_classify"), edges)
+        self.assertIn(("melt_ask", "__end__"), edges)
+        self.assertNotIn(("persona_route", "jev_classify"), edges)
+
 
 if __name__ == "__main__":
     unittest.main()

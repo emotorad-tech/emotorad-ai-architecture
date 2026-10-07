@@ -127,6 +127,7 @@ from .navigation import (
 from .observability import EventLog
 from .evidence_asks import MAX_EVIDENCE_ASKS, added_line, asks_for_media, declines_video
 from .evidence_check import COMPONENTS as FAULT_COMPONENTS
+from .evidence_check import FAULT_AGENTS
 from .evidence_check import (
     EVIDENCE_HANDOVER_TEXT,
     EVIDENCE_HANDOVER_TEXT_HI,
@@ -139,6 +140,8 @@ from .evidence_check import (
     verdict_record,
     writes_hindi,
 )
+from .melt_ask import ASKED_NOTE as MELT_ASKED_NOTE
+from .melt_ask import MeltAsk
 from .one_step import is_too_long, replace_turn_text
 from .one_step import sentences as one_step_sentences
 from .one_step import shorten as shorten_reply
@@ -455,7 +458,16 @@ TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callba
                     "newcomer_started_at", "newcomer_ticket_id", "owner_started_at",
                     # The evidence check's verdict and its errors (evidence_check.py).
                     # A pass on either side stands (_merge_onto_fresh).
-                    "evidence_verdict", "evidence_check_errors")
+                    "evidence_verdict", "evidence_check_errors",
+                    # A melt ask waiting for a bike (melt_ask.py).
+                    "melt_pending")
+
+# Triage's replies that end a turn for want of a bike (triage.py): which bike,
+# asked or asked again, and a bike not in the list collected or confirmed. A
+# waiting melt ask survives these and the verify step's, nothing else
+# (Runtime._settle_melt_wait).
+_MELT_WAITS_FOR = ("multiple_bikes:", "selection_negated", "selection_unmatched", "unlisted_bike:",
+                   "confirm_bike:")
 
 # Whether a turn's support ticket was refused for want of evidence that passed
 # the check (tools/mocks.create_support_ticket).
@@ -517,8 +529,14 @@ class Runtime:
         verify_first: bool = False,
         evidence_check: bool = False,
         customer_care_contact: Optional[str] = None,
+        melt_ask: Optional[MeltAsk] = None,
     ) -> None:
         self.settings = settings or load_settings()
+        # The melt ask (melt_ask.py, 6 October 2026): one fixed reply asking
+        # for all three items at once, with a reference picture for each. None
+        # (the default) is off; api.py passes one only when EMOTORAD_MELT_ASK
+        # is on and all three pictures resolve.
+        self.melt_ask = melt_ask
         # Evidence is checked before a ticket (evidence_check.py, the person's
         # brief of 6 October 2026). Off unless asked for; api.py turns it on
         # with EMOTORAD_EVIDENCE_CHECK. Off, every path is exactly as before.
@@ -535,8 +553,10 @@ class Runtime:
         self.conversations = conversations if conversations is not None else InMemoryConversationStore()
         self.enricher = ContextEnricher()
         # A customer who says the one bike listed is not theirs goes to
-        # registration: the bike they mean is not on this number.
-        self.triage = TriageAgent(TOPIC_AGENTS)
+        # registration: the bike they mean is not on this number. With the
+        # melt ask on, a battery melt is the battery topic (the controller's
+        # ruling 2 of 6 October 2026); off, triage is exactly as before.
+        self.triage = TriageAgent(TOPIC_AGENTS, battery_melt=melt_ask.battery_melt if melt_ask is not None else None)
         # Verify first (the person's decision, 2026-09-30): an anonymous
         # customer proves their number and picks a bike before triage or any
         # model. Off unless asked for; the web chat API turns it on.
@@ -605,6 +625,7 @@ class Runtime:
                 erasure_gate=self._node_erasure,
                 verify_gate=self._node_verify,
                 persona_route=self._node_persona,
+                melt_ask=self._node_melt_ask,
                 jev_classify=self._node_classify,
                 standard_reply=self._node_standard,
                 narrow_agent=self._node_narrow,
@@ -736,6 +757,7 @@ class Runtime:
                 # is the backstop, so one that does not is a handover, not a 500.
                 return self._store_down(message, exc, self._ticket_since(turn_mark, cid))
             reply, resolved = final["reply"], final.get("resolved")
+            self._settle_melt_wait(state, reply)
             if state.user_key is None and self.phone_resolver is not None:
                 # A number verified during this very turn makes the conversation
                 # that person's now, before it is saved: otherwise a visitor who
@@ -1060,6 +1082,8 @@ class Runtime:
             fresh.coverage_result = ours.coverage_result
         fresh.placed_order_ids += [o for o in ours.placed_order_ids if o not in fresh.placed_order_ids]
         fresh.consumed_codes += [c for c in ours.consumed_codes if c not in fresh.consumed_codes]
+        # A bike the melt ask went out for on either server is not asked again.
+        fresh.melt_asked_frames += [f for f in ours.melt_asked_frames if f not in fresh.melt_asked_frames]
         # What this turn read and kept (spec 2026-10-05, section 6): a number
         # the customer typed, a failed look-up, a wait for a number to call,
         # the number a code went to. Where this turn changed one, its value
@@ -1187,6 +1211,7 @@ class Runtime:
         )
         self._note_origin(message, state, resolved)
         self._note_evidence_verdict(message, state)
+        self._note_melt(message, state, resolved)
 
         # Built once per conversation and cached on the state. Rebuilding it every
         # turn costs queries, moves the block in the prompt (defeating prefix
@@ -1288,6 +1313,9 @@ class Runtime:
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         matched, evidence = _safety_scan(message)
         if matched:
+            # Safety wins over the melt ask (melt_ask.py): after a safety
+            # reply nobody is asked to photograph or film the bike.
+            state.melt_pending = False
             return {"reply": self._handle_safety(message, resolved, state, matched, evidence)}
         return {}
 
@@ -1752,13 +1780,21 @@ class Runtime:
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
         if self.verify_gate is None or not self.verify_gate.applies(resolved):
             return {}
+        if (state.pending_topic is None and self.melt_ask is not None
+                and self.melt_ask.battery_melt(message.message_text)):
+            # The topic the verify step keeps for after the bike is chosen, as
+            # triage reads it: a battery melt is the battery topic while the
+            # melt ask is on (the controller's ruling 2 of 6 October 2026).
+            state.pending_topic, state.pending_topic_source = "battery", "text"
         gate = self.verify_gate.handle(message, state)
         if gate.escalated:
             self.log.escalation(message.conversation_id, "verification_locked", gate.ticket_id)
         text = gate.text
         if gate.resolved is not None and state.erasure_step in (erasure_rules.WANTED, erasure_rules.CANCEL_WANTED):
             # Verified for a deletion or a cancel asked before the number:
-            # that, not the bike list (spec 2026-10-01).
+            # that, not the bike list (spec 2026-10-01). The erasure flow, so
+            # a waiting melt ask goes (ruling 1 of 6 October 2026).
+            state.melt_pending = False
             wanted, state.erasure_step = state.erasure_step, None
             user_key = self._user_key(gate.resolved)
             if user_key is not None:
@@ -1784,6 +1820,8 @@ class Runtime:
             # them through the customer path is precisely how a dealer would end
             # up holding someone else's warranty data.
             state.route_to(DEALER_ORDERS)
+            # The melt ask is a customer's (melt_ask.py), never a dealer's.
+            state.melt_pending = False
             self.log.routed(message.conversation_id, DEALER_ORDERS, "persona:dealer")
             return {"reply": self._run_agent_or_handover(DEALER_ORDERS, message, resolved, state)}
 
@@ -1828,6 +1866,105 @@ class Runtime:
                     metadata=dict(outcome.metadata, reason=outcome.reason),
                 )}
         return {}
+
+    def _note_melt(self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity) -> None:
+        """A customer's battery melt, noted when the turn starts (melt_ask.py),
+        so a turn that ends before the ask can go (which bike, verify first)
+        leaves it waiting. Only with the ask on: off, nothing is kept. A motor
+        melt is not noted (the controller's ruling 3 of 6 October 2026)."""
+        if (self.melt_ask is not None and resolved.persona == "customer"
+                and self.melt_ask.battery_melt(message.message_text)):
+            state.melt_pending = True
+
+    @staticmethod
+    def _settle_melt_wait(state: ConversationState, reply: Reply) -> None:
+        """A waiting melt ask survives only a turn that ended for want of a
+        bike (triage asking which bike) or of verification (the verify step);
+        any other reply clears it: a hand-over, an escalation, the erasure
+        flow, going back, an agent's answer (the controller's ruling 1 of 6
+        October 2026). Run once the graph has replied, before the save."""
+        if not state.melt_pending:
+            return
+        reason = str((reply.metadata or {}).get("reason") or "")
+        waiting = not reply.escalated and (
+            reply.handled_by.startswith("verify_first:")
+            or (reply.handled_by == "triage" and reason.startswith(_MELT_WAITS_FOR)))
+        if not waiting:
+            state.melt_pending = False
+
+    def _node_melt_ask(self, turn: Dict[str, Any]) -> Dict[str, Any]:
+        # 5. The melt ask (melt_ask.py, the person's brief of 6 October 2026):
+        #    once a customer's bike is chosen and routed, a melt gets one fixed
+        #    reply by code, asking for all three items at once with a picture
+        #    of each. No model. After safety, which always wins.
+        message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
+        if self.melt_ask is None or resolved.persona != "customer":
+            return {}
+        # A motor melt is not a battery melt: no ask, and triage's routing
+        # stands (the controller's ruling 3 of 6 October 2026).
+        if not (state.melt_pending or self.melt_ask.battery_melt(message.message_text)):
+            return {}
+        frame = state.selected_frame
+        if not frame:
+            # No bike yet: it waits for the turn that chooses one.
+            state.melt_pending = True
+            return {}
+        # The bike as chosen: the unlisted one, or the listed one by its
+        # reference, never the only bike standing in for another.
+        bike = (unlisted_as_bike(state.unlisted_bike) if state.unlisted_bike
+                else next((b for b in resolved.bikes if bike_ref(b) == frame), None)) or {}
+        name = (bike.get("product_name") or "").lower()
+        # The pictures show the downtube battery: a Doodle's connector is
+        # different, and a bike whose model is unknown may be one. Either goes
+        # to the battery agent as before, as does a bike already asked.
+        state.melt_pending = False
+        if not name or "doodle" in name or frame in state.melt_asked_frames:
+            return {}
+        if state.evidence_asks >= self._ask_limit(state):
+            # The ask is an evidence ask, and the video-first cap is reached:
+            # none is sent, and the agent's path and its hand-over at the cap
+            # apply (the controller's ruling 5 of 6 October 2026).
+            self.log.emit("melt_ask_skipped", message.conversation_id, why="evidence_ask_cap",
+                          asks=state.evidence_asks)
+            return {}
+        return {"reply": self._melt_reply(message, state)}
+
+    @staticmethod
+    def _melt_asked(agent_name: str, state: ConversationState) -> bool:
+        """Whether the battery or narrow agent is told the customer was
+        already asked (melt_ask.ASKED_NOTE): the ask went out for the chosen
+        bike and no evidence about it has passed the check (the controller's
+        ruling 4 of 6 October 2026). Read from the state, so it holds after a
+        restart and with the switch since turned off."""
+        return (agent_name in (BATTERY_SUPPORT, NARROW_SUPPORT)
+                and bool(state.selected_frame) and state.selected_frame in state.melt_asked_frames
+                and not verdict_passed(state.evidence_verdict, state))
+
+    def _melt_reply(self, message: InboundMessage, state: ConversationState) -> Reply:
+        cid = message.conversation_id
+        # In Hindi when the message that said it melted has a Devanagari
+        # character: this one, or the earlier one it waited from.
+        said = customer_texts(state.history) + [message.message_text or ""]
+        trigger = next((text for text in reversed(said) if self.melt_ask.battery_melt(text)), message.message_text)
+        hindi = writes_hindi(trigger)
+        pictures, missing = self.melt_ask.pictures()
+        if missing:
+            # Sent with the pictures that did resolve. Keys only, never a URL.
+            self.log.emit("melt_ask_media_missing", cid, keys=missing)
+        state.melt_asked_frames.append(state.selected_frame)
+        # The battery agent and the evidence check take the next message.
+        if state.agent != BATTERY_SUPPORT:
+            state.route_to(BATTERY_SUPPORT)
+            self.log.routed(cid, BATTERY_SUPPORT, "melt_ask")
+        state.fault_topic = FAULT_AGENTS[BATTERY_SUPPORT]
+        self.log.emit("melt_ask", cid, frame_present=True, language="hi" if hindi else "en", pictures=len(pictures))
+        reply = self._finish(message, state, self.melt_ask.text(hindi), "melt_ask", attachments=pictures,
+                             metadata={"pictures": len(pictures)})
+        # One evidence ask, the video-first rule's counter, so its cap and
+        # hand-over still apply. Counted after the turn is written, which
+        # starts the count again when the message brought a photo.
+        state.evidence_asks += 1
+        return reply
 
     def _node_classify(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         message, state, resolved = turn["message"], turn["conversation"], turn["resolved"]
@@ -2116,6 +2253,9 @@ class Runtime:
         if message.entry_metadata.get("photos_unchecked"):
             # This turn only (spec 2026-10-02).
             context += "\n\n" + photo_check.UNCHECKED_NOTE
+        if self._melt_asked(agent.definition.name, state):
+            # Every turn while it holds (the controller's ruling 4 of 6 October 2026).
+            context += "\n\n" + MELT_ASKED_NOTE
         turn = agent.run(
             message, agent_view, state.history, context,
             # Conversation facts the order tool decides on. Lambdas, because
@@ -3196,7 +3336,10 @@ class Runtime:
         ticket_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         already_in_history: bool = False,
+        attachments: Optional[Sequence[Attachment]] = None,
     ) -> Reply:
+        """A reply written by code. `attachments` are pictures code chose (the
+        melt ask's), built the way the model's send_guide_media ones are."""
         outbound = self._outbound(text, state, message.channel)
         if not already_in_history:
             # Short-circuited turns still belong in the transcript, so a human
@@ -3214,5 +3357,6 @@ class Runtime:
             handled_by=handled_by,
             escalated=escalated,
             ticket_id=ticket_id,
+            attachments=list(attachments or []),
             metadata=metadata or {},
         )
