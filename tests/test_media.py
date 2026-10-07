@@ -295,7 +295,7 @@ class SendGuideMediaToolTests(unittest.TestCase):
             "battery_warranty_seal_torn", "controller_serial_label", "motor_serial_number",
             "display_serial_label", "frame_number_sticker",
             "battery_onoff_switch_photo", "battery_soc_button_photo", "battery_soc_button_non_doodle",
-            "battery_switch_on_position", "battery_revival_steps", "battery_terminals_melted_vs_normal",
+            "battery_terminals_melted_vs_normal",
             "controller_connector_not_melted", "controller_connector_melted_vs_normal",
         ]))
         spec = self.registry.specs["send_guide_media"]

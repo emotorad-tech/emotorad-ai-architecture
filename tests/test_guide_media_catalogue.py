@@ -20,7 +20,12 @@ EM_DASH = chr(0x2014)
 KEPT = {
     "soc_button": "afs/battery/photos/soc-button-non-doodle.png",
     "battery_onoff_switch": "afs/battery/photos/battery-onoff-switch.png",
+    # 7 October 2026: two battery guides from the reference library.
+    "battery_switch_on_position": "library/battery/photos/switch-on-position.jpg",
+    "battery_revival_steps": "library/battery/videos/revival-steps.mp4",
 }
+# The library entries the model is offered; the rest stay code-only.
+OFFERED_LIBRARY = {"battery_switch_on_position", "battery_revival_steps"}
 # The melt ask's pictures, code-only (the person's brief, 6 October 2026). The
 # battery serial sticker has no photo yet, so it is not here.
 CODE_ONLY = {
@@ -66,7 +71,7 @@ class CatalogueTests(unittest.TestCase):
 
     def test_the_code_only_pictures_are_the_melt_pictures_and_the_library(self):
         catalogue = code_only(load_catalogue())
-        self.assertEqual(set(catalogue), set(CODE_ONLY) | set(LIBRARY))
+        self.assertEqual(set(catalogue), set(CODE_ONLY) | (set(LIBRARY) - OFFERED_LIBRARY))
         for key, (asset_id, caption) in CODE_ONLY.items():
             self.assertEqual((catalogue[key]["id"], catalogue[key]["caption"]), (asset_id, caption), key)
         for key, item in catalogue.items():
@@ -82,8 +87,10 @@ class CatalogueTests(unittest.TestCase):
             self.assertTrue(item["about"].strip(), key)
             self.assertIn(item["use"], USES, key)
 
-    def test_the_library_is_never_offered_to_the_model(self):
-        self.assertFalse(set(LIBRARY) & set(model_offered(load_catalogue())))
+    def test_only_the_two_battery_guides_of_the_library_are_offered_to_the_model(self):
+        self.assertEqual(set(LIBRARY) & set(model_offered(load_catalogue())), OFFERED_LIBRARY)
+        for key in OFFERED_LIBRARY:
+            self.assertEqual(LIBRARY[key][2], "customer_guide", key)
 
     def test_the_melt_ask_s_serial_pictures_are_the_library_s(self):
         # 7 October 2026: the battery serial and the controller's serial come
@@ -112,7 +119,7 @@ class CatalogueTests(unittest.TestCase):
         self.assertTrue(files)
         for path in files:
             text = path.read_text(encoding="utf-8").lower()
-            for promise in ("battery_revival", "comparison picture", "comparison photo", "short clip",
+            for promise in ("comparison picture", "comparison photo", "short clip",
                             "melted_battery_terminal", "melted_controller_connector"):
                 self.assertNotIn(promise, text, "%s: %s" % (path.name, promise))
 

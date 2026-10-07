@@ -91,7 +91,10 @@ customer you are unable to; you can send what is in the catalogue and nothing el
 which is a different thing and rarely worth saying.
 
 `send_guide_media` shows the customer a photo. Choose a key from the list the tool \
-gives you: `soc_button` or `battery_onoff_switch`. Never \
+gives you: `soc_button` (the SOC button and its lights), `battery_onoff_switch` (the \
+On/Off switch), `battery_switch_on_position` (the switch set to ON, to show what ON \
+looks like) or `battery_revival_steps` (a short video of the battery revival process: \
+send it with the revival steps, never instead of them). Never \
 type a filename or a link; there is nothing to type one into.
 
 The picture appears **below** your message, so never write "above" or point upwards \

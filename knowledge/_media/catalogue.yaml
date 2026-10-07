@@ -64,8 +64,10 @@ melt_terminals:
 # The primary ask, by domain, when a customer reports an issue: controller ->
 # controller serial; battery -> battery serial and controller serial; motor ->
 # motor serial and controller serial; display -> display serial. OCR reads the
-# serial and stores it. When each photo is sent, and to whom, is the next step,
-# so every entry here is code_only until then.
+# serial and stores it. Entries are code_only unless the bot may send them
+# itself while it helps: since 7 October 2026, battery_switch_on_position and
+# battery_revival_steps (the library's copies of the SOC and On/Off pictures
+# stay code_only: soc_button and battery_onoff_switch already offer them).
 #
 # domain: battery, controller, motor, display or frame.
 # use: customer_guide (sent to the customer while the bot helps: "this is the
@@ -220,7 +222,6 @@ battery_switch_on_position:
   id: library/battery/photos/switch-on-position.jpg
   kind: image
   caption: "The battery switch in the ON position"
-  code_only: true
   domain: battery
   use: customer_guide
   about: >-
@@ -231,7 +232,6 @@ battery_revival_steps:
   id: library/battery/videos/revival-steps.mp4
   kind: video
   caption: "How to wake a battery from deep sleep"
-  code_only: true
   domain: battery
   use: customer_guide
   about: >-
