@@ -224,6 +224,14 @@ class LauncherTests(unittest.TestCase):
         lines = self.launcher.status_lines({"EMOTORAD_OMS_API_KEY": "k"}, "openrouter", "memory")
         self.assertTrue(any("fixtures" in line for line in lines))
 
+    def test_the_warranty_service_key_is_withheld_too(self):
+        # 7 October 2026: with the warranty service's key the server reads real
+        # riders' registrations, so the test page leaves it out like the OMS's.
+        env = self.launcher.server_env({"EMOTORAD_WARRANTY_API_KEY": "k"}, mode="openrouter", store="mongodb")
+        self.assertNotIn("EMOTORAD_WARRANTY_API_KEY", env)
+        lines = self.launcher.status_lines({"EMOTORAD_WARRANTY_API_KEY": "k"}, "openrouter", "memory")
+        self.assertTrue(any("EMOTORAD_WARRANTY_API_KEY is set and is ignored here" in line for line in lines), lines)
+
     def test_it_says_where_to_sign_in_for_the_code_panel(self):
         # The page's code fetch cannot ask for the login itself; signing in
         # once under /dev/verification/ lets the browser send it from then on.

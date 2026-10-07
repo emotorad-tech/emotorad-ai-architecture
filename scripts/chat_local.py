@@ -21,7 +21,8 @@ person: with --store mongodb it writes to the real Atlas cluster.
 Not for customers. `openrouter` sends what is typed to OpenRouter, outside AWS
 (see CLAUDE.md); use the fixture customers and nothing real. For the same
 reason the business tools are always the fixtures here: EMOTORAD_OMS_API_KEY
-is left out of the server's environment, so no lookup reaches the live OMS.
+and EMOTORAD_WARRANTY_API_KEY are left out of the server's environment, so no
+lookup reaches the live OMS or the warranty service.
 Tickets are always the mock: every EMOTORAD_ZOHO_* name is left out too, so a
 test chat never becomes a Zoho Desk ticket.
 """
@@ -66,7 +67,7 @@ NEEDS = {
 # Zoho settings, a test chat on this machine would become a Zoho Desk ticket
 # (spec 2026-10-05 section 9). This page always keeps the mock tickets.
 ZOHO_SETTINGS = ENV_NAMES
-WITHHELD = ("EMOTORAD_OMS_API_KEY",) + ZOHO_SETTINGS
+WITHHELD = ("EMOTORAD_OMS_API_KEY", "EMOTORAD_WARRANTY_API_KEY") + ZOHO_SETTINGS
 # Any other Zoho name added later is withheld too.
 WITHHELD_PREFIX = "EMOTORAD_ZOHO_"
 # Reported but not required: each switches one feature on.
@@ -94,8 +95,9 @@ def status_lines(environ: Mapping[str, str], mode: str, store: str) -> List[str]
         lines.append("MongoDB database: %s" % (environ.get("EMOTORAD_MONGO_DB") or "emotorad_ai"))
     for name, feature in OPTIONAL:
         lines.append("%s: %s (%s)" % (name, "set" if _is_set(environ, name) else "not set", feature))
-    ignored = " (EMOTORAD_OMS_API_KEY is set and is ignored here)" if _is_set(environ, "EMOTORAD_OMS_API_KEY") else ""
-    lines.append("business tools: fixtures, never the live OMS" + ignored)
+    ignored = "".join(" (%s is set and is ignored here)" % name
+                      for name in ("EMOTORAD_OMS_API_KEY", "EMOTORAD_WARRANTY_API_KEY") if _is_set(environ, name))
+    lines.append("business tools: fixtures, never the live OMS or warranty service" + ignored)
     zoho_set = any(name.startswith(WITHHELD_PREFIX) and _is_set(environ, name) for name in environ)
     lines.append("tickets: the mock, never Zoho Desk"
                  + (" (EMOTORAD_ZOHO_* settings are set and are ignored here)" if zoho_set else ""))
