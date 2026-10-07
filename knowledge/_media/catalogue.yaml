@@ -48,3 +48,122 @@ melt_terminals:
   kind: image
   caption: "Example: the battery's metal terminals, to film up close"
   code_only: true
+
+# The reference library (7 October 2026): rebuilt from scratch under
+# assets/library/<domain>/ in emotorad-ai-stage-media, one photo at a time, each
+# with its .w900.webp copy. The old assets/afs/ files stay where they are until
+# everything they hold has a place here.
+#
+# The primary ask, by domain, when a customer reports an issue: controller ->
+# controller serial; battery -> battery serial and controller serial; motor ->
+# motor serial and controller serial; display -> display serial. OCR reads the
+# serial and stores it. When each photo is sent, and to whom, is the next step,
+# so every entry here is code_only until then.
+#
+# domain: battery, controller, motor, display or frame.
+# use: customer_example (shown to the customer: "a photo like this") or
+#   checker_reference (sent to the AI checker with the customer's photo, never
+#   to the customer).
+# about: what the photo shows, for the people maintaining this file and for the
+#   checker.
+
+battery_serial_label:
+  id: library/battery/photos/serial-label-downtube.jpg
+  kind: image
+  caption: "Example: the battery's serial number sticker, on the end of the pack"
+  code_only: true
+  domain: battery
+  use: customer_example
+  about: >-
+    A downtube battery pack (any model except the Doodle) held in a hand. The
+    white barcode sticker below the pack's rating label carries the battery
+    serial (EMIN followed by letters and digits) and the line "the interior
+    cell is EVE Li-ion battery".
+
+battery_serial_label_doodle:
+  id: library/battery/photos/serial-label-doodle.jpg
+  kind: image
+  caption: "Example: the Doodle battery's serial number sticker"
+  code_only: true
+  domain: battery
+  use: customer_example
+  about: >-
+    A Doodle battery held in a hand. The white barcode sticker carries the
+    battery serial (ABADAASHA followed by digits). The number moulded into the
+    case above it is a patent number, not the serial.
+
+battery_warranty_seal_intact:
+  id: library/battery/photos/warranty-seal-intact.jpg
+  kind: image
+  caption: "Reference: an intact warranty seal on the battery"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    The underside of a downtube battery pack, out of the bike. The white
+    "WARNING NO TEAR OFF" warranty seal sits flat and whole near a corner
+    screw. This is what an intact seal looks like.
+
+battery_warranty_seal_torn:
+  id: library/battery/photos/warranty-seal-torn.jpg
+  kind: image
+  caption: "Reference: a torn warranty seal on the battery"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    The same view of a downtube battery pack's underside. The "WARNING NO TEAR
+    OFF" seal is broken: the screw beneath it shows through the torn sticker,
+    so the pack has been opened. This is what a torn seal looks like.
+
+controller_serial_label:
+  id: library/controller/photos/serial-label.jpg
+  kind: image
+  caption: "Example: the controller's label, next to the battery pins on the frame"
+  code_only: true
+  domain: controller
+  use: customer_example
+  about: >-
+    The controller on the frame, seen with the battery removed, below the four
+    battery pins. The large label reads EMOTORAD BRUSHLESS MOTOR CONTROLLER,
+    with the model, maximum current, rated voltage 36 V and an S/N with a
+    barcode. A separate small barcode sticker beside it carries a second code
+    starting EMIN. Which of the two is the controller serial is still to be
+    confirmed.
+
+motor_serial_number:
+  id: library/motor/photos/serial-number.jpg
+  kind: image
+  caption: "Example: the serial number printed on the rear hub motor"
+  code_only: true
+  domain: motor
+  use: customer_example
+  about: >-
+    The rear hub motor, seen between the spokes on the chain side. The serial
+    is printed in white on the motor's casing as one line: the rating (36V250W)
+    and wheel size, then the serial digits.
+
+display_serial_label:
+  id: library/display/photos/serial-label-back.jpg
+  kind: image
+  caption: "Example: the serial number on the back of the display"
+  code_only: true
+  domain: display
+  use: customer_example
+  about: >-
+    The back of a display unit (model LCD-M5), held in a hand. The printed
+    text gives the model and an S/N, and a white barcode sticker below carries
+    a code starting EMIN. Where the serial sits on the back varies with the
+    display model.
+
+frame_number_sticker:
+  id: library/frame/photos/frame-number-sticker.jpg
+  kind: image
+  caption: "Example: the frame number sticker on the seat tube"
+  code_only: true
+  domain: frame
+  use: customer_example
+  about: >-
+    The seat tube of a bike, below the seat clamp. A white barcode sticker
+    running down the tube carries the frame number (a letter followed by
+    digits).

@@ -12,6 +12,7 @@ import yaml
 
 from emotorad_ai.knowledge import load_records
 from emotorad_ai.media import code_only, load_catalogue, model_offered
+from emotorad_ai.storage.keys import is_valid_key
 
 CATALOGUE_FILE = pathlib.Path(__file__).resolve().parents[1] / "knowledge" / "_media" / "catalogue.yaml"
 EM_DASH = chr(0x2014)
@@ -28,6 +29,19 @@ CODE_ONLY = {
     "melt_terminals": ("afs/battery/photos/battery-terminals.jpg",
                        "Example: the battery's metal terminals, to film up close"),
 }
+# The reference library (7 October 2026): assets/library/<domain>/, rebuilt
+# from scratch, one entry per photo. Code-only until the rules for when each is
+# sent (to the customer, or to the checker) are written.
+LIBRARY = {
+    "battery_serial_label": ("library/battery/photos/serial-label-downtube.jpg", "battery", "customer_example"),
+    "battery_serial_label_doodle": ("library/battery/photos/serial-label-doodle.jpg", "battery", "customer_example"),
+    "battery_warranty_seal_intact": ("library/battery/photos/warranty-seal-intact.jpg", "battery", "checker_reference"),
+    "battery_warranty_seal_torn": ("library/battery/photos/warranty-seal-torn.jpg", "battery", "checker_reference"),
+    "controller_serial_label": ("library/controller/photos/serial-label.jpg", "controller", "customer_example"),
+    "motor_serial_number": ("library/motor/photos/serial-number.jpg", "motor", "customer_example"),
+    "display_serial_label": ("library/display/photos/serial-label-back.jpg", "display", "customer_example"),
+    "frame_number_sticker": ("library/frame/photos/frame-number-sticker.jpg", "frame", "customer_example"),
+}
 
 
 class CatalogueTests(unittest.TestCase):
@@ -35,12 +49,25 @@ class CatalogueTests(unittest.TestCase):
         catalogue = model_offered(load_catalogue())
         self.assertEqual({key: item["id"] for key, item in catalogue.items()}, KEPT)
 
-    def test_the_code_only_pictures_are_exactly_the_two_melt_pictures(self):
+    def test_the_code_only_pictures_are_the_melt_pictures_and_the_library(self):
         catalogue = code_only(load_catalogue())
-        self.assertEqual({key: (item["id"], item["caption"]) for key, item in catalogue.items()}, CODE_ONLY)
+        self.assertEqual(set(catalogue), set(CODE_ONLY) | set(LIBRARY))
+        for key, (asset_id, caption) in CODE_ONLY.items():
+            self.assertEqual((catalogue[key]["id"], catalogue[key]["caption"]), (asset_id, caption), key)
         for key, item in catalogue.items():
             self.assertIs(item["code_only"], True, key)
             self.assertEqual(item["kind"], "image", key)
+
+    def test_every_library_photo_is_catalogued_by_domain_and_use(self):
+        catalogue = load_catalogue()
+        for key, (asset_id, domain, use) in LIBRARY.items():
+            item = catalogue[key]
+            self.assertEqual((item["id"], item["domain"], item["use"]), (asset_id, domain, use), key)
+            self.assertTrue(is_valid_key("assets/" + asset_id), asset_id)
+            self.assertTrue(item["about"].strip(), key)
+
+    def test_the_library_is_never_offered_to_the_model(self):
+        self.assertFalse(set(LIBRARY) & set(model_offered(load_catalogue())))
 
     def test_the_battery_serial_picture_is_not_there_yet_and_the_header_says_how_to_add_it(self):
         self.assertNotIn("melt_battery_serial", load_catalogue())

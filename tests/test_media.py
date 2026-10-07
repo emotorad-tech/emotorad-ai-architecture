@@ -287,8 +287,14 @@ class SendGuideMediaToolTests(unittest.TestCase):
         # registry's list, and refused by name if a model tries one.
         from emotorad_ai.tools.registry import is_error
 
+        # The reference library's photos (7 October 2026) are code-only too.
         hidden = sorted(media.code_only(self.catalogue))
-        self.assertEqual(hidden, ["melt_controller_label", "melt_terminals"])
+        self.assertEqual(hidden, sorted([
+            "melt_controller_label", "melt_terminals",
+            "battery_serial_label", "battery_serial_label_doodle", "battery_warranty_seal_intact",
+            "battery_warranty_seal_torn", "controller_serial_label", "motor_serial_number",
+            "display_serial_label", "frame_number_sticker",
+        ]))
         spec = self.registry.specs["send_guide_media"]
         schema = spec.schema()
         for key in hidden:
