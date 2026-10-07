@@ -1,6 +1,6 @@
 # Amiigo Support Chat API Contract
 
-Oct 7, 2026 · @Sagnik Mukherjee · v1, **Built, not yet on staging**. Replaces the draft of 30 September 2026 and the chat history draft of 6 October 2026.
+Oct 7, 2026 · @Sagnik Mukherjee · v1, **On staging** (7 October 2026). Replaces the draft of 30 September 2026 and the chat history draft of 6 October 2026.
 
 ## What changed from the earlier drafts
 
@@ -12,7 +12,7 @@ Oct 7, 2026 · @Sagnik Mukherjee · v1, **Built, not yet on staging**. Replaces 
 
 ## Status and scope
 
-v1 is built on the branch `feat/amiigo-history`. It is not on staging yet: it goes there once the branch has been reviewed and deployed, and we will tell you when it is. Until it is on staging, anything here can change; once it is, v1 only gains things (see "Versioning").
+v1 is on staging from 7 October 2026, at the addresses in "Base URLs". From here on v1 only gains things (see "Versioning").
 
 | Part | Before v1 | v1 as built |
 | --- | --- | --- |
@@ -505,6 +505,7 @@ Retrying a `GET` is always safe. A problem inside the bot itself, such as the AI
 1. Sign in to the Amiigo app on its staging environment with a test number, and take the access token it gets.
 2. Open the socket with that token, send a `message`, and see `bot_typing`, then `ack` and `reply`.
 3. Close the socket, then call `GET /amiigo/v1/conversations` and `GET …/messages`: the chat comes back whole.
+4. Use a test number with a cycle registered on the staging warranty service to see the bot name the rider's bike and its cover. A number with no registered cycle gets the "register your cycle" path, which is expected.
 
 Use test numbers only, never a real rider's. There is no test session in v1: every call needs a real staging token.
 
