@@ -24,7 +24,9 @@ KEPT = {
 # The melt ask's pictures, code-only (the person's brief, 6 October 2026). The
 # battery serial sticker has no photo yet, so it is not here.
 CODE_ONLY = {
-    "melt_controller_label": ("afs/battery/photos/controller-pins-closeup.jpg",
+    "melt_battery_serial": ("library/battery/photos/serial-label-downtube.jpg",
+                            "Example: the serial number sticker on the battery"),
+    "melt_controller_label": ("library/controller/photos/serial-label.jpg",
                               "Example: the controller's label, next to the battery pins on the frame"),
     "melt_terminals": ("afs/battery/photos/battery-terminals.jpg",
                        "Example: the battery's metal terminals, to film up close"),
@@ -83,14 +85,12 @@ class CatalogueTests(unittest.TestCase):
     def test_the_library_is_never_offered_to_the_model(self):
         self.assertFalse(set(LIBRARY) & set(model_offered(load_catalogue())))
 
-    def test_the_battery_serial_picture_is_not_there_yet_and_the_header_says_how_to_add_it(self):
-        self.assertNotIn("melt_battery_serial", load_catalogue())
-        # One comment line names the key, the planned S3 key, its webp copy
-        # and the switch.
-        needed = ("melt_battery_serial", "afs/battery/photos/battery-serial-label.jpg", ".w900.webp",
-                  "EMOTORAD_MELT_ASK=on")
-        lines = [line for line in CATALOGUE_FILE.read_text(encoding="utf-8").splitlines() if line.startswith("#")]
-        self.assertTrue(any(all(part in line for part in needed) for line in lines), lines)
+    def test_the_melt_ask_s_serial_pictures_are_the_library_s(self):
+        # 7 October 2026: the battery serial and the controller's serial come
+        # from the reference library, so the melt ask can be switched on.
+        catalogue = load_catalogue()
+        self.assertEqual(catalogue["melt_battery_serial"]["id"], LIBRARY["battery_serial_label"][0])
+        self.assertEqual(catalogue["melt_controller_label"]["id"], LIBRARY["controller_serial_label"][0])
 
     def test_no_caption_has_an_em_dash(self):
         # Read as UTF-8 here: load_catalogue() uses the platform encoding, which

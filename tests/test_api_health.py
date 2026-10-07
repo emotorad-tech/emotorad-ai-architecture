@@ -48,14 +48,16 @@ class HealthTests(unittest.TestCase):
         )
 
     def test_health_says_why_the_melt_ask_is_off_when_it_is_switched_on(self):
-        # The person's decision (6 October 2026): off until the battery serial
-        # sticker photo exists. Switched on today it stays off and says why.
+        # Switched on where the pictures cannot be signed, it stays off and
+        # says why.
         api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_MELT_ASK": "on", "EMOTORAD_AI_MEDIA_BUCKET": ""})
-        self.assertTrue(api.health()["melt_ask"].startswith("off: missing melt_battery_serial"), api.health())
+        # No bucket here, so no picture can be signed: off, and says why.
+        self.assertEqual(api.health()["melt_ask"],
+                         "off: unresolvable melt_battery_serial, melt_controller_label, melt_terminals")
         self.assertIsNone(api.runtime.melt_ask)
         self.assertEqual(len(api.GUIDE_MEDIA), 2)
-        # 2 offered to the model, 2 melt pictures, 16 reference-library files.
-        self.assertEqual(len(api.CATALOGUE), 20)
+        # 2 offered to the model, 3 melt pictures, 16 reference-library files.
+        self.assertEqual(len(api.CATALOGUE), 21)
 
     def test_the_runtime_is_given_the_melt_ask_when_it_is_on(self):
         from emotorad_ai import melt_ask

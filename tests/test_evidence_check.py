@@ -537,6 +537,8 @@ class StagingTests(unittest.TestCase):
             encoding="utf-8")
         (line,) = [line for line in workflow.splitlines() if "docker run -d --name emotorad-ai" in line]
         self.assertIn(" -e EMOTORAD_EVIDENCE_CHECK=on ", line)
+        # 7 October 2026: the melt ask is on in staging too.
+        self.assertIn(" -e EMOTORAD_MELT_ASK=on ", line)
 
     def test_the_settings_are_in_the_config_store_runbook(self):
         from pathlib import Path

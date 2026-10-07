@@ -24,8 +24,9 @@
 # (not in send_guide_media's list, the narrow prompt or a search result). Code
 # attaches it to the melt ask, the one fixed reply that asks for all three
 # items at once (src/emotorad_ai/melt_ask.py), in this order: battery serial,
-# controller label, terminals. The ask stays off until all three exist.
-# melt_battery_serial is not here yet (no photo exists): upload assets/afs/battery/photos/battery-serial-label.jpg with its .w900.webp, add melt_battery_serial with id afs/battery/photos/battery-serial-label.jpg and code_only: true, then set EMOTORAD_MELT_ASK=on to turn the ask on.
+# controller label, terminals. The ask is off unless all three exist and
+# EMOTORAD_MELT_ASK is "on" (on in staging from 7 October 2026). The battery
+# serial and the controller's serial come from the reference library below.
 
 soc_button:
   id: afs/battery/photos/soc-button-non-doodle.png
@@ -37,8 +38,14 @@ battery_onoff_switch:
   kind: image
   caption: The battery On/Off switch, set it to ON before charging
 
+melt_battery_serial:
+  id: library/battery/photos/serial-label-downtube.jpg
+  kind: image
+  caption: "Example: the serial number sticker on the battery"
+  code_only: true
+
 melt_controller_label:
-  id: afs/battery/photos/controller-pins-closeup.jpg
+  id: library/controller/photos/serial-label.jpg
   kind: image
   caption: "Example: the controller's label, next to the battery pins on the frame"
   code_only: true

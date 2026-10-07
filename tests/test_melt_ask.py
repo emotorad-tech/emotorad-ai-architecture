@@ -44,7 +44,7 @@ THREE_BIKES = "+919700000001"  # T-Rex Air TREX2024881201, EMX Plus EMXP20250049
 DEALER = "919000000001"  # Royal Cycle Stores (fixtures)
 AGENT_REPLY = "Thanks. Could you send a short video of the charger plugged in?"
 
-SERIAL_KEY = "afs/battery/photos/battery-serial-label.jpg"
+SERIAL_KEY = "library/battery/photos/serial-label-downtube.jpg"
 SERIAL = {"id": SERIAL_KEY, "kind": "image", "caption": "Example: the serial number sticker on the battery",
           "code_only": True}
 ON = {"EMOTORAD_MELT_ASK": "on"}
@@ -159,10 +159,21 @@ class SwitchTests(unittest.TestCase):
     def test_off_by_default(self):
         self.assertEqual(melt_ask.from_env(full_catalogue(), FakeStore(), {}), (None, "off"))
 
-    def test_on_but_the_battery_serial_picture_missing_is_off_and_says_so(self):
-        # The shipped catalogue today: no serial sticker photo exists yet.
-        self.assertEqual(melt_ask.from_env(load_catalogue(), FakeStore(), ON),
-                         (None, "off: missing melt_battery_serial"))
+    def test_the_shipped_catalogue_has_all_three_and_is_on(self):
+        # 7 October 2026: the battery serial sticker photo exists in the
+        # reference library, so the shipped catalogue turns the ask on.
+        ask, status = melt_ask.from_env(load_catalogue(), FakeStore(), ON)
+        self.assertEqual(status, "on")
+        self.assertEqual([item["id"] for _, item in ask.items], [
+            "library/battery/photos/serial-label-downtube.jpg",
+            "library/controller/photos/serial-label.jpg",
+            "afs/battery/photos/battery-terminals.jpg",
+        ])
+
+    def test_without_the_battery_serial_picture_it_is_off_and_says_so(self):
+        catalogue = load_catalogue()
+        del catalogue["melt_battery_serial"]
+        self.assertEqual(melt_ask.from_env(catalogue, FakeStore(), ON), (None, "off: missing melt_battery_serial"))
 
     def test_on_with_all_three_resolving_is_on(self):
         ask, status = melt_ask.from_env(full_catalogue(), FakeStore(), ON)
@@ -184,7 +195,7 @@ class SwitchTests(unittest.TestCase):
         finally:
             media._store, media._store_loaded = previous
         self.assertIsNone(ask)
-        self.assertEqual(status, "off: missing melt_battery_serial; unresolvable melt_controller_label, melt_terminals")
+        self.assertEqual(status, "off: unresolvable melt_battery_serial, melt_controller_label, melt_terminals")
 
     def test_without_the_knowledge_record_it_is_off_and_says_so(self):
         self.assertEqual(melt_ask.from_env(full_catalogue(), FakeStore(), ON, records=[]),
@@ -206,8 +217,8 @@ class TextAndPictureTests(unittest.TestCase):
         pictures, missing = active().pictures()
         self.assertEqual(missing, [])
         self.assertEqual([p.url for p in pictures], [
-            "https://signed.test/assets/afs/battery/photos/battery-serial-label.w900.webp",
-            "https://signed.test/assets/afs/battery/photos/controller-pins-closeup.w900.webp",
+            "https://signed.test/assets/library/battery/photos/serial-label-downtube.w900.webp",
+            "https://signed.test/assets/library/controller/photos/serial-label.w900.webp",
             "https://signed.test/assets/afs/battery/photos/battery-terminals.w900.webp",
         ])
         self.assertEqual({p.kind for p in pictures}, {"image"})
@@ -216,7 +227,7 @@ class TextAndPictureTests(unittest.TestCase):
     def test_a_picture_that_fails_at_send_time_is_left_out_and_named(self):
         store = FakeStore()
         ask = active(store)
-        store.fail.add("controller-pins")
+        store.fail.add("controller/photos/serial-label")
         pictures, missing = ask.pictures()
         self.assertEqual(len(pictures), 2)
         self.assertEqual(missing, ["melt_controller_label"])
@@ -224,8 +235,8 @@ class TextAndPictureTests(unittest.TestCase):
 
 # --- in a conversation, through runtime.handle() ------------------------------
 
-SERIAL_URL = "https://signed.test/assets/afs/battery/photos/battery-serial-label.w900.webp"
-CONTROLLER_URL = "https://signed.test/assets/afs/battery/photos/controller-pins-closeup.w900.webp"
+SERIAL_URL = "https://signed.test/assets/library/battery/photos/serial-label-downtube.w900.webp"
+CONTROLLER_URL = "https://signed.test/assets/library/controller/photos/serial-label.w900.webp"
 TERMINALS_URL = "https://signed.test/assets/afs/battery/photos/battery-terminals.w900.webp"
 
 
@@ -428,7 +439,7 @@ class MeltAskTests(unittest.TestCase):
 
     def test_one_picture_that_will_not_resolve_leaves_the_text_and_the_others(self):
         chat = MeltChat(select="EMXP2025004417", routed="battery_support")
-        chat.store.fail.add("controller-pins")
+        chat.store.fail.add("controller/photos/serial-label")
         reply = chat.say("something is melted in battery")
         self.assertEqual(reply.text, first_reply(melt_ask.TEXT_EN))
         self.assertEqual([a.url for a in reply.attachments], [SERIAL_URL, TERMINALS_URL])
