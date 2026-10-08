@@ -106,6 +106,16 @@ STAFF_WORDS_RULE = """
 Words for EMotorad's staff: say "a support executive" or "our support team" when you mention the people who \
 will help the customer. Never call them a colleague."""
 
+# A bike whose purchase date OMS lacks has its invoice read by code
+# (invoice_ocr.py, spec 2026-10-08), which raises the ticket and tells the
+# customer what it found. The agent only asks for the invoice when OMS has none.
+INVOICE_RULE = """
+
+When a bike's purchase date is missing: if invoice_on_file is true, do not ask for the invoice; say you are \
+checking the invoice on file. If it is false, ask for a clear photo or PDF of the purchase invoice. Code reads \
+the invoice, raises the ticket and tells the customer what it found: never state an invoice date or a cover end \
+date yourself."""
+
 
 @dataclass(frozen=True)
 class AgentDefinition:
@@ -203,6 +213,7 @@ class Agent:
             # promotion replaces, with the one-step rule last.
             system += PHOTO_SAFETY_RULE
             system += STAFF_WORDS_RULE
+            system += INVOICE_RULE
             system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]
