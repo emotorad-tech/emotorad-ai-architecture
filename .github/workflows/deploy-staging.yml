@@ -99,7 +99,7 @@ jobs:
               \"df -h /\",
               \"docker build -t emotorad-ai:stage . > /tmp/emotorad-build.log 2>&1 || { tail -60 /tmp/emotorad-build.log; exit 1; }\",
               \"docker rm -f emotorad-ai || true\",
-              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=openrouter -e EMOTORAD_STORE=mongodb -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media -e EMOTORAD_EVIDENCE_CHECK=on -e EMOTORAD_MELT_ASK=on -e EMOTORAD_SERIAL_ASK=on -e EMOTORAD_AI_BUILD=$GITHUB_SHA emotorad-ai:stage\",
+              \"docker run -d --name emotorad-ai --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=emotorad-ai-stage --log-opt awslogs-create-group=true -p 127.0.0.1:8000:8000 -e AWS_REGION=$AWS_REGION -e EMOTORAD_AI_SECRET_ID=/emotorad/stage/ai/app -e EMOTORAD_AI_MODE=openrouter -e EMOTORAD_STORE=mongodb -e EMOTORAD_AI_APPROVAL_MODE=reasonable -e EMOTORAD_AI_DEV_CODES=1 -e EMOTORAD_AI_ENV=stage -e LANGFUSE_HOST=https://cloud.langfuse.com -e EMOTORAD_AI_MEDIA_BUCKET=emotorad-ai-stage-media -e EMOTORAD_EVIDENCE_CHECK=on -e EMOTORAD_MELT_ASK=on -e EMOTORAD_SERIAL_ASK=on -e EMOTORAD_INVOICE_OCR=on -e EMOTORAD_AI_BUILD=$GITHUB_SHA emotorad-ai:stage\",
               \"docker image prune -f\"
             ]" \
             --query 'Command.CommandId' --output text)

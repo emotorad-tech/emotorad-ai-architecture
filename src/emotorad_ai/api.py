@@ -65,6 +65,7 @@ from . import origin as origin_place
 from . import evidence_check
 from . import melt_ask as melt_ask_module
 from . import serial_ask as serial_ask_module
+from . import invoice_ocr
 from . import serial_read
 from . import photo_check
 from . import erasure as erasure_rules
@@ -365,6 +366,16 @@ resolver = IdentityResolver(registry)
 TRACING = tracing.langfuse_sink_from_env()
 if TRACING is not None:
     log.sinks.append(TRACING)
+# Invoices read for a missing purchase date (invoice_ocr.py, spec 2026-10-08):
+# on with EMOTORAD_INVOICE_OCR=on and the OpenRouter key, and only with the OMS
+# database, whose registrations say which bikes have no date and which invoice
+# OMS holds. The copy of an OMS invoice is recorded like any customer file.
+_INVOICE_READER = invoice_ocr.reader_from_env() if OMS_DB is not None else None
+INVOICE = (invoice_ocr.InvoiceService(
+    reader=_INVOICE_READER, oms_db=OMS_DB, oms_client=OMS_CLIENT, media_store=MEDIA_STORE,
+    conversations=stores.conversations, emit=log.emit, persist=lambda **record: _persist_media(**record),
+) if _INVOICE_READER is not None else None)
+
 runtime = Runtime(
     settings=settings,
     registry=registry,
@@ -405,6 +416,7 @@ runtime = Runtime(
     # The melt ask, or None (off).
     melt_ask=MELT_ASK,
     serial_ask=SERIAL_ASK,
+    invoice=INVOICE,
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -637,6 +649,8 @@ def health() -> dict:
         # The Jev kill switch (config.jev_switch): on, off, or off and why;
         # only openrouter mode runs Jev at all.
         "jev": settings.jev_status if settings.mode == "openrouter" else "off: mode %s" % settings.mode,
+        # Who reads invoices for a missing purchase date: the provider, or off.
+        "invoice_ocr": INVOICE.provider if INVOICE is not None else "off",
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.
@@ -1366,7 +1380,41 @@ def prepare_turn(
 def _handle_app_turn(message: InboundMessage) -> Reply:
     """The chat socket's turn: the same runtime, read when the turn runs."""
     _start_serial_reads(message)
+    _start_invoice_reads(message)
     return runtime.handle(message)
+
+
+def _start_invoice_reads(message: InboundMessage) -> None:
+    """Reads the chosen bike's invoice before the turn when OMS has no
+    purchase date for it (invoice_ocr.py): OMS's copy when it holds one,
+    otherwise each photo or PDF the customer sent in this message. Waits up to
+    the service's limit; never raises."""
+    if INVOICE is None or not message.identity.phone:
+        return
+    cid = message.conversation_id
+    try:
+        state = stores.conversations.peek(cid)
+        frame = state.selected_frame if state is not None else None
+        if not frame:
+            return
+        row = INVOICE.bike(message.identity.phone, frame)
+        if row is None or row.get("purchase_date"):
+            return
+        user_key = state.user_key
+        cluster = message.entry_metadata.get("cluster_id") or state.cluster_id
+        if row.get("invoice_image"):
+            jobs = [lambda: INVOICE.read_from_oms(cid, user_key, cluster, message.identity.phone, frame)]
+        else:
+            jobs = [
+                (lambda key=item.url[len("s3://"):], mime=item.mime_type:
+                 INVOICE.read_upload(cid, user_key, frame, key, mime))
+                for item in message.attachments
+                if (item.url or "").startswith("s3://")
+                and ((item.mime_type or "").startswith("image/") or item.mime_type == "application/pdf")
+            ]
+        INVOICE.start(jobs)
+    except Exception as exc:
+        log.emit("invoice_read_failed", cid, error="state:" + type(exc).__name__, source="api")
 
 
 def _start_serial_reads(message: InboundMessage) -> None:
@@ -1501,6 +1549,7 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
     except AttachmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     _start_serial_reads(message)
+    _start_invoice_reads(message)
     return _message_out(conversation_id, runtime.handle(message))
 
 

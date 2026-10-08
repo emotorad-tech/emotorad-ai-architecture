@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import date
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -144,6 +145,7 @@ from .melt_ask import ASKED_NOTE as MELT_ASKED_NOTE
 from .melt_ask import MeltAsk
 from . import serial_ask as serial_ask_module
 from . import serial_confirm
+from . import invoice_ocr
 from .serial_ask import SerialAsk
 from .one_step import is_too_long, replace_turn_text
 from .one_step import sentences as one_step_sentences
@@ -159,6 +161,7 @@ from .tools.mocks import (
     PLACE_REPLACEMENT_ORDER,
     RAISE_INTAKE_TICKET,
     SEND_GUIDE_MEDIA,
+    SUBMIT_WARRANTY_PROOF,
     build_registry,
     ticket_source_key,
 )
@@ -536,6 +539,7 @@ class Runtime:
         customer_care_contact: Optional[str] = None,
         melt_ask: Optional[MeltAsk] = None,
         serial_ask: Optional[SerialAsk] = None,
+        invoice: Any = None,
     ) -> None:
         self.settings = settings or load_settings()
         # The melt ask (melt_ask.py, 6 October 2026): one fixed reply asking
@@ -546,6 +550,9 @@ class Runtime:
         # The battery serial-photo ask (serial_ask.py, 7 October 2026). None
         # (the default) is off; api.py passes one when EMOTORAD_SERIAL_ASK is on.
         self.serial_ask = serial_ask
+        # Invoices read for a missing purchase date (invoice_ocr.InvoiceService,
+        # spec 2026-10-08): None leaves every turn as it was.
+        self.invoice = invoice
         # Evidence is checked before a ticket (evidence_check.py, the person's
         # brief of 6 October 2026). Off unless asked for; api.py turns it on
         # with EMOTORAD_EVIDENCE_CHECK. Off, every path is exactly as before.
@@ -1963,6 +1970,72 @@ class Runtime:
         replace_turn_text(state.history, text)
         return replace(turn, text=text)
 
+    def _with_invoice_result(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
+                             turn: Any) -> Any:
+        """Invoices read for this conversation and not yet told (invoice_ocr.py):
+        for each bike, the latest reading raises its warranty-proof ticket, by
+        code, and its line is added to the reply. Never on a reply about a
+        hazard; never for anyone but a customer."""
+        if (self.invoice is None or resolved.persona != "customer"
+                or check_safety_in_description(turn.text).triggered):
+            return turn
+        cid = message.conversation_id
+        try:
+            readings = [r for r in self.conversations.invoice_readings_of(cid) if not r.get("told")]
+        except Exception as exc:
+            self.log.emit("invoice_read_failed", cid, error="store:" + type(exc).__name__, source="runtime")
+            return turn
+        if not readings:
+            return turn
+        latest: Dict[str, Dict[str, Any]] = {}
+        for reading in readings:
+            latest[reading["frame_number"]] = reading
+        today = self.invoice.today()
+        hindi = writes_hindi(turn.text)
+        lines = []
+        for frame, reading in latest.items():
+            bought = date.fromisoformat(reading["purchase_date"]) if reading.get("purchase_date") else None
+            assessed = {"confident": bool(reading.get("confident")), "purchase_date": bought,
+                        "reason": reading.get("reason")}
+            ticket_id = self._raise_invoice_ticket(message, state, resolved, frame, reading, assessed)
+            for told in [r for r in readings if r["frame_number"] == frame]:
+                try:
+                    self.conversations.update_invoice_reading(cid, told["_id"], {"told": True, "ticket_id": ticket_id})
+                except Exception as exc:
+                    self.log.emit("invoice_read_failed", cid, error="store:" + type(exc).__name__, source="runtime")
+            self.log.emit("invoice_told", cid, confident=assessed["confident"], ticket=bool(ticket_id))
+            lines.append(invoice_ocr.customer_line(assessed, today, hindi))
+        text = turn.text.rstrip() + "\n\n" + "\n\n".join(lines)
+        replace_turn_text(state.history, text)
+        return replace(turn, text=text)
+
+    def _raise_invoice_ticket(self, message: InboundMessage, state: ConversationState, resolved: ResolvedIdentity,
+                              frame: str, reading: Dict[str, Any], assessed: Dict[str, Any]) -> Optional[str]:
+        """The bike's warranty-proof ticket, once per run (its idempotency key
+        is the frame), carrying what the invoice showed. The reference, or None."""
+        findings = invoice_ocr.findings_text(reading.get("found") or {}, assessed, reading.get("source") or "")
+        if reading.get("copy_key"):
+            findings += " Invoice copy: %s." % reading["copy_key"]
+        late: Dict[str, Any] = {
+            "identity_strength": lambda: self._identity_strength(message.conversation_id, resolved),
+            "channel": lambda: message.channel,
+            "coverage": lambda: coverage_fact(state, resolved),
+            "invoice_findings": lambda: findings,
+            "invoice_purchase_date": lambda: (assessed["purchase_date"].isoformat()
+                                              if assessed["confident"] and assessed["purchase_date"] else None),
+        }
+        envelope = self.registry.call(
+            SUBMIT_WARRANTY_PROOF,
+            {"frame_number": frame, "idempotency_key": "invoice:" + frame, "purchase_channel": "unknown"},
+            ToolContext(conversation_id=message.conversation_id, phone=resolved.identity.phone,
+                        cluster_id=resolved.cluster_id, persona=resolved.persona,
+                        started_at=self._ticket_run_start(message, state, resolved), late=late),
+        )
+        if is_error(envelope):
+            self.log.emit("invoice_ticket_failed", message.conversation_id, error=envelope["error"].get("code"))
+            return None
+        return envelope["data"]["ticket_id"]
+
     def _node_melt_ask(self, turn: Dict[str, Any]) -> Dict[str, Any]:
         # 5. The melt ask (melt_ask.py, the person's brief of 6 October 2026):
         #    once a customer's bike is chosen and routed, a melt gets one fixed
@@ -2650,6 +2723,7 @@ class Runtime:
                 turn = replace(turn, text=text)
             turn = self._with_serial_ask(message, resolved, state, turn)
         turn = self._with_serial_confirm(message, state, turn)
+        turn = self._with_invoice_result(message, resolved, state, turn)
 
         return Reply(
             conversation_id=message.conversation_id,
