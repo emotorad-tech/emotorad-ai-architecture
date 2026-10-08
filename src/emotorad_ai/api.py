@@ -92,6 +92,7 @@ from .storage.assets import finish_asset
 from .storage.uploads import UploadError, UploadRegistry
 from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
+from .tools import oms_db as oms_db_tools
 from .tools import warranty_api as warranty_api_tools
 from .tools import fixtures
 from .tools.mocks import build_registry
@@ -274,7 +275,21 @@ sent_media: dict = {}
 replacement_orders = ReplacementOrders()
 
 
+# Bikes from OMS production (tools/oms_db.py, spec 2026-10-08): first among the
+# sources when its connection string is set. Nothing connects at import.
+OMS_DB = oms_db_tools.reader_from_env()
+# The OMS API: invoice downloads, and the order-number fallback in
+# verification, which never uses it while the dev-code page is on (a code read
+# off that page plus an order number would verify anyone as the order's owner).
+OMS_CLIENT = OMSClient() if os.environ.get("EMOTORAD_OMS_API_KEY") else None
+ACCOUNT_FINDER = (live_account_finder(OMS_CLIENT)
+                  if OMS_CLIENT is not None and os.environ.get("EMOTORAD_AI_DEV_CODES") != "1"
+                  else fixtures.find_account_by_order_code)
+
+
 def _warranty_source_label() -> str:
+    if OMS_DB is not None:
+        return "oms_db"
     if warranty_api_tools.configured():
         return "warranty_api: %s" % warranty_api_tools.WarrantyAPIClient().host
     return "oms" if os.environ.get("EMOTORAD_OMS_API_KEY") else "fixtures"
@@ -299,8 +314,10 @@ def _build_registry():
     # key is set (7 October 2026: it replaces the OMS warranty lookup), else
     # from the OMS when its key is set, else from the fixtures. The order or
     # invoice code look-up stays with the OMS, which alone holds orders.
-    oms = OMSClient() if os.environ.get("EMOTORAD_OMS_API_KEY") else None
-    if warranty_api_tools.configured():
+    oms = OMS_CLIENT
+    if OMS_DB is not None:
+        source = oms_db_tools.db_warranty_source(OMS_DB)
+    elif warranty_api_tools.configured():
         source = warranty_api_tools.api_warranty_source(warranty_api_tools.WarrantyAPIClient())
     elif oms is not None:
         source = live_warranty_source(oms)
@@ -318,7 +335,7 @@ def _build_registry():
         amigo=AMIGO,
         # Test order numbers (fixtures.ORDER_CODES) without the OMS key, so the
         # fallback can be tried.
-        account_finder=live_account_finder(oms) if oms is not None else fixtures.find_account_by_order_code,
+        account_finder=ACCOUNT_FINDER,
         guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
         replacement_orders=replacement_orders,
