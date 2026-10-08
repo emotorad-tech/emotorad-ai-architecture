@@ -98,6 +98,12 @@ CONVERSATION_NOTICES = "conversation_notices"
 # customer confirms it, which is later work). Permanent, and erased with the
 # person or the conversation.
 SERIAL_READINGS = "serial_readings"
+# Invoices read for a purchase date (invoice_ocr.py, spec 2026-10-08): `_id`
+# (the invoice copy's S3 key, or "oms:" and OMS's file id), `conversation_id`,
+# `user_key`, `frame_number`, `source` ("oms" or "customer"), `found` (what was
+# read), `confident`, `purchase_date`, `read_at`, `ticket_id` and `told`.
+# Permanent, and erased with the person or the conversation.
+INVOICE_READINGS = "invoice_readings"
 # How often a notice is tried when its number or its ticket was taken by
 # another server between the look and the write.
 NOTICE_ATTEMPTS = 5
@@ -145,6 +151,10 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
         ([("conversation_id", 1), ("kind", 1), ("reference", 1)], {"name": "one_notice_per_ticket", "unique": True}),
     ],
     SERIAL_READINGS: [
+        ([("conversation_id", 1), ("read_at", 1)], {"name": "conversation_read_at"}),
+        ([("user_key", 1)], {"name": "user"}),
+    ],
+    INVOICE_READINGS: [
         ([("conversation_id", 1), ("read_at", 1)], {"name": "conversation_read_at"}),
         ([("user_key", 1)], {"name": "user"}),
     ],
@@ -470,6 +480,23 @@ class MongoConversationStore:
         return self._guard(
             "find", lambda: list(readings.find({"conversation_id": conversation_id}).sort([("read_at", 1), ("_id", 1)])))
 
+    def add_invoice_reading(self, reading: Dict[str, Any]) -> None:
+        """An invoice read for a purchase date, by its `_id`: the same invoice
+        read twice keeps one reading."""
+        readings = self._collection(INVOICE_READINGS)
+        self._guard("replace_one", lambda: readings.replace_one({"_id": reading["_id"]}, dict(reading), upsert=True))
+
+    def update_invoice_reading(self, conversation_id: str, reading_id: str, fields: Dict[str, Any]) -> None:
+        """Sets `fields` on one reading (the runtime: told, and its ticket)."""
+        readings = self._collection(INVOICE_READINGS)
+        self._guard("update_one", lambda: readings.update_one(
+            {"_id": reading_id, "conversation_id": conversation_id}, {"$set": dict(fields)}))
+
+    def invoice_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        readings = self._collection(INVOICE_READINGS)
+        return self._guard(
+            "find", lambda: list(readings.find({"conversation_id": conversation_id}).sort([("read_at", 1), ("_id", 1)])))
+
     def notices_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         notices = self._collection(CONVERSATION_NOTICES)
         return self._guard(
@@ -626,7 +653,7 @@ class MongoConversationStore:
         for name, field in ((CONVERSATIONS, "_id"), (TRANSCRIPT_TURNS, "conversation_id"),
                             (CONVERSATION_SUMMARIES, "conversation_id"), (CONVERSATION_ORIGINS, "conversation_id"),
                             (CONVERSATION_NOTICES, "conversation_id"), (VERIFICATION_SESSIONS, "_id"),
-                            (SERIAL_READINGS, "conversation_id"),
+                            (SERIAL_READINGS, "conversation_id"), (INVOICE_READINGS, "conversation_id"),
                             (AMIIGO_RECEIPTS, "conversation_id")):
             collection = self._collection(name)
             found.update(self._guard("distinct", lambda: collection.distinct(field, {"user_key": user_key})))
@@ -644,7 +671,7 @@ class MongoConversationStore:
         """
         counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA,
                                        CONVERSATION_ORIGINS, VERIFICATION_SESSIONS, CONVERSATION_NOTICES,
-                                       SERIAL_READINGS, AMIIGO_RECEIPTS)}
+                                       SERIAL_READINGS, INVOICE_READINGS, AMIIGO_RECEIPTS)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -663,6 +690,7 @@ class MongoConversationStore:
             VERIFICATION_SESSIONS: self._remove(VERIFICATION_SESSIONS, {"_id": conversation_id}, dry_run),
             CONVERSATION_NOTICES: self._remove(CONVERSATION_NOTICES, {"conversation_id": conversation_id}, dry_run),
             SERIAL_READINGS: self._remove(SERIAL_READINGS, {"conversation_id": conversation_id}, dry_run),
+            INVOICE_READINGS: self._remove(INVOICE_READINGS, {"conversation_id": conversation_id}, dry_run),
             # The chat socket's receipts (Ruling 14): their ids name the phone.
             AMIIGO_RECEIPTS: self._remove(AMIIGO_RECEIPTS, {"conversation_id": conversation_id}, dry_run),
         }

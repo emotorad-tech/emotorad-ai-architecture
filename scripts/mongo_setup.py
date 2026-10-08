@@ -33,6 +33,7 @@ sys.path[:0] = [str(ROOT / "src")]
 
 from emotorad_ai.stores.mongo import (  # noqa: E402
     CONVERSATION_NOTICES, CONVERSATION_SUMMARIES, COUNTERS, MEDIA, MONGO_URI_ENV, SERIAL_READINGS, TICKETS,
+    INVOICE_READINGS,
     TRANSCRIPT_TURNS, connect, ensure_indexes,
 )
 
@@ -40,7 +41,7 @@ from emotorad_ai.stores.mongo import (  # noqa: E402
 # numbers them: a counter that expired would hand out EM-1000001 again. The
 # notices in a chat (a ticket closed in Zoho Desk) are part of the chat.
 PERMANENT = (TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, MEDIA, TICKETS, COUNTERS, CONVERSATION_NOTICES,
-             SERIAL_READINGS)
+             SERIAL_READINGS, INVOICE_READINGS)
 
 
 def main() -> int:
