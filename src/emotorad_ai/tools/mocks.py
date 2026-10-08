@@ -347,11 +347,19 @@ def _api_coverage(bike: Dict[str, Any], record: Dict[str, Any], today: Optional[
         })
         return bike
     if coverage.get("status") not in ("active", "expired"):
+        # With the OMS database (tools/oms_db.py), whether OMS holds the
+        # invoice: code reads it (invoice_ocr.py), so the model must not ask.
+        on_file = bool(record.get("invoice_on_file"))
         bike.update({
             "in_warranty": None,
             "coverage_status": "purchase_date_missing",
             "remedy": coverage.get("remedy") or "collect_purchase_proof",
+            "invoice_on_file": on_file,
             "note": (
+                "This bike's purchase date is not on record, but its invoice is on file and is being read "
+                "now. Do not ask for the invoice. Do not state or estimate a coverage date; tell the "
+                "customer you are checking their invoice."
+                if on_file else
                 "This bike is registered but its purchase date is not on record, so coverage cannot be "
                 "known. Ask for the invoice or any proof of purchase showing the date it was bought. Do "
                 "not state or estimate a coverage date."
@@ -376,7 +384,9 @@ def _api_coverage(bike: Dict[str, Any], record: Dict[str, Any], today: Optional[
         "coverage_status": "from_warranty_api",
         "warranty_start": bike["purchase_date"],
         "warranty_start_source": "purchase_date",
-        "term_source": "warranty_api",
+        # "oms_terms" when the cover was worked out from OMS's purchase date
+        # (warranty_terms.py); "warranty_api" when the service gave it.
+        "term_source": record.get("term_source") or "warranty_api",
         "components": components,
     })
     if lead and lead["valid_until"]:
@@ -1458,7 +1468,10 @@ def build_registry(
         # What the ticket record needs, from the runtime (spec 2026-10-05,
         # section 2). None is in the model's schema, and anything it sends
         # under these names is dropped.
-        optional_injects=("persona", "started_at", "cluster_id", "channel", "identity_strength", "coverage"),
+        optional_injects=("persona", "started_at", "cluster_id", "channel", "identity_strength", "coverage",
+                          # Code only (invoice_ocr.py, spec 2026-10-08): what reading the
+                          # invoice found, and the date when the reading was confident.
+                          "invoice_findings", "invoice_purchase_date"),
         write=True,
     )
     def submit_warranty_proof(
@@ -1475,6 +1488,8 @@ def build_registry(
         channel: Optional[str] = None,
         identity_strength: Optional[str] = None,
         coverage: Optional[str] = None,
+        invoice_findings: Optional[str] = None,
+        invoice_purchase_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         if purchase_channel not in ("dealer", "website", "marketplace", "unknown"):
             raise ToolError("invalid_channel", "Unknown purchase channel %r." % purchase_channel)
@@ -1496,9 +1511,12 @@ def build_registry(
             category="late_warranty_registration",
             severity="normal",
             description=(
-                "Warranty proof submitted for frame %s via %s. Customer states purchase date %s. "
-                "REQUIRES HUMAN VERIFICATION against the document before any coverage is set."
-                % (frame_number, purchase_channel, claimed_purchase_date or "not given")
+                "Warranty proof submitted for frame %s via %s. %s "
+                "REQUIRES HUMAN VERIFICATION against the document before any coverage is set.%s"
+                % (frame_number, purchase_channel,
+                   ("Invoice date read by AI: %s." % invoice_purchase_date) if invoice_purchase_date else
+                   "Customer states purchase date %s." % (claimed_purchase_date or "not given"),
+                   ("\n\n" + invoice_findings) if invoice_findings else "")
             ),
             # The customer's claims, labelled as such: nobody has checked the
             # frame number, the date or where it was bought.

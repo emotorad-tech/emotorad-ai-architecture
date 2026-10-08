@@ -30,10 +30,14 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 DEFAULT_BASE_URL = "https://omsrest.emotorad.com/purchase"
 DEFAULT_TIMEOUT = 8.0
+# An invoice file from OMS (download_file): its id is a UUID, and it is never
+# bigger than this.
+MAX_FILE_BYTES = 12 * 1024 * 1024
+_FILE_ID = re.compile(r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}")
 
 _DIGITS = re.compile(r"\D+")
 # Indian mobile numbers are ten digits starting 6-9. Landlines and short codes
@@ -135,6 +139,32 @@ class OMSClient:
             # A 200 carrying an empty list means what the 404 means.
             raise OMSNoRecord("OMS returned no %s rows" % key)
         return [row for row in rows if isinstance(row, dict)]
+
+    def download_file(self, file_id: str, max_bytes: int = MAX_FILE_BYTES) -> Tuple[bytes, str]:
+        """An invoice file by its OMS id, and its type (em-biz-backend
+        file/views.py download_file_without_login, `/file/download/<id>`
+        beside `/purchase`). 400 or 404 is no such file; anything else is an
+        outage. Only a UUID is ever requested."""
+        if not _FILE_ID.fullmatch(file_id or ""):
+            raise ValueError("not an OMS file id")
+        if not self.api_key:
+            raise OMSConfigError("EMOTORAD_OMS_API_KEY is not set")
+        origin = self.base_url.rsplit("/purchase", 1)[0]
+        request = urllib.request.Request("%s/file/download/%s" % (origin, file_id))
+        request.add_header("X-API-KEY", self.api_key)
+        try:
+            with self._opener(request, timeout=self.timeout) as response:
+                body = response.read(max_bytes + 1)
+                mime = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (400, 404):
+                raise OMSNoRecord("no such file")
+            raise OMSUnavailable("OMS returned HTTP %d" % exc.code)
+        except (urllib.error.URLError, OSError) as exc:
+            raise OMSUnavailable("OMS unreachable: %s" % type(exc).__name__) from exc
+        if len(body) > max_bytes:
+            raise OMSUnavailable("file_too_large")
+        return body, mime
 
     def get_warranties_by_mobile(self, phone: str) -> List[Dict[str, Any]]:
         """Registered bikes for a number. Raises OMSNoRecord when there are none."""
