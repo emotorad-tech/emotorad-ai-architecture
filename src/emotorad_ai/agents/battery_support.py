@@ -143,6 +143,19 @@ def _coverage_line(bike: Dict[str, Any]) -> str:
         )
     if bike.get("coverage_status") == "from_warranty_api":
         return _api_coverage_line(bike)
+    if bike.get("coverage_status") == "purchase_date_missing" and bike.get("invoice_on_file"):
+        # Code reads OMS's copy (invoice_ocr.py): asking for it again sends the
+        # customer looking for a paper we already hold.
+        return (
+            "  Coverage: UNKNOWN, no purchase date on record, but the invoice is on file. Do not ask for "
+            "the invoice. Say you are checking the invoice on file; code tells the customer what it shows. "
+            "Do not state or estimate any coverage."
+        )
+    if bike.get("coverage_status") == "purchase_date_missing" and bike.get("invoice_with_support"):
+        return (
+            "  Coverage: UNKNOWN, no purchase date on record; the invoice is already with our support team, "
+            "who will confirm the warranty. Do not ask for the invoice. Do not state or estimate any coverage."
+        )
     if bike.get("coverage_status") == "purchase_date_missing":
         # The one case where saying nothing is not enough — the agent has to know
         # what to *do*, or it will apologise and stop rather than ask for the

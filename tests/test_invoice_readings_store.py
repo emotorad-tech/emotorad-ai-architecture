@@ -68,5 +68,35 @@ class MongoTests(Contract, unittest.TestCase):
             self.assertNotIn("expireAfterSeconds", options)
 
 
+class InsertOnceContract:
+    """Final review, finding 3: a reading already told is never reset by a
+    late read of the same invoice, and a reading is found by its id alone."""
+
+    def test_a_second_add_never_resets_a_reading(self):
+        store = self.make_store()
+        store.add_invoice_reading(dict(a_reading("c1", "oms:f1"), told=True, ticket_id="EM-1000001"))
+        store.add_invoice_reading(a_reading("c1", "oms:f1"))
+        [reading] = store.invoice_readings_of("c1")
+        self.assertEqual((reading["told"], reading["ticket_id"]), (True, "EM-1000001"))
+
+    def test_a_reading_is_found_by_its_id_whatever_the_conversation(self):
+        store = self.make_store()
+        store.add_invoice_reading(a_reading("c1", "oms:f1"))
+        self.assertEqual(store.invoice_reading("oms:f1")["conversation_id"], "c1")
+        self.assertIsNone(store.invoice_reading("oms:nothing"))
+
+
+class InMemoryInsertOnceTests(InsertOnceContract, unittest.TestCase):
+    def make_store(self):
+        return InMemoryConversationStore()
+
+
+class MongoInsertOnceTests(InsertOnceContract, unittest.TestCase):
+    def make_store(self):
+        db = mongomock.MongoClient()["emotorad_ai"]
+        ensure_indexes(db)
+        return MongoConversationStore(db)
+
+
 if __name__ == "__main__":
     unittest.main()

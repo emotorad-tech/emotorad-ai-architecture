@@ -680,9 +680,18 @@ class InMemoryConversationStore:
             reading.update(fields)
 
     def add_invoice_reading(self, reading: Dict[str, Any]) -> None:
-        """An invoice read for a purchase date, by its `_id`: the same invoice
-        read twice keeps one reading."""
-        self._invoices.setdefault(reading["conversation_id"], {})[reading["_id"]] = dict(reading)
+        """An invoice read for a purchase date, by its `_id`, kept only if no
+        reading has that id yet: a late read of the same invoice never resets
+        one already told."""
+        if self.invoice_reading(reading["_id"]) is None:
+            self._invoices.setdefault(reading["conversation_id"], {})[reading["_id"]] = dict(reading)
+
+    def invoice_reading(self, reading_id: str) -> Optional[Dict[str, Any]]:
+        """A reading by its id, whatever the conversation, or None."""
+        for readings in self._invoices.values():
+            if reading_id in readings:
+                return dict(readings[reading_id])
+        return None
 
     def invoice_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
         readings = self._invoices.get(conversation_id, {}).values()

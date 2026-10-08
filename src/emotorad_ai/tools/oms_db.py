@@ -65,11 +65,25 @@ def configured(environ: Optional[Mapping[str, str]] = None) -> bool:
 
 
 def last_ten(phone: str) -> str:
-    """The phone's last ten digits; ValueError for anything but an Indian mobile."""
-    digits = _NOT_DIGITS.sub("", phone or "")[-10:]
-    if not _MOBILE.fullmatch(digits):
+    """An Indian mobile's ten digits, written as ten digits, `0` and ten, `91`
+    and ten, or `+91` and ten (spaces and dashes ignored); ValueError for
+    anything else, a foreign number above all: the last ten digits of +65 or
+    +44 numbers look like an Indian mobile and would read a stranger's bikes."""
+    raw = (phone or "").strip()
+    digits = _NOT_DIGITS.sub("", raw)
+    if raw.startswith("+"):
+        local = digits[2:] if digits.startswith("91") and len(digits) == 12 else None
+    elif len(digits) == 10:
+        local = digits
+    elif len(digits) == 11 and digits.startswith("0"):
+        local = digits[1:]
+    elif len(digits) == 12 and digits.startswith("91"):
+        local = digits[2:]
+    else:
+        local = None
+    if local is None or not _MOBILE.fullmatch(local):
         raise ValueError("not an Indian mobile")
-    return digits
+    return local
 
 
 def _psycopg_connect(dsn: str, **kwargs: Any) -> Any:
@@ -108,7 +122,7 @@ class OMSDatabase:
         try:
             with self._connect(self._dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS,
                                application_name=APPLICATION_NAME,
-                               options="-c statement_timeout=%d -c default_transaction_read_only=on"
+                               options="-c statement_timeout=%d -c default_transaction_read_only=on -c TimeZone=UTC"
                                        % STATEMENT_TIMEOUT_MS) as conn:
                 rows = [dict(row) for row in conn.execute(REGISTRATIONS_SQL, {"m10": m10}).fetchall()]
         except Exception as exc:
@@ -140,10 +154,15 @@ def _day(value: Any) -> Optional[date]:
     return None
 
 
-def to_record(row: Dict[str, Any], today: date) -> Dict[str, Any]:
+def to_record(row: Dict[str, Any], today: date,
+              invoice_state: Optional[Callable[[Optional[str]], str]] = None) -> Dict[str, Any]:
     """One registration as the record the lookup tool reads, in the shape the
-    warranty service's records had (tools/warranty_api.to_record)."""
+    warranty service's records had (tools/warranty_api.to_record).
+    `invoice_state` (invoice_ocr.InvoiceService.invoice_state) says whether
+    OMS's invoice can be read; without it a file on record counts."""
     bought = _day(row.get("purchase_date"))
+    file_id = str(row.get("invoice_image") or "").strip() or None
+    state = invoice_state(file_id) if invoice_state is not None else ("readable" if file_id else "unreadable")
     status = "cancel_requested" if (row.get("status") or "").upper() == "CANCELLED_REQUEST" else "active"
     return {
         "frame_number": row.get("frame_number"),
@@ -155,13 +174,15 @@ def to_record(row: Dict[str, Any], today: date) -> Dict[str, Any]:
         "customer_name": row.get("customer_name"),
         "purchase_date": bought.isoformat() if bought else None,
         "registration_status": status,
-        "invoice_on_file": bool(str(row.get("invoice_image") or "").strip()),
+        "invoice_on_file": state == "readable",
+        "invoice_with_support": state == "with_support",
         "term_source": "oms_terms",
         "warranty_api": warranty_terms.coverage(bought, today),
     }
 
 
-def db_warranty_source(reader: OMSDatabase) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
+def db_warranty_source(reader: OMSDatabase, invoice_state: Optional[Callable[[Optional[str]], str]] = None
+                       ) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
     """Registered bikes from the OMS database, mapped onto the tool's own
     outcomes: rows, None for no rows, and oms_unavailable for any failure."""
     from .registry import ToolError  # local: registry imports tools, not the reverse
@@ -177,7 +198,7 @@ def db_warranty_source(reader: OMSDatabase) -> Callable[[str], Optional[List[Dic
         if not rows:
             return None
         today = reader.today()
-        return [to_record(row, today) for row in rows]
+        return [to_record(row, today, invoice_state) for row in rows]
 
     return source
 

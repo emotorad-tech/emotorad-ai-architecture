@@ -73,8 +73,16 @@ def _entry_block(resolved: ResolvedIdentity) -> str:
             "\nSituation: this customer's bike IS registered with us — %s — but we have no "
             "purchase date on record, so coverage cannot be worked out. Do NOT ask them to "
             "register the bike; we already have it, and saying otherwise sounds like we lost "
-            "their record. Acknowledge the bike by name, then ask only for the invoice or "
-            "proof of purchase showing the date they bought it." % (described or "their bike")
+            "their record. Acknowledge the bike by name, then %s" % (
+                described or "their bike",
+                # OMS's own copy is read by code (invoice_ocr.py): ask only
+                # when there is none to read.
+                "say you are checking the invoice on file; do not ask for it."
+                if any(bike.get("invoice_on_file") for bike in bikes) else
+                "say their invoice is already with our support team, who will confirm the warranty; do "
+                "not ask for it."
+                if any(bike.get("invoice_with_support") for bike in bikes) else
+                "ask only for the invoice or proof of purchase showing the date they bought it.")
         )
 
     return (

@@ -481,10 +481,18 @@ class MongoConversationStore:
             "find", lambda: list(readings.find({"conversation_id": conversation_id}).sort([("read_at", 1), ("_id", 1)])))
 
     def add_invoice_reading(self, reading: Dict[str, Any]) -> None:
-        """An invoice read for a purchase date, by its `_id`: the same invoice
-        read twice keeps one reading."""
+        """An invoice read for a purchase date, by its `_id`, written only if
+        no reading has that id yet: a late read of the same invoice never
+        resets one already told."""
         readings = self._collection(INVOICE_READINGS)
-        self._guard("replace_one", lambda: readings.replace_one({"_id": reading["_id"]}, dict(reading), upsert=True))
+        fields = {name: value for name, value in reading.items() if name != "_id"}
+        self._guard("update_one", lambda: readings.update_one(
+            {"_id": reading["_id"]}, {"$setOnInsert": fields}, upsert=True))
+
+    def invoice_reading(self, reading_id: str) -> Optional[Dict[str, Any]]:
+        """A reading by its id, whatever the conversation, or None."""
+        readings = self._collection(INVOICE_READINGS)
+        return self._guard("find_one", lambda: readings.find_one({"_id": reading_id}))
 
     def update_invoice_reading(self, conversation_id: str, reading_id: str, fields: Dict[str, Any]) -> None:
         """Sets `fields` on one reading (the runtime: told, and its ticket)."""

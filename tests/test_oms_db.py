@@ -59,6 +59,15 @@ class SqlTests(unittest.TestCase):
             db.registrations("12345")
         self.assertEqual(fake.calls, [])
 
+    def test_a_foreign_number_never_reaches_the_database(self):
+        # Final review, finding 2: the last ten digits of +65 91234567 look
+        # like an Indian mobile, and would read a stranger's bikes.
+        for phone in ("+6591234567", "+447911123456", "+16502530000", "+9198765432101", "12345"):
+            db, fake, _ = reader([ROW])
+            with self.assertRaises(ValueError, msg=phone):
+                db.registrations(phone)
+            self.assertEqual(fake.calls, [], phone)
+
     def test_the_query_leaves_out_the_dealers_own_shop_and_deleted_rows(self):
         sql = oms_db.REGISTRATIONS_SQL
         for part in ("em_franchise", "secondary_contact", "em_users", "'franchise_manager'",
@@ -78,6 +87,9 @@ class SqlTests(unittest.TestCase):
         kwargs = fake.calls[0][1]
         self.assertIn("default_transaction_read_only=on", kwargs["options"])
         self.assertIn("statement_timeout=", kwargs["options"])
+        # OMS stores purchase dates as midnight UTC: a session in any other
+        # zone would move every date by a day (final review, finding 13).
+        self.assertIn("TimeZone=UTC", kwargs["options"])
         self.assertEqual(kwargs["application_name"], "emotorad-ai-chatbot")
 
 

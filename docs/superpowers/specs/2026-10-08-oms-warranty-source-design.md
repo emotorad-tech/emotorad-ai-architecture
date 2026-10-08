@@ -77,8 +77,8 @@ SELECT DISTINCT ON (p.frame_number)
   database (as `tools/oms.py` already does for the API).
 - One row per frame: a frame registered twice keeps the row with a purchase date, then the newest.
 - Only these columns are read. `customer_name` is read because a verified customer's own ticket already
-  carries their name (spec 2026-10-05); nothing else personal (email, address, date of birth, the
-  referral's phone) is selected.
+  carries their name (spec 2026-10-05), and `full_address` because the replacement flow reads it back
+  before an order; nothing else personal (email, date of birth, the referral's phone) is selected.
 - Rows map onto the record shape `lookup_warranty_record` and the agents already use (frame number,
   bike model, `purchase_date`, seller, `invoice_on_file`, the computed coverage below), so the agents,
   the coverage post-check, enrichment and the Zoho payload keep working.
@@ -171,7 +171,8 @@ key rotation pending); it is never logged and never sent to the model.
 1. **Sachin creates the role** on OMS production, read-only, with column grants only:
    `em_purchase (id, mobile, frame_number, product_name, product_id, product_color, purchase_date,
    created_at, updated_at, deleted_at, franchise_id, franchise_name, invoice_image, status,
-   customer_name)`, `em_franchise (id, mobile, secondary_contact, deleted_at)`,
+   customer_name, full_address)` (`full_address` added during planning: the replacement flow reads
+   the address back before an order), `em_franchise (id, mobile, secondary_contact, deleted_at)`,
    `em_users (mobile, user_type, related_id, deleted_at)`.
 2. **Sachin opens the network path** from the staging EC2 instance to the OMS database (its security
    group, port 5432).

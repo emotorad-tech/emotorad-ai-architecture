@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -56,10 +57,14 @@ _KEYS = ("is_invoice", "invoice_date", "seller", "frame_numbers", "product", "le
 
 CONFIDENT_EN = ("Going by your invoice dated {date}, your battery is covered until {end}. "
                 "A support executive will confirm this.")
+# When the battery's cover has already ended (final review, finding 7).
+ENDED_EN = ("Going by your invoice dated {date}, your battery's cover ended on {end}. "
+            "A support executive will confirm this.")
 NOT_CONFIDENT_EN = ("Thanks, I have passed your invoice to our support team. A support executive will confirm "
                     "your warranty.")
 # DRAFT: for a Hindi speaker to check before real traffic.
 CONFIDENT_HI = "आपके इनवॉइस की तारीख {date} के हिसाब से, आपकी बैटरी {end} तक कवर है। सपोर्ट टीम इसकी पुष्टि करेगी।"
+ENDED_HI = "आपके इनवॉइस की तारीख {date} के हिसाब से, आपकी बैटरी का कवर {end} को समाप्त हो गया। सपोर्ट टीम इसकी पुष्टि करेगी।"
 NOT_CONFIDENT_HI = "धन्यवाद, मैंने आपका इनवॉइस हमारी सपोर्ट टीम को भेज दिया है। सपोर्ट टीम आपकी वारंटी की पुष्टि करेगी।"
 
 
@@ -171,7 +176,11 @@ def customer_line(assessed: Mapping[str, Any], today: date, hindi: bool) -> str:
         return NOT_CONFIDENT_HI if hindi else NOT_CONFIDENT_EN
     bought = assessed["purchase_date"]
     end = warranty_terms.valid_until(bought, warranty_terms.TERMS[warranty_terms.LEAD_PART])
-    return (CONFIDENT_HI if hindi else CONFIDENT_EN).format(date=_spoken(bought), end=_spoken(end))
+    if end < today:
+        template = ENDED_HI if hindi else ENDED_EN
+    else:
+        template = CONFIDENT_HI if hindi else CONFIDENT_EN
+    return template.format(date=_spoken(bought), end=_spoken(end))
 
 
 def findings_text(found: Mapping[str, Any], assessed: Mapping[str, Any], source: str) -> str:
@@ -208,7 +217,18 @@ class InvoiceService:
     (`invoice_readings`). The API starts the reads before a turn and waits up
     to `wait_seconds`; one that takes longer finishes on its own and is told
     on a later turn. The runtime raises the ticket and tells the customer
-    (Runtime._with_invoice_result). Never raises; failures are logged by code."""
+    (Runtime._with_invoice_result). Never raises; failures are logged by code.
+
+    An invoice is read once (final review, 8 October 2026): a read already
+    running is not started again, a reading is never overwritten, and an OMS
+    file that is not an invoice or cannot be read is not tried again in this
+    process (`invoice_state` then says "unreadable", so the agent asks the
+    customer for theirs). The copy of OMS's file is kept only once it has been
+    read as an invoice."""
+
+    READABLE = "readable"
+    UNREADABLE = "unreadable"
+    WITH_SUPPORT = "with_support"
 
     def __init__(self, reader: Any, oms_db: Any, oms_client: Any, media_store: Any, conversations: Any,
                  emit: Callable[..., None], persist: Optional[Callable[..., None]] = None, pool: Any = None,
@@ -223,6 +243,9 @@ class InvoiceService:
         self.pool = pool or ThreadPoolExecutor(max_workers=2, thread_name_prefix="invoice-read")
         self.wait_seconds = wait_seconds
         self.today = today
+        self._lock = threading.Lock()
+        self._inflight: set = set()
+        self._unreadable: set = set()
 
     @property
     def provider(self) -> str:
@@ -236,32 +259,96 @@ class InvoiceService:
         except Exception:
             return None
 
-    def _known(self, conversation_id: str, reading_id: str) -> bool:
-        return any(r.get("_id") == reading_id for r in self.conversations.invoice_readings_of(conversation_id))
+    def _reading(self, reading_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            return self.conversations.invoice_reading(reading_id)
+        except Exception:
+            return None
+
+    def invoice_state(self, file_id: Optional[str]) -> str:
+        """What can be done with OMS's invoice file: "readable" (read it, or
+        it is being read), "with_support" (read and passed on, in any chat),
+        or "unreadable" (no usable file, no way to fetch it, or it was not an
+        invoice): then the customer is asked for theirs."""
+        from .tools.oms import _FILE_ID
+
+        if not file_id or not _FILE_ID.fullmatch(str(file_id)) or self.oms_client is None:
+            return self.UNREADABLE
+        with self._lock:
+            if file_id in self._unreadable:
+                return self.UNREADABLE
+        existing = self._reading("oms:" + file_id)
+        if existing is not None and existing.get("told"):
+            return self.WITH_SUPPORT
+        return self.READABLE
+
+    def _claim(self, reading_id: str) -> bool:
+        with self._lock:
+            if reading_id in self._inflight:
+                return False
+            self._inflight.add(reading_id)
+        if self._reading(reading_id) is not None:
+            self._release(reading_id)
+            return False
+        return True
+
+    def _release(self, reading_id: str) -> None:
+        with self._lock:
+            self._inflight.discard(reading_id)
+
+    def _give_up(self, file_id: str) -> None:
+        with self._lock:
+            self._unreadable.add(file_id)
 
     def read_from_oms(self, conversation_id: str, user_key: Optional[str], cluster_id: Optional[str], phone: str,
                       frame_number: str) -> None:
+        from .tools.oms import OMSNoRecord
+
         try:
             file_id = self.oms_db.invoice_file(phone, frame_number)
-            if not file_id or self._known(conversation_id, "oms:" + file_id):
-                return
-            data, mime = self.oms_client.download_file(file_id)
         except Exception as exc:
             self.emit("invoice_read_failed", conversation_id, error=type(exc).__name__, source="oms")
             return
-        copy_key = self._keep_copy(conversation_id, cluster_id, data, mime)
-        self._read(conversation_id, user_key, frame_number, "oms:" + file_id, "oms", data, mime, copy_key)
+        if self.invoice_state(file_id) != self.READABLE:
+            return
+        reading_id = "oms:" + file_id
+        if not self._claim(reading_id):
+            return
+        try:
+            try:
+                data, mime = self.oms_client.download_file(file_id)
+            except (OMSNoRecord, ValueError) as exc:
+                self._give_up(file_id)
+                self.emit("invoice_read_failed", conversation_id, error=type(exc).__name__, source="oms")
+                return
+            except Exception as exc:
+                # An outage: tried again on a later turn.
+                self.emit("invoice_read_failed", conversation_id, error=type(exc).__name__, source="oms")
+                return
+            found = self._read(conversation_id, frame_number, "oms", data, mime)
+            if found is None or not found.get("is_invoice"):
+                self._give_up(file_id)
+                return
+            copy_key = self._keep_copy(conversation_id, cluster_id, data, mime)
+            self._store(conversation_id, user_key, frame_number, reading_id, "oms", found, copy_key)
+        finally:
+            self._release(reading_id)
 
     def read_upload(self, conversation_id: str, user_key: Optional[str], frame_number: str, key: str,
                     mime: str) -> None:
-        try:
-            if self._known(conversation_id, key):
-                return
-            data = self.media_store.get_bytes(key)
-        except Exception as exc:
-            self.emit("invoice_read_failed", conversation_id, error=type(exc).__name__, source="customer")
+        if not self._claim(key):
             return
-        self._read(conversation_id, user_key, frame_number, key, "customer", data, mime, key)
+        try:
+            try:
+                data = self.media_store.get_bytes(key)
+            except Exception as exc:
+                self.emit("invoice_read_failed", conversation_id, error=type(exc).__name__, source="customer")
+                return
+            found = self._read(conversation_id, frame_number, "customer", data, mime)
+            if found is not None and found.get("is_invoice"):
+                self._store(conversation_id, user_key, frame_number, key, "customer", found, key)
+        finally:
+            self._release(key)
 
     def start(self, jobs: List[Callable[[], None]]) -> None:
         """Runs the jobs at once, waiting up to `wait_seconds` for them."""
@@ -292,23 +379,26 @@ class InvoiceService:
                          source="oms_invoice")
         return key
 
-    def _read(self, conversation_id: str, user_key: Optional[str], frame_number: str, reading_id: str,
-              source: str, data: bytes, mime: str, copy_key: Optional[str]) -> None:
+    def _read(self, conversation_id: str, frame_number: str, source: str, data: bytes,
+              mime: str) -> Optional[Dict[str, Any]]:
+        """What the reader found, or None when it could not read. Logs the
+        outcome only, never a value."""
         try:
             found = self.reader.read(data, mime, frame_number)
         except InvoiceReadError as exc:
             self.emit("invoice_read_failed", conversation_id, error=str(exc), source=source)
-            return
+            return None
         except Exception as exc:
             self.emit("invoice_read_failed", conversation_id, error=type(exc).__name__, source=source)
-            return
-        today = self.today()
-        assessed = assess(found, frame_number, today)
-        # Outcomes only: never the date, the seller or a frame number.
+            return None
+        assessed = assess(found, frame_number, self.today())
         self.emit("invoice_read", conversation_id, source=source, is_invoice=bool(found.get("is_invoice")),
                   confident=assessed["confident"])
-        if not found.get("is_invoice"):
-            return
+        return found
+
+    def _store(self, conversation_id: str, user_key: Optional[str], frame_number: str, reading_id: str,
+               source: str, found: Dict[str, Any], copy_key: Optional[str]) -> None:
+        assessed = assess(found, frame_number, self.today())
         try:
             self.conversations.add_invoice_reading({
                 "_id": reading_id, "conversation_id": conversation_id, "user_key": user_key,

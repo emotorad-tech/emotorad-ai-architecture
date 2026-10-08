@@ -350,16 +350,22 @@ def _api_coverage(bike: Dict[str, Any], record: Dict[str, Any], today: Optional[
         # With the OMS database (tools/oms_db.py), whether OMS holds the
         # invoice: code reads it (invoice_ocr.py), so the model must not ask.
         on_file = bool(record.get("invoice_on_file"))
+        with_support = bool(record.get("invoice_with_support"))
         bike.update({
             "in_warranty": None,
             "coverage_status": "purchase_date_missing",
             "remedy": coverage.get("remedy") or "collect_purchase_proof",
             "invoice_on_file": on_file,
+            "invoice_with_support": with_support,
             "note": (
                 "This bike's purchase date is not on record, but its invoice is on file and is being read "
                 "now. Do not ask for the invoice. Do not state or estimate a coverage date; tell the "
                 "customer you are checking their invoice."
                 if on_file else
+                "This bike's invoice is already with our support team, who will confirm the warranty. Do "
+                "not ask for the invoice and do not raise another ticket. Do not state or estimate a "
+                "coverage date."
+                if with_support else
                 "This bike is registered but its purchase date is not on record, so coverage cannot be "
                 "known. Ask for the invoice or any proof of purchase showing the date it was bought. Do "
                 "not state or estimate a coverage date."
@@ -1471,7 +1477,10 @@ def build_registry(
         optional_injects=("persona", "started_at", "cluster_id", "channel", "identity_strength", "coverage",
                           # Code only (invoice_ocr.py, spec 2026-10-08): what reading the
                           # invoice found, and the date when the reading was confident.
-                          "invoice_findings", "invoice_purchase_date"),
+                          "invoice_findings", "invoice_purchase_date",
+                          # Frames whose invoice code is reading or has passed on: the
+                          # model may not raise its own ticket for them.
+                          "invoice_frames"),
         write=True,
     )
     def submit_warranty_proof(
@@ -1490,7 +1499,15 @@ def build_registry(
         coverage: Optional[str] = None,
         invoice_findings: Optional[str] = None,
         invoice_purchase_date: Optional[str] = None,
+        invoice_frames: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
+        if invoice_findings is None and frame_number in (invoice_frames or ()):
+            raise ToolError(
+                "invoice_with_code",
+                "This bike's invoice is being read, or is already with our support team, and the ticket is "
+                "raised for it automatically. Do not raise one. Tell the customer the support team will "
+                "confirm their warranty.",
+            )
         if purchase_channel not in ("dealer", "website", "marketplace", "unknown"):
             raise ToolError("invalid_channel", "Unknown purchase channel %r." % purchase_channel)
 

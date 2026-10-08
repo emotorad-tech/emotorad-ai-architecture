@@ -317,7 +317,11 @@ def _build_registry():
     # invoice code look-up stays with the OMS, which alone holds orders.
     oms = OMS_CLIENT
     if OMS_DB is not None:
-        source = oms_db_tools.db_warranty_source(OMS_DB)
+        # Whether OMS's invoice can be read is the invoice service's to say
+        # (defined below, read when a lookup runs); without it, none can.
+        source = oms_db_tools.db_warranty_source(
+            OMS_DB, invoice_state=lambda file_id: (INVOICE.invoice_state(file_id) if INVOICE is not None
+                                                   else invoice_ocr.InvoiceService.UNREADABLE))
     elif warranty_api_tools.configured():
         source = warranty_api_tools.api_warranty_source(warranty_api_tools.WarrantyAPIClient())
     elif oms is not None:
@@ -1397,12 +1401,24 @@ def _start_invoice_reads(message: InboundMessage) -> None:
         frame = state.selected_frame if state is not None else None
         if not frame:
             return
+        # Only once the lookup has shown this bike undated, or in the
+        # late-registration chat, whose whole subject it is: never for a
+        # chat about something else (final review, finding 5).
+        looked_up = any(
+            bike.get("coverage_status") == "purchase_date_missing" and frame in (bike.get("frame_number"),
+                                                                                  bike.get("bike_ref"))
+            for bike in ((state.coverage_result or {}).get("data") or {}).get("bikes") or [])
+        if not looked_up and state.agent != "late_warranty_registration":
+            return
         row = INVOICE.bike(message.identity.phone, frame)
         if row is None or row.get("purchase_date"):
             return
         user_key = state.user_key
         cluster = message.entry_metadata.get("cluster_id") or state.cluster_id
-        if row.get("invoice_image"):
+        file_state = INVOICE.invoice_state(row.get("invoice_image"))
+        if file_state == invoice_ocr.InvoiceService.WITH_SUPPORT:
+            return
+        if file_state == invoice_ocr.InvoiceService.READABLE:
             jobs = [lambda: INVOICE.read_from_oms(cid, user_key, cluster, message.identity.phone, frame)]
         else:
             jobs = [

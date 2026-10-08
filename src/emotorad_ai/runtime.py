@@ -1998,6 +1998,10 @@ class Runtime:
             assessed = {"confident": bool(reading.get("confident")), "purchase_date": bought,
                         "reason": reading.get("reason")}
             ticket_id = self._raise_invoice_ticket(message, state, resolved, frame, reading, assessed)
+            if ticket_id is None:
+                # Nothing is told for a ticket that does not exist: the
+                # reading stays untold and is tried again next turn.
+                continue
             for told in [r for r in readings if r["frame_number"] == frame]:
                 try:
                     self.conversations.update_invoice_reading(cid, told["_id"], {"told": True, "ticket_id": ticket_id})
@@ -2005,6 +2009,8 @@ class Runtime:
                     self.log.emit("invoice_read_failed", cid, error="store:" + type(exc).__name__, source="runtime")
             self.log.emit("invoice_told", cid, confident=assessed["confident"], ticket=bool(ticket_id))
             lines.append(invoice_ocr.customer_line(assessed, today, hindi))
+        if not lines:
+            return turn
         text = turn.text.rstrip() + "\n\n" + "\n\n".join(lines)
         replace_turn_text(state.history, text)
         return replace(turn, text=text)
@@ -2102,6 +2108,20 @@ class Runtime:
                       language="hi" if hindi else "en")
         replace_turn_text(state.history, text)
         return replace(turn, text=text, attachments=list(turn.attachments) + pictures)
+
+    def _invoice_frames(self, conversation_id: str, state: ConversationState) -> List[str]:
+        """The frames code is handling the invoice of: read in this chat, or
+        on file or with the support team by the last lookup."""
+        frames: List[str] = []
+        if self.invoice is not None:
+            try:
+                frames += [r["frame_number"] for r in self.conversations.invoice_readings_of(conversation_id)]
+            except Exception:
+                pass
+        for bike in ((state.coverage_result or {}).get("data") or {}).get("bikes") or []:
+            if bike.get("invoice_on_file") or bike.get("invoice_with_support"):
+                frames.append(bike.get("frame_number"))
+        return [frame for frame in frames if frame]
 
     def _serial_readings(self, conversation_id: str) -> Optional[List[Dict[str, Any]]]:
         """This conversation's readings, for the ticket tool; None with the
@@ -2501,6 +2521,10 @@ class Runtime:
                 # the motor, the controller and the frame, and every ticket
                 # carries what was read. None with the ask off.
                 "serial_readings": lambda: self._serial_readings(message.conversation_id),
+                # Frames whose invoice code reads or has passed on
+                # (invoice_ocr.py): the model may not raise its own proof
+                # ticket for them.
+                "invoice_frames": lambda: self._invoice_frames(message.conversation_id, state),
             },
             # Recorded as the loop runs, not only once the turn ends: a model
             # that calls lookup_warranty_record and place_replacement_order in
