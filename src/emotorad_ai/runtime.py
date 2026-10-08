@@ -145,6 +145,7 @@ from .melt_ask import ASKED_NOTE as MELT_ASKED_NOTE
 from .melt_ask import MeltAsk
 from . import serial_ask as serial_ask_module
 from . import serial_confirm
+from . import date_check
 from . import invoice_ocr
 from .serial_ask import SerialAsk
 from .one_step import is_too_long, replace_turn_text
@@ -2109,6 +2110,21 @@ class Runtime:
         replace_turn_text(state.history, text)
         return replace(turn, text=text, attachments=list(turn.attachments) + pictures)
 
+    def _told_invoice_days(self, conversation_id: str) -> set:
+        """The dates code told the customer from confident invoice readings
+        (invoice_ocr.customer_line), which the model may say again."""
+        if self.invoice is None:
+            return set()
+        try:
+            readings = self.conversations.invoice_readings_of(conversation_id)
+        except Exception:
+            return set()
+        days: set = set()
+        for reading in readings:
+            if reading.get("told") and reading.get("confident") and reading.get("purchase_date"):
+                days |= date_check.invoice_days(date.fromisoformat(reading["purchase_date"]))
+        return days
+
     def _invoice_frames(self, conversation_id: str, state: ConversationState) -> List[str]:
         """The frames code is handling the invoice of: read in this chat, or
         on file or with the support team by the last lookup."""
@@ -2549,7 +2565,7 @@ class Runtime:
         # otherwise leave no trace of it. When the original would be blocked it
         # is not cut, and the checks below block it exactly as they would
         # have, with the original as the suppressed text.
-        if not any(check.blocked for check in self._post_checks(turn.text, turn, state)):
+        if not any(check.blocked for check in self._post_checks(turn.text, turn, state, resolved)):
             turn = self._one_step(agent, message, state, turn)
         # After the cut, so the admission is never the part a cut removes.
         turn = self._admit_unsent_media(message, state, turn)
@@ -2560,7 +2576,7 @@ class Runtime:
 
         # The post-check: calling the warranty tool proved the tool ran, not that
         # the reply matches what it returned.
-        coverage, order, evidence = self._post_checks(turn.text, turn, state)
+        coverage, order, evidence = self._post_checks(turn.text, turn, state, resolved)
         if coverage.blocked:
             self.log.guardrail(
                 message.conversation_id, "coverage_post_check",
@@ -2570,15 +2586,15 @@ class Runtime:
                     "actual": coverage.actual,
                     # What the customer nearly got told. Without it a false
                     # positive and a true positive are indistinguishable in the
-                    # log.
-                    "suppressed_text": turn.text,
+                    # log. Every date hidden: one may be read off an invoice.
+                    "suppressed_text": date_check.redacted(turn.text),
                 },
             )
             self.log.escalation(message.conversation_id, "coverage_claim_blocked", turn.ticket_id)
             return self._finish(
                 message, state, COVERAGE_BLOCKED_MESSAGE + self._already_done(turn), "guardrail:coverage_post_check",
                 escalated=True, ticket_id=turn.ticket_id,
-                metadata={"blocked_reason": coverage.reason, "suppressed_text": turn.text},
+                metadata={"blocked_reason": coverage.reason, "suppressed_text": date_check.redacted(turn.text)},
                 already_in_history=True,
             )
 
@@ -2776,9 +2792,8 @@ class Runtime:
             ),
         )
 
-    @staticmethod
     def _post_checks(
-        text: str, turn: Any, state: ConversationState
+        self, text: str, turn: Any, state: ConversationState, resolved: Optional[ResolvedIdentity] = None
     ) -> Tuple[CoverageCheck, OrderCheck, EvidenceCheck]:
         """The coverage, order and evidence verdicts on `text`, from this
         turn's tool results and what the conversation remembers.
@@ -2800,6 +2815,19 @@ class Runtime:
             # No record of this bike on the number (spec 2026-10-01, unlisted
             # bike): the listed bikes' cover says nothing about it.
             coverage = CoverageCheck(blocked=True, reason="unlisted_bike", claimed="coverage", actual="no record")
+        if not coverage.blocked and turn.agent != DEALER_ORDERS:
+            # A date the model was not given (date_check.py): an invoice date
+            # read off a photo, or an end date it worked out. Customer agents
+            # only: the dealer agent's dates are its orders'. A date it passed
+            # to a tool is not one a tool gave it; with no record, no answer,
+            # or on the late registration agent, any date must be given.
+            coverage = date_check.check_dates(
+                text, results, customer_texts(state.history),
+                arguments=[call.get("arguments") for call in turn.tool_calls],
+                known_bikes=resolved.bikes if resolved is not None else (),
+                no_oms_date=turn.agent == LATE_WARRANTY or state.lookup_error in LOOKUP_ERRORS,
+                invoice_days=self._told_invoice_days(state.conversation_id),
+            )
         order = check_order_claim(
             text,
             [call["result"] for call in turn.tool_calls]
