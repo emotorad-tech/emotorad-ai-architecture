@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 from emotorad_ai.cli import resolve_mode
-from emotorad_ai.config import Settings
+from emotorad_ai.config import JEV_SWITCH_ENV, JEV_UNRECOGNISED, Settings, jev_switch
 from emotorad_ai.jev import JevClient
 from emotorad_ai.llm import OfflinePlanner, OpenRouterChat
 from emotorad_ai.openrouter import API_KEY_ENV, OpenRouterConfigError
@@ -30,10 +30,39 @@ class BuildModelsTests(unittest.TestCase):
         self.assertEqual(models.llm.model, settings.fallback_model)
         self.assertEqual(models.narrow_llm.model, settings.narrow_model)
 
+    def test_with_the_jev_switch_off_openrouter_builds_no_jev_and_keeps_haiku(self):
+        settings = Settings(mode="openrouter", jev_enabled=False, jev_status="off")
+        models = build_models(settings, transport=FakeTransport())
+        self.assertIsNone(models.jev)
+        self.assertIsInstance(models.llm, OpenRouterChat)
+        self.assertEqual(models.llm.model, "anthropic/claude-haiku-4.5")
+
+    def test_the_switch_is_read_from_the_environment_when_settings_are_made(self):
+        with mock.patch.dict(os.environ, {JEV_SWITCH_ENV: "off"}):
+            self.assertIsNone(build_models(Settings(mode="openrouter"), transport=FakeTransport()).jev)
+        with mock.patch.dict(os.environ, {JEV_SWITCH_ENV: "on"}):
+            self.assertIsInstance(build_models(Settings(mode="openrouter"), transport=FakeTransport()).jev, JevClient)
+
     def test_openrouter_without_a_key_fails_loudly(self):
         with mock.patch.dict(os.environ, {API_KEY_ENV: ""}):
             with self.assertRaises(OpenRouterConfigError):
                 build_models(Settings(mode="openrouter"))
+
+
+class JevSwitchTests(unittest.TestCase):
+    def test_unset_or_on_keeps_jev(self):
+        for value in (None, "", "on", "ON", " On "):
+            env = {} if value is None else {JEV_SWITCH_ENV: value}
+            self.assertEqual(jev_switch(env), (True, "on"), value)
+
+    def test_off_turns_it_off(self):
+        for value in ("off", "OFF", " off "):
+            self.assertEqual(jev_switch({JEV_SWITCH_ENV: value}), (False, "off"), value)
+
+    def test_anything_else_is_off_and_says_why(self):
+        for value in ("of", "no", "false", "0", "disabled"):
+            self.assertEqual(jev_switch({JEV_SWITCH_ENV: value}), (False, JEV_UNRECOGNISED), value)
+        self.assertEqual(JEV_UNRECOGNISED, "off: EMOTORAD_JEV must be on or off")
 
 
 class CliModeTests(unittest.TestCase):

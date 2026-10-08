@@ -158,6 +158,25 @@ if set, overrides the default for whichever mode is active, so it must match tha
 format: the unprefixed id (`claude-opus-5`, `claude-sonnet-5`, …) for `anthropic`, the
 `anthropic.`-prefixed id for `bedrock`.
 
+### The Jev kill switch
+
+`EMOTORAD_JEV` in the config store (8 October 2026), read when the container starts. It
+matters only in `openrouter` mode, which staging runs.
+
+- Unset, or `on`: Jev routes each turn to a standard reply, the narrow model or the full
+  agent, as before.
+- `off`: no Jev call is made, and every turn goes to the full agent (Haiku on OpenRouter).
+  The turn's route is logged with the reason `jev_disabled`.
+- Anything else is treated as `off`, and `/health` says `"jev":"off: EMOTORAD_JEV must be on
+  or off"`.
+
+It is a config-store key, not a `docker run -e` flag on purpose: the environment wins over
+the secret (section 2), so a flag in `deploy-staging.yml` would make the secret's value
+ignored. To flip it, change the key in the secret (any of the ways in section 2 that keeps
+the other keys), then restart the container so it reads the secret again: `sudo docker
+restart emotorad-ai` through an SSM session, or a redeploy. Check `/health`: `"jev":"on"` or
+`"jev":"off"`. Rollback is setting it back and restarting again.
+
 ## 7. Zoho Desk tickets
 
 Spec: `docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`. Zoho is off while

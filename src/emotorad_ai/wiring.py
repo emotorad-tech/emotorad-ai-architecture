@@ -47,14 +47,17 @@ def build_models(settings: Settings, transport: Optional[Any] = None) -> Models:
         # offline, anthropic, bedrock: one Claude client. select_llm checks the
         # key at startup and picks each mode's own default model id.
         return Models(llm=select_llm(settings.mode, settings))
-    # openrouter: one transport, one key, three models.
+    # openrouter: one transport, one key, three models. With the kill switch
+    # off (config.jev_switch) there is no Jev client, and the runtime sends
+    # every turn to the full agent, as it does in the single-model modes.
     transport = transport or OpenRouterTransport(
         base_url=settings.openrouter_base_url, timeout=settings.openrouter_timeout
     )
     return Models(
         llm=OpenRouterChat(settings.fallback_model, transport, max_tokens=settings.max_tokens, zdr=settings.openrouter_zdr),
         narrow_llm=OpenRouterChat(settings.narrow_model, transport, max_tokens=settings.max_tokens, zdr=settings.openrouter_zdr),
-        jev=JevClient(transport, model=settings.jev_model, timeout=settings.jev_timeout),
+        jev=(JevClient(transport, model=settings.jev_model, timeout=settings.jev_timeout)
+             if settings.jev_enabled else None),
     )
 
 

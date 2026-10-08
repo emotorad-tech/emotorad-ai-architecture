@@ -617,6 +617,9 @@ def health() -> dict:
         "serial_ask": SERIAL_ASK_STATUS,
         # Who reads the serial photos: the provider, or off.
         "serial_read": SERIAL_READER.provider if SERIAL_READER is not None else "off",
+        # The Jev kill switch (config.jev_switch): on, off, or off and why;
+        # only openrouter mode runs Jev at all.
+        "jev": settings.jev_status if settings.mode == "openrouter" else "off: mode %s" % settings.mode,
     }
     # Tickets waiting, stuck and held, and the worker's state. Shown while
     # Zoho is on, or while any record is outstanding.

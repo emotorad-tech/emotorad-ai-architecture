@@ -46,7 +46,7 @@ class HealthTests(unittest.TestCase):
              "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory",
              "amiigo_receipts": "memory", "amiigo_tokens": "not configured", "zoho_webhook": "not configured",
              "warranty_source": "fixtures", "melt_ask": "off", "serial_ask": "off",
-             "serial_read": "off"},
+             "serial_read": "off", "jev": "off: mode offline"},
         )
 
     def test_health_says_why_the_melt_ask_is_off_when_it_is_switched_on(self):
