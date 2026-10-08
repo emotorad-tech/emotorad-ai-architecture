@@ -434,3 +434,55 @@ Two more things to check before the app team connects. First, the alarm stack (s
 - **If the indexes are missing.** Until `mongo_setup.py` has made the two receipts indexes and the container has restarted, receipts stay in the API process's memory. A restart then forgets which messages were answered, `amiigo_receipts_ttl_missing` is logged at error level (`reason` is `indexes_missing`, or `index_unreadable` when the indexes could not be read), and `/health` shows `"amiigo_receipts":"memory: indexes missing, run scripts/mongo_setup.py"` (or `"memory: indexes could not be checked"`) instead of `"mongodb"`. Nothing is alarmed on it, so check `/health` after a deploy. With MongoDB conversations but receipts in memory, `erasure_admin` cannot reach the API process's receipts, because it runs in its own process. They expire within 24 hours.
 - **A deploy mid-turn.** A turn still running when the container stops (a deploy or a restart) never finishes, and its receipt stays `processing` until its 10-minute lease runs out. So that one chat answers `conversation_busy` for up to 10 minutes after the deploy; the rider's other chats are not held. The app sees `1012` when the server closes its sockets on the way down, or `1006` when the container is killed without closing them, and reconnects either way. Deploy when the chat is quiet if you can.
 - **One container.** A `ticket_update` is pushed only to sockets on the container that took Zoho's call. Staging runs one. More than one needs a shared channel between them first.
+
+## 9. Bikes and warranty from OMS production, and invoice OCR
+
+Spec: `docs/superpowers/specs/2026-10-08-oms-warranty-source-design.md`. Off until
+`EMOTORAD_OMS_PG_DSN` is set; invoice reading is off until both that and
+`EMOTORAD_INVOICE_OCR=on` (set by `deploy-staging.yml`) with the OpenRouter key.
+
+1. **The read-only role (Sachin).** On OMS production (`emotorad`), a role that can log in,
+   with column grants only:
+   ```sql
+   GRANT SELECT (id, mobile, frame_number, product_name, product_id, product_color, purchase_date,
+                 created_at, updated_at, deleted_at, franchise_id, franchise_name, invoice_image, status,
+                 customer_name, full_address) ON em_purchase TO <role>;
+   GRANT SELECT (id, mobile, secondary_contact, deleted_at) ON em_franchise TO <role>;
+   GRANT SELECT (mobile, user_type, related_id, deleted_at) ON em_users TO <role>;
+   ```
+   `full_address` is there because the replacement flow reads the address back before an order.
+2. **The network path (Sachin).** From the staging EC2 instance to the OMS database on port
+   5432 (its security group).
+3. **The config store (a person, in AWS CloudShell, region `ap-south-1`).** Add
+   `EMOTORAD_OMS_PG_DSN` (the role's connection string) and `EMOTORAD_OMS_API_KEY`; remove
+   `EMOTORAD_WARRANTY_API_KEY` and `EMOTORAD_AMIGO_PG_DSN`. This keeps every other key, and
+   asks for each value without echoing it, so nothing is pasted into a command or a chat:
+   ```bash
+   python3 - <<'EOF'
+   import getpass, json, boto3
+   sm = boto3.client("secretsmanager", region_name="ap-south-1")
+   sid = "/emotorad/stage/ai/app"
+   cfg = json.loads(sm.get_secret_value(SecretId=sid)["SecretString"])
+   for name in ("EMOTORAD_OMS_PG_DSN", "EMOTORAD_OMS_API_KEY"):
+       value = getpass.getpass("Paste %s (Enter to keep the current one): " % name).strip()
+       if value:
+           cfg[name] = value
+   for name in ("EMOTORAD_WARRANTY_API_KEY", "EMOTORAD_AMIGO_PG_DSN"):
+       cfg.pop(name, None)
+   sm.put_secret_value(SecretId=sid, SecretString=json.dumps(cfg))
+   print("Keys now:", sorted(cfg))
+   EOF
+   ```
+4. **Deploy** `feat/zoho-desk-tickets` (section 3). `/health` shows
+   `"warranty_source":"oms_db"` and `"invoice_ocr":"openrouter"`.
+5. **Check.** In a test chat, verify with a test number that has an OMS registration; its
+   bikes should be listed. A bike with no purchase date and an invoice on file should get the
+   invoice line within a turn or two, and a `warranty_proof` ticket in the test department.
+
+Rollback: remove `EMOTORAD_OMS_PG_DSN` from the secret (the same script, with the name
+added to the removal list) and redeploy; the warranty service takes over if its key is back,
+otherwise the OMS API or the fixtures.
+
+A slow lookup: `em_purchase` has no index on `mobile`, so each lookup scans the table
+(about 62,000 rows, planned at cost ~6,000). An index through a reviewed em-biz-backend
+migration fixes it.
