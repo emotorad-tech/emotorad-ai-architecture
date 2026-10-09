@@ -114,6 +114,10 @@ def _describe(bike: Dict[str, Any]) -> str:
 
 def _coverage_line(bike: Dict[str, Any]) -> str:
     """One line of coverage, or an explicit instruction not to claim any."""
+    if bike.get("coverage_status") == "after_issue":
+        # The warranty step has not run for this bike yet (warranty_step.py).
+        return ("  Coverage: CHECKED AFTER THE FAULT IS CONFIRMED. The platform checks the warranty once the "
+                "fault is verified. Do not state, estimate or look up coverage yet; help with the issue first.")
     # Three states only an app bike can be in (tools/amigo.py). None has a
     # term to quote, so they come before the lines that quote one.
     if bike.get("coverage_status") == "not_registered":

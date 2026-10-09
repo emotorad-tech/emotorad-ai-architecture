@@ -1121,8 +1121,15 @@ def build_registry(
         "bike they mean rather than assuming.",
         parameters={},
         injects=("phone",),
+        optional_injects=("warranty_ready",),
     )
-    def lookup_warranty_record(phone: str) -> Dict[str, Any]:
+    def lookup_warranty_record(phone: str, warranty_ready: Optional[bool] = None) -> Dict[str, Any]:
+        if warranty_ready is False:
+            # The warranty step has not run for the chosen bike (spec
+            # 2026-10-09 warranty step). Code calls this without the fact.
+            from ..warranty_step import AFTER_ISSUE_NOTE
+
+            return ok({"outcome": "warranty_after_issue", "note": AFTER_ISSUE_NOTE})
         if oms_available is False:
             # "The OMS is down" and "this person has no record" must never look
             # alike: one is retryable and says so, the other routes a genuine

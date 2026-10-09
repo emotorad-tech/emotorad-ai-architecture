@@ -175,6 +175,10 @@ class ConversationState:
     # {"pincode", "district", "state", "source" ("location" or "typed"), "at"}.
     # Never coordinates. Lives the working state's 48 hours.
     area: Optional[Dict[str, Any]] = None
+    # The bikes the warranty step has run for in this run (spec 2026-10-09
+    # warranty step): each one's frame reference, "-" for a rider with no
+    # bike on record. Until a bike is here, its cover is hidden from the agent.
+    warranty_step_frames: List[str] = field(default_factory=list)
     # Self-service erasure (erasure.py): "wanted" or "cancel_wanted" while the
     # verify step runs, "confirming" while the bot waits for DELETE.
     erasure_step: Optional[str] = None

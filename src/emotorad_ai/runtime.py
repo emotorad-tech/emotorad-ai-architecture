@@ -145,6 +145,7 @@ from .melt_ask import ASKED_NOTE as MELT_ASKED_NOTE
 from .melt_ask import MeltAsk
 from . import serial_ask as serial_ask_module
 from . import serial_confirm
+from . import warranty_step as warranty_step_module
 from . import date_check
 from . import invoice_ocr
 from .serial_ask import SerialAsk
@@ -473,7 +474,9 @@ TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callba
                     # A confirmation of a serial read off a photo, under way (serial_confirm.py).
                     "serial_confirm",
                     # The customer's area (spec 2026-10-09).
-                    "area")
+                    "area",
+                    # The warranty step's bikes (spec 2026-10-09).
+                    "warranty_step_frames")
 
 # Triage's replies that end a turn for want of a bike (triage.py): which bike,
 # asked or asked again, and a bike not in the list collected or confirmed. A
@@ -546,6 +549,7 @@ class Runtime:
         serial_ask: Optional[SerialAsk] = None,
         invoice: Any = None,
         store_cards: Any = None,
+        warranty_step: bool = False,
     ) -> None:
         self.settings = settings or load_settings()
         # The melt ask (melt_ask.py, 6 October 2026): one fixed reply asking
@@ -562,6 +566,9 @@ class Runtime:
         # The dealer store cards a turn found (tools/dealer_stores.StoreCards,
         # spec 2026-10-09): put by find_nearest_dealers, taken for the reply.
         self.store_cards = store_cards
+        # The warranty step after the issue is verified (warranty_step.py,
+        # spec 2026-10-09). Off: today's behaviour throughout.
+        self.warranty_step = warranty_step
         # Evidence is checked before a ticket (evidence_check.py, the person's
         # brief of 6 October 2026). Off unless asked for; api.py turns it on
         # with EMOTORAD_EVIDENCE_CHECK. Off, every path is exactly as before.
@@ -729,6 +736,8 @@ class Runtime:
         customer (LOOKUP_ERRORS) is kept for a ticket's coverage, because
         coverage_result keeps only answers that worked. Other failures change
         nothing."""
+        if (envelope.get("data") or {}).get("outcome") == "warranty_after_issue":
+            return  # the step has not run: nothing about cover was answered
         if not is_error(envelope):
             state.coverage_result = envelope
             state.lookup_error = None
@@ -2275,6 +2284,8 @@ class Runtime:
         for call in chosen.prefetch:
             if call.tool not in self.registry.specs:
                 continue
+            if call.tool == LOOKUP_WARRANTY_RECORD and not self._warranty_ready(state):
+                continue  # cover waits for the warranty step (spec 2026-10-09)
             arguments = dict(call.arguments)
             envelope = self.registry.call(call.tool, arguments, context)
             self.log.tool_call(message.conversation_id, call.tool, arguments, envelope)
@@ -2441,6 +2452,12 @@ class Runtime:
             turns=state.turns,
         )
 
+    def _warranty_ready(self, state: ConversationState) -> bool:
+        """Whether the agent may see and look up the chosen bike's cover."""
+        if not self.warranty_step:
+            return True
+        return (state.selected_frame or warranty_step_module.NO_BIKE) in state.warranty_step_frames
+
     @staticmethod
     def _selected_bike(resolved: ResolvedIdentity, state: ConversationState) -> Optional[Dict[str, Any]]:
         if state.unlisted_bike:
@@ -2495,7 +2512,13 @@ class Runtime:
         # told: never "owns 2 bikes, ask which", nor the rejected bikes' cover
         # (the final review, 2026-10-01).
         agent_view = replace(resolved, bikes=[unlisted_as_bike(state.unlisted_bike)]) if state.unlisted_bike else resolved
-        context = ((without_bikes(state.context_block or "") if state.unlisted_bike else (state.context_block or ""))
+        hide_cover = not self._warranty_ready(state)
+        if hide_cover:
+            # The warranty step has not run for the chosen bike: no cover in
+            # anything the agent is told (spec 2026-10-09 warranty step).
+            agent_view = replace(agent_view, bikes=[warranty_step_module.pending_view(b) for b in agent_view.bikes])
+        context = ((without_bikes(state.context_block or "") if (state.unlisted_bike or hide_cover)
+                    else (state.context_block or ""))
                    + unlisted_context(state.unlisted_bike))
         if message.entry_metadata.get("photos_unchecked"):
             # This turn only (spec 2026-10-02).
@@ -2515,6 +2538,9 @@ class Runtime:
                 "started_at": lambda: self._ticket_run_start(message, state, resolved),
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
+                # Whether the warranty step has run for the chosen bike (spec
+                # 2026-10-09): until then the lookup tool holds the cover back.
+                "warranty_ready": lambda: self._warranty_ready(state),
                 # The customer's area, for find_nearest_dealers (spec 2026-10-09).
                 "area": lambda: state.area,
                 # The ticket tool's check on a frame number the rider reads
