@@ -189,7 +189,7 @@ Show the rider's message as soon as it is sent, mark it delivered on `bot_typing
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `message` | object | The reply as sent: exactly what the rider should see. It carries the id history uses for the same message, and history may show a phone number or email in it masked (see "What is masked" and "Messages") |
-| `actions` | array | Buttons for under this reply, for example `{"kind": "request_location", "label": "Share my location"}`. Shown live only: history does not keep them. |
+| `actions` | array | Buttons for under this reply, for example `{"kind": "request_location", "label": "Share my location"}` or `{"kind": "register_warranty", "label": "Register warranty"}`. Shown live only: history does not keep them. |
 | `escalated` | boolean | `true` when the bot handed the chat to EMotorad's support team, for example for a safety issue |
 | `ticket` | object or `null` | Set on the reply that raised a ticket: `{"reference": "EM-1000042", "status": "open", "closed_at": null}` |
 | `handled_by` | string | Which part of the bot answered. For logs and support; do not build UI on it. |
@@ -429,7 +429,7 @@ Text comes back as the server stored it, which is not always exactly what the ri
 | Languages | As sent | The bot answers in the rider's language: English, Hindi (Devanagari script) or Hinglish. Fonts must render Devanagari. |
 | `sender: "system"` | A centred notice, not a bubble | For example a closed ticket |
 | `attachments[]` | An image or a video player under the bubble | Use `caption` as the caption and alt text and `poster` as a video's still, when present |
-| `actions[]` | A button under the live reply | Today only `{"kind": "request_location", "label": "Share my location"}`. On tap, ask for location permission and send the next message with `location`. If the rider refuses, let them type their pincode. Ignore any `kind` you do not know. |
+| `actions[]` | A button under the live reply | Two kinds today. `{"kind": "register_warranty", "label": "Register warranty"}` opens the app's warranty registration once it exists; until then, ignore it. `{"kind": "request_location", "label": "Share my location"}`: on tap, ask for location permission and send the next message with `location`. If the rider refuses, let them type their pincode. Ignore any `kind` you do not know. |
 | `escalated: true` | A clear "handed to our team" state | The bot has stopped and a person will contact the rider; say "our team will contact you", with no promised channel or time. For a safety report (smoke, swelling, heat) this arrives with stop-using instructions: show them prominently. |
 | `ticket` | A reference chip the rider can copy, with its status | `reference` is opaque: do not parse it or assume its length |
 

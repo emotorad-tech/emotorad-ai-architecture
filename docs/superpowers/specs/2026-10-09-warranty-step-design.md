@@ -123,9 +123,17 @@ What code does at the step:
 - **The contract and `_finish` with actions:** a code reply carries `register_warranty` on the Amiigo frame.
 - **The whole suite** stays green. Tests that pinned the old case 4 route or the verify-first wording are updated, each named in the PR.
 
+## Switch
+
+The step and everything in sections 2 to 4 sit behind `EMOTORAD_WARRANTY_STEP`, exactly `on`
+(`Runtime(warranty_step=...)`), set by `deploy-staging.yml`; `/health` shows `warranty_step`.
+Off is today's behaviour throughout. Added while planning: hiding the cover and holding the
+lookup for every chat would have changed hundreds of existing tests, and each code-run ask in
+this repo is rolled out behind a switch.
+
 ## Rollback
 
-Revert the commits. The lookup, the invoice reading and the tickets are unchanged underneath, so nothing in the stores needs undoing.
+Remove `-e EMOTORAD_WARRANTY_STEP=on` from `deploy-staging.yml` and redeploy. The lookup, the invoice reading and the tickets are unchanged underneath, so nothing in the stores needs undoing.
 
 ## Out of scope
 

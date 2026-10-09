@@ -252,6 +252,9 @@ MELT_ASK, MELT_ASK_STATUS = melt_ask_module.from_env(CATALOGUE, MEDIA_STORE)
 # The battery serial-photo ask (serial_ask.py, 7 October 2026): on with
 # EMOTORAD_SERIAL_ASK=on and its three library pictures in the catalogue.
 SERIAL_ASK, SERIAL_ASK_STATUS = serial_ask_module.from_env(CATALOGUE, MEDIA_STORE)
+# The warranty step after the issue is verified (warranty_step.py, spec
+# 2026-10-09), exactly "on"; deploy-staging.yml sets it.
+WARRANTY_STEP = os.environ.get("EMOTORAD_WARRANTY_STEP", "").strip() == "on"
 # Reads the serial off each photo the customer sends once asked (serial_read.py),
 # after the reply. On with the ask, the media bucket and the OpenRouter key.
 SERIAL_READER = (serial_read.serial_reader_from_env()
@@ -439,6 +442,7 @@ runtime = Runtime(
     # The melt ask, or None (off).
     melt_ask=MELT_ASK,
     serial_ask=SERIAL_ASK,
+    warranty_step=WARRANTY_STEP,
     invoice=INVOICE,
     store_cards=STORE_CARDS,
 )
@@ -653,6 +657,7 @@ def health() -> dict:
         "warranty_source": WARRANTY_SOURCE,
         "dealer_stores": DEALER_SOURCE,
         "weather": "open-meteo" if WEATHER is not None else "not configured",
+        "warranty_step": "on" if WARRANTY_STEP else "off",
         "build": BUILD,
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
         # Zoho Desk: on, off, or why not (zoho/wiring.py).
