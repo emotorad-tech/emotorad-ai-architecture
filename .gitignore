@@ -26,6 +26,9 @@ logs/
 # the repo, so a fresh clone cannot import emotorad_ai.api at all:
 # build_registry() loads it eagerly and raises FileNotFoundError.
 !knowledge/_replacement/pincodes.csv
+# ...and every pin code's centre, built from the same public directory
+# (geo.py, scripts/build_pincode_centres.py): the API loads it at startup.
+!src/emotorad_ai/data/pincode_centres.csv
 
 # Never commit credentials.
 .env
