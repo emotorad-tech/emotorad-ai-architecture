@@ -1121,9 +1121,10 @@ def build_registry(
         "bike they mean rather than assuming.",
         parameters={},
         injects=("phone",),
-        optional_injects=("warranty_ready",),
+        optional_injects=("warranty_ready", "register_in_app"),
     )
-    def lookup_warranty_record(phone: str, warranty_ready: Optional[bool] = None) -> Dict[str, Any]:
+    def lookup_warranty_record(phone: str, warranty_ready: Optional[bool] = None,
+                               register_in_app: Optional[bool] = None) -> Dict[str, Any]:
         if warranty_ready is False:
             # The warranty step has not run for the chosen bike (spec
             # 2026-10-09 warranty step). Code calls this without the fact.
@@ -1143,6 +1144,15 @@ def build_registry(
             )
 
         records = warranty_source(phone) if warranty_source else fixtures.WARRANTY_RECORDS.get(phone)
+        if not records and register_in_app:
+            # The warranty step (spec 2026-10-09): registration comes in the app.
+            raise ToolError(
+                "no_warranty_record",
+                "No bike is registered against this number. The customer may still be a genuine "
+                "owner — warranty registration is often skipped. Help with the issue first; "
+                "registration will be possible in the app soon, so never register it in this chat.",
+                remedy="register_in_app",
+            )
         if not records:
             raise ToolError(
                 "no_warranty_record",

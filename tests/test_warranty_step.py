@@ -40,6 +40,12 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(ws.case_of(resolved([], method="no_warranty_record"), state()), ws.NO_FRAME)
         self.assertEqual(ws.case_of(resolved([DATED]), state(unlisted={"frame_number": "TYPED1"})), ws.NO_FRAME)
 
+    def test_no_bikes_for_any_other_reason_is_no_case(self):
+        """The final review's C1: an OMS outage is not "not registered"."""
+        for method in ("oms_error", "oms_unavailable", "anonymous"):
+            with self.subTest(method=method):
+                self.assertIsNone(ws.case_of(resolved([], method=method), state()))
+
     def test_bikes_but_none_chosen_waits(self):
         self.assertIsNone(ws.case_of(resolved([DATED, ON_FILE]), state()))
         self.assertIsNone(ws.case_of(resolved([DATED]), state("NOT-A-FRAME")))
@@ -81,6 +87,7 @@ class PendingViewTests(unittest.TestCase):
 class IntentTests(unittest.TestCase):
     def test_registration_requests_in_english_hinglish_and_hindi(self):
         for text in ("I want to register my warranty", "warranty registration", "how do I register my bike",
+                     "वारंटी रजिस्ट्रेशन करना है", "रजिस्ट्रेशन",
                      "mujhe warranty register karna hai", "वारंटी रजिस्टर करनी है", "पंजीकरण करना है"):
             with self.subTest(text=text):
                 self.assertTrue(ws.asks_to_register(text))

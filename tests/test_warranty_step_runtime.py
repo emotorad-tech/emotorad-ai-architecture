@@ -35,6 +35,9 @@ class FakeInvoice:
         self.reads = []
 
     def start(self, jobs):
+        raise AssertionError("the step must not wait for the read (the final review, Minor 5)")
+
+    def start_later(self, jobs):
         for job in jobs:
             job()
 
@@ -45,8 +48,9 @@ class FakeInvoice:
         return TODAY
 
 
-def make(responses, records=(DATED,), step=True, invoice=None, evidence_check=False, **extra):
-    registry = build_registry(today=TODAY, warranty_source=lambda phone: list(records) if records else None)
+def make(responses, records=(DATED,), step=True, invoice=None, evidence_check=False, oms_available=True, **extra):
+    registry = build_registry(today=TODAY, warranty_source=lambda phone: list(records) if records else None,
+                              oms_available=oms_available)
     llm = ScriptedClaude(responses)
     runtime = Runtime(settings=Settings(log_path="", log_to_stdout=False), registry=registry, llm=llm,
                       log=EventLog(path=None), resolver=IdentityResolver(registry), self_service_identity=True,
@@ -211,6 +215,67 @@ class VerifyFirstWordingTests(unittest.TestCase):
         self.assertEqual(on.verify_gate.no_bikes_text, warranty_step.NO_BIKES_HELP)
         self.assertEqual(off.verify_gate.no_bikes_text, NO_BIKES)
 
+
+
+class ReviewFixTests(unittest.TestCase):
+    """The final review of 9 October 2026."""
+
+    def test_an_oms_outage_never_says_not_registered(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault in your photo.")], records=(),
+                                   oms_available=False)
+        state = runtime.conversations.get("conv-out")
+        state.route_to(BATTERY)
+        state.evidence_seen = True
+        reply = runtime.handle(adapter.to_message({"conversation_id": "conv-out", "session_token": "sess-ananya",
+                                                   "text": "here is the photo"}))
+        self.assertNotIn("isn't registered", reply.text)
+        self.assertEqual(reply.actions, [])
+        self.assertEqual(state.warranty_step_frames, [])
+
+    def test_a_fault_that_mentions_registration_goes_to_the_agent(self):
+        for text in ("I registered my bike at the dealer already but the battery won't charge",
+                     "battery not charging, bike registered at dealer"):
+            with self.subTest(text=text):
+                runtime, adapter, llm = make([say("Let's check the charger.")], records=())
+                reply = runtime.handle(adapter.to_message({"conversation_id": "conv-r", "session_token":
+                                                           "sess-ananya", "text": text}))
+                self.assertNotEqual(reply.handled_by, "warranty_step")
+                self.assertEqual(len(llm.requests), 1)
+
+    def test_mid_chat_a_registration_word_never_replaces_troubleshooting(self):
+        runtime, adapter, llm = make([say("Thanks, let's look at the light.")], records=())
+        runtime.conversations.get("conv-m").route_to(BATTERY)
+        reply = runtime.handle(adapter.to_message({"conversation_id": "conv-m", "session_token": "sess-ananya",
+                                                   "text": "the bike was registered by the dealer, the charger "
+                                                           "light stays red"}))
+        self.assertEqual(reply.handled_by, BATTERY)
+
+    def test_a_no_frame_riders_agent_is_never_told_to_register_now(self):
+        runtime, adapter, llm = make([say("Let's check the charger.")], records=())
+        runtime.conversations.get("conv-p").route_to(BATTERY)
+        runtime.handle(adapter.to_message({"conversation_id": "conv-p", "session_token": "sess-ananya",
+                                           "text": "my battery won't charge"}))
+        system = llm.requests[0]["system"]
+        self.assertNotIn("offer to register their bike now", system)
+        self.assertIn("in the app", system)
+
+    def test_the_lookup_never_tells_the_agent_to_register_now(self):
+        from emotorad_ai.tools.registry import ToolContext
+
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: None)
+        envelope = registry.call(LOOKUP_WARRANTY_RECORD, {}, ToolContext(
+            conversation_id="c", phone=PHONE, late={"register_in_app": lambda: True}))
+        self.assertEqual(envelope["error"]["code"], "no_warranty_record")
+        self.assertNotIn("offer to register", envelope["error"]["message"])
+
+    def test_the_line_waits_while_the_reply_asks_for_something_else(self):
+        runtime, adapter, _ = make([say("Thanks. Could you also send a short video of the charger light?"),
+                                    say("Thanks, that shows it.")], records=(NO_INVOICE,))
+        first = send(runtime, adapter, "here is the photo", frame="EMXP0003", seen=True)
+        self.assertNotIn("purchase invoice", first.text)
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+        second = send(runtime, adapter, "here is the video", frame="EMXP0003", seen=True)
+        self.assertIn("purchase invoice", second.text)
 
 if __name__ == "__main__":
     unittest.main()

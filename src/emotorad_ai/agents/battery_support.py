@@ -232,6 +232,15 @@ def _api_coverage_line(bike: Dict[str, Any]) -> str:
 
 
 def _facts_block(resolved: ResolvedIdentity) -> str:
+    if resolved.method == "no_warranty_record" and resolved.register_in_app:
+        # The warranty step (spec 2026-10-09): registration comes in the app.
+        return (
+            "\nCustomer context: this person is verified, but no bike is registered against "
+            "their number. Warranty registration is often skipped, so treat them as a genuine "
+            "owner. Do not state any bike model, frame number or coverage — you have none. "
+            "Help with the issue first. Registration will be possible in the app soon; never "
+            "offer to register the bike in this chat."
+        )
     if resolved.method == "no_warranty_record":
         # A verified person with no registered bike is not a stranger — most
         # likely an owner who skipped registration. Sending them to "support"

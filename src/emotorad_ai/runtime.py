@@ -1886,12 +1886,17 @@ class Runtime:
             if not self.warranty_step:
                 state.route_to(LATE_WARRANTY)
                 return {"reply": self._run_agent_or_handover(LATE_WARRANTY, message, resolved, state)}
-            if warranty_step_module.asks_to_register(message.message_text or ""):
+            text_in = message.message_text or ""
+            if (state.agent is None and classify_issue(text_in) is None
+                    and warranty_step_module.asks_to_register(text_in)):
+                # Only a rider asking just to register, before any agent has
+                # the chat: a fault that mentions registration is a fault
+                # (the final review, 9 October 2026).
                 # Registration comes in the app (spec 2026-10-09 warranty
                 # step, case 4): the placeholder, by code, no model.
                 if warranty_step_module.NO_BIKE not in state.warranty_step_frames:
                     state.warranty_step_frames.append(warranty_step_module.NO_BIKE)
-                hindi = writes_hindi(message.message_text or "")
+                hindi = writes_hindi(text_in)
                 text = (warranty_step_module.REGISTER_LATER_LINE_HI if hindi
                         else warranty_step_module.REGISTER_LATER_LINE)
                 self.log.emit("warranty_step", message.conversation_id, case=warranty_step_module.NO_FRAME,
@@ -2124,10 +2129,11 @@ class Runtime:
         return {"reply": self._melt_reply(message, state)}
 
     def _with_warranty_step(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
-                            turn: Any) -> Any:
+                            turn: Any, hold: bool = False) -> Any:
         """The warranty step (spec 2026-10-09): once the issue is verified,
-        once per bike, for a customer's fault agent, never on a hazard."""
-        if (not self.warranty_step or resolved.persona != "customer" or turn.agent not in _FAULT_AGENTS
+        once per bike, for a customer's fault agent, never on a hazard, and
+        not on a turn that already asks for something (`hold`)."""
+        if (hold or not self.warranty_step or resolved.persona != "customer" or turn.agent not in _FAULT_AGENTS
                 or check_safety_in_description(turn.text).triggered or carries_caution(turn.text)):
             return turn
         key = state.selected_frame or warranty_step_module.NO_BIKE
@@ -2141,7 +2147,8 @@ class Runtime:
             self._step_lookup(message, resolved, state)
         if case == warranty_step_module.INVOICE_ON_FILE and self.invoice is not None and state.selected_frame:
             frame = state.selected_frame
-            self.invoice.start([lambda: self.invoice.read_from_oms(
+            # Never waited for: the result is told on a later turn (the final review).
+            self.invoice.start_later([lambda: self.invoice.read_from_oms(
                 message.conversation_id, state.user_key, resolved.cluster_id, resolved.identity.phone, frame)])
         self.log.emit("warranty_step", message.conversation_id, case=case,
                       frame=key if key == warranty_step_module.NO_BIKE else "chosen")
@@ -2577,6 +2584,8 @@ class Runtime:
         # told: never "owns 2 bikes, ask which", nor the rejected bikes' cover
         # (the final review, 2026-10-01).
         agent_view = replace(resolved, bikes=[unlisted_as_bike(state.unlisted_bike)]) if state.unlisted_bike else resolved
+        if self.warranty_step:
+            agent_view = replace(agent_view, register_in_app=True)
         hide_cover = not self._warranty_ready(state)
         if hide_cover:
             # The warranty step has not run for the chosen bike: no cover in
@@ -2606,6 +2615,8 @@ class Runtime:
                 # Whether the warranty step has run for the chosen bike (spec
                 # 2026-10-09): until then the lookup tool holds the cover back.
                 "warranty_ready": lambda: self._warranty_ready(state),
+                # A rider with no bike on record registers in the app (spec 2026-10-09).
+                "register_in_app": lambda: self.warranty_step or None,
                 # The customer's area, for find_nearest_dealers (spec 2026-10-09).
                 "area": lambda: state.area,
                 # The ticket tool's check on a frame number the rider reads
@@ -2872,8 +2883,12 @@ class Runtime:
                 replace_turn_text(state.history, text)
                 turn = replace(turn, text=text)
             turn = self._with_serial_ask(message, resolved, state, turn)
+        before_confirm = turn.text
         turn = self._with_serial_confirm(message, state, turn)
-        turn = self._with_warranty_step(message, resolved, state, turn)
+        # The step's line never stacks onto another ask, a serial question or
+        # an escalation: it waits for the next turn (the final review).
+        turn = self._with_warranty_step(message, resolved, state, turn,
+                                        hold=asked is not None or turn.text != before_confirm or turn.escalate)
         turn = self._with_invoice_result(message, resolved, state, turn)
 
         return Reply(

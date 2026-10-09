@@ -87,6 +87,25 @@ def service(row=None, reader=None, client=None, conversations=None, events=None,
 
 
 class ServiceTests(unittest.TestCase):
+    def test_start_later_never_waits_for_the_read(self):
+        """The warranty step's OMS read (the final review, 9 October 2026)."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        release, finished = threading.Event(), threading.Event()
+        pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(pool.shutdown)
+        svc = service()
+        svc.pool, svc.wait_seconds = pool, 5
+        import time
+
+        began = time.monotonic()
+        svc.start_later([lambda: (release.wait(5), finished.set())])
+        self.assertLess(time.monotonic() - began, 1)
+        self.assertFalse(finished.is_set())
+        release.set()
+        self.assertTrue(finished.wait(5))
+
     def test_the_oms_invoice_is_read_kept_and_its_copy_recorded(self):
         persisted = []
         svc = service(persisted=persisted)

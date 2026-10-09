@@ -48,7 +48,7 @@ _COVER_FIELDS = ("in_warranty", "months_remaining", "warranty_start", "warranty_
 
 # Words that ask to register, matched as substrings of the lower-cased text
 # (never \b or \w: Devanagari vowel signs fall outside \w).
-_REGISTER_WORDS = ("register", "registration", "रजिस्टर", "पंजीकरण")
+_REGISTER_WORDS = ("register", "registration", "रजिस्टर", "रजिस्ट्रेशन", "पंजीकरण")
 _WARRANTY_OR_BIKE = ("warranty", "warrenty", "bike", "cycle", "वारंटी", "बाइक", "साइकिल")
 
 
@@ -62,9 +62,13 @@ def chosen_bike(resolved: Any, state: Any) -> Optional[Dict[str, Any]]:
 
 
 def case_of(resolved: Any, state: Any) -> Optional[str]:
-    """The chosen bike's case, or None while the rider has bikes and none is chosen."""
-    if state.unlisted_bike or resolved.method == "no_warranty_record" or not resolved.bikes:
+    """The chosen bike's case, or None while the rider has bikes and none is
+    chosen, or has none for any reason but "no record" (an OMS outage is not
+    "not registered": the final review, 9 October 2026)."""
+    if state.unlisted_bike or resolved.method == "no_warranty_record":
         return NO_FRAME
+    if not resolved.bikes:
+        return None
     bike = chosen_bike(resolved, state)
     if bike is None:
         return None

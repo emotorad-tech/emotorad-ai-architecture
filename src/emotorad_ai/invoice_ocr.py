@@ -359,6 +359,12 @@ class InvoiceService:
         if pending:
             self.emit("invoice_read_late", "invoice", reads=len(pending))
 
+    def start_later(self, jobs: List[Callable[[], None]]) -> None:
+        """Starts the jobs and returns at once; what they find is told on a
+        later turn (`Runtime._with_invoice_result`)."""
+        for job in jobs:
+            self.pool.submit(job)
+
     def _keep_copy(self, conversation_id: str, cluster_id: Optional[str], data: bytes, mime: str) -> Optional[str]:
         """OMS's invoice copied into the customer's tree, so the ticket can
         point at it and erasure reaches it. None when it cannot be kept."""
