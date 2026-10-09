@@ -2106,6 +2106,54 @@ class Runtime:
             return {}
         return {"reply": self._melt_reply(message, state)}
 
+    def _with_warranty_step(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
+                            turn: Any) -> Any:
+        """The warranty step (spec 2026-10-09): once the issue is verified,
+        once per bike, for a customer's fault agent, never on a hazard."""
+        if (not self.warranty_step or resolved.persona != "customer" or turn.agent not in _FAULT_AGENTS
+                or check_safety_in_description(turn.text).triggered or carries_caution(turn.text)):
+            return turn
+        key = state.selected_frame or warranty_step_module.NO_BIKE
+        if not self._issue_verified(state) or key in state.warranty_step_frames:
+            return turn
+        case = warranty_step_module.case_of(resolved, state)
+        if case is None:
+            return turn  # bikes, none chosen yet: the step waits
+        state.warranty_step_frames.append(key)
+        if case != warranty_step_module.NO_FRAME:
+            self._step_lookup(message, resolved, state)
+        if case == warranty_step_module.INVOICE_ON_FILE and self.invoice is not None and state.selected_frame:
+            frame = state.selected_frame
+            self.invoice.start([lambda: self.invoice.read_from_oms(
+                message.conversation_id, state.user_key, resolved.cluster_id, resolved.identity.phone, frame)])
+        self.log.emit("warranty_step", message.conversation_id, case=case,
+                      frame=key if key == warranty_step_module.NO_BIKE else "chosen")
+        line = warranty_step_module.line_for(case, warranty_step_module.chosen_bike(resolved, state),
+                                             writes_hindi(turn.text))
+        actions = warranty_step_module.actions_for(case)
+        if line is None and not actions:
+            return turn
+        text = turn.text.rstrip() + ("\n\n" + line if line else "")
+        replace_turn_text(state.history, text)
+        return replace(turn, text=text, actions=list(turn.actions) + [a for a in actions if a not in turn.actions])
+
+    def _issue_verified(self, state: ConversationState) -> bool:
+        """The issue counts as verified: the evidence check passed (with the
+        check on for this fault chat), otherwise a photo or video reached the
+        agent."""
+        if self._evidence_gated(state):
+            return verdict_passed(state.evidence_verdict, state)
+        return bool(state.evidence_seen)
+
+    def _step_lookup(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState) -> None:
+        """The step's own lookup, with no warranty_ready fact so it is never
+        held back; its answer becomes the chat's coverage result."""
+        context = ToolContext(conversation_id=message.conversation_id, phone=resolved.identity.phone,
+                              cluster_id=resolved.cluster_id, persona=resolved.persona, started_at=state.started_at)
+        envelope = self.registry.call(LOOKUP_WARRANTY_RECORD, {}, context)
+        self.log.tool_call(message.conversation_id, LOOKUP_WARRANTY_RECORD, {}, envelope)
+        self._remember_coverage(state, envelope)
+
     def _with_serial_ask(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState,
                          turn: Any) -> Any:
         """The serial-photo ask (serial_ask.py), added by code to a fault
@@ -2808,6 +2856,7 @@ class Runtime:
                 turn = replace(turn, text=text)
             turn = self._with_serial_ask(message, resolved, state, turn)
         turn = self._with_serial_confirm(message, state, turn)
+        turn = self._with_warranty_step(message, resolved, state, turn)
         turn = self._with_invoice_result(message, resolved, state, turn)
 
         return Reply(

@@ -92,5 +92,79 @@ class HiddenTests(unittest.TestCase):
         self.assertIn("from_warranty_api", json.dumps(runtime.conversations.get("conv-ws").coverage_result))
 
 
+class StepTests(unittest.TestCase):
+    def test_nothing_happens_before_the_issue_is_verified(self):
+        runtime, adapter, _ = make([say("Let's check the charger.")])
+        reply = send(runtime, adapter, "my battery won't charge")
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+        self.assertEqual(reply.actions, [])
+
+    def test_dated_sets_the_coverage_result_and_appends_nothing(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault in your video.")])
+        reply = send(runtime, adapter, "here is the video", seen=True)
+        state = runtime.conversations.get("conv-ws")
+        self.assertEqual(state.warranty_step_frames, ["EMXP0001"])
+        self.assertIn("from_warranty_api", json.dumps(state.coverage_result))
+        self.assertIn("Thanks, I can see the fault", reply.text)
+        self.assertNotIn("invoice", reply.text.lower())
+
+    def test_invoice_on_file_starts_the_read_and_says_so(self):
+        invoice = FakeInvoice()
+        runtime, adapter, _ = make([say("Thanks, I can see the fault.")], records=(ON_FILE,), invoice=invoice)
+        reply = send(runtime, adapter, "here is the video", frame="EMXP0002", seen=True)
+        self.assertEqual(invoice.reads, ["EMXP0002"])
+        self.assertIn("I'm checking the invoice we have on file for your bike.", reply.text)
+
+    def test_invoice_on_file_without_an_invoice_service_still_says_so(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault.")], records=(ON_FILE,), invoice=None)
+        reply = send(runtime, adapter, "here is the video", frame="EMXP0002", seen=True)
+        self.assertIn("I'm checking the invoice", reply.text)
+
+    def test_no_invoice_asks_for_one(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault.")], records=(NO_INVOICE,))
+        reply = send(runtime, adapter, "here is the video", frame="EMXP0003", seen=True)
+        self.assertIn("please send a clear photo or PDF of your purchase invoice", reply.text)
+
+    def test_once_per_bike(self):
+        runtime, adapter, _ = make([say("Thanks."), say("Anything else?")], records=(NO_INVOICE,))
+        send(runtime, adapter, "here is the video", frame="EMXP0003", seen=True)
+        again = send(runtime, adapter, "ok", frame="EMXP0003", seen=True)
+        self.assertNotIn("purchase invoice", again.text)
+
+    def test_a_rider_with_two_bikes_and_none_chosen_waits(self):
+        runtime, adapter, _ = make([say("Which bike is it?")], records=(DATED, NO_INVOICE))
+        reply = send(runtime, adapter, "here is the video", frame=None, seen=True)
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+        self.assertNotIn("invoice", reply.text.lower())
+
+    def test_a_hazard_reply_never_runs_the_step(self):
+        runtime, adapter, _ = make([say("Please stop using the battery, it could catch fire.")],
+                                   records=(NO_INVOICE,))
+        send(runtime, adapter, "it smells odd", frame="EMXP0003", seen=True)
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+
+    def test_with_the_evidence_check_on_only_a_passing_verdict_counts(self):
+        runtime, _, _ = make([], records=(NO_INVOICE,), evidence_check=True)
+        runtime._evidence_gated = lambda state: True  # a fault chat with the check on
+        state = runtime.conversations.get("conv-ws")
+        state.evidence_seen = True
+        self.assertFalse(runtime._issue_verified(state))
+        state.evidence_verdict = {"passed": True}
+        self.assertTrue(runtime._issue_verified(state))
+
+    def test_with_the_evidence_check_off_a_photo_or_video_counts(self):
+        runtime, _, _ = make([], records=(NO_INVOICE,))
+        state = runtime.conversations.get("conv-ws")
+        self.assertFalse(runtime._issue_verified(state))
+        state.evidence_seen = True
+        self.assertTrue(runtime._issue_verified(state))
+
+    def test_the_lookup_is_open_after_the_step(self):
+        runtime, adapter, llm = make([say("Thanks."), call_tool(LOOKUP_WARRANTY_RECORD, {}), say("Covered.")])
+        send(runtime, adapter, "here is the video", seen=True)
+        send(runtime, adapter, "am I covered?")
+        self.assertNotIn("warranty_after_issue", json.dumps(llm.requests[-1]["messages"][-1], default=str))
+
+
 if __name__ == "__main__":
     unittest.main()
