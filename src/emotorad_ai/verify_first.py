@@ -191,8 +191,11 @@ LockoutRecorder = Callable[[InboundMessage, ConversationState, Optional[str], st
 
 class VerifyFirst:
     def __init__(self, registry: ToolRegistry, resolver: IdentityResolver, log: Any,
-                 record_lockout: Optional[LockoutRecorder] = None) -> None:
+                 record_lockout: Optional[LockoutRecorder] = None, no_bikes_text: str = NO_BIKES) -> None:
         self.registry = registry
+        # What a verified number with no bike is told (spec 2026-10-09 warranty
+        # step: the issue first, registration at the warranty step).
+        self.no_bikes_text = no_bikes_text
         self.resolver = resolver
         self.log = log
         self.store = getattr(registry, "verification", None)
@@ -346,7 +349,7 @@ class VerifyFirst:
             text, outcome = CONFIRMED + " " + which_bike_text(resolved.bikes), "verified"
         elif resolved.method == "no_warranty_record":
             state.move_to(AWAITING_ISSUE, "verified_no_bikes")
-            text, outcome = CONFIRMED + " " + NO_BIKES, "verified_no_bikes"
+            text, outcome = CONFIRMED + " " + self.no_bikes_text, "verified_no_bikes"
         else:
             state.move_to(AWAITING_ISSUE, "verified_lookup_failed")
             text, outcome = CONFIRMED + " " + LOOKUP_FAILED, "verified_lookup_failed"

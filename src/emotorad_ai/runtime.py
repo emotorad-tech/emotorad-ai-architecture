@@ -196,6 +196,7 @@ from .verify_first import (
     INVALID_NUMBER,
     NUMBER,
     VerifyFirst,
+    NO_BIKES as verify_first_no_bikes,
     find_code,
     find_phone,
     looks_like_a_number,
@@ -592,7 +593,9 @@ class Runtime:
         # Verify first (the person's decision, 2026-09-30): an anonymous
         # customer proves their number and picks a bike before triage or any
         # model. Off unless asked for; the web chat API turns it on.
-        self.verify_gate = (VerifyFirst(self.registry, self.resolver, self.log, record_lockout=self._record_lockout)
+        self.verify_gate = (VerifyFirst(self.registry, self.resolver, self.log, record_lockout=self._record_lockout,
+                                        no_bikes_text=(warranty_step_module.NO_BIKES_HELP if warranty_step
+                                                       else verify_first_no_bikes))
                             if verify_first else None)
 
         definitions: Dict[str, AgentDefinition] = {
@@ -1880,8 +1883,22 @@ class Runtime:
         # 3. A customer with no bike on record goes straight to registration —
         #    triage has nothing to disambiguate and no issue it can act on.
         if resolved.method in ("no_warranty_record",) and LATE_WARRANTY in self.agents:
-            state.route_to(LATE_WARRANTY)
-            return {"reply": self._run_agent_or_handover(LATE_WARRANTY, message, resolved, state)}
+            if not self.warranty_step:
+                state.route_to(LATE_WARRANTY)
+                return {"reply": self._run_agent_or_handover(LATE_WARRANTY, message, resolved, state)}
+            if warranty_step_module.asks_to_register(message.message_text or ""):
+                # Registration comes in the app (spec 2026-10-09 warranty
+                # step, case 4): the placeholder, by code, no model.
+                if warranty_step_module.NO_BIKE not in state.warranty_step_frames:
+                    state.warranty_step_frames.append(warranty_step_module.NO_BIKE)
+                hindi = writes_hindi(message.message_text or "")
+                text = (warranty_step_module.REGISTER_LATER_LINE_HI if hindi
+                        else warranty_step_module.REGISTER_LATER_LINE)
+                self.log.emit("warranty_step", message.conversation_id, case=warranty_step_module.NO_FRAME,
+                              frame=warranty_step_module.NO_BIKE)
+                return {"reply": self._finish(message, state, text, "warranty_step",
+                                              actions=[dict(warranty_step_module.REGISTER_ACTION)])}
+            # Otherwise triage, like anyone else: the issue first.
 
         # A pin naming an agent this runtime does not have is dropped rather
         # than followed. It reaches here from `MessageIn.agent`, which is
@@ -3716,6 +3733,7 @@ class Runtime:
         metadata: Optional[Dict[str, Any]] = None,
         already_in_history: bool = False,
         attachments: Optional[Sequence[Attachment]] = None,
+        actions: Optional[List[Dict[str, Any]]] = None,
     ) -> Reply:
         """A reply written by code. `attachments` are pictures code chose (the
         melt ask's), built the way the model's send_guide_media ones are."""
@@ -3737,5 +3755,6 @@ class Runtime:
             escalated=escalated,
             ticket_id=ticket_id,
             attachments=list(attachments or []),
+            actions=list(actions or []),
             metadata=metadata or {},
         )

@@ -166,5 +166,51 @@ class StepTests(unittest.TestCase):
         self.assertNotIn("warranty_after_issue", json.dumps(llm.requests[-1]["messages"][-1], default=str))
 
 
+class NoFrameTests(unittest.TestCase):
+    def send_no_bike(self, runtime, adapter, text, seen=False, route=True):
+        state = runtime.conversations.get("conv-nf")
+        if route:
+            state.route_to(BATTERY)  # as triage would for "my battery won't charge"
+        if seen:
+            state.evidence_seen = True
+        return runtime.handle(adapter.to_message({"conversation_id": "conv-nf", "session_token": "sess-ananya",
+                                                  "text": text}))
+
+    def test_a_battery_fault_reaches_the_battery_agent_then_the_placeholder(self):
+        runtime, adapter, llm = make([say("Let's check the charger. Please send a short video."),
+                                      say("Thanks, I can see the fault.")], records=())
+        first = self.send_no_bike(runtime, adapter, "my battery won't charge")
+        self.assertEqual(first.handled_by, BATTERY)
+        second = self.send_no_bike(runtime, adapter, "here is the video", seen=True)
+        self.assertIn("You'll be able to register its warranty in the app soon.", second.text)
+        self.assertIn({"kind": "register_warranty", "label": "Register warranty"}, second.actions)
+        self.assertEqual(runtime.conversations.get("conv-nf").warranty_step_frames, ["-"])
+        self.assertIsNone(second.ticket_id)
+
+    def test_a_registration_request_gets_the_placeholder_without_the_model(self):
+        runtime, adapter, llm = make([], records=())
+        reply = self.send_no_bike(runtime, adapter, "I want to register my warranty", route=False)
+        self.assertIn("register its warranty in the app soon", reply.text)
+        self.assertIn({"kind": "register_warranty", "label": "Register warranty"}, reply.actions)
+        self.assertEqual(llm.requests, [])
+
+    def test_with_the_switch_off_a_rider_with_no_bike_still_goes_to_registration(self):
+        runtime, adapter, _ = make([say("Could you read me the frame number?")], records=(), step=False)
+        reply = self.send_no_bike(runtime, adapter, "my battery won't charge")
+        self.assertEqual(reply.handled_by, "late_warranty_registration")
+
+
+class VerifyFirstWordingTests(unittest.TestCase):
+    def test_the_no_bikes_text_is_the_help_line_when_the_step_is_on(self):
+        from emotorad_ai import warranty_step
+        from emotorad_ai.verify_first import NO_BIKES
+
+        on, _, _ = make([], records=(), step=True, verify_first=True)
+        off, _, _ = make([], records=(), step=False, verify_first=True)
+        self.assertIsNotNone(on.verify_gate)
+        self.assertEqual(on.verify_gate.no_bikes_text, warranty_step.NO_BIKES_HELP)
+        self.assertEqual(off.verify_gate.no_bikes_text, NO_BIKES)
+
+
 if __name__ == "__main__":
     unittest.main()
