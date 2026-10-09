@@ -45,7 +45,7 @@ class HealthTests(unittest.TestCase):
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
              "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory",
              "amiigo_receipts": "memory", "amiigo_tokens": "not configured", "zoho_webhook": "not configured",
-             "warranty_source": "fixtures", "melt_ask": "off", "serial_ask": "off",
+             "warranty_source": "fixtures", "dealer_stores": "fixtures", "melt_ask": "off", "serial_ask": "off",
              "serial_read": "off", "jev": "off: mode offline",
              "invoice_ocr": "off"},
         )

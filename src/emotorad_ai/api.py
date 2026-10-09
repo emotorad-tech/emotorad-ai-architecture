@@ -94,6 +94,7 @@ from .storage.assets import finish_asset
 from .storage.uploads import UploadError, UploadRegistry
 from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
+from .tools import dealer_stores as dealer_stores_tools
 from .tools import oms_db as oms_db_tools
 from .tools import warranty_api as warranty_api_tools
 from .tools import fixtures
@@ -283,6 +284,12 @@ OMS_DB = oms_db_tools.reader_from_env()
 # Every pin code's centre (geo.py, spec 2026-10-09): the shared-location
 # geocoder below and the dealer stores both place things by it.
 PINCODE_CENTRES = PincodeCentres.load()
+# The dealer stores nearest a customer (spec 2026-10-09): OMS's Dealers,
+# read through the same connection setting as the bikes, else three made-up
+# stores. Their cards reach the reply beside the model (StoreCards).
+DEALERS, DEALER_SOURCE = dealer_stores_tools.directory_from_env(
+    PINCODE_CENTRES, log=lambda event, fields: log.emit(event, "dealer_stores", **fields))
+STORE_CARDS = dealer_stores_tools.StoreCards()
 # The OMS API: invoice downloads, and the order-number fallback in
 # verification, which never uses it while the dev-code page is on (a code read
 # off that page plus an order number would verify anyone as the order's owner).
@@ -353,6 +360,8 @@ def _build_registry():
         location_sharing=True,
         idempotency=stores.idempotency,
         ticket_system=ZOHO.router,
+        dealers=DEALERS,
+        store_cards=STORE_CARDS,
     )
 
 
@@ -424,6 +433,7 @@ runtime = Runtime(
     melt_ask=MELT_ASK,
     serial_ask=SERIAL_ASK,
     invoice=INVOICE,
+    store_cards=STORE_CARDS,
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -634,6 +644,7 @@ def health() -> dict:
         "amigo": "configured" if AMIGO is not None else "not configured",
         # Where bikes and coverage come from; the warranty API's host, never its key.
         "warranty_source": WARRANTY_SOURCE,
+        "dealer_stores": DEALER_SOURCE,
         "build": BUILD,
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
         # Zoho Desk: on, off, or why not (zoho/wiring.py).

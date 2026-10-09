@@ -451,6 +451,19 @@ Spec: `docs/superpowers/specs/2026-10-08-oms-warranty-source-design.md`. Off unt
    GRANT SELECT (mobile, user_type, related_id, deleted_at) ON em_users TO <role>;
    ```
    `full_address` is there because the replacement flow reads the address back before an order.
+   The nearest-dealers tool (spec 2026-10-09) reads the dealer stores with the same connection setting,
+   so the role also needs:
+   ```sql
+   GRANT SELECT (id, customer_name, address, address2, pin_code_id, district_id, state_id, franchise_type_id,
+                 poc_name, mobile, is_active, deleted_at, is_distributor) ON em_franchise TO <role>;
+   GRANT SELECT (id, franchise_type_name) ON em_franchise_type TO <role>;
+   GRANT SELECT (id, pin_code) ON em_pin_code TO <role>;
+   GRANT SELECT (id, district_name) ON em_district TO <role>;
+   GRANT SELECT (id, state_name) ON em_state TO <role>;
+   GRANT SELECT (full_name, mobile, user_type, related_id, is_active, deleted_at, updated_at) ON em_users TO <role>;
+   ```
+   `/health` shows `"dealer_stores":"oms_db"` once the setting is in; without it, three made-up stores.
+   Before real customers: Sachin's yes to giving riders the dealer managers' mobile numbers.
 2. **The network path (Sachin).** From the staging EC2 instance to the OMS database on port
    5432 (its security group).
 3. **The config store (a person, in AWS CloudShell, region `ap-south-1`).** Add
