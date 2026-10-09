@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
 from ..contract import ASSERTED, VERIFIED
-from ..conversation import StoreUnavailable, address_tokens
+from ..conversation import StoreUnavailable, address_tokens, utc_now_iso
 from ..digits import ascii_digits
 from ..evidence_check import DEFAULT_MISSING
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
@@ -43,10 +43,33 @@ SEARCH_BATTERY_KNOWLEDGE = SEARCH_KNOWLEDGE
 CREATE_SUPPORT_TICKET = "create_support_ticket"
 FIND_SERVICE_SLOTS = "find_service_slots"
 FIND_NEAREST_DEALERS = "find_nearest_dealers"
+GET_RECENT_WEATHER = "get_recent_weather"
 # A pin code as a customer types it, on text whose digits are already ASCII
 # (digits.ascii_digits): six digits, optionally split 3 + 3, not part of a
 # longer number such as a phone.
 _TYPED_PINCODE = re.compile(r"(?<![0-9])[1-9][0-9]{2} ?[0-9]{3}(?![0-9])")
+
+
+def _typed_area(pincode: Optional[str], customer_messages: Optional[List[str]],
+                centres: Any) -> Optional[Dict[str, Any]]:
+    """The area a pin code the model passed gives, or None when it passed
+    none. The model may pass only a pin code the customer typed in this chat,
+    never one it chose (the dealer tool's final review, 9 October 2026), and
+    only one India Post knows and that has a centre. Raises bad_pincode."""
+    typed = "".join(ascii_digits(str(pincode or "")).split())
+    if not typed:
+        return None
+    said = {"".join(found.split()) for text in (customer_messages or ())
+            for found in _TYPED_PINCODE.findall(ascii_digits(text))}
+    if typed not in said:
+        raise ToolError("bad_pincode", "The customer has not typed that pin code in this chat. Use "
+                                       "their area, or ask them for their six-digit pin code.")
+    places = PincodeDirectory.load().lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
+    if not places or centres.centre(typed) is None:
+        raise ToolError("bad_pincode", "%s is not a pin code India Post delivers to. Ask the customer "
+                                       "for their six-digit pin code." % typed[:12])
+    return {"pincode": typed, "district": places[0].district, "state": places[0].state,
+            "source": "typed", "at": utc_now_iso()}
 BOOK_SERVICE_SLOT = "book_service_slot"
 SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
 # The unverified counterpart of create_support_ticket. Separate on purpose:
@@ -750,6 +773,9 @@ def build_registry(
     # supplied, so an agent that cannot look stores up is never told it can.
     dealers: Optional[Any] = None,
     store_cards: Optional[Any] = None,
+    # The Open-Meteo client (weather.OpenMeteoClient). Absent unless the key
+    # is set, so no agent is told it can look the weather up.
+    weather: Optional[Any] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -1721,11 +1747,8 @@ def build_registry(
             return ok({"offered": True, "action": {"kind": "request_location", "label": "Share my location"}})
 
     if dealers is not None:
-        from ..conversation import utc_now_iso
         from ..evidence_check import CONTACT_ENV
         from .dealer_stores import FAR_KM, DealerStoresUnavailable, store_card
-
-        dealer_pincodes = PincodeDirectory.load()
 
         @registry.register(
             FIND_NEAREST_DEALERS,
@@ -1745,22 +1768,9 @@ def build_registry(
                                  customer_messages: Optional[List[str]] = None,
                                  pincode: Optional[str] = None) -> Dict[str, Any]:
             contact = (os.environ.get(CONTACT_ENV) or "").strip()
-            typed = "".join(ascii_digits(str(pincode or "")).split())
-            if typed:
-                # The model may pass only a pin code the customer typed, never
-                # one it chose (the final review, 9 October 2026): six digits
-                # standing on their own in one of the customer's messages.
-                said = {"".join(found.split()) for text in (customer_messages or ())
-                        for found in _TYPED_PINCODE.findall(ascii_digits(text))}
-                if typed not in said:
-                    raise ToolError("bad_pincode", "The customer has not typed that pin code in this chat. Use "
-                                                   "their area, or ask them for their six-digit pin code.")
-                places = dealer_pincodes.lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
-                if not places or dealers.centres.centre(typed) is None:
-                    raise ToolError("bad_pincode", "%s is not a pin code India Post delivers to. Ask the customer "
-                                                   "for their six-digit pin code." % typed[:12])
-                area = {"pincode": typed, "district": places[0].district, "state": places[0].state,
-                        "source": "typed", "at": utc_now_iso()}
+            typed_area = _typed_area(pincode, customer_messages, dealers.centres)
+            if typed_area is not None:
+                area = typed_area
             centre = dealers.centres.centre((area or {}).get("pincode"))
             if centre is None:
                 return ok({"outcome": "no_area",
@@ -1791,6 +1801,43 @@ def build_registry(
             if far and contact:
                 data["care_contact"] = contact
             return ok(data, freshness_seconds=600)
+
+    if weather is not None:
+        from ..geo import PincodeCentres
+        from ..weather import WeatherUnavailable, summary as weather_summary
+
+        weather_centres = PincodeCentres.load()
+
+        @registry.register(
+            GET_RECENT_WEATHER,
+            "The temperature now and over the last 14 days around the customer's area. Call it when the "
+            "temperature matters (the battery will not charge, charges slowly, range has dropped, or "
+            "storage) instead of asking the customer how hot or cold it is. Pass `pincode` only if the "
+            "customer typed one in this chat; otherwise their area is supplied by the platform.",
+            parameters={"pincode": {"type": "string",
+                                    "description": "A six-digit pin code the customer typed in this chat."}},
+            required=(),
+            injects=("conversation_id",),
+            optional_injects=("area", "customer_messages"),
+        )
+        def get_recent_weather(conversation_id: str, area: Optional[Dict[str, Any]] = None,
+                               customer_messages: Optional[List[str]] = None,
+                               pincode: Optional[str] = None) -> Dict[str, Any]:
+            typed_area = _typed_area(pincode, customer_messages, weather_centres)
+            if typed_area is not None:
+                area = typed_area
+            where = (area or {}).get("pincode")
+            point = weather_centres.centre(where)
+            if point is None:
+                return ok({"outcome": "no_area",
+                           "action": {"kind": "request_location", "label": "Share my location"}})
+            try:
+                report = weather.recent(where, point)
+            except WeatherUnavailable as exc:
+                raise ToolError("weather_unavailable", "The weather cannot be looked up right now (%s). Ask the "
+                                                       "customer about the temperature instead." % exc,
+                                retryable=True)
+            return ok(dict(weather_summary(report, area), outcome="ok"), freshness_seconds=3600)
 
     if replacement_orders is not None:
         parts_table = load_parts_table()
