@@ -70,6 +70,7 @@ TICKET_PRODUCING_TOOLS = ("create_support_ticket", "raise_intake_ticket", "submi
 # on the screen. Runtime._admit_unsent_media is the backstop in code.
 GUIDE_MEDIA_TOOL = "send_guide_media"
 DEALER_TOOL = "find_nearest_dealers"  # tools.mocks.FIND_NEAREST_DEALERS
+WEATHER_TOOL = "get_recent_weather"  # tools.mocks.GET_RECENT_WEATHER
 GUIDE_MEDIA_RULE = """
 
 Pictures: you can show the customer a guide photo or clip only through \
@@ -124,6 +125,17 @@ Nearest dealers:
 - The stores' addresses, managers and phone numbers are shown to the customer below your reply. Name at most the nearest store and its distance. Never write a phone number or a street address.
 - If it answers no_area, ask for their pin code; a button to share their location is shown. If it answers bad_pincode, ask for the pin code again.
 - If `far` is true, say the nearest dealer is over 100 km away, and give the care_contact if there is one.
+"""
+
+WEATHER_RULE = """
+
+Recent weather:
+- When the temperature matters (the battery will not charge, charges slowly, range has dropped, or storage), call get_recent_weather instead of asking the customer how hot or cold it is.
+- Say what it found with their area in one short sentence, for example "It has been up to 41 °C around Pune this week", then ask once whether it is about that hot or cold where they charge or keep the bike.
+- Their answer wins: if they charge indoors, in an air-conditioned room or a basement, go by what they say.
+- Never blame a fault on the weather alone, and never use the weather to refuse or hold up a ticket.
+- If it answers no_area, ask for their pin code; a button to share their location is shown. If it answers weather_unavailable, ask the customer about the temperature instead.
+- Never give a calendar date for the weather; say "this week" or "a few days ago".
 """
 
 
@@ -226,6 +238,8 @@ class Agent:
             system += INVOICE_RULE
             if DEALER_TOOL in self.definition.tool_names and DEALER_TOOL in self.registry.specs:
                 system += DEALER_RULE
+            if WEATHER_TOOL in self.definition.tool_names and WEATHER_TOOL in self.registry.specs:
+                system += WEATHER_RULE
             system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]

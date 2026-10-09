@@ -157,6 +157,7 @@ from .standard_responses import StandardResponse, load_standard_responses
 from .tools.mocks import (
     CREATE_SUPPORT_TICKET,
     FIND_NEAREST_DEALERS,
+    GET_RECENT_WEATHER,
     LOOKUP_ERROR_CODE,
     LOOKUP_WARRANTY_RECORD,
     OFFER_LOCATION_SHARE,
@@ -3609,14 +3610,19 @@ class Runtime:
         9 October 2026)."""
         last = None
         for call in turn.tool_calls:
-            if call["tool"] != FIND_NEAREST_DEALERS:
+            if call["tool"] not in (FIND_NEAREST_DEALERS, GET_RECENT_WEATHER):
                 continue
-            last = call
+            if call["tool"] == FIND_NEAREST_DEALERS:
+                last = call
             if is_error(call["result"]):
                 continue
+            # A pin code the customer typed becomes the chat's area, from
+            # either tool (spec 2026-10-09 recent weather, section 4). The
+            # weather summary leaves out `at`, so it is stamped here.
             area = (call["result"].get("data") or {}).get("area")
-            if isinstance(area, dict) and area.get("source") == "typed":
+            if isinstance(area, dict) and area.get("source") == "typed" and area.get("pincode"):
                 state.area = dict(area)
+                state.area.setdefault("at", utc_now_iso())
         cards = self.store_cards.take(message.conversation_id) if self.store_cards is not None else []
         found = (last is not None and not is_error(last["result"])
                  and (last["result"].get("data") or {}).get("outcome") == "ok")

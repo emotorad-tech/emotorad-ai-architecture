@@ -15,6 +15,7 @@ from emotorad_ai.tools.mocks import (
     CREATE_SUPPORT_TICKET,
     FIND_NEAREST_DEALERS,
     FIND_SERVICE_SLOTS,
+    GET_RECENT_WEATHER,
     GET_RECENT_TRIPS,
     GET_SERVICE_STATUS,
     LOOKUP_WARRANTY_RECORD,
@@ -74,7 +75,7 @@ class NarrowDefinitionTests(NarrowFixture, unittest.TestCase):
         # the nearest dealers send them to a store (spec 2026-10-09).
         self.assertEqual(set(definition.tool_names), {SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS,
                                                       BOOK_SERVICE_SLOT, GET_SERVICE_STATUS, GET_RECENT_TRIPS,
-                                                      FIND_NEAREST_DEALERS})
+                                                      FIND_NEAREST_DEALERS, GET_RECENT_WEATHER})
         self.assertEqual(tuple(definition.tool_names), TOOL_NAMES)
 
 
