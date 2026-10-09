@@ -500,3 +500,18 @@ otherwise the OMS API or the fixtures.
 A slow lookup: `em_purchase` has no index on `mobile`, so each lookup scans the table
 (about 62,000 rows, planned at cost ~6,000). An index through a reviewed em-biz-backend
 migration fixes it.
+
+## 10. Recent weather from Open-Meteo
+
+Spec: `docs/superpowers/specs/2026-10-09-recent-weather-design.md`. Off until the key is set.
+
+1. **The key (a person, in AWS CloudShell, region `ap-south-1`).** Add `EMOTORAD_OPEN_METEO_API_KEY`
+   to `/emotorad/stage/ai/app` with the same script pattern as section 9: it asks for the value
+   without echoing it, so nothing is pasted into a command or a chat.
+2. **Deploy** and check `/health`: `"weather":"open-meteo"`.
+3. **Check** in a battery chat with a pin code known (location shared or typed): say the battery
+   will not charge. The bot states the last two weeks' temperatures around that area and asks once
+   whether it is that hot or cold where the bike is charged.
+
+Only a pin-code centre (about 1 km) is sent to Open-Meteo, never the rider's position or anything
+that names them. Rollback: remove the key and redeploy; the agents go back to asking the rider.

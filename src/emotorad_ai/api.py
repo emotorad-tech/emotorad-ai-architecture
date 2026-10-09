@@ -95,6 +95,7 @@ from .storage.uploads import UploadError, UploadRegistry
 from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
 from .tools import dealer_stores as dealer_stores_tools
+from . import weather as weather_tools
 from .tools import oms_db as oms_db_tools
 from .tools import warranty_api as warranty_api_tools
 from .tools import fixtures
@@ -292,6 +293,9 @@ DEALERS, DEALER_SOURCE = dealer_stores_tools.directory_from_env(
     PINCODE_CENTRES, log=lambda event, fields: log.emit(event, "dealer_stores", **fields),
     offline=settings.mode == "offline")
 STORE_CARDS = dealer_stores_tools.StoreCards()
+# Recent weather at the rider's area (spec 2026-10-09): Open-Meteo, on with
+# its key only. The key is never logged; the client hides it.
+WEATHER = weather_tools.client_from_env()
 # The OMS API: invoice downloads, and the order-number fallback in
 # verification, which never uses it while the dev-code page is on (a code read
 # off that page plus an order number would verify anyone as the order's owner).
@@ -364,6 +368,7 @@ def _build_registry():
         ticket_system=ZOHO.router,
         dealers=DEALERS,
         store_cards=STORE_CARDS,
+        weather=WEATHER,
     )
 
 
@@ -647,6 +652,7 @@ def health() -> dict:
         # Where bikes and coverage come from; the warranty API's host, never its key.
         "warranty_source": WARRANTY_SOURCE,
         "dealer_stores": DEALER_SOURCE,
+        "weather": "open-meteo" if WEATHER is not None else "not configured",
         "build": BUILD,
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
         # Zoho Desk: on, off, or why not (zoho/wiring.py).
