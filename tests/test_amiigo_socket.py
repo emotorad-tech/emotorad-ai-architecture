@@ -499,9 +499,6 @@ class BadFrameTests(SocketCase):
             message(attachments=[{"upload_id": ""}]),
             message(screen=7),
             message(pill=["battery"]),
-            message(location={"latitude": 18.52}),
-            message(location={"latitude": 91, "longitude": 73.85}),
-            message(location={"latitude": True, "longitude": 73.85}),
         ]
         with self.socket() as ws:
             for body in cases:
@@ -514,6 +511,20 @@ class BadFrameTests(SocketCase):
                     self.send(ws, {"type": "ping"})  # never three in a row
                     self.assertEqual(frame(ws), {"type": "pong"})
         self.assertEqual(self.turns.calls, [])
+
+    def test_a_bad_location_is_ignored_and_logged_without_its_values(self):
+        cases = [{"latitude": 18.52}, {"latitude": 91, "longitude": 73.85},
+                 {"latitude": True, "longitude": 73.85}, "18.52,73.85"]
+        with self.socket() as ws:
+            for n, location in enumerate(cases, start=1):
+                with self.subTest(location=location):
+                    _, ack, reply = self.exchange(ws, message(n=n, location=location))
+                    self.assertEqual(reply["type"], "reply")
+        self.assertEqual(len(self.turns.calls), len(cases))
+        self.assertEqual(self.turns.calls[0].message_text, "my battery isn't charging")
+        ignored = [e for e in self.api.log.events if e.get("event") == "location_ignored"]
+        self.assertEqual(len(ignored), len(cases))
+        self.assertNotIn("73.85", json.dumps(ignored))
 
     def test_text_over_4000_characters_and_more_than_3_attachments_are_refused(self):
         with self.socket() as ws:

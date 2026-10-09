@@ -10,10 +10,10 @@ provenance check sees the pincode as typed by them.
 The geocoder is a seam. `NominatimGeocoder` is OpenStreetMap's public service:
 no key, no cost, fine for a LAN test server and explicitly not for production
 volume (its usage policy is one request a second and a real User-Agent). The
-production choice (MapmyIndia, Google) swaps in here without touching the
-flow. Whatever the geocoder says, the postcode is trusted only if the India
-Post directory knows it, and the district and state come from the directory,
-never from the geocoder.
+API uses `CentresGeocoder`, our own pin-code centres, since 9 October 2026;
+`NominatimGeocoder` stays for a LAN test server. Whatever the geocoder says,
+the postcode is trusted only if the India Post directory knows it, and the
+district and state come from the directory, never from the geocoder.
 """
 
 from __future__ import annotations
@@ -83,6 +83,29 @@ def describe_location(result: Optional[LocationResult]) -> str:
         parts.append(result.area)
     parts += [result.district, result.state]
     return "I shared my location. " + ", ".join(parts) + "."
+
+
+class CentresGeocoder:
+    """Our own reverse geocoder: the pin code whose centre is nearest the
+    point (geo.PincodeCentres, spec 2026-10-09, section 3). No third party
+    sees the point, and it answers at once, well inside the app team's
+    two-second limit. It names no locality, only the postcode."""
+
+    def __init__(self, centres: Any) -> None:
+        self.centres = centres
+
+    def reverse(self, latitude: float, longitude: float) -> Optional[Dict[str, Any]]:
+        pincode = self.centres.nearest(latitude, longitude)
+        return {"postcode": pincode} if pincode else None
+
+
+def area_of(result: Optional[LocationResult], source: str, at: str) -> Optional[Dict[str, Any]]:
+    """What the chat keeps of a location: the pin code, district and state,
+    where they came from and when. Never the coordinates."""
+    if result is None:
+        return None
+    return {"pincode": result.pincode, "district": result.district, "state": result.state,
+            "source": source, "at": at}
 
 
 class NominatimGeocoder:

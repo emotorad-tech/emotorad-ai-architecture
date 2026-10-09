@@ -171,6 +171,10 @@ class ConversationState:
     # Where this run came from (origin.py): the place fields and the person
     # once known. Set from the run's first message; only filled in after.
     origin: Optional[Dict[str, Any]] = None
+    # Where the customer is, as an area only (spec 2026-10-09, section 3):
+    # {"pincode", "district", "state", "source" ("location" or "typed"), "at"}.
+    # Never coordinates. Lives the working state's 48 hours.
+    area: Optional[Dict[str, Any]] = None
     # Self-service erasure (erasure.py): "wanted" or "cancel_wanted" while the
     # verify step runs, "confirming" while the bot waits for DELETE.
     erasure_step: Optional[str] = None

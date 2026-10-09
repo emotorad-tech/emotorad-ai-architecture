@@ -66,6 +66,10 @@ def comparable(message):
     with each upload id the same (each path claims its own)."""
     out = message.to_dict()
     out.pop("timestamp")
+    # A shared location's area carries when it was resolved (spec 2026-10-09).
+    metadata = out.get("entry_metadata") or {}
+    if isinstance(metadata.get("area"), dict):
+        metadata["area"] = {k: v for k, v in metadata["area"].items() if k != "at"}
     return json.loads(_UPLOAD_ID.sub("upl_X", json.dumps(out, sort_keys=True)))
 
 
@@ -134,6 +138,31 @@ class SameMessageAsPostMessageTests(ApiCase):
         self.assertEqual(made.identity.phone, fixtures.SESSIONS["sess-ananya"])
         self.assertEqual(made.entry_metadata["pinned_agent"], "battery_support")
         self.assertEqual(made.entry_metadata["cluster_id"], self.api._cluster_for_session("sess-ananya"))
+
+    def test_words_with_a_location_keep_the_words_and_carry_the_area(self):
+        class Geocoder:
+            def reverse(self, lat, lon):
+                return {"postcode": "122018"}
+
+        self.api.geocoder = Geocoder()
+        made = self.api.prepare_turn(conversation_id="c9", text="my battery isn't charging", em_aid="aid-loc",
+                                     location=self.api.LocationIn(latitude=28.41, longitude=77.05))
+        self.assertEqual(made.message_text, "my battery isn't charging")
+        area = made.entry_metadata["area"]
+        self.assertEqual((area["pincode"], area["source"]), ("122018", "location"))
+        self.assertNotIn("28.41", json.dumps(made.to_dict(), default=str))
+        self.assertNotIn("77.05", json.dumps(made.to_dict(), default=str))
+
+    def test_a_location_alone_is_still_the_customers_message_and_carries_the_area(self):
+        class Geocoder:
+            def reverse(self, lat, lon):
+                return {"postcode": "122018", "suburb": "Sector 49"}
+
+        self.api.geocoder = Geocoder()
+        made = self.api.prepare_turn(conversation_id="c10", text="", em_aid="aid-loc",
+                                     location=self.api.LocationIn(latitude=28.41, longitude=77.05))
+        self.assertIn("Pincode 122018", made.message_text)
+        self.assertEqual(made.entry_metadata["area"]["pincode"], "122018")
 
     def test_an_anonymous_visitor_with_a_shared_location(self):
         class Geocoder:

@@ -469,7 +469,9 @@ TURN_FACT_FIELDS = ("typed_number", "lookup_error", "awaiting_callback", "callba
                     # A melt ask waiting for a bike (melt_ask.py).
                     "melt_pending",
                     # A confirmation of a serial read off a photo, under way (serial_confirm.py).
-                    "serial_confirm")
+                    "serial_confirm",
+                    # The customer's area (spec 2026-10-09).
+                    "area")
 
 # Triage's replies that end a turn for want of a bike (triage.py): which bike,
 # asked or asked again, and a bike not in the list collected or confirmed. A
@@ -768,6 +770,11 @@ class Runtime:
             coverage_loaded = state.coverage_result
             # What the turn may change that a merge must not lose or overwrite.
             facts_loaded = {name: getattr(state, name) for name in TURN_FACT_FIELDS}
+            # A location this message carried, as an area (api.prepare_turn).
+            # After the snapshot, so a merge after a conflict keeps it.
+            area = message.entry_metadata.get("area")
+            if isinstance(area, dict) and area.get("pincode"):
+                state.area = dict(area)
             try:
                 final = self.graph.invoke({"message": message, "conversation": state})
             except StoreUnavailable as exc:

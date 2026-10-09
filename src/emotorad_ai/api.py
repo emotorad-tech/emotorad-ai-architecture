@@ -79,7 +79,8 @@ from .media import sendable as media_sendable
 from .guardrails import check_safety, check_safety_in_description
 from .identity import PHONE, IdentityResolver, normalise
 from .address import PincodeDirectory
-from .location import NominatimGeocoder, describe_location, resolve_location
+from .geo import PincodeCentres
+from .location import CentresGeocoder, area_of, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
 from .conversation import StoreUnavailable, customer_texts, utc_now_iso
@@ -279,6 +280,9 @@ replacement_orders = ReplacementOrders()
 # Bikes from OMS production (tools/oms_db.py, spec 2026-10-08): first among the
 # sources when its connection string is set. Nothing connects at import.
 OMS_DB = oms_db_tools.reader_from_env()
+# Every pin code's centre (geo.py, spec 2026-10-09): the shared-location
+# geocoder below and the dealer stores both place things by it.
+PINCODE_CENTRES = PincodeCentres.load()
 # The OMS API: invoice downloads, and the order-number fallback in
 # verification, which never uses it while the dev-code page is on (a code read
 # off that page plus an order number would verify anyone as the order's owner).
@@ -356,11 +360,10 @@ registry = _build_registry()
 # Read once, with the registry, so /health names the source actually in use.
 WARRANTY_SOURCE = _warranty_source_label()
 
-# The reverse geocoder behind "Share my location". OpenStreetMap's public
-# service for this LAN test server; a production provider swaps in here. The
-# tests replace it with a fake. See location.py for what is and is not trusted
-# from it.
-geocoder = NominatimGeocoder()
+# The reverse geocoder behind a shared location: our own pin-code centres,
+# so no third party sees where a rider is. The tests replace it with a fake.
+# See location.py for what is and is not trusted from it.
+geocoder = CentresGeocoder(PINCODE_CENTRES)
 pincode_directory = PincodeDirectory.load()
 resolver = IdentityResolver(registry)
 # Langfuse, when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are in the
@@ -1324,11 +1327,17 @@ def prepare_turn(
     turn = _TurnIn(text=text, pill=pill, agent=agent, attachments=attachments, cluster=cluster)
     found, unchecked, evidence_verdict = _inbound_attachments(turn, conversation_id)
     said = text
+    area = None
     if location is not None:
         # Resolved here, before the message exists, so the coordinates never
-        # become part of anything that is logged or handed to the model.
+        # become part of anything that is logged or handed to the model. Only
+        # a message that is nothing but the location becomes the customer's
+        # words; with words, a chip or a photo, the location is background
+        # (the app team's addendum, 7 October 2026).
         located = resolve_location(location.latitude, location.longitude, geocoder, pincode_directory)
-        said = describe_location(located)
+        area = area_of(located, "location", utc_now_iso())
+        if not (text or "").strip() and not pill and not found:
+            said = describe_location(located)
 
     if phone is not None:
         message_cluster: Optional[str] = cluster()
@@ -1370,6 +1379,9 @@ def prepare_turn(
     place = IP_LOCATOR.place(client_ip) if IP_LOCATOR is not None else None
     if place is not None:
         extra["origin"] = place.as_dict()
+    if area is not None:
+        # The runtime keeps it on the conversation (Runtime._handle).
+        extra["area"] = area
     if unchecked:
         # The runtime tells the agent (Runtime._run); never a summary.
         extra["photos_unchecked"] = unchecked

@@ -88,5 +88,24 @@ class DescribeTests(unittest.TestCase):
         )
 
 
+class CentresGeocoderTests(unittest.TestCase):
+    def test_the_nearest_centre_is_the_postcode_and_no_third_party_is_asked(self):
+        from emotorad_ai.geo import PincodeCentres
+        from emotorad_ai.location import CentresGeocoder
+
+        geocoder = CentresGeocoder(PincodeCentres({"122018": (28.41, 77.05)}))
+        self.assertEqual(geocoder.reverse(28.415, 77.052), {"postcode": "122018"})
+        self.assertIsNone(geocoder.reverse(15.0, 65.0))
+
+    def test_area_of_keeps_the_pincode_district_and_state_only(self):
+        from emotorad_ai.location import LocationResult, area_of
+
+        result = LocationResult(pincode="122018", area="Sector 49", district="Gurugram", state="Haryana")
+        self.assertEqual(area_of(result, "location", "2026-10-09T10:00:00+00:00"),
+                         {"pincode": "122018", "district": "Gurugram", "state": "Haryana", "source": "location",
+                          "at": "2026-10-09T10:00:00+00:00"})
+        self.assertIsNone(area_of(None, "location", "2026-10-09T10:00:00+00:00"))
+
+
 if __name__ == "__main__":
     unittest.main()

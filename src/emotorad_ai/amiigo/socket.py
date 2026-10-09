@@ -194,6 +194,9 @@ class MessageFrame:
     screen: Optional[str] = None
     pill: Optional[str] = None
     location: Optional[Location] = None
+    # Why a location the frame carried was dropped, for the log (never its
+    # values): the app team's addendum makes a bad location harmless.
+    location_ignored: Optional[str] = None
 
 
 class Refused(Exception):
@@ -280,15 +283,17 @@ def _message(body: Dict[str, Any], client_message_id: str) -> MessageFrame:
                 or not item["upload_id"]:
             raise refused()
         upload_ids.append(item["upload_id"])
+    location_ignored = None
     try:
         location = _location(body.get("location"))
-    except ValueError:
-        raise refused() from None
+    except ValueError as exc:
+        location, location_ignored = None, str(exc).replace(" ", "_")
     if len(text) > MAX_TEXT:
         raise refused(TEXT_TOO_LONG)
     if len(upload_ids) > MAX_ATTACHMENTS:
         raise refused(TOO_MANY_ATTACHMENTS)
-    return MessageFrame(client_message_id, conversation_id, text, tuple(upload_ids), screen, pill, location)
+    return MessageFrame(client_message_id, conversation_id, text, tuple(upload_ids), screen, pill, location,
+                        location_ignored)
 
 
 # -- frames the server sends --------------------------------------------------------
@@ -504,6 +509,8 @@ class ChatSocket:
             # Not handled: the app sends it again on its next socket.
             self._logged("amiigo", TOKEN_EXPIRED)
         else:
+            if read.location_ignored:
+                self._noted("location_ignored", "amiigo", reason=read.location_ignored)
             await self._message(read)
         return None
 
