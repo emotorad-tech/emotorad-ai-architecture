@@ -107,6 +107,34 @@ class CardsTests(unittest.TestCase):
         area = runtime.conversations.get("conv-d").area
         self.assertEqual((area["pincode"], area["source"]), ("400054", "typed"))
 
+    def test_a_reply_that_carries_a_hazard_never_carries_cards(self):
+        """The final review's I1: the backstop's safety reply, with or without
+        a ticket, never sends the rider to a dealer."""
+        for text in ("Please stop using the battery, it could catch fire. I have raised a ticket for you.",
+                     "Stop using it, it may catch fire. The nearest dealers are listed below."):
+            with self.subTest(text=text):
+                runtime, adapter, _, _ = runtime_with([call_tool(FIND_NEAREST_DEALERS, {}), say(text)])
+                reply = send(runtime, adapter, "my battery smells a bit odd", area=AREA)
+                self.assertEqual(reply.stores, [])
+
+    def test_cards_only_when_the_last_call_found_stores(self):
+        """The final review's M2: a later failed call takes the cards back."""
+        runtime, adapter, _, _ = runtime_with([
+            call_tool(FIND_NEAREST_DEALERS, {}),
+            call_tool(FIND_NEAREST_DEALERS, {"pincode": "999999"}, tool_use_id="toolu_2"),
+            say("That pin code isn't one I can find. Which pin code are you at?"),
+        ])
+        reply = send(runtime, adapter, "where can I take it? I'm at 999999", area=AREA)
+        self.assertEqual(reply.stores, [])
+
+    def test_a_pincode_the_customer_never_typed_leaves_the_area_alone(self):
+        runtime, adapter, _, _ = runtime_with([
+            call_tool(FIND_NEAREST_DEALERS, {"pincode": "110016"}), say("Which pin code are you at?"),
+        ])
+        reply = send(runtime, adapter, "I am in Pune, where can I take it?", area=AREA)
+        self.assertEqual(reply.stores, [])
+        self.assertEqual(runtime.conversations.get("conv-d").area["pincode"], "411001")
+
     def test_a_safety_report_never_carries_cards(self):
         runtime, adapter, llm, cards = runtime_with([])
         cards.put("conv-d", [{"ref": "D1"}])

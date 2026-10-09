@@ -119,6 +119,14 @@ class DirectoryTests(unittest.TestCase):
         self.fail = False
         self.assertEqual(len(self.directory.stores()), 3)
 
+    def test_a_failed_load_is_logged_with_its_class_and_whether_stale_is_served(self):
+        """The final review's I4: never swallowed silently."""
+        self.directory.stores()
+        self.fail = True
+        self.clock.now += dealer_stores.CACHE_SECONDS + 1
+        self.directory.stores()
+        self.assertEqual(self.events[-1], ("dealer_stores_load_failed", {"error": "OSError", "serving_stale": True}))
+
     def test_the_error_names_no_connection_detail(self):
         def load():
             raise OSError("postgresql://user:secret@host/db")
@@ -129,8 +137,14 @@ class DirectoryTests(unittest.TestCase):
 
 
 class EnvTests(unittest.TestCase):
+    def test_without_a_dsn_outside_offline_mode_there_is_no_directory(self):
+        """The final review's I3: made-up stores never reach a real rider."""
+        directory, source = directory_from_env(CENTRES, environ={}, offline=False)
+        self.assertIsNone(directory)
+        self.assertEqual(source, "not configured")
+
     def test_without_a_dsn_the_fixtures(self):
-        directory, source = directory_from_env(CENTRES, environ={})
+        directory, source = directory_from_env(CENTRES, environ={}, offline=True)
         self.assertEqual(source, "fixtures")
         self.assertEqual(len(directory.stores()), 3)
 

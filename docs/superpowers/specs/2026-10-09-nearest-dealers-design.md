@@ -78,7 +78,7 @@ WHERE f.is_active AND f.deleted_at IS NULL AND NOT coalesce(f.is_distributor, fa
 - **Address:** `address`, `address2`, district, state and pin code, joined with commas, blanks skipped. When `address` already contains the pin code, the pin code is not repeated.
 - **Store position:** the store's pin-code centre. A store whose pin code has no centre is left out, and the count is logged as `dealer_stores_unplaced` (no names).
 - **Caching:** all stores are loaded at once and kept for 10 minutes. After a failure, reads fail at once for a minute (the breaker pattern of `oms_db`). A failed refresh keeps serving the last good list for up to an hour before answering `oms_unavailable`.
-- **Off switch:** with no `EMOTORAD_OMS_PG_DSN`, the source is a fixture list of three made-up stores, in tests and offline mode.
+- **Off switch:** with no `EMOTORAD_OMS_PG_DSN`, the tool is not offered (`/health`: `not configured`). Only offline mode, as in tests, uses a fixture list of three made-up stores (the final review, 9 October 2026).
 - **The SQL's own behaviour** is pinned by an opt-in test with inline rows, as `tests/test_oms_db_sql.py` does: type filter, distributor and inactive excluded, the manager fallback, the newest manager chosen.
 
 ## 3. The customer's area (the app team's location addendum)

@@ -3601,14 +3601,28 @@ class Runtime:
 
     def _dealer_cards(self, message: InboundMessage, turn: Any, state: ConversationState) -> List[Dict[str, Any]]:
         """The store cards this turn found, and the area a typed pin code
-        gave (spec 2026-10-09, sections 3 and 4)."""
+        gave (spec 2026-10-09, sections 3 and 4).
+
+        Cards go out only when the turn's last find_nearest_dealers call found
+        stores, and never on a reply that carries a hazard: a rider told to
+        stop using a battery is not also sent to a dealer (the final review,
+        9 October 2026)."""
+        last = None
         for call in turn.tool_calls:
-            if call["tool"] != FIND_NEAREST_DEALERS or is_error(call["result"]):
+            if call["tool"] != FIND_NEAREST_DEALERS:
+                continue
+            last = call
+            if is_error(call["result"]):
                 continue
             area = (call["result"].get("data") or {}).get("area")
             if isinstance(area, dict) and area.get("source") == "typed":
                 state.area = dict(area)
-        return self.store_cards.take(message.conversation_id) if self.store_cards is not None else []
+        cards = self.store_cards.take(message.conversation_id) if self.store_cards is not None else []
+        found = (last is not None and not is_error(last["result"])
+                 and (last["result"].get("data") or {}).get("outcome") == "ok")
+        if not found or check_safety_in_description(turn.text or "").triggered:
+            return []
+        return cards
 
     def _finish(
         self,

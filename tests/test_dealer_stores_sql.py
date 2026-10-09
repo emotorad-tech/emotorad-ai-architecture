@@ -27,6 +27,7 @@ em_franchise(id, customer_name, address, address2, pin_code_id, district_id, sta
 em_users(full_name, mobile, user_type, related_id, is_active, deleted_at, updated_at) AS (VALUES
   ('Manager Old', '9000000021', 'franchise_manager', 'F1', true, NULL::timestamptz, now() - interval '1 day'),
   ('Manager New', '9000000022', 'franchise_manager', 'F1', true, NULL::timestamptz, now()),
+  ('Manager Undated', '9000000024', 'franchise_manager', 'F1', true, NULL::timestamptz, NULL::timestamptz),
   ('Sales Person', '9000000023', 'sale_franchise_person', 'F6', true, NULL::timestamptz, now()))
 """
 
@@ -50,6 +51,10 @@ class RealSqlTests(unittest.TestCase):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_a_manager_with_no_date_never_beats_a_dated_one(self):
+        """The final review's M5: Postgres sorts NULLs first in DESC."""
+        self.assertIn("ORDER BY u.updated_at DESC NULLS LAST", STORES_SQL)
+
     def test_the_query_starts_with_select_so_the_fixture_ctes_lead_it(self):
         self.assertTrue(STORES_SQL.lstrip().upper().startswith("SELECT"))
 

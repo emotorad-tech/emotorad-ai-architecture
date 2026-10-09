@@ -285,10 +285,12 @@ OMS_DB = oms_db_tools.reader_from_env()
 # geocoder below and the dealer stores both place things by it.
 PINCODE_CENTRES = PincodeCentres.load()
 # The dealer stores nearest a customer (spec 2026-10-09): OMS's Dealers,
-# read through the same connection setting as the bikes, else three made-up
-# stores. Their cards reach the reply beside the model (StoreCards).
+# read through the same connection setting as the bikes; offline, three
+# made-up stores; otherwise none, and the tool is not offered. Their cards
+# reach the reply beside the model (StoreCards).
 DEALERS, DEALER_SOURCE = dealer_stores_tools.directory_from_env(
-    PINCODE_CENTRES, log=lambda event, fields: log.emit(event, "dealer_stores", **fields))
+    PINCODE_CENTRES, log=lambda event, fields: log.emit(event, "dealer_stores", **fields),
+    offline=settings.mode == "offline")
 STORE_CARDS = dealer_stores_tools.StoreCards()
 # The OMS API: invoice downloads, and the order-number fallback in
 # verification, which never uses it while the dev-code page is on (a code read

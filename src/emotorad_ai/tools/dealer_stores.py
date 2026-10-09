@@ -44,7 +44,7 @@ STORES_SQL = (
     " SELECT u.full_name, u.mobile FROM em_users u"
     " WHERE u.related_id = f.id AND u.user_type = 'franchise_manager'"
     " AND u.is_active AND u.deleted_at IS NULL AND coalesce(u.mobile, '') <> ''"
-    " ORDER BY u.updated_at DESC LIMIT 1"
+    " ORDER BY u.updated_at DESC NULLS LAST LIMIT 1"
     " ) m ON true"
     " WHERE f.is_active AND f.deleted_at IS NULL AND NOT coalesce(f.is_distributor, false)"
 )
@@ -160,6 +160,12 @@ class DealerDirectory:
         except Exception as exc:
             with self._lock:
                 self._failed_at = now
+                stale = self._loaded_at is not None and now - self._loaded_at < STALE_SECONDS
+            # Never silent (the final review, 9 October 2026): the class only,
+            # never the message, which can carry the connection string.
+            if self._log is not None:
+                self._log("dealer_stores_load_failed", {"error": type(exc).__name__, "serving_stale": stale})
+            with self._lock:
                 return self._stale_or_raise(now, type(exc).__name__)
         stores = [s for s in (store_from_row(r, self.centres) for r in rows) if s is not None]
         with self._lock:
@@ -187,12 +193,19 @@ def db_loader(dsn: str, connect: Optional[Callable[..., Any]] = None) -> Callabl
 
 
 def directory_from_env(centres: PincodeCentres, environ: Optional[Mapping[str, str]] = None,
-                       log: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Tuple[DealerDirectory, str]:
+                       log: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+                       offline: bool = False) -> Tuple[Optional[DealerDirectory], str]:
+    """The OMS stores with the DSN; the three made-up stores only offline
+    (tests, a laptop); otherwise none, so the tool is never offered and a
+    real rider is never sent to a store that does not exist (the final
+    review, 9 October 2026)."""
     env = os.environ if environ is None else environ
     dsn = (env.get(DSN_ENV) or "").strip()
     if dsn:
         return DealerDirectory(db_loader(dsn), centres, log=log), "oms_db"
-    return DealerDirectory(lambda: [dict(r) for r in FIXTURE_ROWS], centres, log=log), "fixtures"
+    if offline:
+        return DealerDirectory(lambda: [dict(r) for r in FIXTURE_ROWS], centres, log=log), "fixtures"
+    return None, "not configured"
 
 
 class StoreCards:

@@ -22,8 +22,10 @@ def registry(load=None, cards=None):
     return build_registry(dealers=directory, store_cards=cards if cards is not None else StoreCards()), cards
 
 
-def call(reg, arguments=None, area=None):
+def call(reg, arguments=None, area=None, said=None):
     late = {"area": (lambda: area)} if area is not None else {}
+    if said is not None:
+        late["customer_messages"] = lambda: list(said)
     return reg.call(FIND_NEAREST_DEALERS, arguments or {}, ToolContext(conversation_id="c1", late=late))
 
 
@@ -65,9 +67,32 @@ class OutcomeTests(unittest.TestCase):
 
     def test_a_typed_pincode_wins_and_is_returned_as_the_area(self):
         reg, _ = registry()
-        data = call(reg, {"pincode": " 400054 "}, AREA)["data"]
+        data = call(reg, {"pincode": " 400054 "}, AREA, said=["I'm at 400 054 this week"])["data"]
         self.assertEqual(data["stores"][0]["store_name"], "Test Cycles Mumbai")
         self.assertEqual((data["area"]["pincode"], data["area"]["source"]), ("400054", "typed"))
+
+    def test_a_pincode_the_customer_never_typed_is_refused(self):
+        """The final review's I2: the model may only pass a pin code from the
+        customer's own words, never one it chose."""
+        reg, _ = registry()
+        for said in (None, ["I am in Pune, where can I take it?"], ["call me on 9876110016"]):
+            with self.subTest(said=said):
+                envelope = call(reg, {"pincode": "110016"}, AREA, said=said)
+                self.assertEqual(envelope["error"]["code"], "bad_pincode")
+
+    def test_a_pincode_typed_in_devanagari_digits_is_accepted(self):
+        reg, _ = registry()
+        data = call(reg, {"pincode": "४०००५४"}, AREA, said=["मैं ४०००५४ पर हूँ"])["data"]
+        self.assertEqual((data["area"]["pincode"], data["stores"][0]["store_name"]), ("400054", "Test Cycles Mumbai"))
+
+    def test_the_failure_reason_is_named_as_a_class_only(self):
+        def down():
+            raise OSError("postgresql://user:secret@host/db")
+
+        reg, _ = registry(load=down)
+        message = call(reg, area=AREA)["error"]["message"]
+        self.assertIn("OSError", message)
+        self.assertNotIn("secret", message)
 
     def test_no_area_asks_with_the_location_button(self):
         reg, _ = registry()
@@ -79,7 +104,7 @@ class OutcomeTests(unittest.TestCase):
         reg, _ = registry()
         for typed in ("999999", "12345", "abcdef", "011001"):
             with self.subTest(typed=typed):
-                envelope = call(reg, {"pincode": typed}, AREA)
+                envelope = call(reg, {"pincode": typed}, AREA, said=["my pin is %s" % typed])
                 self.assertEqual(envelope["error"]["code"], "bad_pincode")
 
     def test_unreadable_stores_are_oms_unavailable_with_the_care_contact(self):

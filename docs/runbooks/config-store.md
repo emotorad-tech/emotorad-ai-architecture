@@ -462,7 +462,8 @@ Spec: `docs/superpowers/specs/2026-10-08-oms-warranty-source-design.md`. Off unt
    GRANT SELECT (id, state_name) ON em_state TO <role>;
    GRANT SELECT (full_name, mobile, user_type, related_id, is_active, deleted_at, updated_at) ON em_users TO <role>;
    ```
-   `/health` shows `"dealer_stores":"oms_db"` once the setting is in; without it, three made-up stores.
+   `/health` shows `"dealer_stores":"oms_db"` once the setting is in; without it `"not configured"`, and the
+   tool is not offered (offline mode alone uses three made-up stores, `"fixtures"`).
    Before real customers: Sachin's yes to giving riders the dealer managers' mobile numbers.
 2. **The network path (Sachin).** From the staging EC2 instance to the OMS database on port
    5432 (its security group).

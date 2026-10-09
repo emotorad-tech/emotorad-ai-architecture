@@ -17,6 +17,7 @@ from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
 from ..contract import ASSERTED, VERIFIED
 from ..conversation import StoreUnavailable, address_tokens
+from ..digits import ascii_digits
 from ..evidence_check import DEFAULT_MISSING
 from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
 from ..guardrails import check_safety_in_description
@@ -42,6 +43,10 @@ SEARCH_BATTERY_KNOWLEDGE = SEARCH_KNOWLEDGE
 CREATE_SUPPORT_TICKET = "create_support_ticket"
 FIND_SERVICE_SLOTS = "find_service_slots"
 FIND_NEAREST_DEALERS = "find_nearest_dealers"
+# A pin code as a customer types it, on text whose digits are already ASCII
+# (digits.ascii_digits): six digits, optionally split 3 + 3, not part of a
+# longer number such as a phone.
+_TYPED_PINCODE = re.compile(r"(?<![0-9])[1-9][0-9]{2} ?[0-9]{3}(?![0-9])")
 BOOK_SERVICE_SLOT = "book_service_slot"
 SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
 # The unverified counterpart of create_support_ticket. Separate on purpose:
@@ -1734,13 +1739,22 @@ def build_registry(
                                     "description": "A six-digit pin code the customer typed in this chat."}},
             required=(),
             injects=("conversation_id",),
-            optional_injects=("area",),
+            optional_injects=("area", "customer_messages"),
         )
         def find_nearest_dealers(conversation_id: str, area: Optional[Dict[str, Any]] = None,
+                                 customer_messages: Optional[List[str]] = None,
                                  pincode: Optional[str] = None) -> Dict[str, Any]:
             contact = (os.environ.get(CONTACT_ENV) or "").strip()
-            typed = "".join(str(pincode or "").split())
+            typed = "".join(ascii_digits(str(pincode or "")).split())
             if typed:
+                # The model may pass only a pin code the customer typed, never
+                # one it chose (the final review, 9 October 2026): six digits
+                # standing on their own in one of the customer's messages.
+                said = {"".join(found.split()) for text in (customer_messages or ())
+                        for found in _TYPED_PINCODE.findall(ascii_digits(text))}
+                if typed not in said:
+                    raise ToolError("bad_pincode", "The customer has not typed that pin code in this chat. Use "
+                                                   "their area, or ask them for their six-digit pin code.")
                 places = dealer_pincodes.lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
                 if not places or dealers.centres.centre(typed) is None:
                     raise ToolError("bad_pincode", "%s is not a pin code India Post delivers to. Ask the customer "
@@ -1751,12 +1765,13 @@ def build_registry(
             if centre is None:
                 return ok({"outcome": "no_area",
                            "action": {"kind": "request_location", "label": "Share my location"}})
+            reason = "no_stores"
             try:
                 nearest = dealers.nearest(centre)
-            except DealerStoresUnavailable:
-                nearest = []
+            except DealerStoresUnavailable as exc:
+                nearest, reason = [], str(exc)
             if not nearest:
-                raise ToolError("oms_unavailable", "Dealer stores cannot be looked up right now."
+                raise ToolError("oms_unavailable", "Dealer stores cannot be looked up right now (%s)." % reason
                                 + (" The customer can call customer care on %s." % contact if contact else ""),
                                 retryable=True)
             cards = [store_card("D%d" % (n + 1), store, km) for n, (store, km) in enumerate(nearest)]
