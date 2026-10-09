@@ -212,13 +212,17 @@ def message_view(item: Union[TranscriptTurn, Mapping[str, Any]], signer: Signer,
     the caller answers at, the same one its signer was made for; the view
     takes every time it shows from the item and the signer."""
     if isinstance(item, TranscriptTurn):
-        return {
+        view = {
             "id": turn_id(item),
             "sender": "rider" if item.role == "customer" else "bot",
             "text": item.text,
             "sent_at": _shown(item.at),
             "attachments": [_attachment_view(a, signer) for a in item.attachments],
         }
+        if item.stores:
+            # Dealer store cards (spec 2026-10-09): additive within v1.
+            view["stores"] = [dict(s) for s in item.stores]
+        return view
     return {"id": str(item["_id"]), "sender": "system", "text": item.get("text") or "",
             "sent_at": _shown(item.get("at")), "attachments": []}
 

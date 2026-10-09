@@ -412,7 +412,7 @@ class MongoConversationStore:
         turns = self._collection(TRANSCRIPT_TURNS)
         for turn in transcript_turns(state, inbound, reply, self._clock()):
             doc = dict(asdict(turn), conversation_id=state.conversation_id, user_key=state.user_key,
-                       attachments=[dict(a) for a in turn.attachments])
+                       attachments=[dict(a) for a in turn.attachments], stores=[dict(s) for s in turn.stores])
             key = "%s#%05d" % (state.conversation_id, turn.n)
             self._guard("replace_one", lambda: turns.replace_one({"_id": key}, dict(doc, _id=key), upsert=True))
         if summary is not None and state.user_key:
@@ -429,6 +429,7 @@ class MongoConversationStore:
             TranscriptTurn(
                 n=d["n"], role=d["role"], text=d["text"], at=d["at"],
                 attachments=tuple(d.get("attachments") or ()), handled_by=d.get("handled_by", ""), path=d.get("path", ""),
+                stores=tuple(d.get("stores") or ()),
                 conversation_id=d.get("conversation_id") or conversation_id,
             )
             for d in docs

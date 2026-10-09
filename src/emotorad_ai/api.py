@@ -589,6 +589,8 @@ class MessageOut(BaseModel):
     # button: {"kind": "request_location", "label": ...}. Named by code in a
     # tool result, never typed by the model.
     actions: List[dict] = []
+    # Dealer store cards code found (spec 2026-10-09), nearest first.
+    stores: List[dict] = []
 
 
 class AssetPath(BaseModel):
@@ -1522,6 +1524,7 @@ def _message_out(conversation_id: str, reply: Reply) -> MessageOut:
             for attachment in reply.attachments
         ],
         actions=list(reply.actions),
+        stores=[dict(s) for s in reply.stores],
     )
 
 

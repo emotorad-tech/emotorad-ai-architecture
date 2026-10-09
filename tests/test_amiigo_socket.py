@@ -635,6 +635,14 @@ class MessageTests(SocketCase):
                          (True, {"reference": "EM-1000042", "status": "open", "closed_at": None},
                           [{"kind": "request_location", "label": "Share my location"}]))
 
+    def test_the_reply_message_carries_the_store_cards(self):
+        card = {"ref": "D1", "name": "Test Cycles Pune", "address": "Shop 1, Test Road, Pune, Maharashtra - 411014",
+                "pincode": "411014", "manager_name": "Test Manager One", "phone": "+91 9000000001", "distance_km": 3}
+        self.turns.reply_fields = {"stores": [card]}
+        with self.socket() as ws:
+            _, _, reply = self.exchange(ws, message())
+        self.assertEqual(reply["message"]["stores"], [card])
+
     def test_the_replys_pictures_come_with_fresh_links_and_their_captions(self):
         asset = "https://fake.s3.ap-south-1.amazonaws.com/assets/afs/battery/photos/switch.w900.webp"
         self.turns.reply_fields = {"attachments": [Attachment(

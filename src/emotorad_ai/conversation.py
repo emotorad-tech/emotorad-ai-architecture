@@ -462,6 +462,8 @@ class TranscriptTurn:
     attachments: Tuple[Dict[str, str], ...] = ()
     handled_by: str = ""
     path: str = ""
+    # The dealer store cards the bot's reply carried (spec 2026-10-09).
+    stores: Tuple[Dict[str, Any], ...] = ()
     # The conversation the turn belongs to, as a store reads it back, so the
     # turn can name its message id (`<conversation_id>#<n:05d>`, the Amiigo
     # history, amiigo/history.py). Not compared: two readings of one turn are
@@ -515,6 +517,7 @@ def transcript_turns(
         n=n + 1, role="bot", text=redact_pii(reply.text or ""), at=at,
         attachments=tuple({"kind": a.kind, "url": recorded_url(a.url)} for a in reply.attachments),
         handled_by=reply.handled_by or "", path=str(reply.metadata.get("route") or ""),
+        stores=tuple(dict(s) for s in reply.stores),
         conversation_id=state.conversation_id,
     )
     return customer, bot

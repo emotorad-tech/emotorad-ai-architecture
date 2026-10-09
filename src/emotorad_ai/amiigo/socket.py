@@ -344,13 +344,15 @@ def receipt_of(frame: MessageFrame, message: Any, reply: Any,
     ack = {"id": rider_id, "role": "customer", "text": redact_pii(said), "at": at,
            "attachments": [{"kind": a.kind, "url": recorded_url(a.url)} for a in message.attachments]}
     answer = dict(live, id=bot_id, role="bot", text=reply.text or "", at=at,
-                  attachments=[{"kind": a.kind, "url": recorded_url(a.url)} for a in reply.attachments])
+                  attachments=[{"kind": a.kind, "url": recorded_url(a.url)} for a in reply.attachments],
+                  stores=[dict(s) for s in reply.stores])
     return ack, answer
 
 
 def _unrecorded_turn(kept: Dict[str, Any], conversation_id: str) -> TranscriptTurn:
     return TranscriptTurn(n=0, role=kept["role"], text=kept["text"], at=kept["at"],
-                          attachments=tuple(kept["attachments"]), conversation_id=conversation_id)
+                          attachments=tuple(kept["attachments"]), stores=tuple(kept.get("stores") or ()),
+                          conversation_id=conversation_id)
 
 
 def answer_frames(frame: MessageFrame, ack: Dict[str, Any], reply: Dict[str, Any],

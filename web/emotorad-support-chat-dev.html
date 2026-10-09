@@ -162,6 +162,11 @@
     background: #FFFFFF; font-size: 14px; font-weight: 600; cursor: pointer; user-select: none; }
   .action-chip:active { background: #FFF7F2; }
   .action-chip.is-used { opacity: 0.45; pointer-events: none; }
+  .store-card { max-width: 320px; margin: 2px 0 4px 34px; border: 1px solid rgba(127,127,127,.28); border-radius: 12px; padding: 10px 12px; display: grid; gap: 4px; font-size: 13px; }
+  .store-name { font-weight: 600; }
+  .store-km { font-weight: 400; opacity: .7; margin-left: 4px; }
+  .store-address { opacity: .85; }
+  .store-manager a { color: var(--accent); text-decoration: none; user-select: text; }
 
   /* A photo that has been picked and not yet sent. Sits between the chat and
      the composer, so what is about to go out is visible before it goes. */
@@ -620,6 +625,15 @@ function renderAiTurnHtml(turn) {
         esc(a.label || "Share my location") + "</div></div>";
     }
   });
+  // Dealer stores code found (spec 2026-10-09). The model never writes these.
+  (turn.stores || []).forEach(function (s) {
+    var tel = String(s.phone || "").replace(/\s+/g, "");
+    html += '<div class="msg-row ai"><div class="store-card">' +
+      '<div class="store-name">' + esc(s.name) + ' <span class="store-km">' + esc(String(s.distance_km)) + ' km</span></div>' +
+      '<div class="store-address">' + esc(s.address) + '</div>' +
+      '<div class="store-manager">' + esc(s.manager_name) + ' \u00b7 <a href="tel:' + esc(tel) + '">' +
+      esc(s.phone) + '</a></div></div></div>';
+  });
   // Guide photos and clips the agent chose to send. It picks a catalogue key;
   // code resolves the URL, so nothing here is ever a link the model typed.
   (turn.attachments || []).forEach(function (a) {
@@ -849,6 +863,7 @@ function ask(text, location) {
     state.busy = false;
     state.turns.push({
       isUser: false, text: reply.text, attachments: reply.attachments || [], actions: reply.actions || [],
+      stores: reply.stores || [],
       route: { handledBy: reply.handled_by, ticketId: reply.ticket_id, escalated: reply.escalated }
     });
     render();
