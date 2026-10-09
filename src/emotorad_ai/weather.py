@@ -17,6 +17,7 @@ was, never by date, so the date post-check never has a weather date to judge.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -62,7 +63,16 @@ def _urllib_fetch(url: str, timeout: float, limit: int) -> Tuple[int, bytes]:
 
 
 def _number(value: Any) -> Optional[float]:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    """A finite temperature, or None. JSON from a server can hold NaN,
+    Infinity or a number too large for a float (the final review, 9 October
+    2026); none of them is a temperature."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def parse(raw: bytes) -> WeatherReport:
@@ -80,6 +90,10 @@ def parse(raw: bytes) -> WeatherReport:
         if high is None or low is None:
             continue
         days.append({"days_ago": len(highs) - 1 - index, "max_c": high, "min_c": low})
+    if not days:
+        # Nothing usable is unavailable, never an ok of zeros the model would
+        # read as "no hot days" (the final review, 9 October 2026).
+        raise WeatherUnavailable("no_data")
     current = data.get("current") if isinstance(data, dict) else None
     current_c = _number(current.get("temperature_2m")) if isinstance(current, dict) else None
     return WeatherReport(current_c=current_c, days=tuple(days))

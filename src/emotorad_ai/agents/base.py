@@ -131,7 +131,8 @@ WEATHER_RULE = """
 
 Recent weather:
 - When the temperature matters (the battery will not charge, charges slowly, range has dropped, or storage), call get_recent_weather instead of asking the customer how hot or cold it is.
-- Say what it found with their area in one short sentence, for example "It has been up to 41 °C around Pune this week", then ask once whether it is about that hot or cold where they charge or keep the bike.
+- Say what it found with their area in one short sentence, giving the number, for example "It has been up to 41 °C around Pune this week", then ask once: "Is it about that warm where you charge or keep the bike, or cooler indoors?" (or "that cool" when it has been cold).
+- Never say "very hot" or "extremely hot", and do not ask whether it is hot: give the number. Those words stop the chat as a battery hazard.
 - Their answer wins: if they charge indoors, in an air-conditioned room or a basement, go by what they say.
 - Never blame a fault on the weather alone, and never use the weather to refuse or hold up a ticket.
 - If it answers no_area, ask for their pin code; a button to share their location is shown. If it answers weather_unavailable, ask the customer about the temperature instead.

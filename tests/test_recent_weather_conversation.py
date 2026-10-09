@@ -64,11 +64,30 @@ class SliceTests(unittest.TestCase):
         self.assertNotIn(WEATHER_RULE.strip(), llm2.requests[0]["system"])
 
 
+class RuleWordingTests(unittest.TestCase):
+    """The final review's I1: the battery safety gate stops a chat on 'very hot' or
+    'extremely hot' (guardrails._SAFETY_TERMS, Tier-1, unchanged). The rule must not
+    put those words in the bot's mouth, or invite them as the rider's answer."""
+
+    def test_the_question_asks_about_warmth_not_heat(self):
+        self.assertNotIn("that hot", WEATHER_RULE)
+        self.assertIn("about that warm", WEATHER_RULE)
+        self.assertIn('Never say "very hot" or "extremely hot"', WEATHER_RULE)
+
+    def test_a_rider_who_answers_very_hot_still_meets_the_safety_gate(self):
+        """Pinned on purpose: the gate wins over the weather question. Raise
+        with Sachin before ever changing it."""
+        runtime, adapter, llm = runtime_with([])
+        reply = send(runtime, adapter, "yes very hot", area=AREA)
+        self.assertTrue(reply.handled_by.startswith("guardrail"), reply.handled_by)
+        self.assertEqual(llm.requests, [])
+
+
 class ConversationTests(unittest.TestCase):
     def test_the_agent_states_the_weather_and_asks_once(self):
         runtime, adapter, llm = runtime_with([
             call_tool(GET_RECENT_WEATHER, {}),
-            say("It has been up to 41 °C around Pune this week. Is it about that hot where you charge it?"),
+            say("It has been up to 41 °C around Pune this week. Is it about that warm where you charge it, or cooler indoors?"),
         ])
         reply = send(runtime, adapter, "my battery won't charge", area=AREA)
         self.assertIn("41 °C", reply.text)
@@ -79,7 +98,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_a_typed_pincode_becomes_the_chats_area(self):
         runtime, adapter, _ = runtime_with([
-            call_tool(GET_RECENT_WEATHER, {"pincode": "400054"}), say("Is it about that hot where you charge it?"),
+            call_tool(GET_RECENT_WEATHER, {"pincode": "400054"}), say("Is it about that warm where you charge it, or cooler indoors?"),
         ])
         send(runtime, adapter, "I'm at 400054 this week, it won't charge", area=AREA)
         area = runtime.conversations.get("conv-w").area

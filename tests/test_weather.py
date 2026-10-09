@@ -128,6 +128,26 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(parse(body(drop=("current",))).current_c)
 
 
+class NoDataTests(unittest.TestCase):
+    """The final review's I2: nothing usable is unavailable, never an ok of zeros."""
+
+    def test_an_all_null_body_is_unavailable_and_not_cached(self):
+        raw = b'{"daily": {"temperature_2m_max": [null, null], "temperature_2m_min": [null, null]}, "current": null}'
+        transport = Transport([(200, raw), (200, body())])
+        client = OpenMeteoClient(KEY, fetch=transport, clock=Clock())
+        with self.assertRaises(WeatherUnavailable) as caught:
+            client.recent("411014", POINT)
+        self.assertEqual(str(caught.exception), "no_data")
+
+    def test_nan_infinity_and_huge_numbers_are_dropped_not_fatal(self):
+        raw = (b'{"current": {"temperature_2m": NaN}, "daily": {"temperature_2m_max": [NaN, 1e400, 30.0, '
+               + b"9" * 400 + b'], "temperature_2m_min": [20.0, 20.0, 20.0, 20.0]}}')
+        report = parse(raw)
+        self.assertIsNone(report.current_c)
+        self.assertEqual([d["max_c"] for d in report.days], [30.0])
+        self.assertEqual(summary(report, AREA)["highest_c"], 30)
+
+
 class SummaryTests(unittest.TestCase):
     def test_the_figures(self):
         highs = [41.6, 42.0, 39.0, 38.0, 37.0, 36.0, 35.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]

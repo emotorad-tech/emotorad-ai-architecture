@@ -90,7 +90,8 @@ A typed pin code also becomes the chat's area (`source: typed`), as the dealer t
 Appended for an agent that has the tool and whose registry holds it, as `DEALER_RULE` is:
 
 - When a record needs the temperature (the battery will not charge, charges slowly, range dropped, storage), call `get_recent_weather` instead of asking the rider.
-- Say what it found, with the area, in one short sentence: for example, "It has been up to 41 °C around Pune this week." Then ask once whether it is about that hot or cold where they charge or keep the bike.
+- Say what it found, with the area, in one short sentence: for example, "It has been up to 41 °C around Pune this week." Then ask once: "Is it about that warm where you charge or keep the bike, or cooler indoors?"
+- Never say "very hot" or "extremely hot", and never ask whether it is hot. The battery safety gate stops a chat on those words, whoever writes them (the final review, 9 October 2026).
 - The rider's answer wins. If they charge indoors, in an air-conditioned room or in a basement, go by what they say.
 - Never blame a fault on the weather alone, and never use the weather to refuse or hold up a ticket.
 - If the tool says `weather_unavailable`, ask the rider about the temperature as before.
