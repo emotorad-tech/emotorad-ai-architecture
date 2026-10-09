@@ -8,6 +8,7 @@ nothing else. Nothing in this module talks to a real system.
 from __future__ import annotations
 
 import itertools
+import os
 import re
 from datetime import date
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -40,6 +41,7 @@ SEARCH_KNOWLEDGE = "search_knowledge"
 SEARCH_BATTERY_KNOWLEDGE = SEARCH_KNOWLEDGE
 CREATE_SUPPORT_TICKET = "create_support_ticket"
 FIND_SERVICE_SLOTS = "find_service_slots"
+FIND_NEAREST_DEALERS = "find_nearest_dealers"
 BOOK_SERVICE_SLOT = "book_service_slot"
 SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
 # The unverified counterpart of create_support_ticket. Separate on purpose:
@@ -738,6 +740,11 @@ def build_registry(
     # Where write results are remembered. In memory by default; a durable store
     # with the same claim/get/put/release methods shares it across servers.
     idempotency: Optional[Any] = None,
+    # The OMS dealer stores (tools/dealer_stores.DealerDirectory) and the side
+    # channel their cards reach the reply by (StoreCards). Absent unless
+    # supplied, so an agent that cannot look stores up is never told it can.
+    dealers: Optional[Any] = None,
+    store_cards: Optional[Any] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -1707,6 +1714,69 @@ def build_registry(
             # resolves a guide photo's URL: nothing here is a string the model
             # chose.
             return ok({"offered": True, "action": {"kind": "request_location", "label": "Share my location"}})
+
+    if dealers is not None:
+        from ..address import PincodeDirectory
+        from ..conversation import utc_now_iso
+        from ..evidence_check import CONTACT_ENV
+        from .dealer_stores import FAR_KM, DealerStoresUnavailable, store_card
+
+        pincodes = PincodeDirectory.load()
+
+        @registry.register(
+            FIND_NEAREST_DEALERS,
+            "The three EMotorad dealer stores nearest the customer. Call it only when the customer should "
+            "take the bike to a dealer: the issue is still unclear after your questions, or a fault you "
+            "verified is in warranty and its part must be fitted at a dealer. Pass `pincode` only if the "
+            "customer typed one in this chat; otherwise their area is supplied by the platform. The stores' "
+            "addresses, managers and phone numbers are shown to the customer below your reply: never write "
+            "a phone number or a street address yourself.",
+            parameters={"pincode": {"type": "string",
+                                    "description": "A six-digit pin code the customer typed in this chat."}},
+            required=(),
+            injects=("conversation_id",),
+            optional_injects=("area",),
+        )
+        def find_nearest_dealers(conversation_id: str, area: Optional[Dict[str, Any]] = None,
+                                 pincode: Optional[str] = None) -> Dict[str, Any]:
+            contact = (os.environ.get(CONTACT_ENV) or "").strip()
+            typed = "".join(str(pincode or "").split())
+            if typed:
+                places = pincodes.lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
+                if not places or dealers.centres.centre(typed) is None:
+                    raise ToolError("bad_pincode", "%s is not a pin code India Post delivers to. Ask the customer "
+                                                   "for their six-digit pin code." % typed[:12])
+                area = {"pincode": typed, "district": places[0].district, "state": places[0].state,
+                        "source": "typed", "at": utc_now_iso()}
+            centre = dealers.centres.centre((area or {}).get("pincode"))
+            if centre is None:
+                return ok({"outcome": "no_area",
+                           "action": {"kind": "request_location", "label": "Share my location"}})
+            try:
+                nearest = dealers.nearest(centre)
+            except DealerStoresUnavailable:
+                nearest = []
+            if not nearest:
+                raise ToolError("oms_unavailable", "Dealer stores cannot be looked up right now."
+                                + (" The customer can call customer care on %s." % contact if contact else ""),
+                                retryable=True)
+            cards = [store_card("D%d" % (n + 1), store, km) for n, (store, km) in enumerate(nearest)]
+            if store_cards is not None:
+                store_cards.put(conversation_id, cards)
+            far = nearest[0][1] > FAR_KM
+            data: Dict[str, Any] = {
+                "outcome": "ok",
+                "area": dict(area),
+                "far": far,
+                "stores": [{"store_ref": card["ref"], "store_name": card["name"],
+                            "locality": ", ".join(x for x in (store.district, store.state) if x),
+                            "distance_km": card["distance_km"]}
+                           for card, (store, _km) in zip(cards, nearest)],
+                "note": "Their addresses, managers and phone numbers are shown to the customer below your reply.",
+            }
+            if far and contact:
+                data["care_contact"] = contact
+            return ok(data, freshness_seconds=600)
 
     if replacement_orders is not None:
         parts_table = load_parts_table()
