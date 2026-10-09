@@ -1716,12 +1716,11 @@ def build_registry(
             return ok({"offered": True, "action": {"kind": "request_location", "label": "Share my location"}})
 
     if dealers is not None:
-        from ..address import PincodeDirectory
         from ..conversation import utc_now_iso
         from ..evidence_check import CONTACT_ENV
         from .dealer_stores import FAR_KM, DealerStoresUnavailable, store_card
 
-        pincodes = PincodeDirectory.load()
+        dealer_pincodes = PincodeDirectory.load()
 
         @registry.register(
             FIND_NEAREST_DEALERS,
@@ -1742,7 +1741,7 @@ def build_registry(
             contact = (os.environ.get(CONTACT_ENV) or "").strip()
             typed = "".join(str(pincode or "").split())
             if typed:
-                places = pincodes.lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
+                places = dealer_pincodes.lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
                 if not places or dealers.centres.centre(typed) is None:
                     raise ToolError("bad_pincode", "%s is not a pin code India Post delivers to. Ask the customer "
                                                    "for their six-digit pin code." % typed[:12])

@@ -69,6 +69,7 @@ TICKET_PRODUCING_TOOLS = ("create_support_ticket", "raise_intake_ticket", "submi
 # send failed, and it answered "That's the battery On/Off switch" with nothing
 # on the screen. Runtime._admit_unsent_media is the backstop in code.
 GUIDE_MEDIA_TOOL = "send_guide_media"
+DEALER_TOOL = "find_nearest_dealers"  # tools.mocks.FIND_NEAREST_DEALERS
 GUIDE_MEDIA_RULE = """
 
 Pictures: you can show the customer a guide photo or clip only through \
@@ -115,6 +116,15 @@ When a bike's purchase date is missing: if invoice_on_file is true, do not ask f
 checking the invoice on file. If it is false, ask for a clear photo or PDF of the purchase invoice. Code reads \
 the invoice, raises the ticket and tells the customer what it found: never state an invoice date or a cover end \
 date yourself."""
+
+DEALER_RULE = """
+
+Nearest dealers:
+- Call find_nearest_dealers only when the customer should take the bike to a dealer: the issue is still unclear after your questions, or a fault you verified is in warranty and its part has to be fitted at a dealer (raise the ticket first and quote its reference).
+- The stores' addresses, managers and phone numbers are shown to the customer below your reply. Name at most the nearest store and its distance. Never write a phone number or a street address.
+- If it answers no_area, ask for their pin code; a button to share their location is shown. If it answers bad_pincode, ask for the pin code again.
+- If `far` is true, say the nearest dealer is over 100 km away, and give the care_contact if there is one.
+"""
 
 
 @dataclass(frozen=True)
@@ -214,6 +224,8 @@ class Agent:
             system += PHOTO_SAFETY_RULE
             system += STAFF_WORDS_RULE
             system += INVOICE_RULE
+            if DEALER_TOOL in self.definition.tool_names and DEALER_TOOL in self.registry.specs:
+                system += DEALER_RULE
             system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]

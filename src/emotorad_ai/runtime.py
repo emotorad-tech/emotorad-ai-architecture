@@ -156,6 +156,7 @@ from .openrouter import OpenRouterError
 from .standard_responses import StandardResponse, load_standard_responses
 from .tools.mocks import (
     CREATE_SUPPORT_TICKET,
+    FIND_NEAREST_DEALERS,
     LOOKUP_ERROR_CODE,
     LOOKUP_WARRANTY_RECORD,
     OFFER_LOCATION_SHARE,
@@ -543,6 +544,7 @@ class Runtime:
         melt_ask: Optional[MeltAsk] = None,
         serial_ask: Optional[SerialAsk] = None,
         invoice: Any = None,
+        store_cards: Any = None,
     ) -> None:
         self.settings = settings or load_settings()
         # The melt ask (melt_ask.py, 6 October 2026): one fixed reply asking
@@ -556,6 +558,9 @@ class Runtime:
         # Invoices read for a missing purchase date (invoice_ocr.InvoiceService,
         # spec 2026-10-08): None leaves every turn as it was.
         self.invoice = invoice
+        # The dealer store cards a turn found (tools/dealer_stores.StoreCards,
+        # spec 2026-10-09): put by find_nearest_dealers, taken for the reply.
+        self.store_cards = store_cards
         # Evidence is checked before a ticket (evidence_check.py, the person's
         # brief of 6 October 2026). Off unless asked for; api.py turns it on
         # with EMOTORAD_EVIDENCE_CHECK. Off, every path is exactly as before.
@@ -755,6 +760,10 @@ class Runtime:
     def _handle(self, message: InboundMessage) -> Reply:
         cid = message.conversation_id
         turn_mark = len(self.log.events)
+        if self.store_cards is not None:
+            # Cards left by a turn whose reply never carried them (a guardrail
+            # replaced it) must not reach this one.
+            self.store_cards.take(cid)
         for attempt in (1, 2):
             try:
                 state = self.conversations.get(cid)
@@ -2505,6 +2514,8 @@ class Runtime:
                 "started_at": lambda: self._ticket_run_start(message, state, resolved),
                 "evidence_seen": lambda: state.evidence_seen,
                 "coverage_result": lambda: state.coverage_result,
+                # The customer's area, for find_nearest_dealers (spec 2026-10-09).
+                "area": lambda: state.area,
                 # The ticket tool's check on a frame number the rider reads
                 # off the sticker: only for the bike this conversation chose.
                 "selected_bike": lambda: state.selected_frame,
@@ -2793,6 +2804,7 @@ class Runtime:
                 if item.get("url")
             ],
             actions=list(turn.actions),
+            stores=self._dealer_cards(message, turn, state),
             metadata=dict(
                 {"tool_calls": [c["tool"] for c in turn.tool_calls], "iterations": turn.iterations},
                 **({"route": route_path} if route_path else {}),
@@ -3586,6 +3598,17 @@ class Runtime:
         replies a customer is most likely to receive first.
         """
         return apply_disclosure(text, state, channel)
+
+    def _dealer_cards(self, message: InboundMessage, turn: Any, state: ConversationState) -> List[Dict[str, Any]]:
+        """The store cards this turn found, and the area a typed pin code
+        gave (spec 2026-10-09, sections 3 and 4)."""
+        for call in turn.tool_calls:
+            if call["tool"] != FIND_NEAREST_DEALERS or is_error(call["result"]):
+                continue
+            area = (call["result"].get("data") or {}).get("area")
+            if isinstance(area, dict) and area.get("source") == "typed":
+                state.area = dict(area)
+        return self.store_cards.take(message.conversation_id) if self.store_cards is not None else []
 
     def _finish(
         self,

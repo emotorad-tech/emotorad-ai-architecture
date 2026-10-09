@@ -21,6 +21,7 @@ from ..media import model_offered
 from ..tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
+    FIND_NEAREST_DEALERS,
     FIND_SERVICE_SLOTS,
     GET_RECENT_TRIPS,
     GET_SERVICE_STATUS,
@@ -38,7 +39,7 @@ AGENT_NAME = "narrow_support"
 # schedule" (staging, 2026-10-01). Without Amigo they are not registered,
 # and the agent drops them.
 TOOL_NAMES = (SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS, BOOK_SERVICE_SLOT,
-              GET_SERVICE_STATUS, GET_RECENT_TRIPS)
+              GET_SERVICE_STATUS, GET_RECENT_TRIPS, FIND_NEAREST_DEALERS)
 
 _RULES = """\
 You are EMotorad's support assistant. The customer's issue has already been identified, \

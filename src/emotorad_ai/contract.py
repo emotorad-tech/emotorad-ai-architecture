@@ -186,6 +186,10 @@ class Reply:
     # location" button: {"kind": ..., "label": ...}. Empty on every channel
     # that has nothing to render them with.
     actions: List[Dict[str, Any]] = field(default_factory=list)
+    # Dealer store cards code found (spec 2026-10-09): each {"ref", "name",
+    # "address", "pincode", "manager_name", "phone", "distance_km"}, nearest
+    # first. The surface decides how many to show. Never written by the model.
+    stores: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

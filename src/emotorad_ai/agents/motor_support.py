@@ -23,6 +23,7 @@ from ..identity import ResolvedIdentity
 from ..tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
+    FIND_NEAREST_DEALERS,
     FIND_SERVICE_SLOTS,
     GET_RECENT_TRIPS,
     GET_SERVICE_STATUS,
@@ -51,6 +52,7 @@ TOOL_NAMES = (
     BOOK_SERVICE_SLOT,
     GET_SERVICE_STATUS,
     GET_RECENT_TRIPS,
+    FIND_NEAREST_DEALERS,
 )
 
 _BASE_PROMPT = """\
