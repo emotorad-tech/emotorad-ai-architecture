@@ -124,7 +124,7 @@ Authorization: Bearer <Amiigo access token>
 | `attachments` | array, up to 3 | No | `{"upload_id": "..."}` for each photo or video, from "Photos and videos". |
 | `screen` | string | No | The app screen the chat was opened from, for example `battery_health`. Accepted and passed to the bot with the message, but nothing reads it yet: in v1 it does not change the answer, and it is not stored. Send it anyway; a later version will use it to guess the topic. |
 | `pill` | string | No | A quick-reply chip the rider tapped. Today only `battery` and `motor` are handled. |
-| `location` | object | No | `{"latitude": 18.52, "longitude": 73.85}`, sent only after the rider taps "Share my location". The bot turns it into a pincode and keeps no coordinates. |
+| `location` | object | No | `{"latitude": 18.52, "longitude": 73.85}`, with a chat's first message once the app has a fix, and after the rider taps "Share my location" (the app team's addendum of 7 October 2026). The server turns it into a pincode and district and keeps no coordinates. With words, a chip or a photo it is background; on its own it is the rider's answer. A missing, non-numeric or out-of-range value is dropped and logged without its values, and the message is handled as usual (never `bad_frame`, since 9 October 2026). Unknown keys inside it are ignored. |
 
 **`ping`**: `{"type": "ping"}`, to keep the socket open.
 
@@ -408,6 +408,7 @@ One chat's messages. Three ways to call it:
 | `attachments[].url` | string or `null` | A temporary link to the file. `null` when the file cannot be shown (a photo sent while photo storage was unavailable, so it was not kept, or one that has been deleted): show a placeholder such as "Photo". |
 | `attachments[].url_expires_at` | string or `null` | When the link stops working, about 15 minutes after the response. Load the image when it arrives and keep the image, not the link; fetch again for fresh links. |
 | `attachments[].mime_type`, `caption`, `poster` | string or `null` | Only on a live `reply` frame. History keeps the kind and the file, not the caption. |
+| `stores` | array, bot messages only | The three nearest EMotorad dealer stores when the bot sends the rider to a dealer, nearest first; absent otherwise. Live and in history. Each `{ref, name, address, pincode, manager_name, phone, distance_km}`. Draw them as cards; see `docs/contracts/amiigo-support-chat-stores.md`. |
 
 ### What is masked
 
