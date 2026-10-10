@@ -1995,7 +1995,10 @@ def build_registry(
 
             # The gate (spec 2026-10-10 replacement orders, section 1), all in
             # code: the evidence, the registration's date, the part's own cover.
-            if evidence_verified not in ("any", PART_FAULT.get(part)):
+            # A part with no fault component (the display) is never ordered on
+            # a verdict: None must not match a missing verdict.
+            fault = PART_FAULT.get(part)
+            if evidence_verified != "any" and (fault is None or evidence_verified != fault):
                 raise ToolError(
                     "evidence_not_verified",
                     "The fault is not yet confirmed by the photos or video for this bike, so nothing can be "

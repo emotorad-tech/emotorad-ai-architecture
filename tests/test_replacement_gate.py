@@ -2,8 +2,9 @@
 
 import unittest
 from datetime import date
+from unittest import mock
 
-from emotorad_ai.fulfilment import ReplacementOrders
+from emotorad_ai.fulfilment import PartRule, ReplacementOrders
 from emotorad_ai.tools import oms_db
 from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER, build_registry
 from emotorad_ai.tools.registry import ToolContext
@@ -67,6 +68,17 @@ class EvidenceTests(unittest.TestCase):
 
     def test_any_is_the_evidence_check_off(self):
         self.assertTrue(placed(place(registration(), verified="any")))
+
+
+    def test_a_part_with_no_fault_is_never_ordered_on_no_verdict(self):
+        # The parts table makes the display an ask part, which would refuse
+        # first; a table where it is orderable proves the gate itself.
+        table = {"display": PartRule(part="display", technician=False, ask=False)}
+        with mock.patch("emotorad_ai.tools.mocks.load_parts_table", return_value=table):
+            self.assertEqual(code_of(place(registration(), verified=None, part="display")),
+                             "evidence_not_verified")
+            self.assertEqual(code_of(place(registration(), verified="battery", part="display")),
+                             "evidence_not_verified")
 
 
 class RegistrationTests(unittest.TestCase):
