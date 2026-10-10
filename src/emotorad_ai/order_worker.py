@@ -105,8 +105,9 @@ class OrderWorker:
     def process(self, order: Dict[str, Any]) -> None:
         reference = order["_id"]
         order["oms"]["passes"] = int(order["oms"].get("passes") or 0) + 1
+        frame = order.get("frame_number")
         try:
-            found = self._client.find(reference)
+            found = self._client.find(reference, frame_number=frame)
         except _OMS_ERRORS as exc:
             return self._retry(order, type(exc).__name__, looked_not_found=False)
         if found:
@@ -128,13 +129,14 @@ class OrderWorker:
             self._log("replacement_order_intent_unsaved", {"reference": reference, "error": type(exc).__name__})
             return None
         try:
-            placed = self._client.place(afs_request(order, pin_code_id, sale_type_id),
+            placed = self._client.place(afs_request(order, pin_code_id, sale_type_id,
+                                                    env=getattr(self._client, "env", None)),
                                         "%s:%d" % (reference, order["oms"]["passes"]))
             return self._sent(order, placed)
         except _OMS_ERRORS as exc:
             error = type(exc).__name__
         try:
-            found = self._client.find(reference)
+            found = self._client.find(reference, frame_number=frame)
         except _OMS_ERRORS:
             return self._retry(order, error, looked_not_found=False)  # OMS may hold it: not "no order"
         if found:

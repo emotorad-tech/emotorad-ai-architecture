@@ -27,8 +27,8 @@ def queued(ledger, at=START, frame="EMXP0001"):
     return order
 
 
-def worker(ledger, oms, now, logged=None):
-    return OrderWorker(ledger, client(oms), pin_codes=lambda pincode: "pin-1",
+def worker(ledger, oms, now, logged=None, env=None):
+    return OrderWorker(ledger, client(oms, env=env), pin_codes=lambda pincode: "pin-1",
                        log=(lambda event, fields: logged.append((event, fields))) if logged is not None else None,
                        clock=lambda: now[0])
 
@@ -71,6 +71,34 @@ class SendTests(unittest.TestCase):
         worker(ledger, oms, now).run_once()
         self.assertEqual(oms.sent, [])
         self.assertEqual(ledger.get(order["_id"])["status"], "sent")
+
+
+class EnvironmentTests(unittest.TestCase):
+    """Finding 4: the ticket number carries the deployment's environment."""
+
+    def test_an_order_is_sent_and_found_under_its_environments_ticket_number(self):
+        ledger, oms, now = ReplacementOrders(), FakeOMS(fail_add_after_create=True), [START]
+        order = queued(ledger)
+        worker(ledger, oms, now, env="stage").run_once()
+        self.assertEqual(oms.sent[0]["ticket_number"], order["_id"] + "/stage")
+        self.assertEqual(ledger.get(order["_id"])["status"], "sent")
+        self.assertEqual(len(oms.orders), 1)
+
+    def test_another_environments_order_does_not_stop_ours(self):
+        ledger, now = ReplacementOrders(), [START]
+        order = queued(ledger)
+        oms = FakeOMS(orders=[{"id": "o-7", "order_code": "AFS/X/7", "ticket_id": order["_id"]}])
+        worker(ledger, oms, now, env="stage").run_once()
+        self.assertEqual(len(oms.sent), 1)
+        self.assertNotEqual(ledger.get(order["_id"])["oms"]["order_code"], "AFS/X/7")
+
+    def test_a_row_for_another_frame_is_not_our_order(self):
+        ledger, now = ReplacementOrders(), [START]
+        order = queued(ledger)
+        oms = FakeOMS(orders=[{"id": "o-7", "order_code": "AFS/X/7", "ticket_id": order["_id"],
+                               "frame_number": "EMXP9999"}])
+        worker(ledger, oms, now).run_once()
+        self.assertEqual(len(oms.sent), 1)
 
 
 class RetryTests(unittest.TestCase):
@@ -159,10 +187,10 @@ class LookFailsAfterSend:
         self._real = real
         self.looking_fails = False
 
-    def find(self, reference):
+    def find(self, reference, frame_number=None):
         if self.looking_fails:
             raise oms_afs.OMSCallError("look failed")
-        return self._real.find(reference)
+        return self._real.find(reference, frame_number=frame_number)
 
     def place(self, request, client_ref):
         try:

@@ -86,9 +86,24 @@ def _http_post(url: str, json: Any = None, timeout: Optional[float] = None) -> A
     return httpx.post(url, json=json, timeout=timeout)
 
 
-def afs_request(order: Dict[str, Any], pin_code_id: str, sale_type_id: str) -> Dict[str, Any]:
+def ticket_number(reference: str, env: Optional[str] = None) -> str:
+    """Our reference as OMS holds it in ticket_id: `<RO-reference>/<env>` when
+    the deployment names its environment (EMOTORAD_AI_ENV, `stage` on
+    staging), else the bare reference. References restart per deployment, so
+    the environment keeps one deployment's orders from matching another's (the
+    whole-branch review, finding 4)."""
+    env = (env or "").strip()
+    return "%s/%s" % (reference, env) if env else reference
+
+
+def _frame_key(frame_number: Any) -> str:
+    return "".join(str(frame_number or "").split()).upper()
+
+
+def afs_request(order: Dict[str, Any], pin_code_id: str, sale_type_id: str,
+                env: Optional[str] = None) -> Dict[str, Any]:
     """The `afs_order_add` request for one ledger order: a customer order (CO),
-    free (rate 0), sale type Warranty, our reference in ticket_number."""
+    free (rate 0), sale type Warranty, our ticket number (`ticket_number`)."""
     customer = order.get("customer") or {}
     address = customer.get("address") or {}
     request: Dict[str, Any] = {"order_type": "CO"}
@@ -107,7 +122,7 @@ def afs_request(order: Dict[str, Any], pin_code_id: str, sale_type_id: str) -> D
         "sale_type": SALE_TYPE,
         "sale_type_id": sale_type_id,
         "frame_number": order.get("frame_number"),
-        "ticket_number": order["_id"],
+        "ticket_number": ticket_number(order["_id"], env),
         "remark": REMARK + (" Ticket %s." % order["ticket_reference"] if order.get("ticket_reference") else ""),
     })
     return request
@@ -116,8 +131,10 @@ def afs_request(order: Dict[str, Any], pin_code_id: str, sale_type_id: str) -> D
 class AFSClient:
     def __init__(self, settings: AFSSettings, connect: Optional[Callable[..., Any]] = None,
                  post: Optional[Callable[..., Any]] = None, log: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-                 timeout: float = 20.0) -> None:
+                 timeout: float = 20.0, env: Optional[str] = None) -> None:
         self._settings = settings
+        # The deployment's environment, part of every ticket number (ticket_number).
+        self.env = (env or "").strip() or None
         self._connect = connect or _ws_connect
         self._post = post or _http_post
         self._log = log
@@ -131,12 +148,17 @@ class AFSClient:
 
     # -- the three calls -----------------------------------------------------
 
-    def find(self, reference: str) -> Optional[Dict[str, str]]:
-        """Our order in OMS, by the reference in its ticket_id, or None."""
-        response = self._call("afs_order_list", {"search": reference, "limit": 5, "page_no": 1}, reference + ":find")
+    def find(self, reference: str, frame_number: Optional[str] = None) -> Optional[Dict[str, str]]:
+        """Our order in OMS, or None: a row whose ticket_id is exactly our
+        ticket number (with this deployment's environment) and, when the row
+        carries a frame number and we know the order's, the same frame."""
+        wanted = ticket_number(reference, self.env)
+        response = self._call("afs_order_list", {"search": wanted, "limit": 5, "page_no": 1}, reference + ":find")
         if response.get("status") == OK_CODE:
             rows = (response.get("data") or {}).get("data") or []
-            matches = [r for r in rows if r.get("ticket_id") == reference]
+            matches = [r for r in rows if r.get("ticket_id") == wanted
+                       and not (frame_number and r.get("frame_number")
+                                and _frame_key(r.get("frame_number")) != _frame_key(frame_number))]
             # OMS splits an order when stock is short and copies ticket_id onto the
             # child; the list is newest first, so prefer the one with no parent.
             row = next((r for r in matches if not r.get("parent_code")), matches[0] if matches else None)

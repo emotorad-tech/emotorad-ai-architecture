@@ -286,6 +286,13 @@ OMS_DB = oms_db_tools.reader_from_env()
 # with EMOTORAD_OMS_AFS_ORDERS=on and the OMS admin settings, by a worker the
 # lifespan starts. Off: orders are recorded and ticketed, nothing is sent.
 OMS_AFS_SETTINGS, OMS_AFS_HEALTH = oms_afs.settings_from_env()
+if OMS_AFS_SETTINGS is not None and stores.replacement_orders_status != "mongodb":
+    # A memory ledger restarts its references at RO-1000001, so a look-up
+    # would match an earlier process's order and a new one would be marked
+    # sent and never placed (the whole-branch review, finding 3).
+    OMS_AFS_SETTINGS = None
+    OMS_AFS_HEALTH = "misconfigured: replacement orders need MongoDB (%s)" % stores.replacement_orders_status
+ORDERS_LIVE = OMS_AFS_SETTINGS is not None
 PRODUCT_IDS = ProductIds()
 # Every pin code's centre (geo.py, spec 2026-10-09): the shared-location
 # geocoder below and the dealer stores both place things by it.
@@ -372,7 +379,7 @@ def _build_registry():
         # conversations; the worker below sends queued orders to OMS.
         replacement_orders=stores.replacement_orders,
         product_ids=PRODUCT_IDS,
-        orders_live=OMS_AFS_SETTINGS is not None,
+        orders_live=ORDERS_LIVE,
         location_sharing=True,
         idempotency=stores.idempotency,
         ticket_system=ZOHO.router,
@@ -406,9 +413,10 @@ def _oms_afs_log(event: str, fields: dict) -> None:
 
 ORDER_WORKER = (OrderWorker(
     stores.replacement_orders,
-    oms_afs.AFSClient(OMS_AFS_SETTINGS, log=_oms_afs_log),
+    # The environment is part of every ticket number (oms_afs.ticket_number).
+    oms_afs.AFSClient(OMS_AFS_SETTINGS, log=_oms_afs_log, env=os.environ.get("EMOTORAD_AI_ENV")),
     pin_codes=(OMS_DB.pin_code_id if OMS_DB is not None else (lambda pincode: None)),
-    log=_order_worker_log) if OMS_AFS_SETTINGS is not None else None)
+    log=_order_worker_log) if ORDERS_LIVE else None)
 # Read once, with the registry, so /health names the source actually in use.
 WARRANTY_SOURCE = _warranty_source_label()
 

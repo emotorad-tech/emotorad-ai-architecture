@@ -83,8 +83,8 @@ class FakeResponse:
         return self._body
 
 
-def client(oms, logged=None):
-    return oms_afs.AFSClient(SETTINGS, connect=oms.connect, post=oms.post,
+def client(oms, logged=None, env=None):
+    return oms_afs.AFSClient(SETTINGS, connect=oms.connect, post=oms.post, env=env,
                              log=(lambda event, fields: logged.append((event, fields))) if logged is not None else None)
 
 
@@ -115,6 +115,33 @@ class CallTests(unittest.TestCase):
         oms = FakeOMS(orders=[{"id": "o-9", "order_code": "AFS/X/9", "ticket_id": "RO-10000011"},
                               {"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001"}])
         self.assertEqual(client(oms).find("RO-1000001"), {"order_code": "AFS/X/1", "order_id": "o-1"})
+
+    def test_find_searches_and_matches_the_environments_ticket_number(self):
+        # Finding 4: references restart per deployment, so the environment is
+        # part of the ticket number and only an exact match is ours.
+        oms = FakeOMS(orders=[{"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001"},
+                              {"id": "o-2", "order_code": "AFS/X/2", "ticket_id": "RO-1000001/stage"}])
+        self.assertEqual(client(oms, env="stage").find("RO-1000001"), {"order_code": "AFS/X/2", "order_id": "o-2"})
+        self.assertEqual(client(oms).find("RO-1000001"), {"order_code": "AFS/X/1", "order_id": "o-1"})
+
+    def test_another_environments_order_with_the_same_reference_is_not_ours(self):
+        oms = FakeOMS(orders=[{"id": "o-2", "order_code": "AFS/X/2", "ticket_id": "RO-1000001/stage"}])
+        self.assertIsNone(client(oms).find("RO-1000001"))
+        self.assertIsNone(client(oms, env="prod").find("RO-1000001"))
+        oms = FakeOMS(orders=[{"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001"}])
+        self.assertIsNone(client(oms, env="stage").find("RO-1000001"))
+
+    def test_a_row_for_another_frame_is_not_ours(self):
+        oms = FakeOMS(orders=[{"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001",
+                               "frame_number": "EMXP0002"}])
+        self.assertIsNone(client(oms).find("RO-1000001", frame_number="EMXP0001"))
+        oms = FakeOMS(orders=[{"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001",
+                               "frame_number": "emxp 0001"}])
+        self.assertEqual(client(oms).find("RO-1000001", frame_number="EMXP0001"),
+                         {"order_code": "AFS/X/1", "order_id": "o-1"})
+        oms = FakeOMS(orders=[{"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001"}])
+        self.assertEqual(client(oms).find("RO-1000001", frame_number="EMXP0001"),
+                         {"order_code": "AFS/X/1", "order_id": "o-1"})
 
     def test_find_with_no_order_is_none(self):
         self.assertIsNone(client(FakeOMS()).find("RO-1000001"))
@@ -227,6 +254,13 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(request["%s_address" % side], "A1102, Park View")
             self.assertEqual(request["%s_address2" % side], "Sector 49, Gurugram, Haryana")
         self.assertEqual(request["remark"], "Warranty replacement placed by the EMotorad support chatbot.")
+
+    def test_the_ticket_number_carries_the_environment_when_there_is_one(self):
+        order = {"_id": "RO-1000001", "customer": {}}
+        self.assertEqual(oms_afs.afs_request(order, "p", "s")["ticket_number"], "RO-1000001")
+        self.assertEqual(oms_afs.afs_request(order, "p", "s", env="stage")["ticket_number"], "RO-1000001/stage")
+        self.assertEqual(oms_afs.ticket_number("RO-1000001", " stage "), "RO-1000001/stage")
+        self.assertEqual(oms_afs.ticket_number("RO-1000001", " "), "RO-1000001")
 
     def test_the_remark_names_our_ticket_when_there_is_one(self):
         base = {"_id": "RO-1000001", "customer": {}}
