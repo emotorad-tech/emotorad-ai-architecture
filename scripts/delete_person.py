@@ -7,8 +7,9 @@
 
 A person's every conversation, whole: working state, every transcript turn
 (those from before they signed in too), summaries, idempotency receipts,
-media (every photo or video they sent) and where each conversation came from
-(conversation_origins). `--conversation-id` removes one
+media (every photo or video they sent), where each conversation came from
+(conversation_origins) and any number a chat proved that has not yet expired
+(verification_sessions, found by the phone too). `--conversation-id` removes one
 conversation that was never tied to a verified person. Each deletion writes an
 audit record to `erasure_log`: who ran it, when, why and what went, with the
 person's key only as a SHA-256 hash, so the log itself holds nothing about

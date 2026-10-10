@@ -291,6 +291,19 @@ class DeleteTests(unittest.TestCase):
         self.assertEqual(self.desk.media.hidden, [])
         self.assertEqual(len(self.desk.store.transcript("mine")), 4)
 
+    def test_refused_when_a_notice_arrived_after_the_review(self):
+        # Ruling 21: a ticket closed in Zoho Desk after the review puts a
+        # notice in the chat, which the review never saw.
+        self.reviewed()
+        self.desk.store.add_notice("mine", ME, "ticket_closed",
+                                   "Your support request EM-00001 was closed by our support team.",
+                                   "2026-10-03T08:30:00+00:00", reference="EM-00001")
+        code, text = self.delete()
+        self.assertEqual(code, 1)
+        self.assertIn("has changed since your review", text)
+        self.assertEqual(self.desk.media.hidden, [])
+        self.assertEqual(len(self.desk.store.notices_of("mine")), 1)
+
     def test_refused_when_the_wrong_reference_is_typed(self):
         self.reviewed()
         code, text = self.delete(typed="DEL-AAAAAA")

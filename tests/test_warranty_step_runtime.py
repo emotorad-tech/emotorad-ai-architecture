@@ -1,0 +1,281 @@
+"""The warranty step through runtime.handle() (spec 2026-10-09 warranty step)."""
+
+import json
+import unittest
+from datetime import date
+
+from emotorad_ai.adapters import WebsiteChatAdapter
+from emotorad_ai.agents.battery_support import AGENT_NAME as BATTERY
+from emotorad_ai.config import Settings
+from emotorad_ai.identity import IdentityResolver
+from emotorad_ai.llm import ScriptedClaude, call_tool, say
+from emotorad_ai.observability import EventLog
+from emotorad_ai.runtime import TURN_FACT_FIELDS, Runtime
+from emotorad_ai.tools import fixtures
+from emotorad_ai.tools.mocks import LOOKUP_WARRANTY_RECORD, build_registry
+from emotorad_ai.tools.oms_db import to_record
+
+TODAY = date(2026, 10, 9)
+PHONE = fixtures.SESSIONS["sess-ananya"]
+
+
+def record(frame, bought=None, invoice=False):
+    row = {"frame_number": frame, "product_name": "T-Rex Air", "purchase_date": bought,
+           "invoice_image": "f-%s" % frame if invoice else None, "status": "active"}
+    return to_record(row, TODAY, invoice_state=lambda file_id: "readable" if file_id else "unreadable")
+
+
+DATED = record("EMXP0001", bought=date(2025, 3, 12))
+ON_FILE = record("EMXP0002", invoice=True)
+NO_INVOICE = record("EMXP0003")
+
+
+class FakeInvoice:
+    def __init__(self):
+        self.reads = []
+
+    def start(self, jobs):
+        raise AssertionError("the step must not wait for the read (the final review, Minor 5)")
+
+    def start_later(self, jobs):
+        for job in jobs:
+            job()
+
+    def read_from_oms(self, conversation_id, user_key, cluster_id, phone, frame_number):
+        self.reads.append(frame_number)
+
+    def today(self):
+        return TODAY
+
+
+def make(responses, records=(DATED,), step=True, invoice=None, evidence_check=False, oms_available=True, **extra):
+    registry = build_registry(today=TODAY, warranty_source=lambda phone: list(records) if records else None,
+                              oms_available=oms_available)
+    llm = ScriptedClaude(responses)
+    runtime = Runtime(settings=Settings(log_path="", log_to_stdout=False), registry=registry, llm=llm,
+                      log=EventLog(path=None), resolver=IdentityResolver(registry), self_service_identity=True,
+                      warranty_step=step, invoice=invoice, evidence_check=evidence_check, **extra)
+    return runtime, WebsiteChatAdapter(runtime.resolver), llm
+
+
+def send(runtime, adapter, text, frame="EMXP0001", seen=False, cid="conv-ws"):
+    state = runtime.conversations.get(cid)
+    state.route_to(BATTERY)
+    if frame:
+        state.selected_frame = frame
+    if seen:
+        state.evidence_seen = True
+    return runtime.handle(adapter.to_message({"conversation_id": cid, "session_token": "sess-ananya", "text": text}))
+
+
+class HiddenTests(unittest.TestCase):
+    def test_the_state_field_is_a_turn_fact(self):
+        self.assertIn("warranty_step_frames", TURN_FACT_FIELDS)
+
+    def test_no_cover_in_the_prompt_before_the_step(self):
+        runtime, adapter, llm = make([say("Let's check the charger first.")])
+        send(runtime, adapter, "my battery won't charge")
+        system = llm.requests[0]["system"]
+        self.assertIn("EMXP0001", system)
+        self.assertIn("CHECKED AFTER THE FAULT IS CONFIRMED", system)
+        # The prompt's fixed text speaks of warranty in general; the bike's
+        # own cover line (per part, with dates) must be absent.
+        self.assertNotIn("Per part:", system)
+        self.assertNotIn("2026-03-11", system)
+
+    def test_the_lookup_answers_after_issue_and_sets_no_coverage_result(self):
+        runtime, adapter, llm = make([call_tool(LOOKUP_WARRANTY_RECORD, {}), say("Let's check the charger.")])
+        send(runtime, adapter, "is my battery covered?")
+        result = json.dumps(llm.requests[1]["messages"][-1], default=str)
+        self.assertIn("warranty_after_issue", result)
+        self.assertIsNone(runtime.conversations.get("conv-ws").coverage_result)
+
+    def test_with_the_switch_off_everything_is_as_today(self):
+        runtime, adapter, llm = make([call_tool(LOOKUP_WARRANTY_RECORD, {}), say("You're covered.")], step=False)
+        send(runtime, adapter, "is my battery covered?")
+        self.assertIn("from_warranty_api", json.dumps(runtime.conversations.get("conv-ws").coverage_result))
+
+
+class StepTests(unittest.TestCase):
+    def test_nothing_happens_before_the_issue_is_verified(self):
+        runtime, adapter, _ = make([say("Let's check the charger.")])
+        reply = send(runtime, adapter, "my battery won't charge")
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+        self.assertEqual(reply.actions, [])
+
+    def test_dated_sets_the_coverage_result_and_appends_nothing(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault in your video.")])
+        reply = send(runtime, adapter, "here is the video", seen=True)
+        state = runtime.conversations.get("conv-ws")
+        self.assertEqual(state.warranty_step_frames, ["EMXP0001"])
+        self.assertIn("from_warranty_api", json.dumps(state.coverage_result))
+        self.assertIn("Thanks, I can see the fault", reply.text)
+        self.assertNotIn("invoice", reply.text.lower())
+
+    def test_invoice_on_file_starts_the_read_and_says_so(self):
+        invoice = FakeInvoice()
+        runtime, adapter, _ = make([say("Thanks, I can see the fault.")], records=(ON_FILE,), invoice=invoice)
+        reply = send(runtime, adapter, "here is the video", frame="EMXP0002", seen=True)
+        self.assertEqual(invoice.reads, ["EMXP0002"])
+        self.assertIn("I'm checking the invoice we have on file for your bike.", reply.text)
+
+    def test_invoice_on_file_without_an_invoice_service_still_says_so(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault.")], records=(ON_FILE,), invoice=None)
+        reply = send(runtime, adapter, "here is the video", frame="EMXP0002", seen=True)
+        self.assertIn("I'm checking the invoice", reply.text)
+
+    def test_no_invoice_asks_for_one(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault.")], records=(NO_INVOICE,))
+        reply = send(runtime, adapter, "here is the video", frame="EMXP0003", seen=True)
+        self.assertIn("please send a clear photo or PDF of your purchase invoice", reply.text)
+
+    def test_once_per_bike(self):
+        runtime, adapter, _ = make([say("Thanks."), say("Anything else?")], records=(NO_INVOICE,))
+        send(runtime, adapter, "here is the video", frame="EMXP0003", seen=True)
+        again = send(runtime, adapter, "ok", frame="EMXP0003", seen=True)
+        self.assertNotIn("purchase invoice", again.text)
+
+    def test_a_rider_with_two_bikes_and_none_chosen_waits(self):
+        runtime, adapter, _ = make([say("Which bike is it?")], records=(DATED, NO_INVOICE))
+        reply = send(runtime, adapter, "here is the video", frame=None, seen=True)
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+        self.assertNotIn("invoice", reply.text.lower())
+
+    def test_a_hazard_reply_never_runs_the_step(self):
+        runtime, adapter, _ = make([say("Please stop using the battery, it could catch fire.")],
+                                   records=(NO_INVOICE,))
+        send(runtime, adapter, "it smells odd", frame="EMXP0003", seen=True)
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+
+    def test_with_the_evidence_check_on_only_a_passing_verdict_counts(self):
+        runtime, _, _ = make([], records=(NO_INVOICE,), evidence_check=True)
+        runtime._evidence_gated = lambda state: True  # a fault chat with the check on
+        state = runtime.conversations.get("conv-ws")
+        state.evidence_seen = True
+        self.assertFalse(runtime._issue_verified(state))
+        state.evidence_verdict = {"passed": True}
+        self.assertTrue(runtime._issue_verified(state))
+
+    def test_with_the_evidence_check_off_a_photo_or_video_counts(self):
+        runtime, _, _ = make([], records=(NO_INVOICE,))
+        state = runtime.conversations.get("conv-ws")
+        self.assertFalse(runtime._issue_verified(state))
+        state.evidence_seen = True
+        self.assertTrue(runtime._issue_verified(state))
+
+    def test_the_lookup_is_open_after_the_step(self):
+        runtime, adapter, llm = make([say("Thanks."), call_tool(LOOKUP_WARRANTY_RECORD, {}), say("Covered.")])
+        send(runtime, adapter, "here is the video", seen=True)
+        send(runtime, adapter, "am I covered?")
+        self.assertNotIn("warranty_after_issue", json.dumps(llm.requests[-1]["messages"][-1], default=str))
+
+
+class NoFrameTests(unittest.TestCase):
+    def send_no_bike(self, runtime, adapter, text, seen=False, route=True):
+        state = runtime.conversations.get("conv-nf")
+        if route:
+            state.route_to(BATTERY)  # as triage would for "my battery won't charge"
+        if seen:
+            state.evidence_seen = True
+        return runtime.handle(adapter.to_message({"conversation_id": "conv-nf", "session_token": "sess-ananya",
+                                                  "text": text}))
+
+    def test_a_battery_fault_reaches_the_battery_agent_then_the_placeholder(self):
+        runtime, adapter, llm = make([say("Let's check the charger. Please send a short video."),
+                                      say("Thanks, I can see the fault.")], records=())
+        first = self.send_no_bike(runtime, adapter, "my battery won't charge")
+        self.assertEqual(first.handled_by, BATTERY)
+        second = self.send_no_bike(runtime, adapter, "here is the video", seen=True)
+        self.assertIn("You'll be able to register its warranty in the app soon.", second.text)
+        self.assertIn({"kind": "register_warranty", "label": "Register warranty"}, second.actions)
+        self.assertEqual(runtime.conversations.get("conv-nf").warranty_step_frames, ["-"])
+        self.assertIsNone(second.ticket_id)
+
+    def test_a_registration_request_gets_the_placeholder_without_the_model(self):
+        runtime, adapter, llm = make([], records=())
+        reply = self.send_no_bike(runtime, adapter, "I want to register my warranty", route=False)
+        self.assertIn("register its warranty in the app soon", reply.text)
+        self.assertIn({"kind": "register_warranty", "label": "Register warranty"}, reply.actions)
+        self.assertEqual(llm.requests, [])
+
+    def test_with_the_switch_off_a_rider_with_no_bike_still_goes_to_registration(self):
+        runtime, adapter, _ = make([say("Could you read me the frame number?")], records=(), step=False)
+        reply = self.send_no_bike(runtime, adapter, "my battery won't charge")
+        self.assertEqual(reply.handled_by, "late_warranty_registration")
+
+
+class VerifyFirstWordingTests(unittest.TestCase):
+    def test_the_no_bikes_text_is_the_help_line_when_the_step_is_on(self):
+        from emotorad_ai import warranty_step
+        from emotorad_ai.verify_first import NO_BIKES
+
+        on, _, _ = make([], records=(), step=True, verify_first=True)
+        off, _, _ = make([], records=(), step=False, verify_first=True)
+        self.assertIsNotNone(on.verify_gate)
+        self.assertEqual(on.verify_gate.no_bikes_text, warranty_step.NO_BIKES_HELP)
+        self.assertEqual(off.verify_gate.no_bikes_text, NO_BIKES)
+
+
+
+class ReviewFixTests(unittest.TestCase):
+    """The final review of 9 October 2026."""
+
+    def test_an_oms_outage_never_says_not_registered(self):
+        runtime, adapter, _ = make([say("Thanks, I can see the fault in your photo.")], records=(),
+                                   oms_available=False)
+        state = runtime.conversations.get("conv-out")
+        state.route_to(BATTERY)
+        state.evidence_seen = True
+        reply = runtime.handle(adapter.to_message({"conversation_id": "conv-out", "session_token": "sess-ananya",
+                                                   "text": "here is the photo"}))
+        self.assertNotIn("isn't registered", reply.text)
+        self.assertEqual(reply.actions, [])
+        self.assertEqual(state.warranty_step_frames, [])
+
+    def test_a_fault_that_mentions_registration_goes_to_the_agent(self):
+        for text in ("I registered my bike at the dealer already but the battery won't charge",
+                     "battery not charging, bike registered at dealer"):
+            with self.subTest(text=text):
+                runtime, adapter, llm = make([say("Let's check the charger.")], records=())
+                reply = runtime.handle(adapter.to_message({"conversation_id": "conv-r", "session_token":
+                                                           "sess-ananya", "text": text}))
+                self.assertNotEqual(reply.handled_by, "warranty_step")
+                self.assertEqual(len(llm.requests), 1)
+
+    def test_mid_chat_a_registration_word_never_replaces_troubleshooting(self):
+        runtime, adapter, llm = make([say("Thanks, let's look at the light.")], records=())
+        runtime.conversations.get("conv-m").route_to(BATTERY)
+        reply = runtime.handle(adapter.to_message({"conversation_id": "conv-m", "session_token": "sess-ananya",
+                                                   "text": "the bike was registered by the dealer, the charger "
+                                                           "light stays red"}))
+        self.assertEqual(reply.handled_by, BATTERY)
+
+    def test_a_no_frame_riders_agent_is_never_told_to_register_now(self):
+        runtime, adapter, llm = make([say("Let's check the charger.")], records=())
+        runtime.conversations.get("conv-p").route_to(BATTERY)
+        runtime.handle(adapter.to_message({"conversation_id": "conv-p", "session_token": "sess-ananya",
+                                           "text": "my battery won't charge"}))
+        system = llm.requests[0]["system"]
+        self.assertNotIn("offer to register their bike now", system)
+        self.assertIn("in the app", system)
+
+    def test_the_lookup_never_tells_the_agent_to_register_now(self):
+        from emotorad_ai.tools.registry import ToolContext
+
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: None)
+        envelope = registry.call(LOOKUP_WARRANTY_RECORD, {}, ToolContext(
+            conversation_id="c", phone=PHONE, late={"register_in_app": lambda: True}))
+        self.assertEqual(envelope["error"]["code"], "no_warranty_record")
+        self.assertNotIn("offer to register", envelope["error"]["message"])
+
+    def test_the_line_waits_while_the_reply_asks_for_something_else(self):
+        runtime, adapter, _ = make([say("Thanks. Could you also send a short video of the charger light?"),
+                                    say("Thanks, that shows it.")], records=(NO_INVOICE,))
+        first = send(runtime, adapter, "here is the photo", frame="EMXP0003", seen=True)
+        self.assertNotIn("purchase invoice", first.text)
+        self.assertEqual(runtime.conversations.get("conv-ws").warranty_step_frames, [])
+        second = send(runtime, adapter, "here is the video", frame="EMXP0003", seen=True)
+        self.assertIn("purchase invoice", second.text)
+
+if __name__ == "__main__":
+    unittest.main()

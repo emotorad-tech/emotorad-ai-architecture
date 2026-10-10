@@ -19,6 +19,14 @@
 # looked up under `assets/` and signed through the store in
 # `src/emotorad_ai/storage/s3.py`. Upload new assets with
 # `scripts/upload_asset.py`, which writes the key back here.
+#
+# `code_only: true` (6 October 2026): the picture is never offered to the model
+# (not in send_guide_media's list, the narrow prompt or a search result). Code
+# attaches it to the melt ask, the one fixed reply that asks for all three
+# items at once (src/emotorad_ai/melt_ask.py), in this order: battery serial,
+# controller label, terminals. The ask is off unless all three exist and
+# EMOTORAD_MELT_ASK is "on" (on in staging from 7 October 2026). The battery
+# serial and the controller's serial come from the reference library below.
 
 soc_button:
   id: afs/battery/photos/soc-button-non-doodle.png
@@ -29,3 +37,346 @@ battery_onoff_switch:
   id: afs/battery/photos/battery-onoff-switch.png
   kind: image
   caption: The battery On/Off switch, set it to ON before charging
+
+melt_battery_serial:
+  id: library/battery/photos/serial-label-downtube.jpg
+  kind: image
+  caption: "Example: the serial number sticker on the battery"
+  code_only: true
+
+melt_controller_label:
+  id: library/controller/photos/serial-label.jpg
+  kind: image
+  caption: "Example: the controller's label, next to the battery pins on the frame"
+  code_only: true
+
+melt_terminals:
+  id: afs/battery/photos/battery-terminals.jpg
+  kind: image
+  caption: "Example: the battery's metal terminals, to film up close"
+  code_only: true
+
+# The reference library (7 October 2026): rebuilt from scratch under
+# assets/library/<domain>/ in emotorad-ai-stage-media, one photo at a time, each
+# with its .w900.webp copy. The old assets/afs/ files stay where they are until
+# everything they hold has a place here.
+#
+# The primary ask, by domain, when a customer reports an issue: controller ->
+# controller serial; battery -> battery serial and controller serial; motor ->
+# motor serial and controller serial; display -> display serial. OCR reads the
+# serial and stores it. Entries are code_only unless the bot may send them
+# itself while it helps: since 7 October 2026, battery_switch_on_position and
+# battery_revival_steps (the library's copies of the SOC and On/Off pictures
+# stay code_only: soc_button and battery_onoff_switch already offer them).
+#
+# domain: battery, controller, motor, display or frame.
+# use: customer_guide (sent to the customer while the bot helps: "this is the
+#   switch"), customer_example (shown with the request for the customer's own
+#   photo: "a photo like this") or checker_reference (sent to the AI checker
+#   with the customer's photo, never to the customer).
+# about: what the photo shows, for the people maintaining this file and for the
+#   checker.
+
+battery_serial_label:
+  id: library/battery/photos/serial-label-downtube.jpg
+  kind: image
+  caption: "Example: the battery's serial number sticker, on the end of the pack"
+  code_only: true
+  domain: battery
+  use: customer_example
+  about: >-
+    A downtube battery pack (any model except the Doodle) held in a hand. The
+    white barcode sticker below the pack's rating label carries the battery
+    serial (EMIN followed by letters and digits) and the line "the interior
+    cell is EVE Li-ion battery".
+
+battery_serial_label_doodle:
+  id: library/battery/photos/serial-label-doodle.jpg
+  kind: image
+  caption: "Example: the Doodle battery's serial number sticker"
+  code_only: true
+  domain: battery
+  use: customer_example
+  about: >-
+    A Doodle battery held in a hand. The white barcode sticker carries the
+    battery serial (ABADAASHA followed by digits). The number moulded into the
+    case above it is a patent number, not the serial.
+
+battery_warranty_seal_intact:
+  id: library/battery/photos/warranty-seal-intact.jpg
+  kind: image
+  caption: "Reference: an intact warranty seal on the battery"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    The underside of a downtube battery pack, out of the bike. The white
+    "WARNING NO TEAR OFF" warranty seal sits flat and whole near a corner
+    screw. This is what an intact seal looks like.
+
+battery_warranty_seal_torn:
+  id: library/battery/photos/warranty-seal-torn.jpg
+  kind: image
+  caption: "Reference: a torn warranty seal on the battery"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    The same view of a downtube battery pack's underside. The "WARNING NO TEAR
+    OFF" seal is broken: the screw beneath it shows through the torn sticker,
+    so the pack has been opened. This is what a torn seal looks like.
+
+controller_serial_label:
+  id: library/controller/photos/serial-label.jpg
+  kind: image
+  caption: "Example: the controller's label, next to the battery pins on the frame"
+  code_only: true
+  domain: controller
+  use: customer_example
+  about: >-
+    The controller on the frame, seen with the battery removed, below the four
+    battery pins. The large label reads EMOTORAD BRUSHLESS MOTOR CONTROLLER,
+    with the model, maximum current, rated voltage 36 V and an S/N with a
+    barcode. A separate small barcode sticker beside it carries a second code
+    starting EMIN. Which of the two is the controller serial is still to be
+    confirmed.
+
+motor_serial_number:
+  id: library/motor/photos/serial-number.jpg
+  kind: image
+  caption: "Example: the serial number printed on the rear hub motor"
+  code_only: true
+  domain: motor
+  use: customer_example
+  about: >-
+    The rear hub motor, seen between the spokes on the chain side. The serial
+    is printed in white on the motor's casing as one line: the rating (36V250W)
+    and wheel size, then the serial digits.
+
+display_serial_label:
+  id: library/display/photos/serial-label-back.jpg
+  kind: image
+  caption: "Example: the serial number on the back of the display"
+  code_only: true
+  domain: display
+  use: customer_example
+  about: >-
+    The back of a display unit (model LCD-M5), held in a hand. The printed
+    text gives the model and an S/N, and a white barcode sticker below carries
+    a code starting EMIN. Where the serial sits on the back varies with the
+    display model.
+
+frame_number_sticker:
+  id: library/frame/photos/frame-number-sticker.jpg
+  kind: image
+  caption: "Example: the frame number sticker on the seat tube"
+  code_only: true
+  domain: frame
+  use: customer_example
+  about: >-
+    The seat tube of a bike, below the seat clamp. A white barcode sticker
+    running down the tube carries the frame number (a letter followed by
+    digits).
+
+# The second batch (7 October 2026): battery help, and the melted checks.
+# Uploaded byte for byte from the files the person sent.
+
+battery_onoff_switch_photo:
+  id: library/battery/photos/onoff-switch.jpg
+  kind: image
+  caption: "The battery On/Off switch, at the top of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack on a desk, with an arrow and the label "Battery
+    On/Off Switch" pointing to the round switch at the top end of the pack.
+
+battery_soc_button_photo:
+  id: library/battery/photos/soc-button.jpg
+  kind: image
+  caption: "The SOC button and its charge lights, on the side of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack on a desk, with an arrow and the label "SOC
+    Button" pointing to the button above the row of charge lights on the
+    side of the pack. The same picture as battery_soc_button_non_doodle,
+    as WhatsApp re-saved it.
+
+battery_soc_button_non_doodle:
+  id: library/battery/photos/soc-button-non-doodle.png
+  kind: image
+  caption: "The SOC button and its charge lights, on the side of the pack"
+  code_only: true
+  domain: battery
+  use: customer_guide
+  about: >-
+    The SOC button of a battery on any bike except the Doodle (the Doodle has
+    no SOC button): a downtube pack with an arrow and the label "SOC Button"
+    pointing to the button above the row of charge lights. The original of
+    battery_soc_button_photo.
+
+battery_switch_on_position:
+  id: library/battery/photos/switch-on-position.jpg
+  kind: image
+  caption: "The battery switch in the ON position"
+  domain: battery
+  use: customer_guide
+  about: >-
+    A downtube battery pack with a circled close-up of the switch at its top
+    end, set to ON, and the words "Battery Switch is On".
+
+battery_revival_steps:
+  id: library/battery/videos/revival-steps.mp4
+  kind: video
+  caption: "How to wake a battery from deep sleep"
+  domain: battery
+  use: customer_guide
+  about: >-
+    19 seconds, with sound. The charger is plugged into a downtube pack and
+    the pack's On/Off switch is pressed again and again, then the pack is
+    turned and the SOC button pressed to check its charge lights. The battery
+    revival process: used when a battery may be in deep sleep, to tell a
+    sleeping battery from a dead one.
+
+battery_terminals_melted_vs_normal:
+  id: library/battery/photos/terminals-melted-vs-normal.png
+  kind: image
+  caption: "Reference: a melted battery terminal next to a normal one"
+  code_only: true
+  domain: battery
+  use: checker_reference
+  about: >-
+    Two labelled panels of a battery's terminal: on top a melted terminal
+    with fused metal pins, below a normal one with clean, evenly spaced
+    contacts. The AI checker compares the customer's photo or video with it
+    to judge whether the battery terminal has melted. An AI-made illustration
+    (it carries a generator's mark), not a photo of a real battery: replace
+    it with a real melted terminal when one is available.
+
+controller_connector_not_melted:
+  id: library/controller/photos/connector-not-melted.jpg
+  kind: image
+  caption: "Reference: a controller's battery connector that has not melted"
+  code_only: true
+  domain: controller
+  use: checker_reference
+  about: >-
+    The controller on the frame with the battery removed, with a circled
+    close-up of its four straight battery pins and the words "Non Melted
+    Controller". What a normal connector looks like.
+
+controller_connector_melted_vs_normal:
+  id: library/controller/photos/connector-melted-vs-normal.png
+  kind: image
+  caption: "Reference: a melted controller connector next to a normal one"
+  code_only: true
+  domain: controller
+  use: checker_reference
+  about: >-
+    Two labelled panels of the controller's battery connector: on the left
+    a normal one (intact, distinct pins and a clean housing), on the right a
+    melted one (melted and fused pins, severe heat damage, warped plastic).
+    The AI checker compares the customer's photo or video with it to judge
+    whether the controller has melted. An AI-made illustration, not a photo
+    of a real controller: replace it with a real one when available.
+
+# Motor reference clips (8 October 2026), from AFS's "Motor issue evidences"
+# and the AFS chatbot team's motor diagnosis (§5f). They have been in
+# emotorad-ai-stage-media under assets/afs/motor/ since the first upload, each
+# with its .poster.jpg, and were held until AFS said what each shows and when it
+# is sent. Each is offered to the model (send_guide_media) and named in the
+# motor knowledge record of the one case it belongs to; the motor agent's prompt
+# lists them. Five originals are iPhone HEVC 10-bit HDR recordings (9 to 81
+# MB) that play on an iPhone and in Safari but not on every Android phone or in
+# Chrome, so each id below is an H.264 720p SDR copy with its sound (the
+# person allowed format and quality changes for size, 8 October 2026), beside
+# the untouched original (.mov, or -web.mp4 for the bearing clip's copy). The
+# freewheel clip was already H.264 and is the original.
+# Every motor clip is also a reference: the motor agent compares the
+# description of the customer's clip with the `about` below.
+
+motor_e07_reference:
+  id: afs/motor/videos/motor-e007-reference.mp4
+  kind: video
+  caption: "Reference: the motor cable and its connection, in the correct state"
+  domain: motor
+  use: customer_guide
+  about: >-
+    46 seconds. A T-Rex Air showing E 007 on the display, then the motor cable
+    and its connector under the chain stay, plugged in throughout. AFS's
+    reference for the E-07 case (and E-24, the T-Rex Pro's equivalent): the
+    wire condition and the connections in their correct state, in one clip.
+    The customer films the same on their bike, and the bot compares.
+
+motor_noise_reference:
+  id: afs/motor/videos/motor-noise.mp4
+  kind: video
+  caption: "Reference: motor noise, with and without load"
+  domain: motor
+  use: customer_guide
+  about: >-
+    33 seconds. The rear hub motor and the display, then the bike on its stand
+    with no rider: motor noise with and without load. The default clip for a
+    general noise complaint.
+
+motor_noise_no_load_reference:
+  id: afs/motor/videos/motor-noise-without-load.mp4
+  kind: video
+  caption: "Reference: motor noise with the wheel off the ground"
+  domain: motor
+  use: customer_guide
+  about: >-
+    8 seconds. The rear wheel spinning off the ground, with no load. Sent when
+    the customer says the noise comes with the wheel stationary or while not
+    riding. Noise with the wheel stationary points at the planetary gears.
+
+motor_bearing_noise_reference:
+  id: afs/motor/videos/motor-bearing-noise-under-load-web.mp4
+  kind: video
+  caption: "Reference: motor bearing noise while riding"
+  domain: motor
+  use: customer_guide
+  about: >-
+    51 seconds, filmed while riding. Bearing noise under load. Sent when the
+    customer says the noise only happens while riding, which points at the
+    bearings only.
+
+motor_threading_reference:
+  id: afs/motor/videos/motor-threading.mp4
+  kind: video
+  caption: "Reference: a loose brake disc and the bolt-tightening check"
+  domain: motor
+  use: customer_guide
+  about: >-
+    71 seconds. The brake disc turned by hand, then a hex key on a disc bolt
+    again and again: a loose or misaligned disc rotor and the bolt-tightening
+    check. A bolt that tightens firmly and holds is normal; one that keeps
+    turning without gripping is a threading fault. Also the reference for
+    axle threading.
+
+freewheel_threading_reference:
+  id: afs/motor/videos/freewheel-threading.mp4
+  kind: video
+  caption: "Reference: a freewheel that is out of alignment"
+  domain: motor
+  use: customer_guide
+  about: >-
+    28 seconds, portrait. A freewheel with a threading problem: out of
+    alignment. Sent when the bike works on the throttle but not in pedal
+    assist (PAS) or when pedalling.
+
+display_odometer_reading:
+  id: afs/motor/photos/odometer-reading.jpg
+  kind: image
+  caption: "Example: the display's main screen, with the odometer (ODO)"
+  code_only: true
+  domain: display
+  use: customer_example
+  about: >-
+    The display's main screen: energy bar, speed, assist level (PAS) and the
+    ODO reading. No case sends it yet (AFS §5f, 8 October 2026). The AFS
+    folder's frame number and motor serial photos are the library's
+    frame_number_sticker and motor_serial_number.

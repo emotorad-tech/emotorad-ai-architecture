@@ -1,0 +1,50 @@
+id: motor-disc-threading
+title: "Brake disc loose or misaligned: disc bolt or axle threading"
+topic: motor
+symptoms: [disc loose, disc rotor loose, loose disc, disc rotor misaligned, disc misaligned,
+           brake disc wobbling, brakes not applying, brake not applying properly, brake not gripping,
+           disc bolt loose, disc bolt not tightening, bolt not tightening, axle nut loose,
+           axle threading, threading issue, disc threading, unexpected jerks, jerk while riding,
+           disc hil raha hai, brake nahi lag raha, ब्रेक नहीं लग रहा]
+applies_to: {}
+source: AFS chatbot team, motor diagnosis §5f6 (8 October 2026)
+# The reference clip is the catalogue's motor_threading_reference, which shows
+# the bolt-tightening check too.
+media: []
+steps:
+  - >-
+    The motor and cycle are otherwise working, but the customer describes brakes not
+    applying, a loose disc rotor, the disc rotor out of its original position, or unexpected
+    jerks. A brake that does not apply properly is a reason not to ride the bike until it is
+    sorted: say so.
+  - >-
+    A LOOSE DISC ROTOR IS NOT AUTOMATICALLY A THREADING FAULT. It is often just loose bolts.
+    Do not conclude threading until the tightening check below has been done.
+  - >-
+    SEND THE REFERENCE. Send the motor_threading_reference clip with send_guide_media and say
+    in words what it shows: a loose disc rotor, and the bolt-tightening check. Ask whether it
+    matches what they are seeing.
+  - >-
+    THE TIGHTENING CHECK. Ask them to try tightening the disc rotor bolts (for the axle, the
+    axle nut), as the clip shows, and tell them what to look for: a bolt that tightens firmly
+    and holds is normal; a bolt that keeps turning without gripping, or will not hold its
+    tightness, is not.
+  - >-
+    THE BOLTS TIGHTEN AND HOLD: this is not a threading issue. Guide them to finish tightening,
+    ask whether the issue is now resolved, and close it there. No ticket is raised.
+  - >-
+    THE BOLTS DO NOT TIGHTEN: this is a threading issue. Ask for the bolt-tightening evidence:
+    one short video of them trying to tighten the bolt, clearly showing it does not tighten.
+    Ask for one thing at a time, and apply the retry rule if they decline.
+  - >-
+    CHECK THE VIDEO YOURSELF. If it shows the bolt failing to tighten: conclusion "threading
+    damage, motor replacement recommended". Tell them what the video shows and that you are
+    sending it to the Approval team for review, and raise create_support_ticket with category
+    motor_fault, the symptom, what the video showed and that conclusion. If the video shows
+    the bolt tightening normally, treat it as the bolts tightening and holding.
+  - >-
+    Axle threading is covered by these same steps, with the axle nut in place of the disc
+    bolts. Never say a replacement is approved, rejected or confirmed.
+escalate_when: >-
+  A video showing a bolt (or the axle nut) that will not tighten: a motor_fault ticket to the
+  Approval team, conclusion threading damage, motor replacement recommended.

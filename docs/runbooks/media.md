@@ -57,6 +57,22 @@ default because Whisper downloads a model on first use and has no deadline.
 
 ## 3. Upload a guide asset
 
+Two ways, one set of derivatives (`storage/assets.py`).
+
+**From the playground.** Open the sidebar's "Media upload (admin)", fill in programme,
+category, kind and slug, pick the file and press "Upload to media bucket". The browser
+asks `POST /uploads` (tree `assets`) for a presigned PUT, sends the bytes straight to S3
+with a progress bar, then calls `POST /uploads/<upload_id>/finish`, which claims the
+upload and writes the derivatives. The file never passes through nginx, uvicorn or
+Streamlit, so the host's body cap does not apply (nginx's default is 1 MB; a 2.7 MB clip
+was 413 before this). The caps are the bucket's: photos and PDFs 10 MB, clips 100 MB,
+types `png jpg webp mp4 mov 3gp pdf`. Locally this needs the API in front of Streamlit
+(open `http://127.0.0.1:8000/playground/`, not port 8501), the bucket set, and
+`http://localhost:8000` in the bucket's CORS origins, which `infra/media.yaml` already
+carries.
+
+**From a terminal**, with your own AWS credentials:
+
 ```bash
 .venv/bin/python3 scripts/upload_asset.py soc.png \
   --programme afs --category battery --kind photos --slug soc-button
@@ -133,6 +149,24 @@ days). There is no routine expiry any more, so every erasure is an explicit requ
 through `scripts/delete_person.py`, which removes a person's conversation records
 (working state, transcript turns, summaries, idempotency receipts) and their media:
 the `media` records in MongoDB and the matching S3 objects, every version.
+
+**Ticket records are removed by hand until spec section 11 ships.** Neither
+`delete_person.py` nor `erasure_admin` lists or removes the person's `tickets` records
+(spec 2026-10-05, section 11, deferred on 5 October). So a person erasing someone also
+removes them in `mongosh`, from a terminal outside the Claude app. A Claude session never
+runs these commands: they read and delete customer records. Find the records by each of
+the person's conversation ids and by their phone's last ten digits, then delete each by
+its `_id` once its `lease_until` is empty or past:
+
+```javascript
+use emotorad_ai
+db.tickets.find({conversation_id: "<conversation id>"}, {_id: 1, state: 1, lease_until: 1, "zoho.ticket_number": 1})
+db.tickets.find({phone: {$regex: "<last ten digits>$"}}, {_id: 1, conversation_id: 1, state: 1, lease_until: 1, "zoho.ticket_number": 1})
+db.tickets.deleteOne({_id: "<reference, for example EM-1000001>"})
+```
+
+A ticket already in Desk keeps its copy of the chat and the photos; see
+`docs/runbooks/config-store.md` §7 for what to do about it.
 
 **Open question, decide before deploying.** Removing the expiry also keeps objects
 that are nobody's evidence: an upload that was presigned and PUT but never claimed by
@@ -360,3 +394,34 @@ chosen before any model runs. `verify-by-order-number` uses the test order numbe
 (2026-09-29): a signed-in customer whose photo alone shows a hazard is handed to a
 person; an anonymous visitor who types a hazard is not promised a call on a number
 the bot does not have. They fail until that behaviour is fixed.
+
+## 10. Turn on the melt ask
+
+The melt ask (`src/emotorad_ai/melt_ask.py`, 6 October 2026) answers a customer who says
+something melted with one fixed message asking for all three items at once: a photo of the
+battery's serial sticker, a photo of the controller's label, and a short video of both
+ends. A reference picture for each goes with it. It is off until the battery serial
+sticker photo exists, and `/health` says why (`"melt_ask": "off: missing
+melt_battery_serial"`).
+
+1. Upload the photo as `assets/afs/battery/photos/battery-serial-label.jpg`, with its
+   `.w900.webp` copy, by either route in §3 (slug `battery-serial-label`, kind `photos`).
+   `scripts/upload_asset.py` writes both.
+2. Add the catalogue entry to `knowledge/_media/catalogue.yaml`, with `code_only: true`
+   so the model is never offered it, and open a PR:
+
+   ```yaml
+   melt_battery_serial:
+     id: afs/battery/photos/battery-serial-label.jpg
+     kind: image
+     caption: "Example: the serial number sticker on the battery"
+     code_only: true
+   ```
+
+3. Add `-e EMOTORAD_MELT_ASK=on` to the `docker run` line in
+   `.github/workflows/deploy-staging.yml` (only exactly `on` turns it on), and deploy.
+4. Check `/health`: `"melt_ask": "on"`. Anything else names the key that is missing, not
+   code-only or would not resolve.
+
+To turn it off, remove `-e EMOTORAD_MELT_ASK=on` and deploy. The Hindi text is a draft:
+a Hindi speaker checks it before real customer traffic.

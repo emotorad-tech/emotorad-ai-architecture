@@ -39,12 +39,13 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, wait
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import IO, Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import httpx
 import websockets
@@ -54,37 +55,60 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .adapters import WebsiteChatAdapter
+from .amiigo import history as amiigo_history
+from .amiigo import routes as amiigo_routes
+from .amiigo import webhooks as zoho_webhooks
+from .amiigo.auth import token_check_from_env
+from .amiigo.common import AmiigoContext, NoStoreMiddleware
 from .client_ip import client_ip, trusted_from_env
 from . import origin as origin_place
+from . import evidence_check
+from . import melt_ask as melt_ask_module
+from . import serial_ask as serial_ask_module
+from . import invoice_ocr
+from . import serial_read
 from . import photo_check
 from . import erasure as erasure_rules
+from . import oms_afs
+from .fulfilment import ProductIds
+from .order_worker import OrderWorker
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
-from .contract import new_conversation_id
-from .fulfilment import ItemCodes, ReplacementOrders
-from .media import load_catalogue
+from .contract import VERIFIED, Attachment, Identity, InboundMessage, Reply, new_conversation_id
+from .media import load_catalogue, model_offered
 from .media import sendable as media_sendable
-from .identity import IdentityResolver
+from .guardrails import check_safety, check_safety_in_description
+from .identity import PHONE, IdentityResolver, normalise
 from .address import PincodeDirectory
-from .location import NominatimGeocoder, describe_location, resolve_location
+from .geo import PincodeCentres
+from .location import CentresGeocoder, area_of, describe_location, resolve_location
 from .observability import EventLog
 from .ratelimit import RateLimiter
-from .conversation import StoreUnavailable, utc_now_iso
+from .conversation import StoreUnavailable, customer_texts, utc_now_iso
 from .media_records import media_record
 from .runtime import Runtime
 from .storage import keys
 from .storage.keys import KeyValidationError, cluster_of, is_customer_key, is_valid_key
 from .storage.s3 import StorageError, store_from_env
 from . import tracing
+from .storage.assets import finish_asset
 from .storage.uploads import UploadError, UploadRegistry
+from .tickets.clock import now_iso
 from .tools import amigo as amigo_tools
+from .tools import dealer_stores as dealer_stores_tools
+from . import weather as weather_tools
+from .tools import oms_db as oms_db_tools
+from .tools import warranty_api as warranty_api_tools
 from .tools import fixtures
 from .tools.mocks import build_registry
 from .tools.oms import OMSClient, live_account_finder, live_warranty_source
-from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity
+from .tools.verification import MockOtpSender, VerificationStore, apply_verified_identity, proved_owner
+from .triage import classify_issue, topic_from_pill
+from .video_summary import TIMEOUT_SECONDS as VIDEO_SUMMARY_SECONDS
 from .video_summary import VideoSummaryError, summariser_from_env
 from .wiring import build_models, build_stores
+from .zoho.wiring import build_zoho, ticket_health, zoho_status
 
 # Set by docker/start.py's loader to the number of names it exported (as a
 # string), after load_into_environ() succeeds. Reported by /health so a
@@ -133,6 +157,13 @@ PHOTO_CHECKER = photo_check.photo_checker_from_env()
 # under a 15-second deadline timed out on staging and a smoking bike went
 # unseen (2026-10-01).
 PHOTO_CHECK_DEADLINE_SECONDS = 30.0
+# Evidence is checked before a ticket (evidence_check.py, the person's brief of
+# 6 October 2026): Gemini says whether a fault chat's photos and videos show
+# the problem. None unless EMOTORAD_EVIDENCE_CHECK is on and the OpenRouter key
+# is set. The runtime's switch (runtime.evidence_check, below) is the one that
+# matters: on with no checker, nothing can pass, so no fault ticket goes
+# through unchecked.
+EVIDENCE_CHECKER = evidence_check.evidence_checker_from_env()
 
 _logger = logging.getLogger(__name__)
 
@@ -140,7 +171,13 @@ _logger = logging.getLogger(__name__)
 # store is module-level. Without one, `build_registry` does not register
 # `request_identity_verification` or `verify_identity` at all, and an anonymous
 # visitor asked for their number has no way to prove it — the flow dead-ends.
-verification_store = VerificationStore()
+# Proved numbers are also saved with the stores (MongoDB `verification_sessions`
+# with EMOTORAD_STORE=mongodb, once mongo_setup.py has made its TTL index), so
+# a deploy does not make every verified chat anonymous and ask for the number
+# and the bike again (staging, 2026-10-06). The turn takes a saved one back
+# only when the saved conversation agrees (VerificationStore.restore). Codes
+# in transit stay in this process's memory: one process, not several servers.
+verification_store = VerificationStore(sessions=stores.verified_sessions, log=log)
 
 # Sends the one-time code. A stand-in until the OTP service is wired (the
 # person, 2026-09-30): it sends nothing and logs the masked number; the code
@@ -150,6 +187,38 @@ OTP_SENDER = MockOtpSender()
 # Amigo, read-only (tools/amigo.py), when EMOTORAD_AMIGO_PG_DSN is set; the
 # config store exports it from the staging secret. None: behaviour as before.
 AMIGO = amigo_tools.from_env()
+
+# The Amiigo app's token check (amiigo/auth.py): Amiigo's public key from
+# EMOTORAD_AMIIGO_PUBLIC_KEY, which a person sets in the config store. Without
+# it the check is off, /health says so and amiigo_tokens_not_configured is
+# logged once.
+AMIIGO_TOKENS = token_check_from_env()
+
+# The Zoho Desk webhook (amiigo/webhooks.py): its secret, from
+# EMOTORAD_ZOHO_WEBHOOK_SECRET, which a person sets in the config store and
+# in the webhook's path in Zoho Desk. Without a secret we accept, the webhook
+# answers 503 and /health says so, never the value. The secret is in the path,
+# so uvicorn's access log writes the path without it.
+ZOHO_WEBHOOK_SECRET = zoho_webhooks.webhook_secret_from_env()
+ZOHO_WEBHOOK_STATUS = zoho_webhooks.webhook_status()
+if ZOHO_WEBHOOK_STATUS == zoho_webhooks.MISCONFIGURED:
+    log.emit("zoho_webhook_misconfigured", "zoho", error=ZOHO_WEBHOOK_STATUS)
+zoho_webhooks.hide_secret_in_access_log()
+
+# Zoho Desk tickets (spec 2026-10-05). Decided here, once, and nowhere else:
+# the CLI, the playground and the live evaluation keep the mock. Zoho is off
+# without EMOTORAD_ZOHO_REFRESH_TOKEN. A failed start-up check also keeps
+# the mock, says why on /health and logs zoho_misconfigured. The worker is
+# built here, but only the lifespan starts it, never the import.
+ZOHO = build_zoho(
+    os.environ,
+    ticket_store=stores.tickets,
+    store_kind=settings.store,
+    conversations=stores.conversations,
+    media_reader=MEDIA_STORE,
+    log=log,
+    otp_is_mock=isinstance(OTP_SENDER, MockOtpSender),
+)
 
 # The guide photos and clips the agent may show. Loaded once: it is authored
 # content in the repo, not per-request state. load_catalogue() raises on a
@@ -161,7 +230,11 @@ AMIGO = amigo_tools.from_env()
 # catalogue was ever passed here, so the tool was never registered and was
 # filtered straight back out of the slice. The prompt told the model to point at
 # the button it was describing, and it had nothing to point with.
-GUIDE_MEDIA = load_catalogue()
+CATALOGUE = load_catalogue()
+# What a model may be offered: the code-only pictures (the melt ask's, which
+# code attaches to its own reply) are left out here, and again by
+# media.sendable and build_registry.
+GUIDE_MEDIA = model_offered(CATALOGUE)
 # Only the pictures this server can actually send reach the model; with none,
 # the tool is not registered at all, so a picture it does not have is never
 # offered (the person's rule, 2026-09-29). /health says how many.
@@ -172,72 +245,197 @@ if UNSENDABLE_MEDIA:
         len(UNSENDABLE_MEDIA), len(GUIDE_MEDIA), "; ".join(sorted(UNSENDABLE_MEDIA.values()))[:500],
     )
 
+# The melt ask (melt_ask.py, the person's brief of 6 October 2026): one fixed
+# reply asking for all three items at once, with a picture of each. Decided
+# here, once: on only with EMOTORAD_MELT_ASK=on and all three pictures in the
+# catalogue, code-only and resolvable. Until the battery serial sticker photo
+# exists it stays off, and /health says why.
+MELT_ASK, MELT_ASK_STATUS = melt_ask_module.from_env(CATALOGUE, MEDIA_STORE)
+# The battery serial-photo ask (serial_ask.py, 7 October 2026): on with
+# EMOTORAD_SERIAL_ASK=on and its three library pictures in the catalogue.
+SERIAL_ASK, SERIAL_ASK_STATUS = serial_ask_module.from_env(CATALOGUE, MEDIA_STORE)
+# The warranty step after the issue is verified (warranty_step.py, spec
+# 2026-10-09), exactly "on"; deploy-staging.yml sets it.
+WARRANTY_STEP = os.environ.get("EMOTORAD_WARRANTY_STEP", "").strip() == "on"
+# Reads the serial off each photo the customer sends once asked (serial_read.py),
+# after the reply. On with the ask, the media bucket and the OpenRouter key.
+SERIAL_READER = (serial_read.serial_reader_from_env()
+                 if SERIAL_ASK is not None and MEDIA_STORE is not None else None)
+# Four at a time across the server; a turn waits for its own photos' reads
+# at most this long (each read is one Gemini call on one photo).
+SERIAL_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="serial-read")
+SERIAL_READ_WAIT_SECONDS = 15.0
+# Where each label is, and an intact and a torn seal, shown to the reader
+# before the customer's photo (serial_read.REFERENCE_KEYS).
+SERIAL_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE, keys=serial_read.REFERENCE_KEYS)
+                     if SERIAL_READER is not None else None)
+# The library's melted and normal comparisons, sent with a battery chat's
+# evidence (evidence_check.REFERENCE_KEYS), read from the bucket on first use.
+EVIDENCE_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE)
+                       if EVIDENCE_CHECKER is not None and MEDIA_STORE is not None else None)
+
 # conversation_id -> the keys already shown in it. Module-level because "already
 # sent" only means anything across turns, and a request-scoped dict would let
 # the agent send the same photo every turn.
 sent_media: dict = {}
 
-# The replacement orders the bot places. Mocked: nothing reaches the OMS from
-# here yet. Module-level so "already on its way" holds across conversations.
-replacement_orders = ReplacementOrders()
+# Bikes from OMS production (tools/oms_db.py, spec 2026-10-08): first among the
+# sources when its connection string is set. Nothing connects at import.
+OMS_DB = oms_db_tools.reader_from_env()
+# Replacement orders to OMS (spec 2026-10-10 replacement orders): sent only
+# with EMOTORAD_OMS_AFS_ORDERS=on and the OMS admin settings, by a worker the
+# lifespan starts. Off: orders are recorded and ticketed, nothing is sent.
+OMS_AFS_SETTINGS, OMS_AFS_HEALTH = oms_afs.settings_from_env()
+if OMS_AFS_SETTINGS is not None and stores.replacement_orders_status != "mongodb":
+    # A memory ledger restarts its references at RO-1000001, so a look-up
+    # would match an earlier process's order and a new one would be marked
+    # sent and never placed (the whole-branch review, finding 3).
+    OMS_AFS_SETTINGS = None
+    OMS_AFS_HEALTH = "misconfigured: replacement orders need MongoDB (%s)" % stores.replacement_orders_status
+ORDERS_LIVE = OMS_AFS_SETTINGS is not None
+PRODUCT_IDS = ProductIds()
+# Every pin code's centre (geo.py, spec 2026-10-09): the shared-location
+# geocoder below and the dealer stores both place things by it.
+PINCODE_CENTRES = PincodeCentres.load()
+# The dealer stores nearest a customer (spec 2026-10-09): OMS's Dealers,
+# read through the same connection setting as the bikes; offline, three
+# made-up stores; otherwise none, and the tool is not offered. Their cards
+# reach the reply beside the model (StoreCards).
+DEALERS, DEALER_SOURCE = dealer_stores_tools.directory_from_env(
+    PINCODE_CENTRES, log=lambda event, fields: log.emit(event, "dealer_stores", **fields),
+    offline=settings.mode == "offline")
+STORE_CARDS = dealer_stores_tools.StoreCards()
+# Recent weather at the rider's area (spec 2026-10-09): Open-Meteo, on with
+# its key only. The key is never logged; the client hides it.
+WEATHER = weather_tools.client_from_env()
+# The OMS API: invoice downloads, and the order-number fallback in
+# verification, which never uses it while the dev-code page is on (a code read
+# off that page plus an order number would verify anyone as the order's owner).
+OMS_CLIENT = OMSClient() if os.environ.get("EMOTORAD_OMS_API_KEY") else None
+ACCOUNT_FINDER = (live_account_finder(OMS_CLIENT)
+                  if OMS_CLIENT is not None and os.environ.get("EMOTORAD_AI_DEV_CODES") != "1"
+                  else fixtures.find_account_by_order_code)
+
+
+def _warranty_source_label() -> str:
+    if OMS_DB is not None:
+        return "oms_db"
+    if warranty_api_tools.configured():
+        return "warranty_api: %s" % warranty_api_tools.WarrantyAPIClient().host
+    return "oms" if os.environ.get("EMOTORAD_OMS_API_KEY") else "fixtures"
 
 
 def _build_registry():
-    """Real OMS reads when a key is configured, fixtures when it is not.
+    """The warranty API, the real OMS or the fixtures, by which key is set.
 
-    The key is the only switch. Without it every lookup is a fixture, which is
+    The keys are the only switch. Without it every lookup is a fixture, which is
     what the tests and a fresh clone get, and `/chat` will happily name a bike
     that belongs to nobody. With it, a phone number reaches the live purchase
     table and the bikes, frame numbers and purchase dates are the customer's own.
 
-    Ticketing stays mocked either way. That combination is worth knowing about:
-    real bike details followed by a ticket number that exists nowhere is more
-    convincing, and therefore worse, than fixtures all the way through.
+    Tickets do not follow this switch. With Zoho on (ZOHO, above), a
+    customer's ticket is recorded for Zoho Desk and a dealer's stays on the
+    mock. With Zoho off, every ticket is the mock's, and its number exists
+    nowhere. That combination is worth knowing about: real bike details
+    followed by a ticket number that exists nowhere is more convincing, and
+    therefore worse, than fixtures all the way through.
     """
-    if not os.environ.get("EMOTORAD_OMS_API_KEY"):
-        return build_registry(
-            verification=verification_store,
-            send_code=OTP_SENDER,
-            # Test order numbers (fixtures.ORDER_CODES), so the fallback can
-            # be tried without the OMS key.
-            account_finder=fixtures.find_account_by_order_code,
-            # The fixture bikes merged with the rider's app bikes, when Amigo
-            # can be read; the fixtures alone otherwise.
-            warranty_source=amigo_tools.merged_source(fixtures.WARRANTY_RECORDS.get, AMIGO) if AMIGO else None,
-            amigo=AMIGO,
-            guide_media=SENDABLE_MEDIA,
-            sent_media=sent_media,
-            replacement_orders=replacement_orders,
-            item_codes=ItemCodes(),
-            approval_mode=settings.approval_mode,
-            location_sharing=True,
-            idempotency=stores.idempotency,
-        )
-    client = OMSClient()
+    # Registered bikes and their coverage come from the warranty API when its
+    # key is set (7 October 2026: it replaces the OMS warranty lookup), else
+    # from the OMS when its key is set, else from the fixtures. The order or
+    # invoice code look-up stays with the OMS, which alone holds orders.
+    oms = OMS_CLIENT
+    if OMS_DB is not None:
+        # Whether OMS's invoice can be read is the invoice service's to say
+        # (defined below, read when a lookup runs); without it, none can.
+        source = oms_db_tools.db_warranty_source(
+            OMS_DB, invoice_state=lambda file_id: (INVOICE.invoice_state(file_id) if INVOICE is not None
+                                                   else invoice_ocr.InvoiceService.UNREADABLE),
+            # Bikes from OMS orders (spec 2026-10-10): a failing orders query
+            # is logged by its class and the registrations stand alone.
+            log=lambda event, fields: log.emit(event, "oms_orders", **fields))
+    elif warranty_api_tools.configured():
+        source = warranty_api_tools.api_warranty_source(warranty_api_tools.WarrantyAPIClient())
+    elif oms is not None:
+        source = live_warranty_source(oms)
+    else:
+        source = fixtures.WARRANTY_RECORDS.get
+    if AMIGO:
+        # The rider's app bikes merged in, when Amigo can be read.
+        source = amigo_tools.merged_source(source, AMIGO)
+    elif source is fixtures.WARRANTY_RECORDS.get:
+        source = None  # build_registry's own default: the fixtures
     return build_registry(
         verification=verification_store,
         send_code=OTP_SENDER,
-        warranty_source=(amigo_tools.merged_source(live_warranty_source(client), AMIGO)
-                         if AMIGO else live_warranty_source(client)),
+        warranty_source=source,
         amigo=AMIGO,
-        account_finder=live_account_finder(client),
+        # Test order numbers (fixtures.ORDER_CODES) without the OMS key, so the
+        # fallback can be tried.
+        account_finder=ACCOUNT_FINDER,
         guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
-        replacement_orders=replacement_orders,
-        item_codes=ItemCodes(),
-        approval_mode=settings.approval_mode,
+        # The order ledger (spec 2026-10-10 replacement orders), shared across
+        # conversations; the worker below sends queued orders to OMS.
+        replacement_orders=stores.replacement_orders,
+        product_ids=PRODUCT_IDS,
+        orders_live=ORDERS_LIVE,
         location_sharing=True,
         idempotency=stores.idempotency,
+        ticket_system=ZOHO.router,
+        dealers=DEALERS,
+        store_cards=STORE_CARDS,
+        weather=WEATHER,
     )
 
 
 registry = _build_registry()
 
-# The reverse geocoder behind "Share my location". OpenStreetMap's public
-# service for this LAN test server; a production provider swaps in here. The
-# tests replace it with a fake. See location.py for what is and is not trusted
-# from it.
-geocoder = NominatimGeocoder()
+# Failures the worker and the OMS client log are errors: an order that did not
+# reach OMS, a pass that crashed, a login that was refused.
+_ERROR_EVENTS = frozenset({"replacement_order_failed", "replacement_order_pass_failed",
+                           "replacement_order_intent_unsaved", "order_worker_pass_failed",
+                           # An order a person may need to look for in OMS, a ledger
+                           # write lost, a pin code OMS could not be asked for.
+                           "replacement_order_look_only", "replacement_order_save_failed",
+                           "oms_pin_code_lookup_failed"})
+
+
+def _order_worker_log(event: str, fields: dict) -> None:
+    if event in _ERROR_EVENTS:
+        log.emit(event, "replacement_orders", level="error", **fields)
+    else:
+        log.emit(event, "replacement_orders", **fields)
+
+
+def _oms_afs_log(event: str, fields: dict) -> None:
+    if event == "oms_login_failed":
+        log.emit(event, "oms_afs", level="error", **fields)
+    else:
+        log.emit(event, "oms_afs", **fields)
+
+
+def _pin_code_id(pincode: str) -> Optional[str]:
+    """OMS's pin code id for the worker; None without the OMS database (the
+    order waits as pin_code_unknown), and a failed read is logged."""
+    if OMS_DB is None:
+        return None
+    return OMS_DB.pin_code_id(pincode, log=_order_worker_log)
+
+
+ORDER_WORKER = (OrderWorker(
+    stores.replacement_orders,
+    # The environment is part of every ticket number (oms_afs.ticket_number).
+    oms_afs.AFSClient(OMS_AFS_SETTINGS, log=_oms_afs_log, env=os.environ.get("EMOTORAD_AI_ENV")),
+    pin_codes=_pin_code_id,
+    log=_order_worker_log) if ORDERS_LIVE else None)
+# Read once, with the registry, so /health names the source actually in use.
+WARRANTY_SOURCE = _warranty_source_label()
+
+# The reverse geocoder behind a shared location: our own pin-code centres,
+# so no third party sees where a rider is. The tests replace it with a fake.
+# See location.py for what is and is not trusted from it.
+geocoder = CentresGeocoder(PINCODE_CENTRES)
 pincode_directory = PincodeDirectory.load()
 resolver = IdentityResolver(registry)
 # Langfuse, when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are in the
@@ -247,6 +445,16 @@ resolver = IdentityResolver(registry)
 TRACING = tracing.langfuse_sink_from_env()
 if TRACING is not None:
     log.sinks.append(TRACING)
+# Invoices read for a missing purchase date (invoice_ocr.py, spec 2026-10-08):
+# on with EMOTORAD_INVOICE_OCR=on and the OpenRouter key, and only with the OMS
+# database, whose registrations say which bikes have no date and which invoice
+# OMS holds. The copy of an OMS invoice is recorded like any customer file.
+_INVOICE_READER = invoice_ocr.reader_from_env() if OMS_DB is not None else None
+INVOICE = (invoice_ocr.InvoiceService(
+    reader=_INVOICE_READER, oms_db=OMS_DB, oms_client=OMS_CLIENT, media_store=MEDIA_STORE,
+    conversations=stores.conversations, emit=log.emit, persist=lambda **record: _persist_media(**record),
+) if _INVOICE_READER is not None else None)
+
 runtime = Runtime(
     settings=settings,
     registry=registry,
@@ -279,6 +487,17 @@ runtime = Runtime(
     phone_resolver=verification_store.verified_phone,
     otp_verified_at=verification_store.verified_on,
     media_store=MEDIA_STORE,
+    # Evidence before a ticket (evidence_check.py): on with
+    # EMOTORAD_EVIDENCE_CHECK=on, and EMotorad's customer care contact for
+    # when the evidence never passes. Off, every path is as before.
+    evidence_check=evidence_check.switch_on(),
+    customer_care_contact=evidence_check.customer_care_contact(),
+    # The melt ask, or None (off).
+    melt_ask=MELT_ASK,
+    serial_ask=SERIAL_ASK,
+    warranty_step=WARRANTY_STEP,
+    invoice=INVOICE,
+    store_cards=STORE_CARDS,
 )
 adapter = WebsiteChatAdapter(resolver)
 
@@ -289,7 +508,17 @@ _ATTACHMENT_KIND = {"images": "image", "videos": "video", "docs": "document"}
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    # The Zoho worker runs only in a process that is serving. It starts here,
+    # never at import, so the tests, a reload and the playground start nothing.
+    if ZOHO.worker is not None:
+        ZOHO.worker.start()
+    if ORDER_WORKER is not None:
+        ORDER_WORKER.start()
     yield
+    if ORDER_WORKER is not None:
+        ORDER_WORKER.stop()
+    if ZOHO.worker is not None:
+        ZOHO.worker.stop()
     # The SDK batches in a background thread; a container stopped mid-batch
     # would otherwise lose the last turns of every open conversation.
     if TRACING is not None:
@@ -297,6 +526,28 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Emotorad AI — battery support", lifespan=_lifespan)
+
+
+def _cluster_for_phone(phone: str) -> str:
+    """The identity-graph cluster of a phone the caller has proved, with no
+    cookie: what `_cluster_for_session` gives for a session that maps to this
+    phone (IdentityResolver.resolve_website), so an Amiigo rider's uploads are
+    keyed under the same person either way. Never the phone itself."""
+    return resolver.graph.link(None, PHONE, phone, verified=True)
+
+
+# The Amiigo app's routes under /amiigo/v1/ (amiigo/routes.py), with what
+# they read from this process, and Cache-Control: no-store on every answer
+# under that path. Nothing outside /amiigo/v1/ is touched. The upload
+# registry is the website's own: one place an upload id is minted and claimed.
+app.state.amiigo = AmiigoContext(stores=stores, tokens=AMIIGO_TOKENS, log=log, media_store=MEDIA_STORE,
+                                 uploads=UPLOADS, cluster_for_phone=_cluster_for_phone,
+                                 receipts=stores.amiigo_receipts, zoho_webhook_secret=ZOHO_WEBHOOK_SECRET)
+app.include_router(amiigo_routes.router)
+# Zoho Desk's call when support closes a ticket: the ticket's chat gets a
+# notice and the rider's open sockets a ticket_update (amiigo/tickets.py).
+app.include_router(zoho_webhooks.router)
+app.add_middleware(NoStoreMiddleware)
 
 
 class MessageIn(BaseModel):
@@ -416,6 +667,8 @@ class MessageOut(BaseModel):
     # button: {"kind": "request_location", "label": ...}. Named by code in a
     # tool result, never typed by the model.
     actions: List[dict] = []
+    # Dealer store cards code found (spec 2026-10-09), nearest first.
+    stores: List[dict] = []
 
 
 class AssetPath(BaseModel):
@@ -445,7 +698,7 @@ BUILD = os.environ.get("EMOTORAD_AI_BUILD") or "unknown"
 
 @app.get("/health")
 def health() -> dict:
-    return {
+    report = {
         "status": "ok",
         "mode": MODE,
         "store": settings.store,
@@ -457,9 +710,53 @@ def health() -> dict:
         "photo_check": PHOTO_CHECKER.provider if PHOTO_CHECKER is not None else "off",
         "tracing": "on" if TRACING is not None else "off",
         "amigo": "configured" if AMIGO is not None else "not configured",
+        # Where bikes and coverage come from; the warranty API's host, never its key.
+        "warranty_source": WARRANTY_SOURCE,
+        "oms_orders": "on" if OMS_DB is not None and OMS_DB.orders_on else "off",
+        "oms_afs_orders": OMS_AFS_HEALTH,
+        "replacement_orders": stores.replacement_orders_status,
+        "dealer_stores": DEALER_SOURCE,
+        "weather": "open-meteo" if WEATHER is not None else "not configured",
+        "warranty_step": "on" if WARRANTY_STEP else "off",
         "build": BUILD,
         "ip_location": IP_LOCATOR.db if IP_LOCATOR is not None else "not configured",
+        # Zoho Desk: on, off, or why not (zoho/wiring.py).
+        "zoho": zoho_status(ZOHO),
+        # Where proved numbers outlive a restart: memory, mongodb, or memory
+        # and why (wiring.build_stores: no TTL index, no saving).
+        "verification_sessions": stores.verified_sessions_status,
+        # Where the chat socket's receipts are kept: memory, mongodb, or
+        # memory and why (wiring.build_stores: their indexes missing).
+        "amiigo_receipts": stores.amiigo_receipts_status,
+        # Whether Amiigo access tokens can be checked: on, or not configured.
+        "amiigo_tokens": "on" if AMIIGO_TOKENS.enabled else "not configured",
+        # Whether Zoho Desk can tell us a ticket closed: on, not configured,
+        # or why the secret was refused. Never the secret.
+        "zoho_webhook": ZOHO_WEBHOOK_STATUS,
+        # The melt ask: on, off, or off and why (melt_ask.from_env).
+        "melt_ask": MELT_ASK_STATUS,
+        # The battery serial-photo ask: on, off, or off and why.
+        "serial_ask": SERIAL_ASK_STATUS,
+        # Who reads the serial photos: the provider, or off.
+        "serial_read": SERIAL_READER.provider if SERIAL_READER is not None else "off",
+        # The Jev kill switch (config.jev_switch): on, off, or off and why;
+        # only openrouter mode runs Jev at all.
+        "jev": settings.jev_status if settings.mode == "openrouter" else "off: mode %s" % settings.mode,
+        # Who reads invoices for a missing purchase date: the provider, or off.
+        "invoice_ocr": INVOICE.provider if INVOICE is not None else "off",
     }
+    # Tickets waiting, stuck and held, and the worker's state. Shown while
+    # Zoho is on, or while any record is outstanding.
+    report.update(ticket_health(ZOHO, now_iso()))
+    # Safety reports this server could not record a ticket for (spec
+    # 2026-10-05, section 6), since it started. Alarmed by their event too.
+    if runtime.safety_not_recorded > 0:
+        report["safety_tickets_not_recorded"] = runtime.safety_not_recorded
+    if runtime.evidence_check:
+        # Shown only while the switch is on: who checks, or that nothing can pass.
+        report["evidence_check"] = (EVIDENCE_CHECKER.provider if EVIDENCE_CHECKER is not None
+                                    else "on, no checker: nothing can pass")
+    return report
 
 
 def _require_media() -> None:
@@ -571,7 +868,22 @@ def _persist_media(
         )
 
 
-def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Dict[str, Any]], int]:
+class _TurnIn(NamedTuple):
+    """What the attachment and evidence steps read of a turn, whichever way
+    it arrived (prepare_turn): the words as typed, the chip, the pinned
+    agent, the attachments as sent, and the caller's identity-graph cluster,
+    a call that raises HTTPException when the caller resolves to none."""
+
+    text: str
+    pill: Optional[str]
+    agent: Optional[str]
+    attachments: Optional[List[dict]]
+    cluster: Callable[[], str]
+
+
+def _inbound_attachments(
+    turn: _TurnIn, conversation_id: str
+) -> Tuple[List[Dict[str, Any]], int, Optional[Dict[str, Any]]]:
     """What the customer sent, in the shape the adapter takes, in the order they
     sent it.
 
@@ -584,18 +896,21 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
     longer "stored nowhere" once a bucket exists. With no bucket, or no
     cluster to key it under, it stays inline and unstored, as before. An
     `{"upload_id": ...}` is an object already PUT to S3 through
-    `POST /uploads`; it is checked against this session and claimed once, and
-    becomes an `s3://` key the runtime reads with the instance role. No S3
-    URL ever reaches the model either way.
+    `POST /uploads` (or the app's `POST /amiigo/v1/uploads`); it is checked
+    against the caller's cluster (`turn.cluster`: the session's, or the
+    rider's phone's) and claimed once, and becomes an `s3://` key the runtime
+    reads with the instance role. No S3 URL ever reaches the model either way.
 
     The count limit is on the total, not on each path, so adding the presigned
     route cannot be used to send more pictures than the inline one allows.
 
-    Also returns how many photos the safety check could not answer.
+    Also returns how many photos the safety check could not answer, and the
+    evidence check's verdict on a fault chat's photos and videos (None when
+    nothing was checked).
     """
-    items = [item for item in (body.attachments or []) if item]
+    items = [item for item in (turn.attachments or []) if item]
     if not items:
-        return [], 0
+        return [], 0, None
     if len(items) > MAX_ATTACHMENTS:
         raise AttachmentError(
             "Too many attachments: %d sent, %d allowed." % (len(items), MAX_ATTACHMENTS)
@@ -618,10 +933,20 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
         (("inline", id(raw_item)), (lambda data=item["data"]: base64.b64decode(data)), item["media_type"])
         for raw_item, item in zip(inline, validated) if item["media_type"].startswith("image/")
     ]
+    # The evidence check's media, in the order the customer sent it: each
+    # item's position, how to read it, its type, name and size (None for an
+    # inline photo, already within its 4 MB limit). A photo is read; a clip
+    # is handed over still in the bucket (evidence_check.StoredClip).
+    position = {id(item): n for n, item in enumerate(items)}
+    evidence_jobs: List[_EvidenceJob] = [
+        (position[id(raw_item)], (lambda data=item["data"]: base64.b64decode(data)), item["media_type"], "photo",
+         None)
+        for raw_item, item in zip(inline, validated) if item["media_type"].startswith("image/")
+    ]
     stored: Dict[int, Dict[str, Any]] = {}
     if MEDIA_STORE is not None and inline:
         try:
-            inline_cluster = _cluster_for_session(body.session_token, body.em_aid)
+            inline_cluster = turn.cluster()
         except HTTPException:
             # No session, no cookie: nowhere to derive a customer key from.
             # Not the customer's fault and not worth a 400 for: the photo
@@ -664,9 +989,12 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
 
     uploaded = [item for item in items if item.get("upload_id")]
     claims: Dict[str, Dict[str, Any]] = {}
+    # Described after every upload is claimed, so the evidence check can start
+    # first and run beside them.
+    videos: List[Tuple[str, str, str]] = []
     if uploaded:
         _require_media()
-        caller_cluster = _cluster_for_session(body.session_token, body.em_aid)
+        caller_cluster = turn.cluster()
         try:
             for item in uploaded:
                 upload_id = item["upload_id"]
@@ -697,31 +1025,73 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
                     size_bytes=claimed.size, source="upload",
                 )
                 if claimed.kind == "videos":
-                    summary = _summarise_video(claimed.key, claimed.mime)
-                    if summary is not None:
-                        claims[upload_id]["summary"] = summary
-                        # The description is customer content — a picture of
-                        # their bike, their garage, whoever is standing in it,
-                        # narrated to text — so it belongs in the log only on a
-                        # staging box with dev codes on. Production must never
-                        # write it, not even its length.
-                        if DEV_CODES:
-                            log.emit(
-                                "video_summary",
-                                conversation_id,
-                                key=claimed.key.rsplit("/", 1)[-1],
-                                chars=len(summary),
-                                text=summary,
-                            )
+                    videos.append((upload_id, claimed.key, claimed.mime))
                 if claimed.kind == "images":
                     photo_jobs.append(
                         (("upload", upload_id), (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)), claimed.mime))
+                    evidence_jobs.append((position[id(item)], (lambda key=claimed.key: MEDIA_STORE.get_bytes(key)),
+                                          claimed.mime, claimed.key.rsplit("/", 1)[-1], claimed.size))
+                if claimed.kind == "videos":
+                    # Up to 100 MB: streamed by the checker into the file
+                    # ffmpeg reads when it is shrunk, never read whole here.
+                    evidence_jobs.append((position[id(item)], (lambda key=claimed.key, size=claimed.size:
+                                                               _stored_clip(key, size)),
+                                          claimed.mime, claimed.key.rsplit("/", 1)[-1], claimed.size))
         except UploadError as exc:
             raise HTTPException(exc.status, str(exc)) from None
+
+    # The evidence check starts now, and runs while the clips are described
+    # and the photos safety-checked below. A turn that fails before it reads
+    # the verdict tells the check to stop.
+    evidence = _start_evidence_check(turn, conversation_id, sorted(evidence_jobs, key=lambda job: job[0]))
+    try:
+        attachments, unchecked, hazard_seen = _described(items, claims, stored, videos, photo_jobs,
+                                                         conversation_id)
+    except BaseException:
+        if evidence is not None:
+            evidence.cancel.set()
+        raise
+    if evidence is not None and hazard_seen:
+        # A safety report is immediate and never needs evidence: the turn
+        # does not wait for the check (the review of 6 October 2026), and the
+        # check stops: no transcode, nothing sent (the re-review).
+        log.emit("evidence_check_skipped", conversation_id, error="safety")
+        evidence.cancel.set()
+        evidence = None
+    return attachments, unchecked, _evidence_verdict(evidence, conversation_id)
+
+
+def _described(
+    items: List[Dict[str, Any]], claims: Dict[str, Dict[str, Any]], stored: Dict[int, Dict[str, Any]],
+    videos: List[Tuple[str, str, str]], photo_jobs: List[Tuple[Tuple[str, Any], Callable[[], bytes], str]],
+    conversation_id: str,
+) -> Tuple[List[Dict[str, Any]], int, bool]:
+    """The turn's attachments, each clip described and each photo safety-
+    checked; how many photos the safety check could not answer; and whether
+    any of them shows a live hazard."""
+    for upload_id, key, mime in videos:
+        summary = _summarise_video(key, mime)
+        if summary is not None:
+            claims[upload_id]["summary"] = summary
+            # The description is customer content — a picture of
+            # their bike, their garage, whoever is standing in it,
+            # narrated to text — so it belongs in the log only on a
+            # staging box with dev codes on. Production must never
+            # write it, not even its length.
+            if DEV_CODES:
+                log.emit(
+                    "video_summary",
+                    conversation_id,
+                    key=key.rsplit("/", 1)[-1],
+                    chars=len(summary),
+                    text=summary,
+                )
 
     # The description of a live hazard becomes the attachment's summary,
     # which the safety gate scans; a photo with none gets no summary.
     notes, unchecked = _check_photos(photo_jobs, conversation_id)
+    hazard_seen = bool(notes) or any(
+        check_safety_in_description(claim.get("summary") or "").triggered for claim in claims.values())
     for (where, key), note in notes.items():
         if where == "upload":
             claims[key]["summary"] = note
@@ -734,7 +1104,165 @@ def _inbound_attachments(body: MessageIn, conversation_id: str) -> Tuple[List[Di
         note = notes.get(("inline", id(item)))
         # A copy: the customer's own item is never changed.
         attachments.append(dict(base, summary=note) if note else base)
-    return attachments, unchecked
+    return attachments, unchecked, hazard_seen
+
+
+def _evidence_subject(turn: _TurnIn, conversation_id: str) -> Optional[Tuple[str, str]]:
+    """(the customer's complaint, "battery" or "motor") when this turn's
+    media is evidence of a bike fault, else None.
+
+    A fault chat by evidence_check.is_fault_chat, read with `peek`, which never
+    creates a conversation: nothing is written outside the turn. A first
+    message, before triage has run, counts when its pill or its words name the
+    battery or the motor."""
+    try:
+        state = stores.conversations.peek(conversation_id)
+    except StoreUnavailable as exc:
+        log.emit("evidence_check_skipped", conversation_id, error="store", why=type(exc).__name__)
+        state = None
+    component = evidence_check.fault_component(state)
+    if component is None and (state is None or state.agent is None):
+        # A tester's pin (/chat?agent=battery_support) routes this turn to
+        # that agent, so its media is the fault's evidence; then the pill or
+        # the words, as triage reads them.
+        topic = (evidence_check.FAULT_AGENTS.get(turn.agent or "") or topic_from_pill(turn.pill)
+                 or classify_issue(turn.text or ""))
+        component = topic if topic in evidence_check.COMPONENTS else None
+    if component is None:
+        return None
+    said = customer_texts(state.history) if state is not None else []
+    return evidence_check.complaint_from(said + [turn.text or ""]), component
+
+
+# One item for the evidence check: its position in the message, how to get
+# it (a photo's bytes, or a clip still in the bucket), its type, name and
+# size (None for an inline photo).
+_EvidenceJob = Tuple[int, Callable[[], evidence_check.Media], str, str, Optional[int]]
+
+
+class _EvidenceRun(NamedTuple):
+    """A check under way: its future, the moment the turn stops waiting
+    (time.monotonic()), and the event the turn sets when it stops waiting
+    (its deadline, a safety report, or a failure), so the check's thread
+    stops too: no transcode and no request once nobody is waiting."""
+
+    future: Any
+    deadline: float
+    cancel: threading.Event
+
+
+def _stored_clip(key: str, size: int) -> evidence_check.StoredClip:
+    """An uploaded clip as the evidence check takes it: still in the bucket."""
+    return evidence_check.StoredClip(size, lambda handle: _copy_object(key, handle))
+
+
+def _copy_object(key: str, handle: IO[bytes]) -> None:
+    """A stored clip written into an open file a part at a time
+    (S3Store.copy_to); a store that cannot stream (the local test page's)
+    reads it whole, one clip at a time."""
+    copy_to = getattr(MEDIA_STORE, "copy_to", None)
+    if copy_to is None:
+        handle.write(MEDIA_STORE.get_bytes(key))
+    else:
+        copy_to(key, handle)
+
+
+def _start_evidence_check(
+    turn: _TurnIn, conversation_id: str, jobs: Sequence[_EvidenceJob],
+) -> Optional[_EvidenceRun]:
+    """The check, started on its own thread, and the moment the turn stops
+    waiting for it: the photo check's deadline, or the video summary's when a
+    clip is among the media, so a turn waits no longer than it does today.
+    The checker is given that moment, which is taken before any clip is read
+    from the bucket, and the cancel. None when nothing is checked: the switch
+    off, no photo or video, or a chat that is not about a bike fault."""
+    if not runtime.evidence_check or not jobs:
+        return None
+    if check_safety(turn.text or "").triggered:
+        # A safety report (battery or motor terms, the safety gate's own plain
+        # scan): immediate, and exempt from evidence, so nothing is checked
+        # and the turn never waits (the review of 6 October 2026).
+        return None
+    subject = _evidence_subject(turn, conversation_id)
+    if subject is None:
+        return None
+    if EVIDENCE_CHECKER is None:
+        return _EvidenceRun(_done({"error": "not_configured"}), 0.0, threading.Event())
+    complaint, component = subject
+    # A clip over the inline limit is fetched: the checker sends a smaller
+    # copy of it (evidence_check.fit_inline). A photo is never shrunk, so
+    # photos over the limit by themselves are refused before anything is
+    # fetched, as the checker would refuse them.
+    limit = getattr(EVIDENCE_CHECKER, "inline_limit", evidence_check.INLINE_LIMIT)
+    photo_sizes = [size for _, _, mime, _, size in jobs if size is not None and not mime.startswith("video/")]
+    if sum(photo_sizes) > limit:
+        return _EvidenceRun(_done({"error": "too_large"}), 0.0, threading.Event())
+    has_video = any(mime.startswith("video/") for _, _, mime, _, _ in jobs)
+    wait_for = VIDEO_SUMMARY_SECONDS if has_video else PHOTO_CHECK_DEADLINE_SECONDS
+    deadline, cancel = time.monotonic() + wait_for, threading.Event()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence-check")
+    future = pool.submit(_check_evidence, list(jobs), complaint, component, deadline, cancel)
+    # A check still running at the deadline is abandoned, not waited for,
+    # and told to stop (_evidence_verdict).
+    pool.shutdown(wait=False)
+    return _EvidenceRun(future, deadline, cancel)
+
+
+def _done(result: Dict[str, Any]) -> Any:
+    """A finished future holding `result`."""
+    from concurrent.futures import Future
+
+    future: Any = Future()
+    future.set_result(result)
+    return future
+
+
+def _check_evidence(jobs: Sequence[_EvidenceJob], complaint: str, component: str, deadline: float,
+                    cancel: threading.Event) -> Dict[str, Any]:
+    # Photos are read here (14 MiB at most together, or refused above); a
+    # clip stays in the bucket until the checker streams or reads it.
+    media = [(load(), mime, name) for _, load, mime, name, _ in jobs]
+    extra: Dict[str, Any] = {}
+    if EVIDENCE_REFERENCES is not None:
+        references, missing = EVIDENCE_REFERENCES.for_component(component)
+        if missing:
+            log.emit("evidence_references_missing", "evidence_check", keys=missing)
+        if references:
+            extra["references"] = references
+    notes = evidence_check.reference_notes(CATALOGUE, component)
+    if notes:
+        extra["reference_notes"] = notes
+    verdict = EVIDENCE_CHECKER.check(media, complaint, component, deadline_at=deadline, cancel=cancel, **extra)
+    # With the fault it was checked for: the runtime keeps a pass to it.
+    return dict(verdict.as_dict(), component=component)
+
+
+def _evidence_verdict(started: Optional[_EvidenceRun], conversation_id: str) -> Optional[Dict[str, Any]]:
+    """The verdict as the turn carries it, or {"error": code} when the check
+    could not be made: never a pass. Logged by outcome and code only; what
+    Gemini wrote is customer content and never reaches the log."""
+    if started is None:
+        return None
+    done, _ = wait([started.future], timeout=max(0.0, started.deadline - time.monotonic()))
+    if not done:
+        # Nobody reads it now: no transcode and no request after this.
+        started.cancel.set()
+        log.emit("evidence_check_skipped", conversation_id, error="timeout")
+        return {"error": "timeout"}
+    future = started.future
+    try:
+        verdict = future.result()
+    except evidence_check.EvidenceCheckError as exc:
+        verdict = {"error": str(exc)}
+    except StorageError as exc:
+        verdict = {"error": "store", "why": type(exc).__name__}
+    except Exception as exc:  # the class only: a provider message can echo the request
+        verdict = {"error": type(exc).__name__}
+    if "error" in verdict:
+        log.emit("evidence_check_skipped", conversation_id, error=verdict["error"])
+        return {"error": verdict["error"]}
+    log.emit("evidence_check_done", conversation_id, passed=verdict.get("passed") is True)
+    return verdict
 
 
 def _summarise_video(key: str, mime: str) -> Optional[str]:
@@ -813,75 +1341,256 @@ def _one_photo(load: Callable[[], bytes], mime: str, conversation_id: str) -> Li
     return PHOTO_CHECKER.check(data, mime)
 
 
-@app.post("/message", response_model=MessageOut)
-def post_message(body: MessageIn, request: Request) -> MessageOut:
-    if not message_limiter.allow(client_ip(request, TRUSTED_PROXIES)):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many messages. Wait a moment and try again.",
-        )
-    # Before the attachments: `_inbound_attachments` stores and records inline
-    # photos and claims uploads, and a request refused here must leave no
-    # object, no record and no spent upload id behind.
-    if body.agent and body.agent not in CHAT_AGENTS:
-        raise HTTPException(
-            status_code=400,
-            detail="Unknown agent %r. Expected one of: %s"
-            % (body.agent, ", ".join(CHAT_AGENTS)),
-        )
-    conversation_id = body.conversation_id or new_conversation_id()
-    try:
-        attachments, unchecked = _inbound_attachments(body, conversation_id)
-    except AttachmentError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    text = body.text
-    if body.location is not None:
-        # Resolved here, before the message exists, so the coordinates never
-        # become part of anything that is logged or handed to the model.
-        located = resolve_location(
-            body.location.latitude, body.location.longitude, geocoder, pincode_directory
-        )
-        text = describe_location(located)
+# The ways a turn arrives through prepare_turn: the website chat's
+# POST /message, and the Amiigo app's chat socket, whose turns are always a
+# rider's, proved by the token.
+WEBSITE_CHANNEL = "website_chat"
+APP_CHANNEL = amiigo_history.APP_CHANNEL
+TURN_CHANNELS = (WEBSITE_CHANNEL, APP_CHANNEL)
 
-    # Record which cluster started this conversation, the first time we see
-    # it, so a later presign under the same conversation id can be checked
-    # against who actually owns it (see post_upload). Best-effort: a session
-    # that does not resolve to a customer is a legitimate anonymous chat and
-    # must not 400 here just because we tried to attribute a cluster to it.
-    try:
-        message_cluster = _cluster_for_session(body.session_token)
-    except HTTPException:
-        message_cluster = None
-    message = adapter.to_message(
-        {
-            "conversation_id": conversation_id,
-            "session_token": body.session_token,
-            "em_aid": body.em_aid,
-            "text": text,
-            "pill": body.pill,
-            "attachments": attachments,
-        }
-    )
+
+def prepare_turn(
+    *,
+    conversation_id: str,
+    text: str,
+    attachments: Optional[List[dict]] = None,
+    pill: Optional[str] = None,
+    screen: Optional[str] = None,
+    location: Optional[LocationIn] = None,
+    channel: str = WEBSITE_CHANNEL,
+    session_token: Optional[str] = None,
+    em_aid: Optional[str] = None,
+    rider_phone: Optional[str] = None,
+    agent: Optional[str] = None,
+    client_ip: Optional[str] = None,
+) -> InboundMessage:
+    """The turn `runtime.handle` takes, from what a message carried, for
+    every way one arrives: POST /message and the Amiigo app's chat socket.
+
+    In this order, as POST /message always did it: the attachments (inline
+    photos stored and recorded, uploads claimed and recorded, each photo
+    safety-checked, each clip described, the evidence check started at
+    ingest beside them), then a shared location turned into the customer's
+    words, then the identity and the cluster that started the conversation,
+    then the pinned agent, the screen, the place and the checks' results in
+    `entry_metadata` for the runtime to apply inside the turn.
+
+    Who is writing: with `rider_phone` (the phone an Amiigo token proved),
+    a verified customer with that phone and its cluster, on the identity
+    itself, as a website session's phone is (IdentityResolver.
+    resolve_website); no session or cookie is looked up, and nothing is
+    added to the session table. Otherwise the website's own path: the
+    session or the cookie, then a number this chat proved
+    (apply_verified_identity).
+
+    The caller refuses what it must before this (the rate limit, an unknown
+    agent, a conversation that is not the caller's): an attachment is stored
+    or an upload claimed here, and a refused message must leave neither.
+    Raises AttachmentError for attachments outside `attachments.validate`;
+    HTTPException for an upload that cannot be claimed (404 unknown or
+    expired, 403 not the caller's, 409 not finished or not as presigned, 503
+    no media storage) or uploads from a caller with no cluster (400); and
+    ValueError for a channel it does not serve, an app turn with no rider,
+    or a rider's phone on any channel but the app's.
+    `client_ip` is used for the place only, and goes no further.
+    """
+    if channel not in TURN_CHANNELS:
+        raise ValueError("prepare_turn serves %s, not %r" % (" and ".join(TURN_CHANNELS), channel))
+    if channel == APP_CHANNEL and not rider_phone:
+        raise ValueError("an Amiigo app turn is a rider's: rider_phone, from the token, is required")
+    if rider_phone and channel != APP_CHANNEL:
+        # A token-proved phone belongs to the app's turns only (the plan's
+        # Ruling 11): on any other channel it would verify a visitor who
+        # proved nothing.
+        raise ValueError("rider_phone is the Amiigo app's, not %r's" % (channel,))
+    phone = normalise(PHONE, rider_phone) if rider_phone else None
+    if phone is not None:
+        def cluster() -> str:
+            return _cluster_for_phone(phone)
+    else:
+        def cluster() -> str:
+            return _cluster_for_session(session_token, em_aid)
+    turn = _TurnIn(text=text, pill=pill, agent=agent, attachments=attachments, cluster=cluster)
+    found, unchecked, evidence_verdict = _inbound_attachments(turn, conversation_id)
+    said = text
+    area = None
+    if location is not None:
+        # Resolved here, before the message exists, so the coordinates never
+        # become part of anything that is logged or handed to the model. Only
+        # a message that is nothing but the location becomes the customer's
+        # words; with words, a chip or a photo, the location is background
+        # (the app team's addendum, 7 October 2026).
+        located = resolve_location(location.latitude, location.longitude, geocoder, pincode_directory)
+        area = area_of(located, "location", utc_now_iso())
+        if not (text or "").strip() and not pill and not found:
+            said = describe_location(located)
+
+    if phone is not None:
+        message_cluster: Optional[str] = cluster()
+        message = _rider_message(conversation_id, channel, phone, message_cluster, said, pill, found)
+    else:
+        # Record which cluster started this conversation, the first time we
+        # see it, so a later presign under the same conversation id can be
+        # checked against who actually owns it (see post_upload).
+        # Best-effort: a session that does not resolve to a customer is a
+        # legitimate anonymous chat and must not 400 here just because we
+        # tried to attribute a cluster to it.
+        try:
+            message_cluster = _cluster_for_session(session_token)
+        except HTTPException:
+            message_cluster = None
+        message = adapter.to_message(
+            {
+                "conversation_id": conversation_id,
+                "session_token": session_token,
+                "em_aid": em_aid,
+                "text": said,
+                "pill": pill,
+                "attachments": found,
+            }
+        )
     # The proof this conversation has already given. Without this the customer
     # types a correct code and the very next turn still resolves anonymous, so
     # the warranty lookup is refused for want of a phone exactly as it was
-    # before they bothered.
+    # before they bothered. A rider's turn already carries its phone, which
+    # this never overwrites.
     message = apply_verified_identity(message, verification_store)
     # The cluster that started this conversation, and a pinned agent, are
     # applied by the runtime inside the turn (Runtime._node_prepare), not
     # written to the state here: with a durable store, a change made outside
     # the turn is to a copy the turn never saves.
-    extra = {key: value for key, value in (("cluster_id", message_cluster), ("pinned_agent", body.agent)) if value}
+    extra = {key: value for key, value in (("cluster_id", message_cluster), ("pinned_agent", agent),
+                                           ("screen", screen)) if value}
     # Where the customer is, as a place: the runtime keeps the run's first one.
-    place = IP_LOCATOR.place(client_ip(request, TRUSTED_PROXIES)) if IP_LOCATOR is not None else None
+    place = IP_LOCATOR.place(client_ip) if IP_LOCATOR is not None else None
     if place is not None:
         extra["origin"] = place.as_dict()
+    if area is not None:
+        # The runtime keeps it on the conversation (Runtime._handle).
+        extra["area"] = area
     if unchecked:
         # The runtime tells the agent (Runtime._run); never a summary.
         extra["photos_unchecked"] = unchecked
+    if evidence_verdict is not None:
+        # The runtime keeps it on the conversation, inside the turn.
+        extra["evidence_verdict"] = evidence_verdict
     if extra:
         message = replace(message, entry_metadata=dict(message.entry_metadata, **extra))
-    reply = runtime.handle(message)
+    return message
+
+
+def _handle_app_turn(message: InboundMessage) -> Reply:
+    """The chat socket's turn: the same runtime, read when the turn runs."""
+    _start_serial_reads(message)
+    _start_invoice_reads(message)
+    return runtime.handle(message)
+
+
+def _start_invoice_reads(message: InboundMessage) -> None:
+    """Reads the chosen bike's invoice before the turn when OMS has no
+    purchase date for it (invoice_ocr.py): OMS's copy when it holds one,
+    otherwise each photo or PDF the customer sent in this message. Waits up to
+    the service's limit; never raises."""
+    if INVOICE is None or not message.identity.phone:
+        return
+    cid = message.conversation_id
+    try:
+        state = stores.conversations.peek(cid)
+        frame = state.selected_frame if state is not None else None
+        if not frame:
+            return
+        # Only once the lookup has shown this bike undated, or in the
+        # late-registration chat, whose whole subject it is: never for a
+        # chat about something else (final review, finding 5).
+        looked_up = any(
+            bike.get("coverage_status") == "purchase_date_missing" and frame in (bike.get("frame_number"),
+                                                                                  bike.get("bike_ref"))
+            for bike in ((state.coverage_result or {}).get("data") or {}).get("bikes") or [])
+        if not looked_up and state.agent != "late_warranty_registration":
+            return
+        row = INVOICE.bike(message.identity.phone, frame)
+        if row is None or row.get("purchase_date"):
+            return
+        user_key = state.user_key
+        cluster = message.entry_metadata.get("cluster_id") or state.cluster_id
+        file_state = INVOICE.invoice_state(row.get("invoice_image"))
+        if file_state == invoice_ocr.InvoiceService.WITH_SUPPORT:
+            return
+        if file_state == invoice_ocr.InvoiceService.READABLE:
+            jobs = [lambda: INVOICE.read_from_oms(cid, user_key, cluster, message.identity.phone, frame)]
+        else:
+            jobs = [
+                (lambda key=item.url[len("s3://"):], mime=item.mime_type:
+                 INVOICE.read_upload(cid, user_key, frame, key, mime))
+                for item in message.attachments
+                if (item.url or "").startswith("s3://")
+                and ((item.mime_type or "").startswith("image/") or item.mime_type == "application/pdf")
+            ]
+        INVOICE.start(jobs)
+    except Exception as exc:
+        log.emit("invoice_read_failed", cid, error="state:" + type(exc).__name__, source="api")
+
+
+def _start_serial_reads(message: InboundMessage) -> None:
+    """Reads the turn's stored photos with the serial reader before the turn
+    runs, when the bike the chat is about was asked for its serial photos
+    (read from the state before the turn): each photo at the same time, and
+    the turn waits for them up to SERIAL_READ_WAIT_SECONDS, so the ticket
+    tool sees a motor photo that has just arrived and the reply can confirm
+    what was read (serial_confirm.py). A read still running then finishes on
+    its own and is confirmed on a later turn. Never raises."""
+    if SERIAL_READER is None or MEDIA_STORE is None or not message.attachments:
+        return
+    try:
+        state = stores.conversations.peek(message.conversation_id)
+        photos = serial_read.photos_to_read(message.attachments, state)
+    except Exception as exc:
+        log.emit("serial_read_failed", message.conversation_id, error="state:" + type(exc).__name__)
+        return
+    if not photos:
+        return
+    futures = [SERIAL_READ_POOL.submit(
+        serial_read.read_photos, SERIAL_READER, [photo], MEDIA_STORE.get_bytes, stores.conversations,
+        conversation_id=message.conversation_id, user_key=state.user_key, frame_number=state.selected_frame,
+        emit=log.emit, references=SERIAL_REFERENCES,
+    ) for photo in photos]
+    done, pending = wait(futures, timeout=SERIAL_READ_WAIT_SECONDS)
+    if pending:
+        log.emit("serial_read_late", message.conversation_id, photos=len(pending))
+
+
+# The chat socket's turn (amiigo/socket.py): prepare_turn with the app's
+# channel and the token's phone, then the runtime, as POST /message does.
+app.state.amiigo.prepare_turn = prepare_turn
+app.state.amiigo.handle_turn = _handle_app_turn
+
+
+def _rider_message(
+    conversation_id: str, channel: str, phone: str, cluster_id: str, text: str, pill: Optional[str],
+    attachments: List[Dict[str, Any]],
+) -> InboundMessage:
+    """A rider's turn, shaped as the website adapter shapes a turn
+    (WebsiteChatAdapter.to_message), with the identity the token proved: a
+    verified customer, their phone and its cluster, and no session, cookie or
+    token on it (the plan's Ruling 2)."""
+    return InboundMessage(
+        conversation_id=conversation_id,
+        persona="customer",
+        identity=Identity(cluster_id=cluster_id, strength=VERIFIED, phone=phone),
+        channel=channel,
+        message_text=(text or "").strip(),
+        entry_metadata={"pill_clicked": pill} if pill else {},
+        attachments=[
+            Attachment(kind=a.get("kind", "image"), url=a["url"], mime_type=a.get("mime_type"),
+                       summary=a.get("summary"))
+            for a in attachments
+            if a.get("url")
+        ],
+    )
+
+
+def _message_out(conversation_id: str, reply: Reply) -> MessageOut:
+    """The reply as POST /message answers it."""
     return MessageOut(
         conversation_id=conversation_id,
         text=reply.text,
@@ -899,7 +1608,64 @@ def post_message(body: MessageIn, request: Request) -> MessageOut:
             for attachment in reply.attachments
         ],
         actions=list(reply.actions),
+        stores=[dict(s) for s in reply.stores],
     )
+
+
+def _is_app_chat(conversation_id: str) -> bool:
+    """Whether this conversation is an Amiigo app chat, which the website
+    never writes in (the plan's Rulings 8 and 9; amiigo_history.is_app_chat
+    reads the permanent records). A store that cannot answer is logged and
+    counts as no: the turn then meets the same store and answers as it does
+    any outage (a handover, or a safety report's steps), and a safety report
+    never gets a 503 instead."""
+    try:
+        return amiigo_history.is_app_chat(stores.conversations, conversation_id)
+    except StoreUnavailable as exc:
+        log.emit("app_chat_check_failed", conversation_id, error=type(exc).__name__)
+        return False
+
+
+@app.post("/message", response_model=MessageOut)
+def post_message(body: MessageIn, request: Request) -> MessageOut:
+    caller_ip = client_ip(request, TRUSTED_PROXIES)
+    if not message_limiter.allow(caller_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many messages. Wait a moment and try again.",
+        )
+    # Before the attachments: `prepare_turn` stores and records inline photos
+    # and claims uploads, and a request refused here must leave no object, no
+    # record and no spent upload id behind.
+    if body.agent and body.agent not in CHAT_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown agent %r. Expected one of: %s"
+            % (body.agent, ", ".join(CHAT_AGENTS)),
+        )
+    if body.conversation_id and _is_app_chat(body.conversation_id):
+        # A rider's app chat is written in only through the app, with the
+        # rider's token: anyone else holding its id could otherwise add to
+        # the rider's history from here.
+        raise HTTPException(status_code=403, detail="not your conversation")
+    conversation_id = body.conversation_id or new_conversation_id()
+    try:
+        message = prepare_turn(
+            conversation_id=conversation_id,
+            text=body.text,
+            attachments=body.attachments,
+            pill=body.pill,
+            location=body.location,
+            session_token=body.session_token,
+            em_aid=body.em_aid,
+            agent=body.agent,
+            client_ip=caller_ip,
+        )
+    except AttachmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _start_serial_reads(message)
+    _start_invoice_reads(message)
+    return _message_out(conversation_id, runtime.handle(message))
 
 
 class ErasureIn(BaseModel):
@@ -921,8 +1687,8 @@ def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str, Dict
         raise HTTPException(status_code=429, detail="Too many requests. Wait a moment and try again.")
     persona, identity = resolver.resolve_website(None, body.session_token or None)
     if persona == "customer" and identity.may_disclose and identity.phone:
-        return "PHONE#" + identity.phone, "amiigo_app", erasure_rules.proof_of(None)
-    phone = verification_store.verified_phone(body.conversation_id) if body.conversation_id else None
+        return erasure_rules.app_requester(identity.phone)
+    phone = _proved_phone(body.conversation_id)
     if phone:
         return ("PHONE#" + phone, "website_chat",
                 erasure_rules.proof_of(verification_store.verified_on(body.conversation_id)))
@@ -930,11 +1696,26 @@ def _erasure_person(request: Request, body: "ErasureIn") -> Tuple[str, str, Dict
     raise HTTPException(status_code=403, detail=detail)
 
 
-def _erasure_store_down(exc: Exception, conversation_id: Optional[str]) -> HTTPException:
-    log.emit("erasure_request_failed", conversation_id or "erasure", error=type(exc).__name__)
-    return HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED)
+def _proved_phone(conversation_id: Optional[str]) -> Optional[str]:
+    """The number this chat proved. After a restart, its saved session is
+    taken back first, as a turn would, and only if the saved conversation
+    says the same person finished verifying (VerificationStore.restore).
+    A store that cannot be read proves nothing."""
+    if not conversation_id:
+        return None
+    phone = verification_store.verified_phone(conversation_id)
+    if phone is not None or verification_store.sessions is None:
+        return phone
+    try:
+        state = stores.conversations.peek(conversation_id)
+    except StoreUnavailable:
+        return None
+    return verification_store.restore(conversation_id, proved_owner(state))
 
 
+# The bodies of these three are erasure.py's (record_request, request_status,
+# cancel_request), shared with the app's /amiigo/v1/erasure-requests*: this
+# path finds the person by session or verified chat, and words its own errors.
 @app.post("/erasure-requests", status_code=201)
 def post_erasure_request(body: ErasureIn, request: Request, response: Response) -> Dict[str, Any]:
     """The Amiigo app's "Delete my conversation data" button, after its own
@@ -943,44 +1724,35 @@ def post_erasure_request(body: ErasureIn, request: Request, response: Response) 
     if not body.confirm:
         raise HTTPException(status_code=400, detail="Send confirm: true once the rider has confirmed.")
     try:
-        pending = stores.conversations.pending_erasure_of(user_key)
-        reference = pending["_id"] if pending else stores.conversations.request_erasure(
-            user_key, channel, body.conversation_id, utc_now_iso(), proof=proof)
-    except Exception as exc:
-        raise _erasure_store_down(exc, body.conversation_id) from None
-    if pending:
+        recorded, answer = erasure_rules.record_request(stores.conversations, log, user_key, channel, proof,
+                                                        body.conversation_id, utc_now_iso())
+    except erasure_rules.RequestsUnavailable:
+        raise HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED) from None
+    if not recorded:
         response.status_code = 200
-        return {"reference": reference, "status": "pending",
-                "text": erasure_rules.ERASURE_EXISTING.format(reference=reference)}
-    log.emit("erasure_requested", body.conversation_id or "erasure", reference=reference)
-    return {"reference": reference, "status": "pending",
-            "text": erasure_rules.ERASURE_REQUESTED.format(reference=reference)}
+    return answer
 
 
 @app.post("/erasure-requests/status")
 def post_erasure_status(body: ErasureIn, request: Request) -> Dict[str, Any]:
     user_key, _, _ = _erasure_person(request, body)
     try:
-        pending = stores.conversations.pending_erasure_of(user_key)
-    except Exception as exc:
-        raise _erasure_store_down(exc, body.conversation_id) from None
-    if pending is None:
-        return {"reference": None, "status": "none"}
-    return {"reference": pending["_id"], "status": "pending", "requested_at": pending["requested_at"]}
+        return erasure_rules.request_status(stores.conversations, log, user_key, body.conversation_id)
+    except erasure_rules.RequestsUnavailable:
+        raise HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED) from None
 
 
 @app.post("/erasure-requests/cancel")
 def post_erasure_cancel(body: ErasureIn, request: Request) -> Dict[str, Any]:
     user_key, _, _ = _erasure_person(request, body)
     try:
-        reference = stores.conversations.cancel_erasure(user_key, utc_now_iso())
-    except Exception as exc:
-        raise _erasure_store_down(exc, body.conversation_id) from None
-    if reference is None:
+        answer = erasure_rules.cancel_request(stores.conversations, log, user_key, body.conversation_id,
+                                              utc_now_iso())
+    except erasure_rules.RequestsUnavailable:
+        raise HTTPException(status_code=503, detail=erasure_rules.ERASURE_FAILED) from None
+    if answer is None:
         raise HTTPException(status_code=404, detail=erasure_rules.ERASURE_NOTHING_TO_CANCEL)
-    log.emit("erasure_cancelled", body.conversation_id or "erasure", reference=reference)
-    return {"reference": reference, "status": "cancelled",
-            "text": erasure_rules.ERASURE_CANCELLED.format(reference=reference)}
+    return answer
 
 
 # The playground has no auth of its own and takes an Anthropic API key as
@@ -1041,6 +1813,33 @@ def require_playground_auth(request: Request) -> None:
 # off — and only once that passes does the flag decide between the data and a
 # 404, exactly as before.
 DEV_CODES = os.environ.get("EMOTORAD_AI_DEV_CODES") == "1"
+
+
+# The playground's admin upload, step three. The browser presigned an asset
+# (`POST /uploads`, tree "assets"), PUT the bytes straight to S3, and now asks
+# for the derivatives (a 900px WebP for a photo, a poster frame for a clip) and
+# the id to paste into a knowledge record. Behind the playground login, like
+# the presign: a customer upload is never finished this way, and the id stays
+# claimable by the message it belongs to.
+@app.post("/uploads/{upload_id}/finish", dependencies=[Depends(require_playground_auth)])
+def finish_upload(upload_id: str) -> Dict[str, Any]:
+    _require_media()
+    pending = UPLOADS.peek(upload_id)
+    if pending is None:
+        raise HTTPException(404, "unknown or expired upload id")
+    if pending.tree != "assets":
+        raise HTTPException(403, "not an asset upload")
+    try:
+        claimed = UPLOADS.claim(upload_id)
+    except UploadError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    try:
+        return finish_asset(MEDIA_STORE, claimed.key)
+    except Exception as exc:
+        # The original is in the bucket and the id is spent, so the admin
+        # has to upload again under the same slug; say so rather than hide it.
+        _logger.exception("asset derivatives failed for %s", claimed.key)
+        raise HTTPException(500, "stored %s but could not make its derivatives (%s); upload it again" % (claimed.key, type(exc).__name__)) from None
 
 
 @app.get("/dev/verification/{conversation_id}", dependencies=[Depends(require_playground_auth)])
@@ -1187,8 +1986,12 @@ async def playground_http_proxy(request: Request, rest: str = "") -> StreamingRe
         content=await request.body(),
     )
     upstream_response = await _playground_client.send(upstream_request, stream=True)
+    # aiter_bytes, not aiter_raw: Content-Encoding is dropped below, so the
+    # body must go out decoded. Streamlit gzips the files of a custom component
+    # (the admin uploader's index.html); forwarded raw, the browser rendered
+    # the gzip stream as text and the component never came up.
     return StreamingResponse(
-        upstream_response.aiter_raw(),
+        upstream_response.aiter_bytes(),
         status_code=upstream_response.status_code,
         headers={k: v for k, v in upstream_response.headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS},
         background=BackgroundTask(upstream_response.aclose),

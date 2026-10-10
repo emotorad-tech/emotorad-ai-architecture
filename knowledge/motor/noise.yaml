@@ -1,14 +1,48 @@
 id: motor-noise
 title: Motor is making a noise
 topic: motor
-symptoms: [noise, noisy, grinding, whining, clicking, awaz, sound from motor,
-           awaz aa rahi, आवाज आ रही, मोटर आवाज]
+symptoms: [noise, noisy, grinding, whining, clicking, knocking, humming, rattling, unusual noise,
+           awkward noise, strange sound, sound from motor, motor sound, motor making noise,
+           noise while riding, noise when wheel spins, bearing noise,
+           awaz, awaz aa rahi, motor se awaz, आवाज आ रही, मोटर आवाज, मोटर से आवाज]
 applies_to: {}
-source: Drive system manual §3.2
+source: AFS chatbot team, motor diagnosis §5f2 (8 October 2026)
+# The reference clips are the catalogue's motor_noise_reference (the default),
+# motor_noise_no_load_reference and motor_bearing_noise_reference.
 media: []
 steps:
-  - Note when it happens — only under power, only while pedalling, or all the time. That one detail separates a motor fault from a drivetrain one.
-  - A faint electrical whine under load is normal on a hub motor and is not a fault.
-  - Check nothing is rubbing — mudguard, brake pad, or a loose spoke will make a rhythmic sound that rises with speed.
-  - Clicking that matches your pedalling cadence is usually the chain or crank, not the motor.
-escalate_when: Grinding or knocking that rises with motor power rather than pedalling cadence.
+  - >-
+    ASK TWO THINGS FIRST: is the motor still working, and is it making an unusual noise? Then
+    ask when the noise happens: with the wheel stationary or spinning off the ground, or only
+    while actually riding. That one detail decides the branch.
+  - >-
+    SEND THE REFERENCE CLIP THAT FITS what they described, with send_guide_media, and say in
+    words what it shows. Noise with the wheel stationary or not riding:
+    motor_noise_no_load_reference (the wheel spinning off the ground). Noise only while
+    riding: motor_bearing_noise_reference (bearing noise under load). Anything else, or not
+    sure: motor_noise_reference, the default (noise with and without load). Send one clip,
+    not all three.
+  - >-
+    ASK FOR ONE VIDEO OF THEIR OWN NOISE, with the sound on, filmed the same way as the
+    reference: close to the rear hub motor, long enough to hear it.
+  - >-
+    READ THEIR VIDEO YOURSELF, from its description, and branch. Your read decides the branch,
+    never the outcome: that is the Approval team's.
+  - >-
+    WHEEL STATIONARY AND THE MOTOR STILL MAKING NOISE: conclusion "planetary gears". Tell them
+    what the video shows and that you are sending it to the Approval team for review, and
+    raise create_support_ticket with category motor_fault, the symptom, what the video
+    showed and that conclusion.
+  - >-
+    WHEEL ROTATING OR WORKING AND STILL NOISY: conclusion "planetary gears and bearings". Same
+    as above: tell them, motor_fault ticket, Approval team.
+  - >-
+    NOISE ONLY WHILE ACTUALLY RIDING: conclusion "bearings only". Same as above: tell them,
+    motor_fault ticket, Approval team.
+  - >-
+    Tell them the Approval team will review it and update them. Never say a replacement or
+    repair is approved, rejected or confirmed.
+escalate_when: >-
+  Every branch ends with the Approval team: a motor_fault ticket carrying the video's
+  description and the conclusion (planetary gears; planetary gears and bearings; or bearings
+  only).

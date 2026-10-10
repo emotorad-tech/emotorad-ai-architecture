@@ -98,6 +98,32 @@ class SetupScriptTests(unittest.TestCase):
         # Customer media is kept permanently (decision 2026-09-29), so its
         # record is part of the permanent record and must never get a TTL.
         self.assertRegex(text, r"\bmedia\s+permanent")
+        # So are the ticket records, and the counter behind their references:
+        # one that expired would hand out EM-1000001 again.
+        self.assertRegex(text, r"\btickets\s+permanent")
+        self.assertRegex(text, r"\bcounters\s+permanent")
+
+    def test_only_a_collection_with_a_ttl_index_is_printed_as_one_that_expires(self):
+        # The Task 7 review: conversation_origins and erasure_requests have
+        # no TTL index, yet were printed as "expires". And a chat's notices
+        # are part of the chat (Ruling 21): permanent.
+        client = mongomock.MongoClient()
+        module = load("mongo_setup")
+        out = io.StringIO()
+        env = {"EMOTORAD_MONGO_URI": "mongodb+srv://emotorad-ai-dev:SECRET@emotorad.example.mongodb.net/"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(module, "connect", lambda db_name: client[db_name]), \
+                redirect_stdout(out):
+            self.assertEqual(module.main(), 0)
+        kept = dict(line.split()[:2] for line in out.getvalue().splitlines() if line.startswith("  "))
+        expiring = {name for name, label in kept.items() if label == "expires"}
+        self.assertEqual(expiring, {"conversations", "idempotency_keys", "verification_sessions", "amiigo_receipts"})
+        for name in ("conversation_notices", "conversation_origins", "erasure_requests", "serial_readings",
+                     "invoice_readings"):
+            self.assertEqual(kept[name], "permanent", name)
+        db = client["emotorad_ai"]
+        for name, label in kept.items():
+            ttl = any("expireAfterSeconds" in index for index in db[name].index_information().values())
+            self.assertEqual(label == "expires", ttl, name)
 
 
 class DeletePersonScriptTests(unittest.TestCase):

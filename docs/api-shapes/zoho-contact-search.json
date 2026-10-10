@@ -1,0 +1,54 @@
+{
+  "_source": "Captured by scripts/zoho/test_ticket.py on 2026-10-05, masked by scripts/zoho/_common.py. Replaces the published-shape draft. Trimmed before commit to the test contact: the search also matched 8 other contacts whose numbers end in the same four digits, and their ids are not kept.",
+  "data": [
+    {
+      "lastName": "<str>",
+      "country": null,
+      "modifiedTime": "<str>",
+      "secondaryEmail": null,
+      "city": null,
+      "customFields": {},
+      "description": null,
+      "language": null,
+      "title": null,
+      "type": null,
+      "ownerId": "<str>",
+      "photoURL": null,
+      "twitter": null,
+      "street": null,
+      "createdTime": "<str>",
+      "isEndUser": false,
+      "zohoCRMContact": null,
+      "id": "55430000068790003",
+      "state": null,
+      "customerHappiness": {
+        "badPercentage": "<str>",
+        "okPercentage": "<str>",
+        "goodPercentage": "<str>"
+      },
+      "email": null,
+      "zip": null,
+      "owner": {
+        "photoURL": "<str>",
+        "firstName": "<str>",
+        "lastName": "<str>",
+        "emailId": "<str>",
+        "id": "55430000068563302",
+        "zuid": "<str>"
+      },
+      "accountCount": "<str>",
+      "cf": {},
+      "facebook": null,
+      "mobile": null,
+      "layoutId": "<str>",
+      "firstName": null,
+      "accountId": null,
+      "isAnonymous": false,
+      "phone": "<str>",
+      "webUrl": "<str>",
+      "isSpam": false,
+      "account": null
+    }
+  ],
+  "count": "<int>"
+}

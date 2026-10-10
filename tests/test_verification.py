@@ -8,6 +8,7 @@ that by being persuasive.
 
 import unittest
 
+from emotorad_ai.contract import ASSERTED, VERIFIED
 from emotorad_ai.tools.mocks import RAISE_INTAKE_TICKET, build_registry
 from emotorad_ai.tools.registry import ToolContext, is_error
 from emotorad_ai.tools.verification import (
@@ -183,12 +184,15 @@ class IntakeTicketTests(unittest.TestCase):
 
     def setUp(self):
         self.registry = build_registry(verification=VerificationStore())
-        self.ctx = ToolContext(conversation_id="c1")
+        # The runtime's fact: the last mobile the customer typed in this chat
+        # (spec 2026-10-05, the intake number rule). Without one, or a
+        # verified phone, the tool refuses (the tests at the end).
+        self.ctx = ToolContext(conversation_id="c1", late={"typed_number": lambda: "9999999999"})
 
-    def _raise(self, **kw):
+    def _raise(self, ctx=None, **kw):
         args = {"summary": "Motor dead, customer says in warranty", "idempotency_key": "k1"}
         args.update(kw)
-        return self.registry.call(RAISE_INTAKE_TICKET, args, self.ctx)
+        return self.registry.call(RAISE_INTAKE_TICKET, args, ctx or self.ctx)
 
     def test_it_works_without_a_resolved_phone(self):
         # create_support_ticket refuses here, which left an unverified customer
@@ -209,6 +213,10 @@ class IntakeTicketTests(unittest.TestCase):
         self.assertEqual(ticket["identity"], "unverified")
         self.assertEqual(ticket["stated_name"], "Radhika")
         self.assertEqual(ticket["category"], "intake_unverified")
+        self.assertEqual(ticket["kind"], "intake")
+        # The number typed in the chat is the one to call; what they stated stays a claim.
+        self.assertEqual(ticket["phone"], "+919999999999")
+        self.assertEqual(ticket["stated_contact"], "r@example.com")
 
     def test_absent_details_are_recorded_as_absent_rather_than_blank(self):
         ticket = self.registry.tickets.tickets[self._raise()["data"]["ticket_id"]]
@@ -219,6 +227,33 @@ class IntakeTicketTests(unittest.TestCase):
         data = self._raise()["data"]
         self.assertNotIn("coverage", str(data).lower())
         self.assertIn("verify", data["expected_response"])
+
+    def test_without_a_number_to_call_it_refuses_and_says_to_ask_for_one(self):
+        envelope = self._raise(ctx=ToolContext(conversation_id="c1"))
+        self.assertTrue(is_error(envelope))
+        self.assertEqual(envelope["error"]["code"], "contact_number_required")
+        self.assertEqual(envelope["error"]["remedy"], "ask_for_callback_number")
+        self.assertIn("ask the customer for a mobile number we can call", envelope["error"]["message"])
+        self.assertEqual(self.registry.tickets.tickets, {})
+
+    def test_a_number_the_model_passes_is_never_the_number_to_call(self):
+        # stated_contact is the customer's claim, and typed_number is a fact
+        # only the runtime sets: one the model sends is dropped.
+        envelope = self._raise(ctx=ToolContext(conversation_id="c1"), stated_contact="99999 99999",
+                               typed_number="9999999999")
+        self.assertEqual(envelope["error"]["code"], "contact_number_required")
+
+    def test_a_verified_phone_is_the_number_to_call(self):
+        ctx = ToolContext(conversation_id="c1", phone="+919999999999",
+                          late={"identity_strength": lambda: VERIFIED, "typed_number": lambda: "9999999998"})
+        data = self._raise(ctx=ctx)["data"]
+        ticket = self.registry.tickets.tickets[data["ticket_id"]]
+        self.assertEqual((data["identity"], ticket["identity"], ticket["phone"]),
+                         ("verified", "verified", "+919999999999"))
+
+    def test_a_caller_id_is_not_a_number_anyone_proved(self):
+        ctx = ToolContext(conversation_id="c1", phone="+919999999999", late={"identity_strength": lambda: ASSERTED})
+        self.assertEqual(self._raise(ctx=ctx)["error"]["code"], "contact_number_required")
 
 
 if __name__ == "__main__":

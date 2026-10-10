@@ -121,7 +121,46 @@ state the harm in one sentence, it is probably not an edge case — it is an ine
 | 6.3 | AI disclosure required on first turn | **Resolved by design** | Risk 16, all channels |
 | 6.4 | No EU–India adequacy decision | **CAPTURE** (legal) | Deployment topology decision. Risk 18 |
 
+## 7. Handovers that record no Zoho ticket (2026-10-05)
+
+From the Zoho Desk spec (`docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`, "Not changed in this version"). Each one tells the customer a person takes over, or could, and records nothing for a person to act on. Each is counted by the event named, so shadow mode can promote it.
+
+| # | Case | Disposition | Notes |
+|---|---|---|---|
+| 7.1 | The evidence-not-forthcoming handover records no ticket | **CAPTURE** | Counted by `escalation` with `reason: evidence_not_forthcoming`. The `guardrail_triggered` event beside it says which path: `guardrail: evidence_not_forthcoming` (asked to show the fault, nothing came back) or `guardrail: evidence_post_check` (a conclusion reached having seen nothing) |
+| 7.2 | The coverage and order post-check blocks hand over and record no ticket | **CAPTURE** | `escalation` with `reason: coverage_claim_blocked` or `order_claim_blocked`; `guardrail_triggered` with `guardrail: coverage_post_check` or `order_post_check` |
+| 7.3 | A ticket promised with none behind it, in a reply that is not about a live hazard, hands over and records nothing | **CAPTURE** | `guardrail_triggered` and `escalation`, both `ticket_promise_unbacked`. A reply about a live hazard is backed instead (`safety_backstop`): the safety ticket is raised, or for a customer with no number known the reply asks for one. With Zoho off, that customer gets the safety steps and 112 instead, with no promise of a call, and `safety_ticket_not_recorded` with `why: backstop_no_contact`, which is alarmed. A backstop ticket that fails (`safety_backstop_failed`), and anyone who is not a customer, fall back to this handover |
+| 7.4 | Agent loop failures hand over and record nothing: model unavailable, an empty reply, a stuck tool loop, the iteration budget | **CAPTURE** | `llm_error` (with `escalation` and `reason: model_unavailable`), `empty_reply` and `stuck_agent` (each with `escalation` and `reason: agent_requested_handover`). The budget has no event of its own, only `escalation` with `reason: agent_requested_handover` |
+| 7.5 | Model and store outages, other than safety, hand over and record nothing | **CAPTURE** | `escalation` with `reason: llm_error` or `llm_error_after_write`; `store_unavailable` (the event, and the `reason` of its `escalation`). A safety report while the store is down is handled: it logs `safety_ticket_not_recorded`, which is alarmed |
+| 7.6 | The unsupported persona hands over and records nothing | **CAPTURE** | No event of its own: the `outcome` event with `handled_by: router` and `escalated: true` |
+| 7.7 | Triage's "unsupported topic" says it will put the customer through, and records nothing | **CAPTURE** | `routed` and `classification` with `reason: unsupported_topic:<topic>`. The reply is not marked `escalated` |
+| 7.8 | Prose handovers in the late-warranty, motor, dealer and photo-safety prompts ("I'll pass you to our team") record nothing | **CAPTURE** | No event yet: the model writes the line without escalating. A scan of bot replies for handover phrases would count it |
+| 7.9 | A request for a person in Hindi or Hinglish misses the handover gate | **CAPTURE** | No event counts a miss, because nothing fires: the triggers are English only (`guardrails._HANDOFF_TERMS`). The `inbound` event keeps every message's text, with numbers hidden, so misses can be found by searching it |
+| 7.10 | A non-Indian number typed for a call-back is refused | **CAPTURE** | `callback_number_invalid`, from the call-back gate, on a try made while it waits. The first try, in the message that asked for a person or reported the hazard, shows as `callback_asked`. EU volume through the web chat would promote it |
+
+## 8. Ticket references and log redaction gaps (2026-10-05)
+
+Found in the reviews of the Zoho Desk work (Tasks 10 and 11) and left alone on purpose. None is a regression. No event counts them, so each is found by searching the log text.
+
+| # | Case | Disposition | Notes |
+|---|---|---|---|
+| 8.1 | A conversation whose context block was built while Zoho was off keeps its old mock reference (`EM-0xxxx`, five digits) after a deploy that turns Zoho on | **CAPTURE** | The block is kept in the conversation's working state, which lives 48 h. The reference exists nowhere in Desk, but `_ticket_known` still accepts a reply that names it. It ends with the working state. Found by searching `outcome` text for an `EM-0` reference after the deploy |
+| 8.2 | A mobile number glued to letters stays visible in the log and in the Zoho transcript after a label or a change of script: `mobile:9876543210pls`, `phone=9876543210pls`, `9876543210plsधन्यवाद`, a loosely grouped number run into a word (`970 000 0010पर`), and a word made only of the letters a to f (`9876543210bad`) | **CAPTURE** | `redact_pii` hides a number glued to letters only after a space, a bracket, a quote, a comma or a semicolon. The verify step does not read the loosely grouped ones either, so the reader and the log agree. Found by searching `inbound` and `outcome` text for ten digits |
+| 8.3 | A Spanish number written with the `00` international prefix (`0034 612 345 678`) stays visible in the log and in the Zoho transcript | **CAPTURE** | The redaction hides `+<country code>` forms, which is what the spec names. Spain is live, so this is the form to watch for |
+
 ---
+
+## 9. Bikes from OMS orders (2026-10-10)
+
+Spec 2026-10-10: the phone on an `em_orders` row is taken as the rider's. Where that is wrong, a rider sees a bike that is not theirs, or misses their own.
+
+| # | Case | Disposition | Notes |
+|---|---|---|---|
+| 9.1 | The phone on the order is the buyer's, not the rider's: a gift, a company purchase, a family member | **CAPTURE** | The rider who bought it sees the bike; the one who rides it does not until it is registered |
+| 9.2 | A dealer's number missing from `em_franchise` and `em_users` | **CAPTURE** | That dealer, verifying on it, sees the bikes on their orders as their own |
+| 9.3 | A marketplace order whose phone is masked or a relay number | **CAPTURE** | Nobody's verified phone matches it, so the bike is found by nobody |
+| 9.4 | A frame swapped out in a replacement (`em_order_rr`) still shows on the original order | **CAPTURE** | The rider may see the old frame beside the new one |
+| 9.5 | For a dealer order, `invoice_at` is when the dealer bought the bike | **CAPTURE** | The cover shown may end before the real one; a rider who disagrees sends their invoice |
 
 ## What to do with CAPTURE items
 

@@ -1,0 +1,292 @@
+# infra/zoho-alarms.yaml
+# Alarms on the Zoho Desk ticket events (spec 2026-10-05, section 8): one
+# CloudWatch Logs metric filter and one alarm per event, on the deployment's
+# log group, emailing one named person through an SNS topic. Deployed by a
+# person (person step 9), never by a workflow or a chat session.
+#
+#   aws cloudformation deploy --profile emotorad-staging --region ap-south-1 \
+#     --stack-name emotorad-ai-stage-zoho-alarms --template-file infra/zoho-alarms.yaml \
+#     --parameter-overrides LogGroupName=emotorad-ai-stage AlarmEmail=<their @emotorad.com address>
+#
+# AWS emails that address once to confirm the subscription. No alarm reaches
+# it until its owner confirms.
+#
+# Every event is one JSON line on the container's stdout (observability.EventLog,
+# with EMOTORAD_AI_LOG_STDOUT=1 in the Dockerfile), which the awslogs driver
+# writes to the log group. So each filter matches the line's "event" field.
+# An alarm fires on one event in its period. The worker logs a stuck or late
+# record once an hour, so a stuck record means one email an hour until it is sent.
+# The one exception is zoho_worker_store_unavailable: the worker logs it on each
+# pass MongoDB Atlas cannot be reached, and a blip is not worth an email, so it
+# alarms only when it is logged in each of three consecutive five-minute periods.
+# zoho_webhook_store_unavailable alarms at once: Zoho Desk documents no retry
+# of a webhook, so each one is a ticket closure the rider may never hear about.
+#
+# Nine events are alarmed. Every other ticket event the code logs is an end
+# state, or is followed by an alarmed event when it matters. Each is listed
+# with its reason in NOT_ALARMED in tests/test_zoho_scripts.py, which keeps
+# that list, this template and the code's events in step.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EMotorad AI platform - alarms on the Zoho Desk ticket events
+
+Parameters:
+  LogGroupName:
+    Type: String
+    Default: emotorad-ai-stage
+    Description: The deployment's log group, the awslogs-group on the workflow's docker run line
+  AlarmEmail:
+    Type: String
+    AllowedPattern: '^[^@\s]+@emotorad\.com$'
+    ConstraintDescription: an @emotorad.com address
+    Description: Who receives the alarms (person step 9)
+
+Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${LogGroupName}-zoho-alarms"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+      Tags:
+        - Key: service
+          Value: emotorad-ai
+
+  ZohoMisconfiguredFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_misconfigured" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_misconfigured
+          MetricValue: "1"
+
+  ZohoMisconfiguredAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_misconfigured"
+      AlarmDescription: "Zoho is switched on but a start-up check failed, so tickets go to the mock and nothing reaches Desk. /health says why."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_misconfigured
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoTokenRefusedFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_token_refused" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_token_refused
+          MetricValue: "1"
+
+  ZohoTokenRefusedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_token_refused"
+      AlarmDescription: "Zoho refused the chatbot's refresh token, for example after the OMS client secret was rotated without updating ours. Nothing reaches Desk until it is fixed."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_token_refused
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoWorkerErrorFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_worker_error" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_worker_error
+          MetricValue: "1"
+
+  ZohoWorkerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_worker_error"
+      AlarmDescription: "The Zoho worker hit an unexpected error in a pass. It carries on; the log line names the error class."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_worker_error
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoTicketStuckFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_ticket_stuck" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_ticket_stuck
+          MetricValue: "1"
+
+  ZohoTicketStuckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_ticket_stuck"
+      AlarmDescription: "A ticket has waited 24 hours to reach Zoho. Run scripts/zoho/tickets_report.py and tell the support lead."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_ticket_stuck
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  SafetyTicketLateFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "safety_ticket_late" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: safety_ticket_late
+          MetricValue: "1"
+
+  SafetyTicketLateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-safety_ticket_late"
+      AlarmDescription: "A safety ticket has waited 10 minutes to reach Zoho. Ask the support lead to call the customer now."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: safety_ticket_late
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  SafetyTicketNotRecordedFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "safety_ticket_not_recorded" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: safety_ticket_not_recorded
+          MetricValue: "1"
+
+  SafetyTicketNotRecordedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-safety_ticket_not_recorded"
+      AlarmDescription: "A customer reported a safety issue and no ticket could be recorded. Read the conversation and reach the customer."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: safety_ticket_not_recorded
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  UnverifiedTicketCappedFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "unverified_ticket_capped" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: unverified_ticket_capped
+          MetricValue: "1"
+
+  UnverifiedTicketCappedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-unverified_ticket_capped"
+      AlarmDescription: "The daily cap on unverified tickets refused a request. Check for abuse, or whether the cap is too low."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: unverified_ticket_capped
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoWorkerStoreUnavailableFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_worker_store_unavailable" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_worker_store_unavailable
+          MetricValue: "1"
+
+  ZohoWorkerStoreUnavailableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_worker_store_unavailable"
+      AlarmDescription: "The Zoho worker could not reach MongoDB Atlas for 15 minutes. No ticket reaches Desk, safety ones included, until it can. Check Atlas and the service's connection."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_worker_store_unavailable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ZohoWebhookStoreUnavailableFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: '{ $.event = "zoho_webhook_store_unavailable" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "EMotorad/AI/${LogGroupName}"
+          MetricName: zoho_webhook_store_unavailable
+          MetricValue: "1"
+
+  ZohoWebhookStoreUnavailableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LogGroupName}-zoho_webhook_store_unavailable"
+      AlarmDescription: "Support closed a ticket in Zoho Desk and MongoDB could not record it. Zoho documents no retry, so the rider may still see the ticket as open: find it by the logged ticket_hash and the time, and tell the support lead."
+      Namespace: !Sub "EMotorad/AI/${LogGroupName}"
+      MetricName: zoho_webhook_store_unavailable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+Outputs:
+  TopicArn:
+    Value: !Ref AlarmTopic

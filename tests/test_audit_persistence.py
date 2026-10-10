@@ -36,6 +36,7 @@ from emotorad_ai.runtime import Runtime
 from emotorad_ai.stores.mongo import MongoConversationStore, MongoIdempotencyStore, ensure_indexes
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, LOOKUP_WARRANTY_RECORD, SEND_GUIDE_MEDIA, build_registry
 from emotorad_ai.tools.registry import IdempotencyStore, ToolContext, ToolRegistry, ok
+from tests.clock import mongomock_clock_at
 from tests.store_contract import inbound, reply, summary
 from tests.test_runtime_persistence import ConflictingStore, runtime_on, send
 
@@ -45,7 +46,7 @@ NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 # mongomock expires TTL documents against the real clock, and these stores run
 # on NOW: once the real date passed NOW + 48 hours (1 October 2026, 10:00 UTC),
 # every saved conversation counted as expired. mongomock's clock is pinned too.
-_MONGOMOCK_CLOCK = mock.patch("mongomock.utcnow", lambda: NOW.replace(tzinfo=None))
+_MONGOMOCK_CLOCK = mongomock_clock_at(NOW)
 
 
 def setUpModule():
@@ -303,7 +304,9 @@ class ErasureTests(unittest.TestCase):
         self.assertEqual({name: db[name].count_documents({}) for name in COLLECTIONS}, before)
         real = store.delete_person(USER)
         self.assertEqual(real, {"conversations": 1, "transcript_turns": 4, "conversation_summaries": 1,
-                                "idempotency_keys": 1, "media": 0, "conversation_origins": 1})
+                                "idempotency_keys": 1, "media": 0, "conversation_origins": 1,
+                                "verification_sessions": 0, "conversation_notices": 0, "serial_readings": 0, "invoice_readings": 0,
+                                "amiigo_receipts": 0, "replacement_orders": 0})
         self.assertEqual(dry, real)
 
     def test_a_conversation_with_no_summary_yet_is_still_erased(self):

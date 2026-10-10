@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from emotorad_ai.contract import ANONYMOUS, VERIFIED, Identity
+from emotorad_ai.guardrails import SAFETY_NOT_RECORDED_MESSAGE
 from emotorad_ai.llm import call_tool, say
 from emotorad_ai.runtime import HANDOVER_TEXT
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, RAISE_INTAKE_TICKET
@@ -45,12 +46,20 @@ class HazardClaimTests(unittest.TestCase):
         self.assertEqual(tickets(chat), [])
         self.assertEqual(reply.handled_by, "battery_support")
 
-    def test_a_hazard_claim_with_no_known_customer_is_handed_over(self):
+    def test_a_hazard_claim_with_no_known_customer_gets_the_steps_and_no_promise(self):
+        # Spec 2026-10-05, section 6, and the plan's cross-check, finding 13:
+        # with Zoho off nothing can be recorded for a visitor with no number,
+        # so neither a ticket nor a hand-over is promised. With Zoho on, the
+        # number is asked for (tests/test_safety_without_phone.py).
         chat = Chat(replies=[say(STAGING_REPLY)], verify_first=False)
         reply = ask(chat, identity=Identity(strength=ANONYMOUS, em_aid="aid-1"))
         self.assertEqual(tickets(chat), [])
-        self.assertEqual(reply.handled_by, "guardrail:ticket_promise_unbacked")
+        self.assertEqual(reply.handled_by, "battery_support")
+        self.assertIn(SAFETY_NOT_RECORDED_MESSAGE, reply.text)
         self.assertNotIn("I'm raising", reply.text)
+        self.assertNotIn(HANDOVER_TEXT, reply.text)
+        self.assertFalse(reply.escalated)
+        self.assertEqual(len(chat.llm.requests), 1)
 
     def test_a_hazard_claim_whose_ticket_cannot_be_raised_is_handed_over(self):
         chat = Chat(replies=[say(STAGING_REPLY)])

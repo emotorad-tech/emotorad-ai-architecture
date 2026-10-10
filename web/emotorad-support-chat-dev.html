@@ -162,6 +162,11 @@
     background: #FFFFFF; font-size: 14px; font-weight: 600; cursor: pointer; user-select: none; }
   .action-chip:active { background: #FFF7F2; }
   .action-chip.is-used { opacity: 0.45; pointer-events: none; }
+  .store-card { max-width: 320px; margin: 2px 0 4px 34px; border: 1px solid rgba(127,127,127,.28); border-radius: 12px; padding: 10px 12px; display: grid; gap: 4px; font-size: 13px; }
+  .store-name { font-weight: 600; }
+  .store-km { font-weight: 400; opacity: .7; margin-left: 4px; }
+  .store-address { opacity: .85; }
+  .store-manager a { color: var(--accent); text-decoration: none; user-select: text; }
 
   /* A photo that has been picked and not yet sent. Sits between the chat and
      the composer, so what is about to go out is visible before it goes. */
@@ -483,7 +488,9 @@
    message, a video through POST /uploads (needs the media
    bucket). Either one counts as evidence for a ticket.
    ============================================================ */
-var OPENING = "Hi! I'm an AI assistant here to help with your EMotorad bike.\n\nWhat's going on?";
+// No AI claim here: the server adds the disclosure to the first reply, and
+// saying it here as well told every customer twice (6 October 2026).
+var OPENING = "Hi! How can I help with your EMotorad bike today?";
 
 /* Testing switches, read from this page's own address. Neither is for
    customers; the page is internal (see /chat in api.py).
@@ -617,6 +624,15 @@ function renderAiTurnHtml(turn) {
         '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>' +
         esc(a.label || "Share my location") + "</div></div>";
     }
+  });
+  // Dealer stores code found (spec 2026-10-09). The model never writes these.
+  (turn.stores || []).forEach(function (s) {
+    var tel = String(s.phone || "").replace(/\s+/g, "");
+    html += '<div class="msg-row ai"><div class="store-card">' +
+      '<div class="store-name">' + esc(s.name) + ' <span class="store-km">' + esc(String(s.distance_km)) + ' km</span></div>' +
+      '<div class="store-address">' + esc(s.address) + '</div>' +
+      '<div class="store-manager">' + esc(s.manager_name) + ' \u00b7 <a href="tel:' + esc(tel) + '">' +
+      esc(s.phone) + '</a></div></div></div>';
   });
   // Guide photos and clips the agent chose to send. It picks a catalogue key;
   // code resolves the URL, so nothing here is ever a link the model typed.
@@ -847,6 +863,7 @@ function ask(text, location) {
     state.busy = false;
     state.turns.push({
       isUser: false, text: reply.text, attachments: reply.attachments || [], actions: reply.actions || [],
+      stores: reply.stores || [],
       route: { handledBy: reply.handled_by, ticketId: reply.ticket_id, escalated: reply.escalated }
     });
     render();

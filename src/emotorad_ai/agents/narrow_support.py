@@ -17,10 +17,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from ..contract import InboundMessage
 from ..identity import ResolvedIdentity
 from ..knowledge import KnowledgeRecord
+from ..media import model_offered
 from ..tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
+    FIND_NEAREST_DEALERS,
     FIND_SERVICE_SLOTS,
+    GET_RECENT_WEATHER,
     GET_RECENT_TRIPS,
     GET_SERVICE_STATUS,
     SEND_GUIDE_MEDIA,
@@ -37,7 +40,8 @@ AGENT_NAME = "narrow_support"
 # schedule" (staging, 2026-10-01). Without Amigo they are not registered,
 # and the agent drops them.
 TOOL_NAMES = (SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS, BOOK_SERVICE_SLOT,
-              GET_SERVICE_STATUS, GET_RECENT_TRIPS)
+              GET_SERVICE_STATUS, GET_RECENT_TRIPS, FIND_NEAREST_DEALERS,
+              GET_RECENT_WEATHER)
 
 _RULES = """\
 You are EMotorad's support assistant. The customer's issue has already been identified, \
@@ -65,8 +69,9 @@ def _record_block(record: KnowledgeRecord, sendable: Optional[Mapping[str, Mappi
     # Only a picture this server can send, and by the catalogue key the tool
     # takes. The record names its media by file path, which the tool rejects,
     # and listing a picture that cannot be sent is how the bot came to offer
-    # one it did not have (2026-09-29).
-    key_for = {item.get("id"): key for key, item in (sendable or {}).items() if item.get("id")}
+    # one it did not have (2026-09-29). Never a code-only picture (the melt
+    # ask's, 6 October 2026): no model is offered one.
+    key_for = {item.get("id"): key for key, item in model_offered(sendable or {}).items() if item.get("id")}
     media = [(key_for[item["id"]], item) for item in record.media if item.get("id") in key_for]
     if media:
         lines.append("Guide media you can send with send_guide_media, by key:")

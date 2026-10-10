@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .conversation import (
     AWAITING_BIKE_CONFIRMATION,
@@ -55,6 +55,11 @@ TOPIC_KEYWORDS: Dict[str, Sequence[str]] = {
         "cuts out", "cutting out", "cuts off", "cutting off", "power cut",
         "stops while riding", "while riding",
         "मोटर", "आवाज", "awaz",
+        # AFS's motor cases (8 October 2026). Never bare "disc": it is inside
+        # "discharge", a battery word, and two topics mean asking.
+        "e-07", "e07", "e 07", "e-24", "e24", "freewheel", "disc rotor", "brake disc", "disc bolt",
+        "loose disc", "disc loose", "rotor", "threading", "motor jam", "jammed motor", "wheel not",
+        "not moving", "speedometer",
     ),
 }
 
@@ -493,9 +498,21 @@ def _ordinal_choice(text: str, bikes: Sequence[Dict[str, Any]]) -> Optional[Dict
 class TriageAgent:
     """Greets, narrows to one bike, captures the issue, hands off."""
 
-    def __init__(self, topic_agents: Dict[str, str]) -> None:
+    def __init__(self, topic_agents: Dict[str, str], battery_melt: Optional[Callable[[str], bool]] = None) -> None:
         # topic -> sub-agent name, e.g. {"battery": "battery_support"}.
         self.topic_agents = topic_agents
+        # The melt ask, when it is on (melt_ask.MeltAsk.battery_melt; the
+        # controller's ruling 2 of 6 October 2026): a battery melt is the
+        # battery topic, so "connector melted" or "E-06" is routed rather than
+        # asked "What is happening?". None, the ask off: exactly classify_issue.
+        self.battery_melt = battery_melt
+
+    def classify(self, text: str) -> Optional[str]:
+        """The topic of free text: the battery for a battery melt while the
+        melt ask is on, otherwise classify_issue."""
+        if self.battery_melt is not None and self.battery_melt(text):
+            return "battery"
+        return classify_issue(text)
 
     def handle(
         self,
@@ -524,7 +541,7 @@ class TriageAgent:
         # through bike selection — knowing they tapped "Battery issue" does not
         # say which of three bikes it is about.
         pill = message.pill_clicked
-        topic = topic_from_pill(pill) or classify_issue(text)
+        topic = topic_from_pill(pill) or self.classify(text)
         source = "pill:%s" % pill if pill and topic_from_pill(pill) else "text"
 
         if state.selected_frame is None:
@@ -636,7 +653,7 @@ class TriageAgent:
         if model and not bike.get("model"):
             bike["model"] = model
         # The issue, if they gave it here, is kept for when the bike is known.
-        topic = classify_issue(text)
+        topic = self.classify(text)
         if topic and not state.pending_topic:
             state.pending_topic, state.pending_topic_source = topic, "text"
         state.unlisted_bike = bike
@@ -689,7 +706,7 @@ class TriageAgent:
         bike the conversation's; a correction is taken and confirmed; a no asks
         what is wrong, or, for a listed bike, goes back to asking for the
         details; anything else is asked again once, then taken as a no."""
-        topic = classify_issue(text)
+        topic = self.classify(text)
         if topic and not state.pending_topic:
             state.pending_topic, state.pending_topic_source = topic, "text"
         asked = dict(state.bike_confirmation or {"kind": "unlisted", "ref": None, "step": "confirm", "unclear": 0})

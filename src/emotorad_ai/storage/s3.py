@@ -13,7 +13,7 @@ transcript, short enough that a leaked link is not a lasting one.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Mapping, Optional
+from typing import IO, Any, Dict, List, Mapping, Optional
 
 BUCKET_ENV = "EMOTORAD_AI_MEDIA_BUCKET"
 PUT_EXPIRY = 300
@@ -23,6 +23,8 @@ GET_EXPIRY = 900
 CONNECT_TIMEOUT = 3
 READ_TIMEOUT = 10
 MAX_RETRIES = 2
+# Bytes per read when an object is streamed into a file (copy_to).
+COPY_CHUNK = 1 << 20
 
 
 class StorageError(Exception):
@@ -74,9 +76,9 @@ class S3Store:
             "expires_in": PUT_EXPIRY,
         }
 
-    def presign_get(self, key: str) -> str:
+    def presign_get(self, key: str, expires_in: int = GET_EXPIRY) -> str:
         return self._client.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=GET_EXPIRY
+            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_in
         )
 
     def head(self, key: str) -> Optional[Dict[str, Any]]:
@@ -94,6 +96,30 @@ class S3Store:
             return self._client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
         except Exception as exc:
             raise StorageError("get %r failed: %s" % (key, type(exc).__name__)) from None
+
+    def copy_to(self, key: str, handle: IO[bytes]) -> int:
+        """The object written into an open file a part at a time, so a
+        100 MB clip is never held in memory whole (the evidence check's
+        shrink, the re-review of 6 October 2026). Returns the bytes written.
+        A read that fails is a StorageError; a write that fails is the
+        file's own OSError."""
+        try:
+            body = self._client.get_object(Bucket=self.bucket, Key=key)["Body"]
+        except Exception as exc:
+            raise StorageError("get %r failed: %s" % (key, type(exc).__name__)) from None
+        written = 0
+        try:
+            while True:
+                try:
+                    part = body.read(COPY_CHUNK)
+                except Exception as exc:
+                    raise StorageError("get %r failed: %s" % (key, type(exc).__name__)) from None
+                if not part:
+                    return written
+                handle.write(part)
+                written += len(part)
+        finally:
+            body.close()
 
     def put_bytes(self, key: str, data: bytes, mime: str) -> None:
         try:

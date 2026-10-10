@@ -18,7 +18,10 @@ KINDS = (KIND_IMAGE, KIND_VIDEO, KIND_DOCUMENT)
 
 SOURCE_INLINE = "inline"
 SOURCE_UPLOAD = "upload"
-SOURCES = (SOURCE_INLINE, SOURCE_UPLOAD)
+# A copy of the invoice OMS holds, kept in the customer's tree when it is read
+# (invoice_ocr.py): recorded like the customer's own files, so erasure finds it.
+SOURCE_OMS_INVOICE = "oms_invoice"
+SOURCES = (SOURCE_INLINE, SOURCE_UPLOAD, SOURCE_OMS_INVOICE)
 
 # The marks of a presigned URL. Checked case-insensitively: S3 itself treats
 # the header/query name case-insensitively, and a caller could easily lower-case it.

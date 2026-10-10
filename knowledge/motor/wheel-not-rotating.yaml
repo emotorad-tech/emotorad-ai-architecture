@@ -1,0 +1,36 @@
+id: motor-jam
+title: "Motor jam: the wheel does not turn although the display works"
+topic: motor
+symptoms: [wheel not rotating, wheel not turning, wheel not moving, cycle not moving, bike not moving,
+           motor jam, motor jammed, motor stuck, display on but not moving, display working but bike not moving,
+           throttle not moving the bike, cycle chal nahi rahi, wheel ghoom nahi raha, पहिया नहीं घूम रहा]
+applies_to: {}
+source: >-
+  AFS chatbot team, motor diagnosis §5f4 (8 October 2026), with the person's change of the
+  same day: a motor jam is a motor replacement ticket to the Approval team, with a video,
+  not a workshop visit.
+media: []
+steps:
+  - >-
+    CONFIRM: the wheel does not turn and the cycle does not move, even though the display is
+    on and working.
+  - >-
+    ASK THEM TO SET PAS (pedal assist) TO LEVEL 1 AND APPLY THE THROTTLE. If a motor error
+    code appears on the display (E-07, or E-24 on a T-Rex Pro), follow motor-e07-malfunction
+    instead: search for it.
+  - >-
+    IF AT PAS LEVEL 1 WITH THE THROTTLE APPLIED IT STILL DOES NOT MOVE: this is a motor jam.
+    Ask for one short video showing it: PAS at level 1, the throttle applied, and the wheel
+    not turning, with the display in view. If they decline, apply the retry rule.
+  - >-
+    CHECK THE VIDEO YOURSELF, from its description: the display on, PAS at 1, the throttle
+    applied and the wheel not turning. If it shows that: conclusion "motor jam, motor
+    replacement recommended". Tell them what the video shows and that you are sending it to
+    the Approval team for review, and raise create_support_ticket with category motor_jam, the
+    symptom, what they tried, what the video showed and that conclusion.
+  - >-
+    Tell them the Approval team will review it and update them. Never say a replacement is
+    approved, rejected or confirmed, and never give a timeline you cannot know.
+escalate_when: >-
+  A video showing the wheel not turning at PAS 1 with the throttle applied and no error code:
+  a motor_jam ticket to the Approval team, conclusion motor replacement recommended.

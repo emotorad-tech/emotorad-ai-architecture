@@ -31,10 +31,15 @@ RECENT = timedelta(hours=48)
 REMIND_AFTER_DAYS = 25
 FILES = "s3_objects"
 # What a review is compared on: the records that never expire, and the files.
-# MongoDB drops `conversations` after 48 hours and `idempotency_keys` after 7
-# days on its own, which made delete refuse when the customer had done nothing
-# (the final review). A new chat adds transcript turns either way.
-PERMANENT = ("transcript_turns", "conversation_summaries", "media", "conversation_origins", FILES)
+# MongoDB drops `conversations` after 48 hours, `idempotency_keys` after 7
+# days and `verification_sessions` after 12 hours on its own, which made
+# delete refuse when the customer had done nothing (the final review). They
+# are still counted, and deleted, through delete_person. A new chat adds
+# transcript turns either way. A ticket closed in Zoho Desk after the review
+# adds a notice to the chat (amiigo/tickets.py), which counts too.
+PERMANENT = ("transcript_turns", "conversation_summaries", "media", "conversation_origins",
+             "conversation_notices", "serial_readings",
+             "invoice_readings", FILES)
 
 
 class Refused(Exception):

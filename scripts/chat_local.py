@@ -22,6 +22,8 @@ Not for customers. `openrouter` sends what is typed to OpenRouter, outside AWS
 (see CLAUDE.md); use the fixture customers and nothing real. For the same
 reason the business tools are always the fixtures here: EMOTORAD_OMS_API_KEY
 is left out of the server's environment, so no lookup reaches the live OMS.
+Tickets are always the mock: every EMOTORAD_ZOHO_* name is left out too, so a
+test chat never becomes a Zoho Desk ticket.
 """
 
 import argparse
@@ -32,6 +34,10 @@ from pathlib import Path
 from typing import List, Mapping, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from emotorad_ai.zoho.settings import ENV_NAMES  # noqa: E402
+
 # What the server binds to: this machine only.
 HOST = "127.0.0.1"
 # What the printed addresses use. The media bucket's CORS allows
@@ -54,10 +60,15 @@ NEEDS = {
     "anthropic": ("ANTHROPIC_API_KEY",),
     "mongodb": ("EMOTORAD_MONGO_URI",),
 }
-# Never passed to the server. With it, a phone number typed on the page reaches
-# the live purchase table (api._build_registry), and those details would go to
-# OpenRouter with the rest of the conversation.
-WITHHELD = ("EMOTORAD_OMS_API_KEY",)
+# Never passed to the server. With the OMS key, a phone number typed on the
+# page reaches the live purchase table (api._build_registry), and those
+# details would go to OpenRouter with the rest of the conversation. With the
+# Zoho settings, a test chat on this machine would become a Zoho Desk ticket
+# (spec 2026-10-05 section 9). This page always keeps the mock tickets.
+ZOHO_SETTINGS = ENV_NAMES
+WITHHELD = ("EMOTORAD_OMS_API_KEY",) + ZOHO_SETTINGS
+# Any other Zoho name added later is withheld too.
+WITHHELD_PREFIX = "EMOTORAD_ZOHO_"
 # Reported but not required: each switches one feature on.
 OPTIONAL = (
     ("EMOTORAD_AI_MEDIA_BUCKET", "photo and video storage in S3"),
@@ -85,12 +96,16 @@ def status_lines(environ: Mapping[str, str], mode: str, store: str) -> List[str]
         lines.append("%s: %s (%s)" % (name, "set" if _is_set(environ, name) else "not set", feature))
     ignored = " (EMOTORAD_OMS_API_KEY is set and is ignored here)" if _is_set(environ, "EMOTORAD_OMS_API_KEY") else ""
     lines.append("business tools: fixtures, never the live OMS" + ignored)
+    zoho_set = any(name.startswith(WITHHELD_PREFIX) and _is_set(environ, name) for name in environ)
+    lines.append("tickets: the mock, never Zoho Desk"
+                 + (" (EMOTORAD_ZOHO_* settings are set and are ignored here)" if zoho_set else ""))
     return lines
 
 
 def server_env(environ: Mapping[str, str], mode: str, store: str) -> dict:
     """The server's environment: a copy of this one plus the test page's settings."""
-    env = {name: value for name, value in environ.items() if name not in WITHHELD}
+    env = {name: value for name, value in environ.items()
+           if name not in WITHHELD and not name.startswith(WITHHELD_PREFIX)}
     env["EMOTORAD_AI_MODE"] = mode
     env["EMOTORAD_STORE"] = store
     env["EMOTORAD_AI_DEV_CODES"] = "1"

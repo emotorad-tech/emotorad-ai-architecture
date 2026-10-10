@@ -1,0 +1,34 @@
+id: motor-freewheel-threading
+title: "Works on the throttle but not with pedal assist: freewheel threading"
+topic: motor
+symptoms: [works on throttle but not pas, works on throttle not pedal, throttle works pas does not,
+           only throttle working, throttle works but pedalling does not, pedalling does not drive,
+           pedals spin freely, freewheel, freewheel issue, freewheel threading, freewheel misaligned,
+           sirf throttle pe chal rahi, pedal se nahi chal rahi, पैडल से नहीं चल रही]
+applies_to: {}
+source: AFS chatbot team, motor diagnosis §5f6 (8 October 2026)
+# The reference clip is the catalogue's freewheel_threading_reference.
+media: []
+steps:
+  - >-
+    CONFIRM: the e-bike works fine on the throttle, but not in pedal assist (PAS) or when
+    pedalling.
+  - >-
+    SEND THE REFERENCE. Send the freewheel_threading_reference clip with send_guide_media and
+    say in words what it shows: a freewheel that is out of alignment. Ask whether theirs looks
+    like it.
+  - >-
+    ASK FOR ONE SHORT VIDEO of their freewheel while they turn the pedals, so its alignment
+    can be seen.
+  - >-
+    CHECK IT AGAINST THE REFERENCE YOURSELF. Once it shows the same misalignment: conclusion
+    "freewheel adapter and freewheel replacement recommended". Tell them what the video shows
+    and that you are sending it to the Approval team for review, and raise
+    create_support_ticket with category motor_fault, the symptom, what the video showed and
+    that conclusion.
+  - >-
+    Tell them the Approval team will review it and update them. Never say a replacement is
+    approved, rejected or confirmed.
+escalate_when: >-
+  A video matching the freewheel reference: a motor_fault ticket to the Approval team,
+  conclusion freewheel adapter and freewheel replacement recommended.

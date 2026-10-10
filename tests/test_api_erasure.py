@@ -107,6 +107,30 @@ class WebsiteChatButtonTests(unittest.TestCase):
         cancelled = self.client.post("/erasure-requests/cancel", json={"conversation_id": "web-3"})
         self.assertEqual(cancelled.json()["status"], "cancelled")
 
+    def restarted(self, conversation_id, verify_step=None):
+        """Verified, the saved conversation as `verify_step` leaves it, then
+        a new process: nothing in memory, the same saved sessions."""
+        from emotorad_ai.tools.verification import VerificationStore
+
+        self.verify(conversation_id)
+        state = self.api.stores.conversations.get(conversation_id)
+        state.user_key, state.verify_step = "PHONE#+919700000033", verify_step
+        self.api.stores.conversations.save(state)
+        self.api.verification_store = VerificationStore(sessions=self.api.stores.verified_sessions, log=self.api.log)
+
+    def test_after_a_restart_the_verified_chat_can_still_ask(self):
+        self.restarted("web-5")
+        r = self.client.post("/erasure-requests", json={"conversation_id": "web-5", "confirm": True})
+        self.assertEqual(r.status_code, 201, r.text)
+        self.assertEqual(self.api.stores.conversations.erasure_record(r.json()["reference"])["proof"]["method"], "otp")
+
+    def test_after_a_restart_a_chat_that_changed_its_number_cannot(self):
+        # The saved conversation says the number is being changed: the saved
+        # session it no longer agrees with proves nothing (the review, minor 3).
+        self.restarted("web-6", verify_step="number")
+        r = self.client.post("/erasure-requests", json={"conversation_id": "web-6", "confirm": True})
+        self.assertEqual((r.status_code, r.json()["detail"]), (403, erasure.ERASURE_VERIFY_FIRST))
+
     def test_the_request_records_the_otp_and_when(self):
         self.verify("web-3")
         r = self.client.post("/erasure-requests", json={"conversation_id": "web-3", "confirm": True})

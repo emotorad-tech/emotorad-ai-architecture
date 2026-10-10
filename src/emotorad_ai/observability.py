@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from .digits import ascii_digits
+
 # `\b` cannot match before a "+", so the leading sign was left behind and the
 # log read "+[phone]". A lookbehind that rejects a digit or a sign also stops
 # this matching the tail of a longer digit run, which is what the word
@@ -26,6 +28,8 @@ from typing import Any, Callable, Dict, List, Optional
 # the transcript must hide them too. A letter on either side means the digits
 # sit inside an identifier (a UUID in an S3 key, a hex id), not a phone: the
 # deploy gate once failed on a customer id logged as "b0c[phone]cd2-...".
+# Two narrower patterns below take back the cases that are plainly a phone:
+# a word typed straight after the number, and Devanagari on either side.
 _PHONE = re.compile(r"(?<![\w+])(?:\+?91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\w)")
 # A number read out in any grouping ("+91 970 000 0010", "97 00 00 00 10").
 # The verify-first step reads a number with exactly this pattern
@@ -35,6 +39,37 @@ LOOSE_PHONE = re.compile(r"(?<![\w+])\+?\d[\d \-]{8,16}\d(?!\w)")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # 16-digit-ish sequences: card numbers pasted into a support chat.
 _LONG_DIGITS = re.compile(r"\b\d{12,19}\b")
+
+# Devanagari on either side of a mobile (spec 2026-10-05, section 8). Hindi
+# puts a postposition straight after a number ("9876543210पर"), and a
+# Devanagari letter is a word character to `\w`, so _PHONE sees no boundary
+# there. Devanagari never appears in an S3 key or a hex id, so here the glue
+# cannot mean an identifier.
+_PHONE_BY_DEVANAGARI = re.compile(
+    r"(?<=[ऀ-ॿ])(?:\+?91[\s-]?|0)?[6-9][0-9]{4}[\s-]?[0-9]{5}(?![0-9])"
+    r"|(?<![0-9+])(?:\+?91[\s-]?|0)?[6-9][0-9]{4}[\s-]?[0-9]{5}(?=[ऀ-ॿ])"
+)
+# A mobile with Latin letters typed straight after it ("9876543210pls",
+# "9876543210hai"). Hidden only when the digits start a word and the letters
+# end it: a space, a bracket, a quote or a comma (or nothing) before the
+# digits, and a space, sentence punctuation or the end after the letters. An
+# identifier fails one test or the other. In an S3 key or a hex id the digits
+# follow a slash, a dash, an underscore or a letter ("run-a9876543210f"), or
+# the letters run on into more digits, a dash, or a dot and an extension
+# ("9876543210ab12cd", "9876543210abcd.jpg"). The letters must also include
+# one past "f", so a hex id of ten digits then a to f ("9876543210abcdef")
+# stays. A rare word made only of a to f ("9876543210bad") stays with it.
+_PHONE_BEFORE_LETTERS = re.compile(
+    r"""(?<![^\s(\["',;])(?:\+?91[\s-]?|0)?[6-9][0-9]{4}[\s-]?[0-9]{5}"""
+    r"""(?=[A-Za-z]*[g-zG-Z][A-Za-z]*(?:[\s,;:!?)\]"']|\.(?![A-Za-z0-9_])|$))"""
+)
+# A number with another country's code ("+34 612 345 678", "+44 20 7946
+# 0958", "+1 (415) 555-0100"): a plus sign and eight to fifteen digits, the
+# lengths E.164 allows, with spaces, dashes or brackets between them.
+# Customers in Spain write to the same chat, and the transcript now goes to Zoho.
+# The lookbehind names ASCII word characters, not `\w`, so a number typed
+# straight after a Devanagari word ("नंबर+34612345678") is still hidden.
+_INTL_PHONE = re.compile(r"(?<![A-Za-z0-9_+])\+[0-9](?:[\s\-()]{0,2}[0-9]){7,14}(?![0-9])")
 
 
 # A one-time code or pincode typed on its own. Six digits are far too short
@@ -49,7 +84,13 @@ _OTP_ALONE = re.compile(r"^\s*\d{4,8}\s*$")
 # `phone_masked` is deliberately absent: the masked form is what the agent reads
 # back to the customer, and checking it was masked correctly is a thing the log
 # has to be able to answer.
-_SENSITIVE_KEYS = frozenset({"code", "otp", "phone", "mobile", "stated_contact"})
+# Zoho's OAuth values join them (spec 2026-10-05, section 8). A token or a
+# secret logged once stays a credential in CloudWatch for as long as the log
+# is kept. `authorization` is the header that carries the access token.
+_SENSITIVE_KEYS = frozenset({
+    "code", "otp", "phone", "mobile", "stated_contact", "customer_name",
+    "access_token", "refresh_token", "client_secret", "authorization",
+})
 
 # An inline image, which is how a customer's photo arrives. Never written down:
 # it is a picture of somebody's bike, their garage and whoever is standing in
@@ -66,7 +107,12 @@ def redact_pii(text: str) -> str:
 
     Ownership data already reaches us through identity resolution, so nothing
     downstream needs these to be readable in the log.
+
+    Digits of any script are read as ASCII first (digits.ascii_digits), so a
+    number typed on a Hindi keyboard is hidden like any other. The text that
+    comes back has ASCII digits where the customer typed Devanagari ones.
     """
+    text = ascii_digits(text)
     if _OTP_ALONE.match(text):
         # A one-time code or a pincode, typed alone. Both are hidden; the
         # placeholder says only what it can know. Calling every bare
@@ -79,7 +125,11 @@ def redact_pii(text: str) -> str:
     # thing about what had been there. A card number cannot be caught by _PHONE
     # in passing: its word boundaries cannot land inside a longer digit run.
     text = _PHONE.sub("[phone]", text)
+    text = _PHONE_BY_DEVANAGARI.sub("[phone]", text)
+    text = _PHONE_BEFORE_LETTERS.sub("[phone]", text)
     text = LOOSE_PHONE.sub(_phone_or_as_typed, text)
+    # Last of the phone patterns: by now an Indian number is already [phone].
+    text = _INTL_PHONE.sub("[phone]", text)
     text = _LONG_DIGITS.sub("[number]", text)
     return text
 

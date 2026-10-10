@@ -26,7 +26,7 @@ from emotorad_ai.storage.keys import (
 
 class VocabularyTests(unittest.TestCase):
     def test_the_vocabularies_are_the_ones_in_the_spec(self):
-        self.assertEqual(PROGRAMMES, ("afs", "presales", "dealer"))
+        self.assertEqual(PROGRAMMES, ("afs", "presales", "dealer", "library"))
         self.assertEqual(ASSET_KINDS, ("photos", "videos", "tips", "docs"))
         self.assertEqual(CUSTOMER_KINDS, ("images", "videos", "docs"))
         self.assertEqual(SIZE_CAPS, {"images": 10 * 1024 * 1024, "videos": 100 * 1024 * 1024, "docs": 10 * 1024 * 1024})
@@ -138,6 +138,16 @@ class IsValidKeyTests(unittest.TestCase):
         self.assertTrue(is_valid_key("assets/afs/battery/photos/soc-button.jpg"))
         self.assertTrue(is_valid_key("assets/afs/battery/photos/soc-button.w900.webp"))
         self.assertTrue(is_valid_key("assets/afs/battery/videos/key-turn.poster.jpg"))
+
+    def test_accepts_a_library_key_and_its_derivative(self):
+        # The reference library (7 October 2026): assets/library/<domain>/...
+        self.assertEqual(
+            asset_key("library", "controller", "photos", "serial-label", "image/jpeg"),
+            "assets/library/controller/photos/serial-label.jpg",
+        )
+        self.assertTrue(is_valid_key("assets/library/battery/photos/serial-label-downtube.jpg"))
+        self.assertTrue(is_valid_key("assets/library/battery/photos/serial-label-downtube.w900.webp"))
+        self.assertFalse(is_valid_key("assets/libraries/battery/photos/serial-label-downtube.jpg"))
 
     def test_rejects_a_prefix_only_match(self):
         self.assertFalse(is_valid_key("assets/../customers/x/y/images/z.jpg"))

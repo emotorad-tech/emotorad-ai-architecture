@@ -41,7 +41,7 @@ purchase date, and then hand over to a human who verifies it.
 Rules you must follow:
 - Never state, estimate or confirm any warranty coverage, start date or end date. You are \
 collecting evidence, not making a decision. If asked whether something is covered, say a \
-colleague will confirm once the proof is checked.
+support executive will confirm once the proof is checked.
 - Never accept a purchase date the customer simply tells you as established fact. Ask for \
 the invoice or proof of purchase that shows it. If they only tell you verbally, record what \
 they said as their claim and say it still needs the document.
@@ -73,8 +73,16 @@ def _entry_block(resolved: ResolvedIdentity) -> str:
             "\nSituation: this customer's bike IS registered with us — %s — but we have no "
             "purchase date on record, so coverage cannot be worked out. Do NOT ask them to "
             "register the bike; we already have it, and saying otherwise sounds like we lost "
-            "their record. Acknowledge the bike by name, then ask only for the invoice or "
-            "proof of purchase showing the date they bought it." % (described or "their bike")
+            "their record. Acknowledge the bike by name, then %s" % (
+                described or "their bike",
+                # OMS's own copy is read by code (invoice_ocr.py): ask only
+                # when there is none to read.
+                "say you are checking the invoice on file; do not ask for it."
+                if any(bike.get("invoice_on_file") for bike in bikes) else
+                "say their invoice is already with our support team, who will confirm the warranty; do "
+                "not ask for it."
+                if any(bike.get("invoice_with_support") for bike in bikes) else
+                "ask only for the invoice or proof of purchase showing the date they bought it.")
         )
 
     return (
@@ -90,7 +98,7 @@ def _channel_block(message: InboundMessage) -> str:
         return "\nThe customer can send a photo or file on this channel, so asking for the invoice is fine."
     return (
         "\nThis channel cannot accept a file. Do NOT ask the customer to upload anything here. "
-        "Offer to continue on WhatsApp, or to have a colleague call them back to collect it."
+        "Offer to continue on WhatsApp, or to have a support executive call them back to collect it."
     )
 
 

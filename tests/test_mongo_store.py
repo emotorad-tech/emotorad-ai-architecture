@@ -10,6 +10,7 @@ from pymongo.errors import ServerSelectionTimeoutError
 from emotorad_ai.conversation import ConversationConflict, ConversationState, StoreUnavailable
 from emotorad_ai.observability import EventLog
 from emotorad_ai.stores.mongo import INDEXES, MONGO_URI_ENV, MongoConversationStore, connect, ensure_indexes
+from tests.clock import mongomock_clock_at
 from tests.store_contract import StoreContract, inbound, reply, summary
 
 NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
@@ -17,7 +18,7 @@ NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 # mongomock expires TTL documents against the real clock, and these stores run
 # on NOW: once the real date passed NOW + 48 hours (1 October 2026, 10:00 UTC),
 # every saved conversation counted as expired. mongomock's clock is pinned too.
-_MONGOMOCK_CLOCK = mock.patch("mongomock.utcnow", lambda: NOW.replace(tzinfo=None))
+_MONGOMOCK_CLOCK = mongomock_clock_at(NOW)
 
 
 def setUpModule():
@@ -127,17 +128,20 @@ class MongoStoreTests(StoreContract, unittest.TestCase):
 
 
 class IndexTests(unittest.TestCase):
-    def test_every_collection_gets_exactly_its_indexes_and_only_two_expire(self):
+    def test_every_collection_gets_exactly_its_indexes_and_only_four_expire(self):
         db = fresh_db()
         report = ensure_indexes(db)
         self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media",
-                                       "conversation_origins", "erasure_requests"})
+                                       "conversation_origins", "erasure_requests", "tickets", "counters",
+                                       "verification_sessions", "conversation_notices", "serial_readings",
+                                       "invoice_readings", "amiigo_receipts", "replacement_orders"})
         ttl = {}
         for collection in report:
             for index, info in db[collection].index_information().items():
                 if "expireAfterSeconds" in info:
                     ttl["%s.%s" % (collection, index)] = info["expireAfterSeconds"]
-        self.assertEqual(ttl, {"conversations.expires_at_ttl": 0, "idempotency_keys.expires_at_ttl": 0})
+        self.assertEqual(ttl, {"conversations.expires_at_ttl": 0, "idempotency_keys.expires_at_ttl": 0,
+                               "verification_sessions.expires_at_ttl": 0, "amiigo_receipts.expires_at_ttl": 0})
         self.assertTrue(db["transcript_turns"].index_information()["conversation_turn"]["unique"])
         self.assertIn("user_recent", db["conversation_summaries"].index_information())
 
@@ -147,7 +151,8 @@ class IndexTests(unittest.TestCase):
 
     def test_the_index_table_has_no_ttl_on_the_permanent_record(self):
         for collection in ("transcript_turns", "conversation_summaries", "conversation_origins",
-                           "erasure_requests"):
+                           "erasure_requests", "tickets", "counters", "conversation_notices", "serial_readings",
+                           "invoice_readings", "replacement_orders"):
             for _, options in INDEXES[collection]:
                 self.assertNotIn("expireAfterSeconds", options)
 

@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from . import erasure as erasure_rules
 from .attachments import MACHINE_TEXT_PREFIXES
 from .contract import InboundMessage, Reply
+from .evidence_check import FAULT_AGENTS
 from .observability import redact_pii
 
 # Phases. A conversation moves forward through these, and can move back — a
@@ -101,6 +102,37 @@ class ConversationState:
     # asks with nothing back are sent; the fourth hands over to a person.
     evidence_asks: int = 0
     video_declined: bool = False
+    # The evidence check before a ticket (evidence_check.py, 6 October 2026),
+    # kept only with it switched on: the latest verdict on the customer's
+    # photos and videos ({"passed", "seen", "missing", "error", "at"}), and
+    # how many checks in this run could not be made. A verdict that passed
+    # stays until the run ends or the bike changes; the first error in a run
+    # earns one extra ask.
+    evidence_verdict: Optional[Dict[str, Any]] = None
+    evidence_check_errors: int = 0
+    # The bike fault this run was last about, "battery" or "motor"
+    # (evidence_check.fault_component): set when the chat is routed to the
+    # battery or motor agent, or a request for a person names the fault, and
+    # kept for the run. Going back to the list or to another number clears the
+    # agent and the topic, never this: only a new run (restart_for) does.
+    fault_topic: Optional[str] = None
+    # The melt ask (melt_ask.py, 6 October 2026). `melt_pending`: a customer
+    # said something melted in a turn that ended before the ask could go (the
+    # which-bike question, verify first), so it goes on the first later turn
+    # where it can; cleared once sent, with the bike (forget_bike) and when a
+    # dealer writes. `melt_asked_frames`: the bikes it was sent for, by the
+    # reference they are chosen by, so each bike is asked once.
+    melt_pending: bool = False
+    melt_asked_frames: List[str] = field(default_factory=list)
+    # The serial-photo ask (serial_ask.py, 7 October 2026): the bikes it was
+    # added to a reply for, by the frame number or reference, so it goes once
+    # per bike.
+    serials_asked_frames: List[str] = field(default_factory=list)
+    # Confirming serials read off the customer's photos (serial_confirm.py):
+    # the readings already put to the customer, by their id, so each is
+    # asked once; and the confirmation under way, or None.
+    serial_asked_ids: List[str] = field(default_factory=list)
+    serial_confirm: Optional[Dict[str, Any]] = None
     # The most recent warranty lookup, kept for the conversation for the same
     # reason `evidence_seen` is. Coverage is looked up once and then relied on;
     # the post-check that guards coverage claims was fed the current turn's tool
@@ -112,7 +144,7 @@ class ConversationState:
     coverage_result: Optional[Dict[str, Any]] = None
     # Every order this conversation has placed, kept for the same reason
     # `coverage_result` is. The order post-check only ever saw this turn's tool
-    # results, so a correct "it was RO-00001" a turn after the order was placed
+    # results, so a correct "it was RO-1000001" a turn after the order was placed
     # was blocked as unsupported and the customer escalated to check an order
     # that had already gone through. The check itself is unchanged — a claimed
     # order id must still be one a tool actually placed, in this conversation.
@@ -139,11 +171,48 @@ class ConversationState:
     # Where this run came from (origin.py): the place fields and the person
     # once known. Set from the run's first message; only filled in after.
     origin: Optional[Dict[str, Any]] = None
+    # Where the customer is, as an area only (spec 2026-10-09, section 3):
+    # {"pincode", "district", "state", "source" ("location" or "typed"), "at"}.
+    # Never coordinates. Lives the working state's 48 hours.
+    area: Optional[Dict[str, Any]] = None
+    # The bikes the warranty step has run for in this run (spec 2026-10-09
+    # warranty step): each one's frame reference, "-" for a rider with no
+    # bike on record. Until a bike is here, its cover is hidden from the agent.
+    warranty_step_frames: List[str] = field(default_factory=list)
     # Self-service erasure (erasure.py): "wanted" or "cancel_wanted" while the
     # verify step runs, "confirming" while the bot waits for DELETE.
     erasure_step: Optional[str] = None
     # The turn that asked for DELETE: only the next one may answer it.
     erasure_turn: Optional[int] = None
+    # The latest Indian mobile the customer typed in this run, ten digits
+    # (Runtime._note_typed_number): the number a ticket is called back on when
+    # nobody proved one (spec 2026-10-05, section 6). Never the model's, and it
+    # goes with the run.
+    typed_number: Optional[str] = None
+    # The run's last failed warranty look-up, "no_warranty_record" or
+    # "oms_unavailable", for a ticket's coverage: coverage_result keeps only a
+    # look-up that worked. Cleared by one that works, and with the bike.
+    lookup_error: Optional[str] = None
+    # The call-back gate (spec 2026-10-05, section 6): "handover" or "safety"
+    # while it waits for a number to call, and the asks it has made.
+    awaiting_callback: Optional[str] = None
+    callback_asks: int = 0
+    # The last number a verification code was sent to, for a lock-out ticket.
+    last_code_phone: Optional[str] = None
+    # Someone other than the run's own person writing in it before
+    # restart_for (a second person on a shared browser, once the first
+    # person's proof lapsed): where their stretch of the run began
+    # (Runtime._newcomer_start) and the ticket recorded for them in it. Their
+    # tickets take this start, never the run's, and `ticket_id` stays the
+    # run's own person's. Both are cleared when the run's own person writes
+    # again, which ends the stretch's tickets (Runtime._note_speaker).
+    newcomer_started_at: Optional[str] = None
+    newcomer_ticket_id: Optional[str] = None
+    # Where the run's own person's stretch of the run began, once someone
+    # else's stretch has ended (Runtime._owner_start): their tickets after it
+    # take this start, never the run's, so none of them takes in the other
+    # person's turns or photos. None until then: the run's start stands.
+    owner_started_at: Optional[str] = None
     channel: Optional[str] = None
     escalated: bool = False
     ticket_id: Optional[str] = None
@@ -205,6 +274,8 @@ class ConversationState:
         if self.selected_frame and self.selected_frame != frame_number:
             self.agent = None
             self.sub_category = None
+            # Evidence that passed was about the other bike.
+            self.evidence_verdict = None
             self.transitions.append("bike_changed:%s->%s" % (self.selected_frame, frame_number))
         self.selected_frame = frame_number
         self.selected_bike_label = label
@@ -213,8 +284,11 @@ class ConversationState:
         """Back to before a bike was chosen (navigation, spec 2026-10-02). The
         bike goes, with any unlisted one and its confirmation, the agent, and
         what was learnt about that bike, which does not hold for another: its
-        warranty lookup, the evidence seen and the asks for it. Orders placed
-        stay: they were placed. The topic is the caller's to keep or clear."""
+        warranty lookup and a failed one, the evidence seen and the asks for
+        it. Orders placed stay: they were placed. A number the customer typed
+        stays: it is theirs, not the bike's. The topic is the caller's to keep
+        or clear. A melt ask waiting for a bike goes; the bikes it was sent
+        for stay, so none is asked twice."""
         if self.selected_frame:
             self.transitions.append("bike_forgotten:%s" % self.selected_frame)
         self.selected_frame = None
@@ -223,11 +297,15 @@ class ConversationState:
         self.agent = None
         self.sub_category = None
         self.coverage_result = None
+        self.lookup_error = None
         self.evidence_seen = False
         self.evidence_asks, self.video_declined = 0, False
+        self.evidence_verdict = None
+        self.melt_pending = False
 
     def route_to(self, agent: str) -> None:
         self.agent = agent
+        self.fault_topic = FAULT_AGENTS.get(agent, self.fault_topic)
         self.move_to(ROUTED, agent)
 
     def hand_back(self, reason: str) -> None:
@@ -343,6 +421,32 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# What `owner_of` answers for a conversation whose runs belong to more than
+# one person: a web chat on a shared browser, where a second person proved
+# their number after the first person's proof lapsed (restart_for). No user
+# key equals it ("PHONE#..." or "DEALER#..."), so neither person's history,
+# and no rider's socket, can open the conversation and read the other's turns.
+SHARED_OWNER = "#shared"
+
+
+def notice_doc(conversation_id: str, seq: int, user_key: Optional[str], kind: str, text: str,
+               at: str, reference: str) -> Dict[str, Any]:
+    """A notice in a chat (a ticket closed in Zoho Desk), with the fields the
+    Amiigo history reads (amiigo/history.py): `_id`
+    `<conversation_id>#N<seq:05d>`, `conversation_id`, `user_key` (the person
+    whose chat it is, or None), `kind`, `text` and `at` (ISO 8601 UTC, as a
+    transcript turn's); and `reference`, the ticket it is about, which makes
+    it one of a kind in its chat whatever its wording."""
+    return {"_id": "%s#N%05d" % (conversation_id, seq), "conversation_id": conversation_id, "user_key": user_key,
+            "kind": kind, "text": text, "at": at, "reference": reference}
+
+
+def notice_seq(notice_id: str) -> int:
+    """A notice's number in its chat, from its `_id`; 0 when it has none."""
+    seq = str(notice_id).rsplit("#N", 1)[-1]
+    return int(seq) if seq.isascii() and seq.isdigit() else 0
+
+
 class ConversationConflict(Exception):
     """Another server saved this conversation after we loaded it."""
 
@@ -362,6 +466,13 @@ class TranscriptTurn:
     attachments: Tuple[Dict[str, str], ...] = ()
     handled_by: str = ""
     path: str = ""
+    # The dealer store cards the bot's reply carried (spec 2026-10-09).
+    stores: Tuple[Dict[str, Any], ...] = ()
+    # The conversation the turn belongs to, as a store reads it back, so the
+    # turn can name its message id (`<conversation_id>#<n:05d>`, the Amiigo
+    # history, amiigo/history.py). Not compared: two readings of one turn are
+    # the same turn.
+    conversation_id: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -404,11 +515,14 @@ def transcript_turns(
     customer = TranscriptTurn(
         n=n, role="customer", text=redact_pii(inbound.message_text or ""), at=at,
         attachments=tuple({"kind": a.kind, "url": recorded_url(a.url)} for a in inbound.attachments),
+        conversation_id=state.conversation_id,
     )
     bot = TranscriptTurn(
         n=n + 1, role="bot", text=redact_pii(reply.text or ""), at=at,
         attachments=tuple({"kind": a.kind, "url": recorded_url(a.url)} for a in reply.attachments),
         handled_by=reply.handled_by or "", path=str(reply.metadata.get("route") or ""),
+        stores=tuple(dict(s) for s in reply.stores),
+        conversation_id=state.conversation_id,
     )
     return customer, bot
 
@@ -444,8 +558,12 @@ class InMemoryConversationStore:
     them) and must raise ConversationConflict on a stale save.
     """
 
-    def __init__(self, clock: Callable[[], str] = utc_now_iso, max_conversations: int = 10_000) -> None:
+    def __init__(self, clock: Callable[[], str] = utc_now_iso, max_conversations: int = 10_000,
+                 receipts: Any = None) -> None:
         self._clock = clock
+        # The chat socket's receipts in this process (amiigo/receipts.py), when
+        # wired: erased with the person or the conversation (Ruling 14).
+        self.receipts = receipts
         # Bounded, so a long-running process does not grow without limit: past
         # `max_conversations`, the least recently used conversation goes, whole
         # (state, transcript, summaries). Everything here is lost on restart
@@ -458,6 +576,17 @@ class InMemoryConversationStore:
         self._media: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Where each run came from (origin.py), permanent: conversation id -> run key -> record.
         self._origins: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Notices in a chat (a ticket closed in Zoho Desk), permanent like the
+        # transcript: conversation id -> notice id -> notice. Written under
+        # the lock, so one notice is never written twice.
+        self._notices: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._notice_lock = threading.Lock()
+        # Serials read off the customer's photos (serial_read.py), permanent:
+        # conversation id -> reading id -> reading.
+        self._serials: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Invoices read for a purchase date (invoice_ocr.py), permanent:
+        # conversation id -> reading id -> reading.
+        self._invoices: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Self-service erasure requests (erasure.py): reference -> request.
         self._erasures: Dict[str, Dict[str, Any]] = {}
         # One pending request per person, even for two requests at once.
@@ -504,6 +633,87 @@ class InMemoryConversationStore:
     def transcript(self, conversation_id: str) -> List[TranscriptTurn]:
         return [turn for _, turn in sorted(self._turns.get(conversation_id, {}).items())]
 
+    # -- the Amiigo history (amiigo/history.py) ------------------------------
+
+    def runs_of(self, user_key: str, channel: Optional[str] = None) -> List[ConversationSummaryItem]:
+        """Every run of every conversation of one person: one summary each.
+        Grouped into conversations by amiigo/history.py."""
+        return [s for s in self._summaries.get(user_key, {}).values() if channel is None or s.channel == channel]
+
+    def owner_of(self, conversation_id: str) -> Optional[str]:
+        """The user key of the conversation's summaries: None when it has
+        none, SHARED_OWNER when they name more than one person."""
+        keys = {s.user_key for items in self._summaries.values() for s in items.values()
+                if s.conversation_id == conversation_id}
+        if not keys:
+            return None
+        return keys.pop() if len(keys) == 1 else SHARED_OWNER
+
+    def turns_of(self, conversation_id: str) -> List[TranscriptTurn]:
+        return self.transcript(conversation_id)
+
+    def count_turns(self, conversation_id: str) -> int:
+        return len(self._turns.get(conversation_id, {}))
+
+    def notices_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        notices = self._notices.get(conversation_id, {}).values()
+        return [dict(n) for n in sorted(notices, key=lambda n: (n["at"], n["_id"]))]
+
+    def add_notice(self, conversation_id: str, user_key: Optional[str], kind: str, text: str,
+                   at: str, *, reference: str) -> Tuple[Dict[str, Any], bool]:
+        """A notice in the chat, numbered after its others, and whether this
+        call wrote it. A notice of the same kind about the same ticket
+        (`reference`) already in the chat is returned as it is, whatever its
+        wording: a chat says one thing once (the final review's Minor 1)."""
+        with self._notice_lock:
+            mine = self._notices.setdefault(conversation_id, {})
+            same = next((n for n in mine.values() if n["kind"] == kind and n.get("reference") == reference), None)
+            if same is not None:
+                return dict(same), False
+            notice = notice_doc(conversation_id, max(map(notice_seq, mine), default=0) + 1, user_key, kind, text, at,
+                                reference)
+            mine[notice["_id"]] = notice
+            return dict(notice), True
+
+    def add_serial_reading(self, reading: Dict[str, Any]) -> None:
+        """A serial read off a customer's photo (serial_read.reading_doc), by
+        its `_id`: the same photo read twice keeps one reading."""
+        self._serials.setdefault(reading["conversation_id"], {})[reading["_id"]] = dict(reading)
+
+    def serial_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        readings = self._serials.get(conversation_id, {}).values()
+        return [dict(r) for r in sorted(readings, key=lambda r: (r["read_at"], r["_id"]))]
+
+    def update_serial_reading(self, conversation_id: str, reading_id: str, fields: Dict[str, Any]) -> None:
+        """Sets `fields` on one reading (serial_confirm.py: confirmed, or typed)."""
+        reading = self._serials.get(conversation_id, {}).get(reading_id)
+        if reading is not None:
+            reading.update(fields)
+
+    def add_invoice_reading(self, reading: Dict[str, Any]) -> None:
+        """An invoice read for a purchase date, by its `_id`, kept only if no
+        reading has that id yet: a late read of the same invoice never resets
+        one already told."""
+        if self.invoice_reading(reading["_id"]) is None:
+            self._invoices.setdefault(reading["conversation_id"], {})[reading["_id"]] = dict(reading)
+
+    def invoice_reading(self, reading_id: str) -> Optional[Dict[str, Any]]:
+        """A reading by its id, whatever the conversation, or None."""
+        for readings in self._invoices.values():
+            if reading_id in readings:
+                return dict(readings[reading_id])
+        return None
+
+    def invoice_readings_of(self, conversation_id: str) -> List[Dict[str, Any]]:
+        readings = self._invoices.get(conversation_id, {}).values()
+        return [dict(r) for r in sorted(readings, key=lambda r: (r["read_at"], r["_id"]))]
+
+    def update_invoice_reading(self, conversation_id: str, reading_id: str, fields: Dict[str, Any]) -> None:
+        """Sets `fields` on one reading (the runtime: told, and its ticket)."""
+        reading = self._invoices.get(conversation_id, {}).get(reading_id)
+        if reading is not None:
+            reading.update(fields)
+
     def record_media(self, record: Dict[str, Any]) -> None:
         """Upsert by `_id` (the S3 key): recording the same object twice
         (a retried claim) replaces its record rather than duplicating it."""
@@ -527,6 +737,14 @@ class InMemoryConversationStore:
         mine |= {s.conversation_id for s in self._summaries.get(user_key, {}).values()}
         mine |= {cid for cid, runs in self._origins.items()
                  if any(r.get("user_key") == user_key for r in runs.values())}
+        mine |= {cid for cid, notices in self._notices.items()
+                 if any(n.get("user_key") == user_key for n in notices.values())}
+        mine |= {cid for cid, readings in self._serials.items()
+                 if any(r.get("user_key") == user_key for r in readings.values())}
+        mine |= {cid for cid, readings in self._invoices.items()
+                 if any(r.get("user_key") == user_key for r in readings.values())}
+        if self.receipts is not None:
+            mine |= self.receipts.conversations_of(user_key)
         return sorted(mine)
 
     def pending_erasure_of(self, user_key: str) -> Optional[Dict[str, Any]]:
@@ -623,11 +841,16 @@ class InMemoryConversationStore:
                 "transcript_turns": sum(len(self._turns.get(cid, {})) for cid in mine),
                 "media": sum(len(self._media.get(cid, {})) for cid in mine),
                 "conversation_origins": sum(len(self._origins.get(cid, {})) for cid in mine),
+                "conversation_notices": sum(len(self._notices.get(cid, {})) for cid in mine),
+                "serial_readings": sum(len(self._serials.get(cid, {})) for cid in mine),
+                "invoice_readings": sum(len(self._invoices.get(cid, {})) for cid in mine),
+                "amiigo_receipts": sum(self._receipts_of(cid, dry_run=True) for cid in mine),
                 "conversation_summaries": len(self._summaries.get(user_key, {})) + sum(
                     1 for key, items in self._summaries.items() if key != user_key
                     for item in items.values() if item.conversation_id in mine),
             }
         counts = {"conversations": 0, "transcript_turns": 0, "media": 0, "conversation_origins": 0,
+                  "conversation_notices": 0, "serial_readings": 0, "invoice_readings": 0, "amiigo_receipts": 0,
                   "conversation_summaries": len(self._summaries.pop(user_key, {}))}
         for cid in mine:
             for name, count in self.delete_conversation(cid).items():
@@ -648,7 +871,16 @@ class InMemoryConversationStore:
             "conversation_summaries": summaries,
             "media": len(self._media.pop(conversation_id, {})),
             "conversation_origins": len(self._origins.pop(conversation_id, {})),
+            "conversation_notices": len(self._notices.pop(conversation_id, {})),
+            "serial_readings": len(self._serials.pop(conversation_id, {})),
+            "invoice_readings": len(self._invoices.pop(conversation_id, {})),
+            "amiigo_receipts": self._receipts_of(conversation_id),
         }
+
+    def _receipts_of(self, conversation_id: str, dry_run: bool = False) -> int:
+        if self.receipts is None:
+            return 0
+        return self.receipts.delete_conversation(conversation_id, dry_run=dry_run)
 
     def history(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.get(conversation_id).history

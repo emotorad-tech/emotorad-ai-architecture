@@ -8,6 +8,8 @@ import os
 import unittest
 from unittest import mock
 
+from emotorad_ai.zoho.settings import ENV_NAMES
+
 
 def fresh_api(env):
     with mock.patch.dict(os.environ, env, clear=False):
@@ -16,20 +18,72 @@ def fresh_api(env):
         return importlib.reload(api)
 
 
+def zoho_blank():
+    """Every Zoho setting (spec 2026-10-05 section 9) blank, together with any
+    other EMOTORAD_ZOHO_* name on this machine, so a laptop with the staging
+    secret loaded still sees Zoho off where /health is pinned."""
+    names = set(ENV_NAMES) | {name for name in os.environ if name.startswith("EMOTORAD_ZOHO_")}
+    return {name: "" for name in names}
+
+
 class HealthTests(unittest.TestCase):
     def test_offline_reports_no_secret(self):
         # Both video keys blanked, so the frames fallback is what is reported on
-        # any machine, including one with a real key in its environment.
-        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
-                         "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
-                         "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb"})
+        # any machine, including one with a real key in its environment. Zoho
+        # blanked for the same reason: off, it is the mock, and no ticket
+        # counts appear while nothing is waiting.
+        api = fresh_api(dict({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": "",
+                              "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
+                              "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb",
+                              "EMOTORAD_AMIIGO_PUBLIC_KEY": "", "EMOTORAD_OMS_API_KEY": "",
+                              "EMOTORAD_WARRANTY_API_KEY": "", "EMOTORAD_OMS_ORDERS": "", "EMOTORAD_MELT_ASK": "",
+                              "EMOTORAD_SERIAL_ASK": "", "EMOTORAD_OPEN_METEO_API_KEY": "",
+                              "EMOTORAD_WARRANTY_STEP": "", "EMOTORAD_OMS_AFS_ORDERS": "", "EMOTORAD_OMS_WS_URL": "",
+                              "EMOTORAD_OMS_LOGIN_URL": "", "EMOTORAD_OMS_ADMIN_EMAIL": "",
+                              "EMOTORAD_OMS_ADMIN_PASSWORD": "", "EMOTORAD_OMS_ADMIN_TOKEN": ""}, **zoho_blank()))
         self.assertEqual(
             api.health(),
             {"status": "ok", "mode": "offline", "store": "memory", "secrets": "not configured", "media": "not configured",
              "guide_media": "0 of %d sendable" % len(api.GUIDE_MEDIA), "video_summary": "frames", "tracing": "off",
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
-             "photo_check": "off"},
+             "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory",
+             "amiigo_receipts": "memory", "amiigo_tokens": "not configured", "zoho_webhook": "not configured",
+             "warranty_source": "fixtures", "oms_orders": "off", "oms_afs_orders": "off", "replacement_orders": "memory",
+             "dealer_stores": "fixtures", "weather": "not configured", "warranty_step": "off", "melt_ask": "off", "serial_ask": "off",
+             "serial_read": "off", "jev": "off: mode offline",
+             "invoice_ocr": "off"},
         )
+
+    def test_health_says_why_the_melt_ask_is_off_when_it_is_switched_on(self):
+        # Switched on where the pictures cannot be signed, it stays off and
+        # says why.
+        api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_MELT_ASK": "on", "EMOTORAD_AI_MEDIA_BUCKET": ""})
+        # No bucket here, so no picture can be signed: off, and says why.
+        self.assertEqual(api.health()["melt_ask"],
+                         "off: unresolvable melt_battery_serial, melt_controller_label, melt_terminals")
+        self.assertIsNone(api.runtime.melt_ask)
+        self.assertEqual(len(api.GUIDE_MEDIA), 10)
+        # 10 offered to the model (2 of them the library's, 6 the motor clips), 3 melt pictures,
+        # 14 more library files and the odometer photo.
+        self.assertEqual(len(api.CATALOGUE), 28)
+
+    def test_the_runtime_is_given_the_melt_ask_when_it_is_on(self):
+        from emotorad_ai import melt_ask
+
+        # Shaped like the ask: the runtime hands its battery_melt to triage.
+        sentinel = mock.Mock(spec=melt_ask.MeltAsk)
+        with mock.patch.object(melt_ask, "from_env", return_value=(sentinel, "on")):
+            api = fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_MELT_ASK": "on"})
+        self.assertIs(api.runtime.melt_ask, sentinel)
+        self.assertEqual(api.health()["melt_ask"], "on")
+
+    def test_safety_reports_not_recorded_are_counted_once_there_are_any(self):
+        # Spec 2026-10-05, section 6: safety_ticket_not_recorded is alarmed and
+        # counted on /health. Absent at 0, so the pinned report above holds.
+        api = fresh_api(dict({"EMOTORAD_AI_MODE": "offline"}, **zoho_blank()))
+        self.assertNotIn("safety_tickets_not_recorded", api.health())
+        api.runtime.safety_not_recorded = 2
+        self.assertEqual(api.health()["safety_tickets_not_recorded"], 2)
 
     def test_health_names_the_commit_it_was_built_from(self):
         # The deploy checks this, so a build that failed on the server and
@@ -147,7 +201,7 @@ class HealthTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        fresh_api({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""})
+        fresh_api(dict({"EMOTORAD_AI_MODE": "offline", "EMOTORAD_AI_SECRET_ID": ""}, **zoho_blank()))
 
 
 if __name__ == "__main__":

@@ -95,9 +95,9 @@ class TicketTests(unittest.TestCase):
         self.assertEqual(envelope["error"]["code"], "frame_number_not_owned")
 
     def test_a_replacement_for_a_bike_without_a_frame_is_refused(self):
-        from emotorad_ai.fulfilment import ItemCodes, ReplacementOrders, load_parts_table
+        from emotorad_ai.fulfilment import ReplacementOrders, load_parts_table
 
-        reg = registry(replacement_orders=ReplacementOrders(), item_codes=ItemCodes(), approval_mode="reasonable")
+        reg = registry(replacement_orders=ReplacementOrders())
         part = next(p for p, r in load_parts_table().items() if not r.technician and not r.ask)
         envelope = reg.call(
             PLACE_REPLACEMENT_ORDER, {"part": part, "use_record_address": True, "idempotency_key": "o1"},

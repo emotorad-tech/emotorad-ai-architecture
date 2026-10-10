@@ -1,10 +1,11 @@
 """Self-service "delete my data" (spec 2026-10-01).
 
-The chat (runtime erasure_gate) and the Amiigo app (POST /erasure-requests)
-only record a request. A person deletes, with erasure_admin.py, after reading
-the request (manual erasure spec). This module holds what they share: the
-phrases, the fixed replies, the reference and the shape of the erasure_log
-audit record.
+The chat (runtime erasure_gate) and the Amiigo app (POST /erasure-requests,
+and POST /amiigo/v1/erasure-requests with the rider's token) only record a
+request. A person deletes, with erasure_admin.py, after reading the request
+(manual erasure spec). This module holds what they share: the phrases, the
+fixed replies, the reference, the shape of the erasure_log audit record, and
+the bodies of the request endpoints (asking, the status, cancelling).
 """
 
 from __future__ import annotations
@@ -13,7 +14,10 @@ import hashlib
 import re
 import secrets
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
+
+# The Amiigo app's channel, where a signed-in rider asks (app_requester).
+APP_CHANNEL = "amiigo_app"
 
 # No 0/O, 1/I/L or U: a reference is read aloud and typed back.
 REFERENCE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -104,6 +108,74 @@ def proof_of(otp_verified_at: Optional[str]) -> Dict[str, str]:
     if otp_verified_at:
         return {"method": "otp", "verified_at": otp_verified_at}
     return {"method": "app_sign_in"}
+
+
+def app_requester(phone: str) -> Tuple[str, str, Dict[str, str]]:
+    """The Amiigo app's signed-in rider as the person asking: their user key,
+    the app's channel and the app's sign-in as the proof. The app's session
+    path (api.py) and its token path (amiigo/routes.py) both ask as this."""
+    return "PHONE#" + phone, APP_CHANNEL, proof_of(None)
+
+
+# -- the requests the app and the website chat's button record ----------------
+#
+# One body each for asking, the status and cancelling, called by the website's
+# POST /erasure-requests* (api.py) and the app's POST
+# /amiigo/v1/erasure-requests* (amiigo/routes.py). Each path finds the person
+# and words its own errors; `logged` adds fields to the log lines (the app's
+# rider_hash), which never carry a phone or a token.
+
+
+class RequestsUnavailable(Exception):
+    """The requests could not be read or written. Already logged, as
+    erasure_request_failed, by the error's class."""
+
+
+def _unavailable(log: Any, exc: Exception, conversation_id: Optional[str],
+                 logged: Dict[str, Any]) -> RequestsUnavailable:
+    log.emit("erasure_request_failed", conversation_id or "erasure", error=type(exc).__name__, **logged)
+    return RequestsUnavailable()
+
+
+def record_request(conversations: Any, log: Any, user_key: str, channel: str, proof: Dict[str, str],
+                   conversation_id: Optional[str], now: str, **logged: Any) -> Tuple[bool, Dict[str, Any]]:
+    """The person's pending request, recorded now unless one already is:
+    (whether it was recorded now, the answer)."""
+    try:
+        pending = conversations.pending_erasure_of(user_key)
+        reference = pending["_id"] if pending else conversations.request_erasure(
+            user_key, channel, conversation_id, now, proof=proof)
+    except Exception as exc:
+        raise _unavailable(log, exc, conversation_id, logged) from None
+    if pending:
+        return False, {"reference": reference, "status": "pending",
+                       "text": ERASURE_EXISTING.format(reference=reference)}
+    log.emit("erasure_requested", conversation_id or "erasure", reference=reference, **logged)
+    return True, {"reference": reference, "status": "pending", "text": ERASURE_REQUESTED.format(reference=reference)}
+
+
+def request_status(conversations: Any, log: Any, user_key: str, conversation_id: Optional[str],
+                   **logged: Any) -> Dict[str, Any]:
+    try:
+        pending = conversations.pending_erasure_of(user_key)
+    except Exception as exc:
+        raise _unavailable(log, exc, conversation_id, logged) from None
+    if pending is None:
+        return {"reference": None, "status": "none"}
+    return {"reference": pending["_id"], "status": "pending", "requested_at": pending["requested_at"]}
+
+
+def cancel_request(conversations: Any, log: Any, user_key: str, conversation_id: Optional[str], now: str,
+                   **logged: Any) -> Optional[Dict[str, Any]]:
+    """The answer once the pending request is cancelled, or None when nothing is pending."""
+    try:
+        reference = conversations.cancel_erasure(user_key, now)
+    except Exception as exc:
+        raise _unavailable(log, exc, conversation_id, logged) from None
+    if reference is None:
+        return None
+    log.emit("erasure_cancelled", conversation_id or "erasure", reference=reference, **logged)
+    return {"reference": reference, "status": "cancelled", "text": ERASURE_CANCELLED.format(reference=reference)}
 
 
 def new_reference(choice: Callable[[str], str] = secrets.choice) -> str:

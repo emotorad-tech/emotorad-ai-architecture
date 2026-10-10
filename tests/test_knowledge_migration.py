@@ -298,6 +298,12 @@ class WarrantyReplacementFlowTests(unittest.TestCase):
             if record.id == self.RECORD_ID:
                 continue
             body = " ".join(record.steps) + " " + record.escalate_when
+            if record.topic == "motor" and "Approval team" in body:
+                # AFS's motor cases (8 October 2026) recommend a replacement and
+                # send it to the Approval team; the bot never places one, so
+                # they never reach this record, which is the battery's.
+                self.assertNotIn(self.RECORD_ID, body, record.id)
+                continue
             if re.search(r"replacement|warranty flow", body, re.I):
                 self.assertIn(self.RECORD_ID, body, record.id)
 

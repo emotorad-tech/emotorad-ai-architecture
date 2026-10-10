@@ -42,8 +42,11 @@ class Chat:
     """One website visitor, turn by turn."""
 
     def __init__(self, replies=(), verify_first=True, account_finder=fixtures.find_account_by_order_code, clock=None,
-                 conversations=None):
-        self.store = VerificationStore(clock=clock) if clock else VerificationStore()
+                 conversations=None, sessions=None):
+        # `sessions`: the saved verified sessions, shared by two Chats to stand
+        # in for one conversation on a restarted server (test_verified_sessions).
+        options = {"clock": clock} if clock else {}
+        self.store = VerificationStore(sessions=sessions, **options) if sessions is not None else VerificationStore(**options)
         self.registry = build_registry(verification=self.store, today=TODAY, account_finder=account_finder)
         self.llm = ScriptedClaude(list(replies))
         self.conversations = conversations if conversations is not None else InMemoryConversationStore()

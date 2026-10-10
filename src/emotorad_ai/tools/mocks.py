@@ -8,15 +8,22 @@ nothing else. Nothing in this module talks to a real system.
 from __future__ import annotations
 
 import itertools
+import os
 import re
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import media as media_module
 from ..address import AddressError, PincodeDirectory, assemble, parse_address
-from ..conversation import address_tokens
-from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
+from ..contract import ASSERTED, VERIFIED
+from ..conversation import StoreUnavailable, address_tokens, utc_now_iso
+from ..digits import ascii_digits
+from ..evidence_check import DEFAULT_MISSING
+from ..fulfilment import PART_COMPONENTS, PART_FAULT, ProductIds, ReplacementOrders, load_parts_table, open_key
+from ..guardrails import check_safety_in_description
 from ..knowledge import BatteryKnowledgeBase
+from ..tickets.caps import CAP_TEXTS, cap_reached
+from ..tickets.clock import now_iso
 from . import fixtures
 from .verification import VerificationStore, register_verification_tools
 from .registry import ToolError, ToolRegistry, ok
@@ -35,6 +42,34 @@ SEARCH_KNOWLEDGE = "search_knowledge"
 SEARCH_BATTERY_KNOWLEDGE = SEARCH_KNOWLEDGE
 CREATE_SUPPORT_TICKET = "create_support_ticket"
 FIND_SERVICE_SLOTS = "find_service_slots"
+FIND_NEAREST_DEALERS = "find_nearest_dealers"
+GET_RECENT_WEATHER = "get_recent_weather"
+# A pin code as a customer types it, on text whose digits are already ASCII
+# (digits.ascii_digits): six digits, optionally split 3 + 3, not part of a
+# longer number such as a phone.
+_TYPED_PINCODE = re.compile(r"(?<![0-9])[1-9][0-9]{2} ?[0-9]{3}(?![0-9])")
+
+
+def _typed_area(pincode: Optional[str], customer_messages: Optional[List[str]],
+                centres: Any) -> Optional[Dict[str, Any]]:
+    """The area a pin code the model passed gives, or None when it passed
+    none. The model may pass only a pin code the customer typed in this chat,
+    never one it chose (the dealer tool's final review, 9 October 2026), and
+    only one India Post knows and that has a centre. Raises bad_pincode."""
+    typed = "".join(ascii_digits(str(pincode or "")).split())
+    if not typed:
+        return None
+    said = {"".join(found.split()) for text in (customer_messages or ())
+            for found in _TYPED_PINCODE.findall(ascii_digits(text))}
+    if typed not in said:
+        raise ToolError("bad_pincode", "The customer has not typed that pin code in this chat. Use "
+                                       "their area, or ask them for their six-digit pin code.")
+    places = PincodeDirectory.load().lookup(typed) if len(typed) == 6 and typed.isdigit() and typed[0] != "0" else []
+    if not places or centres.centre(typed) is None:
+        raise ToolError("bad_pincode", "%s is not a pin code India Post delivers to. Ask the customer "
+                                       "for their six-digit pin code." % typed[:12])
+    return {"pincode": typed, "district": places[0].district, "state": places[0].state,
+            "source": "typed", "at": utc_now_iso()}
 BOOK_SERVICE_SLOT = "book_service_slot"
 SUBMIT_WARRANTY_PROOF = "submit_warranty_proof"
 # The unverified counterpart of create_support_ticket. Separate on purpose:
@@ -60,13 +95,121 @@ PLACE_ORDER = "place_order"
 # --- replacement fulfilment --------------------------------------------------
 PLACE_REPLACEMENT_ORDER = "place_replacement_order"
 
-TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety", "other")
+TICKET_CATEGORIES = ("battery_charging", "battery_range", "battery_power", "battery_safety",
+                     # The motor cases (AFS §5f, 8 October 2026): a fault or physical damage
+                     # goes to the Approval team; a jam or a motor that fails under load to
+                     # the Service team (zoho/payload.NEXT_ACTIONS).
+                     "motor_fault", "motor_damage", "motor_jam", "motor_under_load",
+                     "other")
 # A hazard is raised on the customer's word, never held behind a photograph.
 EVIDENCE_EXEMPT_CATEGORIES = ("battery_safety",)
+# Categories whose ticket never waits for evidence. None since 8 October 2026:
+# a motor jam is a motor replacement ticket now, with its video like the rest.
+NO_EVIDENCE_CATEGORIES: Tuple[str, ...] = ()
+# Every motor ticket waits for photos of these parts (the person's rule, 8
+# October 2026), for the serials' OCR and the evidence check: a reading of each
+# in the conversation's serial_readings (serial_read.py), legible or not. A
+# hazard is never held back. Only with the serial ask on (the runtime injects
+# the readings; None means off).
+SERIAL_PHOTOS_REQUIRED = {
+    category: ("motor", "controller", "frame")
+    for category in ("motor_fault", "motor_damage", "motor_jam", "motor_under_load")
+}
+_SERIAL_LABELS = {"battery": "Battery serial", "motor": "Motor serial", "controller": "Controller S/N",
+                  "frame": "Frame number", "warranty_seal": "Battery warranty seal"}
+_SERIAL_ASKED_FOR = {"motor": "the serial number printed on the rear hub motor",
+                     "controller": "the controller's label, on the frame where the battery slots in",
+                     "frame": "the frame number sticker on the seat tube"}
+
+
+def _serial_photos_missing(category: str, readings: Optional[Sequence[Mapping[str, Any]]]) -> List[str]:
+    if readings is None:
+        return []
+    seen = {r.get("part") for r in readings}
+    return [part for part in SERIAL_PHOTOS_REQUIRED.get(category, ()) if part not in seen]
+
+
+def serials_line(readings: Optional[Sequence[Mapping[str, Any]]]) -> Optional[str]:
+    """What the photos showed, for the ticket: each part once, the confirmed
+    or latest reading, and how it is known. Never the model's words."""
+    if not readings:
+        return None
+    best: Dict[str, Mapping[str, Any]] = {}
+    for reading in readings:
+        part = reading.get("part")
+        if part not in _SERIAL_LABELS:
+            continue
+        kept = best.get(part)
+        if kept is None or reading.get("confirmed") or not kept.get("confirmed"):
+            best[part] = reading
+    pieces = []
+    for part in ("battery", "motor", "controller", "frame", "warranty_seal"):
+        reading = best.get(part)
+        if reading is None:
+            continue
+        if part == "warranty_seal":
+            pieces.append("%s: %s (read by AI)" % (_SERIAL_LABELS[part], reading.get("seal") or "unclear"))
+        elif not reading.get("serial"):
+            pieces.append("%s: photo received, not readable" % _SERIAL_LABELS[part])
+        elif reading.get("source") == "typed":
+            pieces.append("%s: %s (typed by the customer)" % (_SERIAL_LABELS[part], reading["serial"]))
+        elif reading.get("confirmed"):
+            pieces.append("%s: %s (read by AI, confirmed by the customer)" % (_SERIAL_LABELS[part], reading["serial"]))
+        else:
+            pieces.append("%s: %s (read by AI, not confirmed)" % (_SERIAL_LABELS[part], reading["serial"]))
+    return "From the customer's photos: " + "; ".join(pieces) + "." if pieces else None
 TICKET_SEVERITIES = ("low", "normal", "high", "critical")
+
+
+def _evidence_refusal(missing: Optional[str]) -> ToolError:
+    """With the evidence check on (evidence_check.py): no fault ticket until
+    the customer's media has passed, and the model is told what is missing."""
+    return ToolError(
+        "evidence_not_accepted",
+        "The customer's photos and videos have not shown the problem itself, so a fault ticket "
+        "cannot be raised yet. What is missing: %s. Ask the customer for a short video that shows "
+        "it, or a clear photo if they cannot take a video."
+        % ((missing or "").strip().rstrip(".") or DEFAULT_MISSING),
+        remedy="collect_evidence",
+    )
+
+
+def _hazard_ticket(category: str, description: str, ticket_kind: Optional[str],
+                   hazard_reported: Optional[bool]) -> bool:
+    """Whether a support ticket is about a hazard, and so never waits for the
+    evidence check. The safety branch's own ticket, whose kind only code sets;
+    or the safety category on a hazard the customer's own words reported
+    (`hazard_reported`, from the runtime) or the description names, negation
+    aware. The category alone is the model's choice, and a customer can ask
+    for it ("raise it as a safety issue"), so on its own it opens nothing
+    (the review of 6 October 2026)."""
+    if ticket_kind == "safety":
+        return True
+    return category in EVIDENCE_EXEMPT_CATEGORIES and (
+        hazard_reported is True or check_safety_in_description(description).triggered)
 
 # An Indian pincode. Six digits, first digit 1 to 9.
 _PINCODE = re.compile(r"\b[1-9]\d{5}\b")
+# An Indian mobile as the runtime keeps a typed one (ConversationState.typed_number,
+# from verify_first.find_phone): ten ASCII digits, the first 6 to 9. Matched
+# whole with fullmatch, so no word boundary is needed, and [0-9] rather than \d
+# so a Devanagari digit is never a number to call.
+_TEN_DIGIT_MOBILE = re.compile(r"[6-9][0-9]{9}")
+# An email the rider typed: one @, a dot in the domain, no spaces (spec
+# 2026-10-10 replacement orders, section 2). OMS requires one on a customer order.
+_EMAIL = re.compile(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+")
+# The email-shaped words inside a typed message. The guards stop a match that
+# starts or ends inside a longer address, so "x@b.com" is not found in
+# "xx@b.com" and "a@b.co" is not found in "a@b.com".
+_EMAIL_IN_TEXT = re.compile(
+    r"(?<![A-Za-z0-9._%+\-@])[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+(?![A-Za-z0-9\-@])")
+# The words of a name, in any script. `\w` alone drops Devanagari vowel signs,
+# so the explicit Devanagari block is added (CLAUDE.md, rules from the build log).
+_NAME_WORD = re.compile(r"[\wऀ-ॿ]+")
+
+
+def _name_tokens(text: str) -> set:
+    return set(_NAME_WORD.findall((text or "").casefold()))
 
 
 def _clean(value: Any) -> Any:
@@ -117,6 +260,9 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         # the VIN, and never shown to the rider.
         "bike_ref": record.get("bike_ref") or record.get("frame_number"),
         "frame_on_record": record.get("frame_on_record", True),
+        # Where the purchase date came from (spec 2026-10-10): only
+        # "oms_purchase" (em_purchase) may lead to a replacement order.
+        "ownership_source": record.get("ownership_source"),
         "in_app": bool(record.get("in_app")),
         "product_name": _clean(record.get("product_name")),
         "product_color": _clean(record.get("product_color")),
@@ -164,6 +310,9 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
                      "raise a support ticket that says so."),
         })
         return bike
+
+    if "warranty_api" in record:
+        return _api_coverage(bike, record, today)
 
     # `purchase_date` is the right answer and `created_at` is the available one.
     # Verified against live OMS 2026-08-29: purchase_date and ocr_date were null
@@ -220,6 +369,89 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
             "registered, and that the exact date can be confirmed from their invoice. Do "
             "not refuse a claim on this basis alone."
         )
+    return bike
+
+
+# The part the bike-level answer follows. The battery agent came first, and the
+# OMS path used the battery's term too. Reading the bike's overall status
+# instead would be unsafe: the frame runs 60 months and the battery 12, so a
+# bike whose battery cover has ended is still "active" as a whole.
+_LEAD_COMPONENT = "battery"
+
+
+def _api_coverage(bike: Dict[str, Any], record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
+    """One bike from the warranty API (tools/warranty_api.py): the service's own
+    coverage, quoted rather than computed."""
+    coverage = record.get("warranty_api") or {}
+    if record.get("registration_status") != "active":
+        # pending_review, or anything new the service adds: only an active
+        # registration may lead to a coverage answer.
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "pending_review",
+            "note": ("EMotorad is still reviewing this bike's warranty registration (usually the invoice). "
+                     "Do not state or estimate coverage. Say the registration is being reviewed and that "
+                     "the support team will confirm the warranty once it is done."),
+        })
+        return bike
+    if coverage.get("status") not in ("active", "expired"):
+        # With the OMS database (tools/oms_db.py), whether OMS holds the
+        # invoice: code reads it (invoice_ocr.py), so the model must not ask.
+        on_file = bool(record.get("invoice_on_file"))
+        with_support = bool(record.get("invoice_with_support"))
+        bike.update({
+            "in_warranty": None,
+            "coverage_status": "purchase_date_missing",
+            "remedy": coverage.get("remedy") or "collect_purchase_proof",
+            "invoice_on_file": on_file,
+            "invoice_with_support": with_support,
+            "note": (
+                "This bike's purchase date is not on record, but its invoice is on file and is being read "
+                "now. Do not ask for the invoice. Do not state or estimate a coverage date; tell the "
+                "customer you are checking their invoice."
+                if on_file else
+                "This bike's invoice is already with our support team, who will confirm the warranty. Do "
+                "not ask for the invoice and do not raise another ticket. Do not state or estimate a "
+                "coverage date."
+                if with_support else
+                ("This bike's purchase date is not on record" if record.get("ownership_source") == "oms_order"
+                 else "This bike is registered but its purchase date is not on record")
+                + ", so coverage cannot be "
+                "known. Ask for the invoice or any proof of purchase showing the date it was bought. Do "
+                "not state or estimate a coverage date."
+            ),
+        })
+        return bike
+
+    components = [
+        {
+            "component": part.get("component"),
+            "months": part.get("months"),
+            "valid_until": _date_only(part.get("validUntil")),
+            "active": part.get("active") is True,
+        }
+        for part in coverage.get("components") or []
+        if isinstance(part, dict)
+    ]
+    lead = next((part for part in components if part["component"] == _LEAD_COMPONENT), None)
+    on = today or date.today()
+    bike.update({
+        "in_warranty": lead["active"] if lead else coverage.get("status") == "active",
+        "coverage_status": "from_warranty_api",
+        "warranty_start": bike["purchase_date"],
+        "warranty_start_source": "purchase_date",
+        # "oms_terms" when the cover was worked out from OMS's purchase date
+        # (warranty_terms.py); "warranty_api" when the service gave it.
+        "term_source": record.get("term_source") or "warranty_api",
+        "components": components,
+    })
+    if lead and lead["valid_until"]:
+        ends = fixtures.parse_date(lead["valid_until"])
+        bike.update({
+            "warranty_end": ends.isoformat(),
+            "term_months": lead["months"],
+            "months_remaining": max(fixtures.months_between(on, ends), 0) if ends > on else 0,
+        })
     return bike
 
 
@@ -329,6 +561,13 @@ def _unlisted_ticket_bike(
             "frame_number_source": UNLISTED_SOURCE if frame else None}
 
 
+def _same_frame(a: Any, b: Any) -> bool:
+    """Two frame numbers are one bike: upper-cased, spaces removed. None is no bike."""
+    if not a or not b:
+        return False
+    return "".join(str(a).split()).upper() == "".join(str(b).split()).upper()
+
+
 def _owned_bike(
     phone: str,
     frame_number: Optional[str],
@@ -398,16 +637,54 @@ def _owned_bike(
     return records[0]
 
 
+# Where a warranty proof's frame number came from: the customer read it out
+# for a registration nobody has checked yet (spec 2026-10-05, section 3).
+CLAIMED_FRAME_SOURCE = "given by the customer for registration; not checked"
+
+
+def ticket_source_key(conversation_id: str, started_at: Optional[str], tool: str, idempotency_key: str) -> str:
+    """A ticket's own key (spec 2026-10-05, section 2): the run, the tool and
+    the call's idempotency key. The ticket system answers a key it has seen
+    with the first ticket, so a retry whose receipt was lost, or a second
+    server, never raises a second one, and a new run (a new person after
+    restart_for) never gets the last run's."""
+    return "%s:%s:%s:%s" % (conversation_id, started_at or "", tool, idempotency_key)
+
+
+def _record_name(record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The customer's name from an OMS warranty record, or None. An app record
+    carries the rider's username instead (tools/amigo.amigo_records marks it
+    warranty_on_record False), and a name typed in the chat is a claim:
+    neither is ever a ticket's customer name."""
+    if not record or record.get("warranty_on_record") is False:
+        return None
+    return _clean(record.get("customer_name"))
+
+
 class MockTicketSystem:
-    """Stands in for Zoho Desk (confirmed for dealer-side W1; customer side is an open item)."""
+    """Stands in for Zoho Desk: in tests, the playground, the CLI and the live
+    evaluation, and for every persona but the customer's when Zoho is on
+    (tickets/seam.py). Its EM-00001 numbers exist nowhere else."""
+
+    # Nothing it records reaches a person (TicketRouter says True).
+    records_real_tickets = False
 
     def __init__(self) -> None:
         self._counter = itertools.count(1)
         self.tickets: Dict[str, Dict[str, Any]] = {}
+        # source_key -> ticket id: the same key always returns the same ticket.
+        self._by_source_key: Dict[str, str] = {}
 
-    def create(self, **payload: Any) -> Dict[str, Any]:
+    def create(self, source_key: Optional[str] = None, persona: Optional[str] = None, **payload: Any) -> Dict[str, Any]:
+        if source_key and source_key in self._by_source_key:
+            return self.tickets[self._by_source_key[source_key]]
         ticket_id = "EM-%05d" % next(self._counter)
         ticket = dict(payload, ticket_id=ticket_id, status="open")
+        if source_key:
+            ticket["source_key"] = source_key
+            self._by_source_key[source_key] = ticket_id
+        if persona is not None:
+            ticket["persona"] = persona
         self.tickets[ticket_id] = ticket
         return ticket
 
@@ -417,6 +694,15 @@ class MockTicketSystem:
         if ticket_id not in self.tickets:
             raise KeyError("no ticket %s" % ticket_id)
         self.tickets[ticket_id]["transcript"] = transcript
+
+    def add_note(self, ticket_id: str, text: str) -> None:
+        """A short line for the ticket, kept with it."""
+        if ticket_id not in self.tickets:
+            raise KeyError("no ticket %s" % ticket_id)
+        self.tickets[ticket_id].setdefault("notes", []).append(text)
+
+    def close_runs(self, conversation_id: str, new_started_at: str) -> None:
+        """Nothing to mark: the mock sends nothing anywhere."""
 
 
 class MockOrderSystem:
@@ -452,9 +738,21 @@ class MockBookingSystem:
         return booking
 
 
+def _same_phone(placed_from: Optional[str], caller: Optional[str]) -> bool:
+    """Whether two phone strings are one number: by their last ten digits when
+    both parse as Indian mobiles, else exactly."""
+    from .oms_db import last_ten
+
+    try:
+        return last_ten(placed_from or "") == last_ten(caller or "")
+    except ValueError:
+        return bool(placed_from) and placed_from == caller
+
+
 def build_registry(
     knowledge_base: Optional[BatteryKnowledgeBase] = None,
-    ticket_system: Optional[MockTicketSystem] = None,
+    # A MockTicketSystem, or the TicketRouter (tickets/seam.py) when Zoho is on.
+    ticket_system: Optional[Any] = None,
     booking_system: Optional[MockBookingSystem] = None,
     order_system: Optional["MockOrderSystem"] = None,
     diagnostics_available: bool = False,
@@ -497,10 +795,11 @@ def build_registry(
     amigo: Optional[Any] = None,
     # The replacement order the bot places on the customer's behalf. Absent
     # unless a store is supplied, so an agent that cannot place one is never
-    # told it can. Item codes default to the mock resolver.
+    # told it can. Product ids default to none (an order is recorded, not
+    # sent); orders_live is the OMS switch (spec 2026-10-10 replacement orders).
     replacement_orders: Optional["ReplacementOrders"] = None,
-    item_codes: Optional["ItemCodes"] = None,
-    approval_mode: str = "reasonable",
+    product_ids: Optional["ProductIds"] = None,
+    orders_live: bool = False,
     # True only on a surface with a location button (the website chat).
     # WhatsApp shares location natively and IVR cannot; neither is offered a
     # button that does not exist there.
@@ -508,6 +807,14 @@ def build_registry(
     # Where write results are remembered. In memory by default; a durable store
     # with the same claim/get/put/release methods shares it across servers.
     idempotency: Optional[Any] = None,
+    # The OMS dealer stores (tools/dealer_stores.DealerDirectory) and the side
+    # channel their cards reach the reply by (StoreCards). Absent unless
+    # supplied, so an agent that cannot look stores up is never told it can.
+    dealers: Optional[Any] = None,
+    store_cards: Optional[Any] = None,
+    # The Open-Meteo client (weather.OpenMeteoClient). Absent unless the key
+    # is set, so no agent is told it can look the weather up.
+    weather: Optional[Any] = None,
 ) -> ToolRegistry:
     """Wire the mocked tools into a registry.
 
@@ -518,7 +825,17 @@ def build_registry(
     """
 
     kb = knowledge_base or BatteryKnowledgeBase()
-    tickets = ticket_system or MockTicketSystem()
+    # A code-only picture (the melt ask's, 6 October 2026) is attached by code
+    # to its own fixed reply and is never offered to a model: not in the
+    # send_guide_media enum or description, not in the narrow prompt's list,
+    # not named by a search result. Dropped here, before any of them is built.
+    guide_media = media_module.model_offered(guide_media or {})
+
+    def _default_knowledge_bike() -> Optional[Mapping[str, Any]]:
+        # search_knowledge's own parameter shadows the name, so read it here.
+        return knowledge_bike() if callable(knowledge_bike) else knowledge_bike
+
+    tickets = ticket_system if ticket_system is not None else MockTicketSystem()
     bookings = booking_system or MockBookingSystem()
     orders = order_system or MockOrderSystem()
     registry = ToolRegistry(idempotency=idempotency) if idempotency is not None else ToolRegistry()
@@ -696,18 +1013,24 @@ def build_registry(
 
         @registry.register(
             RAISE_INTAKE_TICKET,
-            "Raise a ticket for a customer whose identity could NOT be confirmed — they could "
+            "Raise a ticket for a customer whose identity could NOT be confirmed: they could "
             "not complete the one-time code, or could not give a number or order number at "
-            "all. Use it so the conversation still ends with the case in a human's queue "
+            "all. Use it so the conversation still ends with the case in a person's queue "
             "rather than nowhere. Everything you pass is what the customer TOLD you, not "
             "anything the system confirmed: pass their words. Do not state or imply any "
-            "warranty outcome to the customer — a person verifies who they are before anyone "
-            "acts on this.",
+            "warranty outcome to the customer: a person verifies who they are before anyone "
+            "acts on this. The team calls back on the customer's verified number, or else on "
+            "the last mobile number they typed in this chat, never on anything you pass. If "
+            "there is neither, this answers contact_number_required: ask the customer for a "
+            "mobile number we can call, and call this again once they have typed it.",
             parameters={
                 "stated_name": {"type": "string", "description": "Name as the customer gave it."},
                 "stated_contact": {
                     "type": "string",
-                    "description": "Any phone or email they offered, unverified, exactly as given.",
+                    "description": (
+                        "Any phone or email they offered, unverified, exactly as given. Kept as "
+                        "their claim only: it is never the number we call back."
+                    ),
                 },
                 "summary": {
                     "type": "string",
@@ -724,6 +1047,15 @@ def build_registry(
             },
             required=("summary", "idempotency_key"),
             injects=("conversation_id",),
+            # The number to call back and what the ticket record needs, from
+            # the runtime (spec 2026-10-05, section 2). None is in the model's
+            # schema, and anything it sends under these names is dropped.
+            # With the evidence check on (evidence_check.py), whether media
+            # that shows the problem has passed it, and what is missing:
+            # for a verified phone this is a support ticket under another
+            # name, so it waits the same way (the review of 6 October 2026).
+            optional_injects=("phone", "identity_strength", "typed_number", "persona", "started_at",
+                              "cluster_id", "channel", "evidence_accepted", "evidence_missing"),
             write=True,
         )
         def raise_intake_ticket(
@@ -733,26 +1065,78 @@ def build_registry(
             stated_name: str = "",
             stated_contact: str = "",
             evidence: str = "",
+            phone: Optional[str] = None,
+            identity_strength: Optional[str] = None,
+            typed_number: Optional[str] = None,
+            persona: Optional[str] = None,
+            started_at: Optional[str] = None,
+            cluster_id: Optional[str] = None,
+            channel: Optional[str] = None,
+            evidence_accepted: Optional[bool] = None,
+            evidence_missing: Optional[str] = None,
         ) -> Dict[str, Any]:
             """A ticket that records claims, deliberately kept apart from the verified one.
 
-            `create_support_ticket` injects a phone from a resolved identity and
-            refuses without one, which is right: a ticket carrying a frame number
-            and a coverage claim should only exist for someone we know. But that
-            left an unverified customer with no path at all — the agent would
-            promise to raise something and then raise nothing, which is worse
-            than saying no.
+            `create_support_ticket` needs a resolved phone and puts a bike and a
+            coverage outcome on the ticket, which is right only for someone we
+            know. This is the weaker ticket for everyone else, and the weakness
+            is the point: it asserts nothing. Every field is what the customer
+            said, labelled as such, and `identity` travels with it so triage
+            cannot mistake it for a confirmed case.
 
-            So this is a second, weaker ticket, and the weakness is the point. It
-            asserts nothing. Every field is what the customer said, labelled as
-            such, and `identity: unverified` travels with it so triage cannot
-            mistake it for a confirmed case.
+            It does need a number to call back (the person's decision,
+            2026-10-05): the verified phone when there is one, otherwise the
+            last Indian mobile the customer typed in this run, which the
+            runtime reads from their messages. Never `stated_contact`, which is
+            the model's copy of their words. With neither it refuses, so the
+            bot asks for a number rather than promising a call nobody can make.
             """
+            if phone and identity_strength == VERIFIED:
+                callback, identity = phone, "verified"
+            elif typed_number and _TEN_DIGIT_MOBILE.fullmatch(typed_number):
+                callback, identity = "+91" + typed_number, "unverified"
+            else:
+                raise ToolError(
+                    "contact_number_required",
+                    "There is no number to call this customer back on: ask the customer for a mobile "
+                    "number we can call, then raise the ticket again once they have typed it.",
+                    remedy="ask_for_callback_number",
+                )
+            if identity == "verified" and evidence_accepted is not None and evidence_accepted is not True:
+                # The brief exempts the intake ticket because it is for
+                # someone we cannot identify. On a verified phone in a fault
+                # chat it would be the support ticket by another route.
+                raise _evidence_refusal(evidence_missing)
+            source_key = ticket_source_key(conversation_id, started_at, RAISE_INTAKE_TICKET, idempotency_key)
+            # The caps on unverified tickets (spec 2026-10-05, section 6), the
+            # same helper the runtime's gates use. A verified customer's intake
+            # is never capped, and nor is a retry of a recorded one. A store
+            # that cannot count does not cap, as for the gates
+            # (Runtime._cap_refusal): the write below then succeeds or fails
+            # on its own.
+            if identity != "verified" and persona == "customer" and getattr(tickets, "records_real_tickets", False):
+                try:
+                    capped = cap_reached(tickets.store, phone=callback, source_key=source_key, now=now_iso())
+                except StoreUnavailable:
+                    capped = None
+                if capped is not None:
+                    raise ToolError(
+                        "unverified_ticket_capped",
+                        "No ticket was raised. Tell the customer exactly this, and promise no call: %s"
+                        % CAP_TEXTS[capped],
+                    )
             ticket = tickets.create(
+                source_key=source_key,
+                persona=persona,
+                kind="intake",
+                conversation_id=conversation_id,
+                started_at=started_at,
+                cluster_id=cluster_id,
+                channel=channel,
+                phone=callback,
+                identity=identity,
                 category="intake_unverified",
                 severity="normal",
-                identity="unverified",
-                conversation_id=conversation_id,
                 stated_name=_clean(stated_name) or "not given",
                 stated_contact=_clean(stated_contact) or "not given",
                 evidence=_clean(evidence) or "none offered",
@@ -762,7 +1146,7 @@ def build_registry(
                 {
                     "ticket_id": ticket["ticket_id"],
                     "status": ticket["status"],
-                    "identity": "unverified",
+                    "identity": identity,
                     "expected_response": "a person will verify the customer before acting on this",
                 }
             )
@@ -776,8 +1160,16 @@ def build_registry(
         "bike they mean rather than assuming.",
         parameters={},
         injects=("phone",),
+        optional_injects=("warranty_ready", "register_in_app"),
     )
-    def lookup_warranty_record(phone: str) -> Dict[str, Any]:
+    def lookup_warranty_record(phone: str, warranty_ready: Optional[bool] = None,
+                               register_in_app: Optional[bool] = None) -> Dict[str, Any]:
+        if warranty_ready is False:
+            # The warranty step has not run for the chosen bike (spec
+            # 2026-10-09 warranty step). Code calls this without the fact.
+            from ..warranty_step import AFTER_ISSUE_NOTE
+
+            return ok({"outcome": "warranty_after_issue", "note": AFTER_ISSUE_NOTE})
         if oms_available is False:
             # "The OMS is down" and "this person has no record" must never look
             # alike: one is retryable and says so, the other routes a genuine
@@ -791,6 +1183,15 @@ def build_registry(
             )
 
         records = warranty_source(phone) if warranty_source else fixtures.WARRANTY_RECORDS.get(phone)
+        if not records and register_in_app:
+            # The warranty step (spec 2026-10-09): registration comes in the app.
+            raise ToolError(
+                "no_warranty_record",
+                "No bike is registered against this number. The customer may still be a genuine "
+                "owner — warranty registration is often skipped. Help with the issue first; "
+                "registration will be possible in the app soon, so never register it in this chat.",
+                remedy="register_in_app",
+            )
         if not records:
             raise ToolError(
                 "no_warranty_record",
@@ -887,13 +1288,21 @@ def build_registry(
             },
         },
         required=("query",),
+        # The bike this conversation chose (Runtime._selected_bike), injected
+        # when the tool runs. Absent from the model's schema, and a value the
+        # model supplies is dropped, so it can never widen the filter. Before
+        # 6 October 2026 nothing passed it on the web chat and a Doodle owner
+        # was given the standard flow.
+        optional_injects=("knowledge_bike",),
     )
-    def search_knowledge(query: str, topic: Optional[str] = None) -> Dict[str, Any]:
+    def search_knowledge(query: str, topic: Optional[str] = None,
+                         knowledge_bike: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         # `bike` drives the applies_to filter, so a record written for a bike with
         # a throttle is unretrievable for one without. The model cannot widen this
         # by phrasing the query differently — the filter is applied here, not by
-        # the search terms.
-        bike = knowledge_bike() if callable(knowledge_bike) else knowledge_bike
+        # the search terms. The conversation's chosen bike wins; the registry's
+        # own (the playground's, the live evaluation's) is the fallback.
+        bike = knowledge_bike if knowledge_bike is not None else _default_knowledge_bike()
         passages = kb.search(query, topic=topic, bike=bike or {})
         if not passages:
             # An explicit empty answer, not a shrug. Without this the model fills
@@ -950,14 +1359,27 @@ def build_registry(
             },
         },
         required=("category", "description", "severity", "idempotency_key"),
-        injects=("phone",),
+        injects=("phone", "conversation_id"),
         # Whether any photo or video has arrived in the conversation, from the
         # runtime's facts; absent for a caller that has none (the safety branch).
-        optional_injects=("evidence_seen", "selected_bike", "unlisted_bike"),
+        # Then what the ticket record needs (spec 2026-10-05, section 2): the
+        # run, the persona (absent: the mock), the channel, how well the phone
+        # is known (absent: unverified), the cover code worked out, and the
+        # kind, which only the safety branch sets. None is in the model's
+        # schema, and anything it sends under these names is dropped.
+        # With the evidence check on (evidence_check.py), whether media that
+        # shows the problem has passed it, what a better video would need, and
+        # what Gemini saw; absent with it off, when the old evidence_seen rule
+        # applies.
+        optional_injects=("evidence_seen", "selected_bike", "unlisted_bike", "persona", "started_at",
+                          "cluster_id", "channel", "identity_strength", "coverage", "ticket_kind",
+                          "evidence_accepted", "evidence_missing", "evidence_checked", "hazard_reported",
+                          "serial_readings"),
         write=True,
     )
     def create_support_ticket(
         phone: str,
+        conversation_id: str,
         category: str,
         description: str,
         severity: str,
@@ -966,12 +1388,32 @@ def build_registry(
         evidence_seen: Optional[bool] = None,
         selected_bike: Optional[str] = None,
         unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
+        persona: Optional[str] = None,
+        started_at: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        identity_strength: Optional[str] = None,
+        coverage: Optional[str] = None,
+        ticket_kind: Optional[str] = None,
+        evidence_accepted: Optional[bool] = None,
+        evidence_missing: Optional[str] = None,
+        evidence_checked: Optional[str] = None,
+        hazard_reported: Optional[bool] = None,
+        serial_readings: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         if category not in TICKET_CATEGORIES:
             raise ToolError("invalid_category", "Unknown ticket category %r." % category)
         if severity not in TICKET_SEVERITIES:
             raise ToolError("invalid_severity", "Unknown severity %r." % severity)
-        if evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES:
+        hazard = _hazard_ticket(category, description, ticket_kind, hazard_reported)
+        if evidence_accepted is not None:
+            # The evidence check is on (the person's brief, 6 October 2026):
+            # a passing verdict replaces the evidence_seen test below. Never
+            # for a hazard, which is raised on the customer's word.
+            if evidence_accepted is not True and not hazard and category not in NO_EVIDENCE_CATEGORIES:
+                raise _evidence_refusal(evidence_missing)
+        elif (evidence_seen is False and category not in EVIDENCE_EXEMPT_CATEGORIES
+              and category not in NO_EVIDENCE_CATEGORIES):
             # The rule the evidence post-check enforces on the reply, enforced
             # here on the write too: before, the ticket was created and only the
             # reply saying so was blocked, so the customer never heard of it.
@@ -982,16 +1424,75 @@ def build_registry(
                 "(a voice call, or they say they cannot), hand the conversation to a person instead.",
                 remedy="collect_evidence",
             )
-        bike = _unlisted_ticket_bike(frame_number, unlisted_bike) or _owned_bike(
-            phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
+        missing_photos = [] if hazard else _serial_photos_missing(category, serial_readings)
+        if missing_photos:
+            raise ToolError(
+                "serial_photos_required",
+                "A motor ticket needs a clear photo of each of these first, and they have not arrived: %s. Ask "
+                "the customer for them, one message with all of them, saying the example pictures already sent "
+                "show where each is. If a photo arrived but was not of the right part, ask for that one again."
+                % "; ".join(_SERIAL_ASKED_FOR[part] for part in missing_photos),
+                remedy="collect_serial_photos",
+            )
+        serials = serials_line(serial_readings)
+        if serials:
+            description = description.rstrip() + "\n\n" + serials
+        verified = identity_strength == VERIFIED
+        if identity_strength == ASSERTED:
+            # Caller ID, which anyone can send (identity.resolve_voice): no
+            # bike is looked up for it, so the real owner's bike never lands on
+            # a stranger's ticket, and no frame number is checked against it.
+            bike = None
+        else:
+            unlisted = _unlisted_ticket_bike(frame_number, unlisted_bike)
+            try:
+                bike = unlisted or _owned_bike(
+                    phone, frame_number, bikes_on, allow_rider_read=True, selected=selected_bike)
+            except ToolError as exc:
+                # The safety branch fires before a bike is chosen. On a number
+                # with several bikes its ticket is raised with no bike, never
+                # refused for want of a frame number (spec 2026-10-05, section
+                # 6). Only the kind code sets: the model's call is refused as before.
+                if ticket_kind != "safety" or exc.code != "frame_number_required":
+                    raise
+                bike = None
+            if (evidence_accepted is True and not hazard and frame_number and selected_bike and bike is not None
+                    and not unlisted and (bike.get("bike_ref") or bike.get("frame_number")) != selected_bike):
+                # The evidence that passed was about the bike this
+                # conversation chose (the review of 6 October 2026).
+                raise ToolError(
+                    "evidence_for_another_bike",
+                    "The video or photo that showed the problem was about the bike this conversation chose, "
+                    "not this one. Ask the customer to go back to their bike list, choose this bike, and send "
+                    "a short video that shows its problem.",
+                    remedy="choose_bike",
+                )
         ticket = tickets.create(
+            source_key=ticket_source_key(conversation_id, started_at, CREATE_SUPPORT_TICKET, idempotency_key),
+            persona=persona,
+            # Set by code, never from the model's category: only the safety
+            # branch's fact makes a safety ticket (spec 2026-10-05, section 3).
+            kind="safety" if ticket_kind == "safety" else "support",
+            conversation_id=conversation_id,
+            started_at=started_at,
+            cluster_id=cluster_id,
+            channel=channel,
             phone=phone,
+            identity="verified" if verified else "unverified",
             category=category,
             description=description,
             severity=severity,
             frame_number=bike.get("frame_number") if bike else None,
             frame_number_source=bike.get("frame_number_source") if bike else None,
             bike_model=bike.get("product_name") if bike else None,
+            # A person's cover and name go on a ticket only for a phone
+            # someone proved.
+            coverage=coverage if verified else None,
+            customer_name=_record_name(bike) if verified else None,
+            # What Gemini saw, only after a pass (zoho/payload.py says so).
+            **({"evidence_check": evidence_checked}
+               if evidence_accepted is True and evidence_checked and category not in EVIDENCE_EXEMPT_CATEGORIES
+               else {}),
         )
         return ok(
             {
@@ -1036,7 +1537,7 @@ def build_registry(
         SUBMIT_WARRANTY_PROOF,
         "Submit a customer's warranty registration or proof of purchase for a human to verify. "
         "Use this once you have what they can give you. This does NOT register the warranty or "
-        "set any coverage — it queues the evidence for a colleague to check.",
+        "set any coverage — it queues the evidence for a support executive to check.",
         parameters={
             "frame_number": {
                 "type": "string",
@@ -1063,37 +1564,87 @@ def build_registry(
             },
         },
         required=("frame_number", "idempotency_key"),
-        injects=("phone",),
+        injects=("phone", "conversation_id"),
+        # What the ticket record needs, from the runtime (spec 2026-10-05,
+        # section 2). None is in the model's schema, and anything it sends
+        # under these names is dropped.
+        optional_injects=("persona", "started_at", "cluster_id", "channel", "identity_strength", "coverage",
+                          # Code only (invoice_ocr.py, spec 2026-10-08): what reading the
+                          # invoice found, and the date when the reading was confident.
+                          "invoice_findings", "invoice_purchase_date",
+                          # Frames whose invoice code is reading or has passed on: the
+                          # model may not raise its own ticket for them.
+                          "invoice_frames"),
         write=True,
     )
     def submit_warranty_proof(
         phone: str,
+        conversation_id: str,
         frame_number: str,
         idempotency_key: str,
         proof_url: Optional[str] = None,
         claimed_purchase_date: Optional[str] = None,
         purchase_channel: str = "unknown",
+        persona: Optional[str] = None,
+        started_at: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        identity_strength: Optional[str] = None,
+        coverage: Optional[str] = None,
+        invoice_findings: Optional[str] = None,
+        invoice_purchase_date: Optional[str] = None,
+        invoice_frames: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
+        if invoice_findings is None and frame_number in (invoice_frames or ()):
+            raise ToolError(
+                "invoice_with_code",
+                "This bike's invoice is being read, or is already with our support team, and the ticket is "
+                "raised for it automatically. Do not raise one. Tell the customer the support team will "
+                "confirm their warranty.",
+            )
         if purchase_channel not in ("dealer", "website", "marketplace", "unknown"):
             raise ToolError("invalid_channel", "Unknown purchase channel %r." % purchase_channel)
 
+        # `proof_url` stays in the schema and is ignored (spec 2026-10-05,
+        # section 3): the model never sees a URL, so one here is one it wrote.
+        # The customer's own photo reaches the ticket from the conversation.
+        verified = identity_strength == VERIFIED
         submission = tickets.create(
+            source_key=ticket_source_key(conversation_id, started_at, SUBMIT_WARRANTY_PROOF, idempotency_key),
+            persona=persona,
+            kind="warranty_proof",
+            conversation_id=conversation_id,
+            started_at=started_at,
+            cluster_id=cluster_id,
+            channel=channel,
             phone=phone,
+            identity="verified" if verified else "unverified",
             category="late_warranty_registration",
             severity="normal",
             description=(
-                "Warranty proof submitted for frame %s via %s. Customer states purchase date %s. "
-                "REQUIRES HUMAN VERIFICATION against the document before any coverage is set."
-                % (frame_number, purchase_channel, claimed_purchase_date or "not given")
+                "Warranty proof submitted for frame %s via %s. %s "
+                "REQUIRES HUMAN VERIFICATION against the document before any coverage is set.%s"
+                % (frame_number, purchase_channel,
+                   ("Invoice date read by AI: %s." % invoice_purchase_date) if invoice_purchase_date else
+                   "Customer states purchase date %s." % (claimed_purchase_date or "not given"),
+                   ("\n\n" + invoice_findings) if invoice_findings else "")
             ),
+            # The customer's claims, labelled as such: nobody has checked the
+            # frame number, the date or where it was bought.
             frame_number=frame_number,
-            proof_url=proof_url,
+            frame_number_source=CLAIMED_FRAME_SOURCE,
             claimed_purchase_date=claimed_purchase_date,
+            purchase_channel=purchase_channel,
+            coverage=coverage if verified else None,
+            # The proof, not the person: nobody has read the document yet.
             verified=False,
         )
         return ok(
             {
                 "reference": submission["ticket_id"],
+                # The same id under the name the runtime reads, so this ticket
+                # gets the transcript and counts as this turn's ticket.
+                "ticket_id": submission["ticket_id"],
                 "status": "awaiting_human_verification",
                 # Stated in the payload so the model cannot read this as a
                 # completed registration and congratulate the customer on being
@@ -1251,9 +1802,102 @@ def build_registry(
             # chose.
             return ok({"offered": True, "action": {"kind": "request_location", "label": "Share my location"}})
 
+    if dealers is not None:
+        from ..evidence_check import CONTACT_ENV
+        from .dealer_stores import FAR_KM, DealerStoresUnavailable, store_card
+
+        @registry.register(
+            FIND_NEAREST_DEALERS,
+            "The three EMotorad dealer stores nearest the customer. Call it only when the customer should "
+            "take the bike to a dealer: the issue is still unclear after your questions, or a fault you "
+            "verified is in warranty and its part must be fitted at a dealer. Pass `pincode` only if the "
+            "customer typed one in this chat; otherwise their area is supplied by the platform. The stores' "
+            "addresses, managers and phone numbers are shown to the customer below your reply: never write "
+            "a phone number or a street address yourself.",
+            parameters={"pincode": {"type": "string",
+                                    "description": "A six-digit pin code the customer typed in this chat."}},
+            required=(),
+            injects=("conversation_id",),
+            optional_injects=("area", "customer_messages"),
+        )
+        def find_nearest_dealers(conversation_id: str, area: Optional[Dict[str, Any]] = None,
+                                 customer_messages: Optional[List[str]] = None,
+                                 pincode: Optional[str] = None) -> Dict[str, Any]:
+            contact = (os.environ.get(CONTACT_ENV) or "").strip()
+            typed_area = _typed_area(pincode, customer_messages, dealers.centres)
+            if typed_area is not None:
+                area = typed_area
+            centre = dealers.centres.centre((area or {}).get("pincode"))
+            if centre is None:
+                return ok({"outcome": "no_area",
+                           "action": {"kind": "request_location", "label": "Share my location"}})
+            reason = "no_stores"
+            try:
+                nearest = dealers.nearest(centre)
+            except DealerStoresUnavailable as exc:
+                nearest, reason = [], str(exc)
+            if not nearest:
+                raise ToolError("oms_unavailable", "Dealer stores cannot be looked up right now (%s)." % reason
+                                + (" The customer can call customer care on %s." % contact if contact else ""),
+                                retryable=True)
+            cards = [store_card("D%d" % (n + 1), store, km) for n, (store, km) in enumerate(nearest)]
+            if store_cards is not None:
+                store_cards.put(conversation_id, cards)
+            far = nearest[0][1] > FAR_KM
+            data: Dict[str, Any] = {
+                "outcome": "ok",
+                "area": dict(area),
+                "far": far,
+                "stores": [{"store_ref": card["ref"], "store_name": card["name"],
+                            "locality": ", ".join(x for x in (store.district, store.state) if x),
+                            "distance_km": card["distance_km"]}
+                           for card, (store, _km) in zip(cards, nearest)],
+                "note": "Their addresses, managers and phone numbers are shown to the customer below your reply.",
+            }
+            if far and contact:
+                data["care_contact"] = contact
+            return ok(data, freshness_seconds=600)
+
+    if weather is not None:
+        from ..geo import PincodeCentres
+        from ..weather import WeatherUnavailable, summary as weather_summary
+
+        weather_centres = PincodeCentres.load()
+
+        @registry.register(
+            GET_RECENT_WEATHER,
+            "The temperature now and over the last 14 days around the customer's area. Call it when the "
+            "temperature matters (the battery will not charge, charges slowly, range has dropped, or "
+            "storage) instead of asking the customer how hot or cold it is. Pass `pincode` only if the "
+            "customer typed one in this chat; otherwise their area is supplied by the platform.",
+            parameters={"pincode": {"type": "string",
+                                    "description": "A six-digit pin code the customer typed in this chat."}},
+            required=(),
+            injects=("conversation_id",),
+            optional_injects=("area", "customer_messages"),
+        )
+        def get_recent_weather(conversation_id: str, area: Optional[Dict[str, Any]] = None,
+                               customer_messages: Optional[List[str]] = None,
+                               pincode: Optional[str] = None) -> Dict[str, Any]:
+            typed_area = _typed_area(pincode, customer_messages, weather_centres)
+            if typed_area is not None:
+                area = typed_area
+            where = (area or {}).get("pincode")
+            point = weather_centres.centre(where)
+            if point is None:
+                return ok({"outcome": "no_area",
+                           "action": {"kind": "request_location", "label": "Share my location"}})
+            try:
+                report = weather.recent(where, point)
+            except WeatherUnavailable as exc:
+                raise ToolError("weather_unavailable", "The weather cannot be looked up right now (%s). Ask the "
+                                                       "customer about the temperature instead." % exc,
+                                retryable=True)
+            return ok(dict(weather_summary(report, area), outcome="ok"), freshness_seconds=3600)
+
     if replacement_orders is not None:
         parts_table = load_parts_table()
-        codes = item_codes or ItemCodes()
+        codes = product_ids or ProductIds()
         # Loaded once per process and shared; 19,584 rows, under a megabyte.
         pincodes = PincodeDirectory.load()
 
@@ -1263,7 +1907,7 @@ def build_registry(
             "concluded that a part needs replacing and the customer has confirmed where to "
             "send it. Pass the address exactly as they confirmed it. This decides on its own "
             "whether the part needs a technician, whether an order is already on its way, "
-            "and whether it can be approved now; read the result and say what it says. It "
+            "and whether one is already placed; read the result and say what it says. It "
             "handles in-warranty only: anything chargeable is refused and goes to a person.",
             parameters={
                 "frame_number": {
@@ -1311,6 +1955,11 @@ def build_registry(
                     },
                     "required": ["house_or_flat", "building_or_street", "area", "pincode"],
                 },
+                "customer_name": {"type": "string",
+                                  "description": "The customer's full name, as they typed it and confirmed."},
+                "email": {"type": "string", "description": "The customer's email, as they typed it and confirmed."},
+                "mobile": {"type": "string",
+                           "description": "Only if they gave a number other than the one they are chatting from."},
                 "idempotency_key": {
                     "type": "string",
                     "description": "Stable key for this order, so a retry does not place it twice.",
@@ -1318,7 +1967,7 @@ def build_registry(
             },
             required=("part", "idempotency_key"),
             injects=("phone", "conversation_id", "evidence_seen", "coverage_result", "customer_messages"),
-            optional_injects=("unlisted_bike",),
+            optional_injects=("unlisted_bike", "evidence_verified"),
             write=True,
         )
         def place_replacement_order(
@@ -1333,6 +1982,10 @@ def build_registry(
             use_record_address: bool = False,
             address: Optional[Dict[str, Any]] = None,
             unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
+            evidence_verified: Optional[Dict[str, Any]] = None,
+            customer_name: Optional[str] = None,
+            email: Optional[str] = None,
+            mobile: Optional[str] = None,
         ) -> Dict[str, Any]:
             if unlisted_bike:
                 # The customer's bike is not registered on this number (the
@@ -1380,6 +2033,92 @@ def build_registry(
                     "Ask the customer to read the frame number off the sticker and raise a support ticket instead.",
                 )
             frame = bike["frame_number"]
+
+            # The gate (spec 2026-10-10 replacement orders, section 1), all in
+            # code: the evidence, the registration's date, the part's own cover.
+            # A part with no fault component (the display) is never ordered on
+            # a verdict: None must not match a missing verdict. The evidence
+            # holds only for the bike it was seen on (the whole-branch review,
+            # finding 1): a passing video for one bike never orders another's.
+            fault = PART_FAULT.get(part)
+            proved = evidence_verified if isinstance(evidence_verified, dict) else {}
+            proved_fault = proved.get("component")
+            on_this_bike = _same_frame(proved.get("frame"), frame)
+            if not on_this_bike or (proved_fault != "any" and (fault is None or proved_fault != fault)):
+                raise ToolError(
+                    "evidence_not_verified",
+                    "The fault is not yet confirmed by the photos or video for this bike, so nothing can be "
+                    "ordered. Ask for a short video that shows the fault, or raise a support ticket.",
+                    remedy="collect_evidence",
+                )
+            entry = next((e for e in (coverage_result.get("data") or {}).get("bikes", [])
+                          if e.get("frame_number") == frame), None)
+            if entry is None:
+                raise ToolError(
+                    "coverage_undetermined",
+                    "Coverage for this bike is not settled. Ask for the invoice before ordering.",
+                    remedy="collect_purchase_proof",
+                )
+            if entry.get("ownership_source") != "oms_purchase" or not entry.get("purchase_date"):
+                raise ToolError(
+                    "warranty_not_from_registration",
+                    "A replacement is ordered only for a bike whose purchase date is on its warranty "
+                    "registration. Raise a support ticket with the evidence instead; the support team "
+                    "will confirm the warranty.",
+                    remedy="support_ticket",
+                )
+            component = PART_COMPONENTS.get(part)
+            cover = next((c for c in entry.get("components") or [] if c.get("component") == component), None)
+            if cover is None:
+                raise ToolError(
+                    "coverage_undetermined",
+                    "The %s's cover is not on record. Raise a support ticket instead." % part,
+                    remedy="support_ticket",
+                )
+            if cover.get("active") is not True:
+                raise ToolError(
+                    "part_not_in_warranty",
+                    "The %s's warranty has ended, so this replacement is chargeable. Chargeable "
+                    "replacements are handled by a person: raise a support ticket and hand over rather "
+                    "than quote." % part,
+                    remedy="human_handoff",
+                )
+
+            # The rider's details (section 2): each typed by the rider in this chat.
+            from .oms_db import last_ten
+
+            name = " ".join((customer_name or "").split())
+            name_words = _name_tokens(name)
+            if not name_words:
+                raise ToolError("customer_name_required",
+                                "Ask for the customer's full name, read it back, and pass it as customer_name.")
+            typed = set()
+            for message in customer_messages:
+                typed |= _name_tokens(message)
+            stray = name_words - typed
+            if stray:
+                # How many, never which: the message is logged with the tool
+                # call, and the name is never logged (spec section 2).
+                raise ToolError("customer_name_unconfirmed",
+                                "%d word%s of the name %s not typed by the customer. Ask for their name and "
+                                "pass exactly what they confirmed."
+                                % (len(stray), "" if len(stray) == 1 else "s", "was" if len(stray) == 1 else "were"))
+            mail = (email or "").strip()
+            if not _EMAIL.fullmatch(mail):
+                raise ToolError("email_invalid", "Ask for the customer's email address and pass it as they typed it.")
+            typed_emails = {found.lower() for message in customer_messages
+                            for found in _EMAIL_IN_TEXT.findall(message or "")}
+            if mail.lower() not in typed_emails:
+                raise ToolError("email_unconfirmed",
+                                "That email was not typed by the customer. Ask for it and pass it as they typed it.")
+            try:
+                mobile_ten = last_ten(mobile) if mobile else last_ten(phone)
+            except ValueError:
+                raise ToolError("mobile_invalid", "Ask for an Indian mobile number the order can be delivered to.")
+            if mobile and not any(mobile_ten in re.sub(r"[^0-9]", "", message) for message in customer_messages):
+                raise ToolError("mobile_invalid",
+                                "That mobile number was not typed by the customer. Ask for it and pass it as typed.")
+            rider = {"name": name, "email": mail, "mobile": mobile_ten}
 
             # The address backstop. Two ways in, both decided here.
             #
@@ -1455,76 +2194,52 @@ def build_registry(
                     place = places[0]
                 delivery_address = assemble(parsed, place)
 
-            # Coverage, from the lookup the runtime remembered. Chargeable is a
-            # later build; refusing it here keeps the model from improvising a
-            # payment it cannot take.
-            covered = None
-            for entry in (coverage_result.get("data") or {}).get("bikes", []):
-                if entry.get("frame_number") == frame:
-                    covered = entry.get("in_warranty")
-            if covered is None:
-                raise ToolError(
-                    "coverage_undetermined",
-                    "Coverage for this bike is not settled. Ask for the invoice before ordering.",
-                    remedy="collect_purchase_proof",
-                )
-            if covered is False:
-                raise ToolError(
-                    "chargeable_not_supported",
-                    "This bike is out of warranty, so the part is chargeable. Chargeable "
-                    "replacements are handled by a person for now; hand over rather than quote.",
-                    remedy="human_handoff",
-                )
-
-            existing = replacement_orders.in_flight(frame, part)
-            if existing is not None:
-                return ok(
-                    {
-                        "order_id": existing["order_id"],
-                        "status": existing["status"],
-                        "part": part,
-                        "item_code": existing.get("item_code"),
-                        "delivery_address": existing.get("delivery_address"),
-                        "already_placed": True,
-                        "placed_at_utc": existing.get("placed_at_utc"),
-                        "note": (
-                            "Nothing new was placed. A replacement for this bike and part was "
-                            "placed earlier, at the time and to the address above. Tell the "
-                            "customer it already exists, quote the order id and that address, "
-                            "and if they want the address changed, hand over to the support team."
-                        ),
+            existing = replacement_orders.open_order(frame, part)
+            if existing is None:
+                record_line = delivery_address
+                if use_record_address:
+                    pins = re.findall(r"(?<![0-9])[1-9][0-9]{5}(?![0-9])", record_line)
+                    oms_address = {"line1": record_line, "line2": "", "pincode": pins[-1] if pins else ""}
+                else:
+                    fields = parsed.customer_fields()
+                    oms_address = {
+                        "line1": ", ".join(v for v in (fields.get("house_or_flat"), fields.get("building_or_street")) if v),
+                        "line2": ", ".join(v for v in (fields.get("area"), fields.get("landmark"),
+                                                       place.district, place.state) if v),
+                        "pincode": parsed.pincode,
                     }
-                )
-
-            item_code = codes.resolve(bike.get("product_name"), part)
-            sure = is_sure(evidence_seen, covered, item_code, rule)
-            # A missing item code is never a refusal and never an approval: the
-            # spec has a not-sure case still placed as pending_approval, with
-            # nothing dropped, and a human resolving the code. Approving it
-            # would hand the OMS an order it cannot fulfil; refusing it drops a
-            # customer's correct claim for 48 hours behind the in-flight check.
-            status = decide(sure, approval_mode)
-            if item_code is None:
-                status = "pending_approval"
-            order = replacement_orders.create(
-                frame_number=frame,
-                part=part,
-                item_code=item_code,
-                delivery_address=delivery_address,
-                phone=phone,
-                conversation_id=conversation_id,
-                sure=sure,
-                status=status,
-            )
-            return ok(
-                {
-                    "order_id": order["order_id"],
-                    "status": order["status"],
-                    "part": part,
-                    "item_code": item_code,
-                    "delivery_address": order["delivery_address"],
-                    "already_placed": False,
-                }
-            )
+                product_id = codes.resolve(bike.get("product_name"), part)
+                now = utc_now_iso()
+                reference = replacement_orders.next_reference()
+                existing, created = replacement_orders.insert({
+                    "_id": reference, "open_key": open_key(frame, part), "frame_number": frame, "part": part,
+                    "product_id": product_id, "product_name": bike.get("product_name"),
+                    "customer": dict(rider, address=oms_address), "delivery_address": delivery_address,
+                    "phone": phone, "conversation_id": conversation_id, "ticket_reference": None,
+                    "status": "queued" if (orders_live and product_id) else "recorded",
+                    "oms": {"intent_at": None, "order_code": None, "order_id": None, "passes": 0, "last_error": None},
+                    "next_attempt_at": now, "lease_until": None, "created_at": now, "updated_at": now,
+                })
+                if created:
+                    return ok({"order_id": existing["_id"], "status": existing["status"], "part": part,
+                               "delivery_address": existing["delivery_address"], "already_placed": False})
+            # The earlier order's address and time go only to the phone it was
+            # placed from: another number that lists the same frame is told
+            # that an order exists and nothing more.
+            if _same_phone(existing.get("phone"), phone):
+                return ok({
+                    "order_id": existing["_id"], "status": existing["status"], "part": part,
+                    "delivery_address": existing.get("delivery_address"), "already_placed": True,
+                    "placed_at_utc": existing.get("created_at"),
+                    "note": ("Nothing new was placed. A replacement for this bike and part was placed earlier, at "
+                             "the time and to the address above. Tell the customer it already exists, quote the "
+                             "order id and that address, and if they want the address changed, hand over to the "
+                             "support team."),
+                })
+            return ok({
+                "order_id": existing["_id"], "status": existing["status"], "part": part, "already_placed": True,
+                "note": ("A replacement for this bike and part was already placed from another number. Do not "
+                         "share its details; hand the conversation to the support team."),
+            })
 
     return registry

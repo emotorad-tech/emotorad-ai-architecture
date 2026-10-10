@@ -1,0 +1,9 @@
+{
+  "_source": "Captured by scripts/zoho/probe.py on 2026-10-05, masked by scripts/zoho/_common.py. Replaces the published-shape draft. The token cannot list departments (no Desk.basic.READ, as with the OMS's token), so this list was confirmed through a ticket in each department: GET /api/v1/tickets with the department's id, include=departments and limit=1. Only each department's id and name were kept, never the ticket.",
+  "data": [
+    {
+      "id": "55430000000010772",
+      "name": "Inkodop technologies Pvt.Ltd"
+    }
+  ]
+}

@@ -60,14 +60,17 @@ MODEL_UNAVAILABLE_TEXT = (
     "of our support team who can help."
 )
 
-# Tool names whose successful result carries a ticket the customer must be told about.
-TICKET_PRODUCING_TOOLS = ("create_support_ticket",)
+# Tool names whose successful result carries a ticket the customer must be told
+# about, and which the run's transcript is attached to (spec 2026-10-05, section 6).
+TICKET_PRODUCING_TOOLS = ("create_support_ticket", "raise_intake_ticket", "submit_warranty_proof")
 
 # Every agent that can send a guide picture is given this, last in its prompt
 # (Agent.run). On 2026-09-29 the bot offered "I can show you where it is", the
 # send failed, and it answered "That's the battery On/Off switch" with nothing
 # on the screen. Runtime._admit_unsent_media is the backstop in code.
 GUIDE_MEDIA_TOOL = "send_guide_media"
+DEALER_TOOL = "find_nearest_dealers"  # tools.mocks.FIND_NEAREST_DEALERS
+WEATHER_TOOL = "get_recent_weather"  # tools.mocks.GET_RECENT_WEATHER
 GUIDE_MEDIA_RULE = """
 
 Pictures: you can show the customer a guide photo or clip only through \
@@ -96,6 +99,45 @@ PHOTO_SAFETY_RULE = """
 Safety in photos and videos: if a photo or video shows smoke, flames, swelling, leaking fluid or sparks, that \
 is a safety case, whatever else the conversation was doing. Stop, tell the customer to stop using and charging \
 the bike now, and hand over to a person."""
+
+# Every customer agent (the person, 2026-10-06): EMotorad's staff are support
+# executives. The prompts used another word for them, and customers saw it.
+# tests/test_staff_wording.py keeps that word out of everything but this rule.
+STAFF_WORDS_RULE = """
+
+Words for EMotorad's staff: say "a support executive" or "our support team" when you mention the people who \
+will help the customer. Never call them a colleague."""
+
+# A bike whose purchase date OMS lacks has its invoice read by code
+# (invoice_ocr.py, spec 2026-10-08), which raises the ticket and tells the
+# customer what it found. The agent only asks for the invoice when OMS has none.
+INVOICE_RULE = """
+
+When a bike's purchase date is missing: if invoice_on_file is true, do not ask for the invoice; say you are \
+checking the invoice on file. If it is false, ask for a clear photo or PDF of the purchase invoice. Code reads \
+the invoice, raises the ticket and tells the customer what it found: never state an invoice date or a cover end \
+date yourself."""
+
+DEALER_RULE = """
+
+Nearest dealers:
+- Call find_nearest_dealers only when the customer should take the bike to a dealer: the issue is still unclear after your questions, or a fault you verified is in warranty and its part has to be fitted at a dealer (raise the ticket first and quote its reference).
+- The stores' addresses, managers and phone numbers are shown to the customer below your reply. Name at most the nearest store and its distance. Never write a phone number or a street address.
+- If it answers no_area, ask for their pin code; a button to share their location is shown. If it answers bad_pincode, ask for the pin code again.
+- If `far` is true, say the nearest dealer is over 100 km away, and give the care_contact if there is one.
+"""
+
+WEATHER_RULE = """
+
+Recent weather:
+- When the temperature matters (the battery will not charge, charges slowly, range has dropped, or storage), call get_recent_weather instead of asking the customer how hot or cold it is.
+- Say what it found with their area in one short sentence, giving the number, for example "It has been up to 41 °C around Pune this week", then ask once: "Is it about that warm where you charge or keep the bike, or cooler indoors?" (or "that cool" when it has been cold).
+- Never say "very hot" or "extremely hot", and do not ask whether it is hot: give the number. Those words stop the chat as a battery hazard.
+- Their answer wins: if they charge indoors, in an air-conditioned room or a basement, go by what they say.
+- Never blame a fault on the weather alone, and never use the weather to refuse or hold up a ticket.
+- If it answers no_area, ask for their pin code; a button to share their location is shown. If it answers weather_unavailable, ask the customer about the temperature instead.
+- Never give a calendar date for the weather; say "this week" or "a few days ago".
+"""
 
 
 @dataclass(frozen=True)
@@ -193,6 +235,12 @@ class Agent:
             # Here, not in each agent's prompt text: outside the base prompt a
             # promotion replaces, with the one-step rule last.
             system += PHOTO_SAFETY_RULE
+            system += STAFF_WORDS_RULE
+            system += INVOICE_RULE
+            if DEALER_TOOL in self.definition.tool_names and DEALER_TOOL in self.registry.specs:
+                system += DEALER_RULE
+            if WEATHER_TOOL in self.definition.tool_names and WEATHER_TOOL in self.registry.specs:
+                system += WEATHER_RULE
             system += ONE_STEP_RULE
         tools = self.registry.schemas_for(
             [name for name in self.definition.tool_names if name in self.registry.specs]
@@ -201,6 +249,9 @@ class Agent:
             conversation_id=message.conversation_id,
             phone=resolved.identity.phone,
             cluster_id=resolved.cluster_id,
+            # Who this is, for the ticket seam. The run arrives in the facts
+            # (started_at), read when the tool runs.
+            persona=resolved.persona,
             late=self._late_facts(message.conversation_id, facts),
         )
 

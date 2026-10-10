@@ -181,6 +181,112 @@ permanent transcript never keeps an inline photo or a signed link.
 Still not built: real integrations behind the mocks, and a vector index — retrieval is still keyword
 scoring over the authored records (`_score` is the single seam).
 
+**Zoho Desk tickets, parts 1 to 4, 2026-10-05.** 3,062 tests (one known `test_video` failure). Spec
+`docs/superpowers/specs/2026-10-05-zoho-desk-tickets-design.md`, plan
+`docs/superpowers/plans/2026-10-05-zoho-desk-tickets.md`, runbook `docs/runbooks/config-store.md` §7.
+Zoho is off by default: without `EMOTORAD_ZOHO_REFRESH_TOKEN` every ticket goes to the mock, as
+before.
+
+- Part 1, the scripts a person runs (`scripts/zoho/`): the consent address, the code exchange
+  (India only), the read-only probe, one test ticket, the tickets report and the revoke. Their
+  masked captures replace the drafts in `docs/api-shapes/`.
+- Part 2, the ticket record: our own reference (`EM-` and seven digits, from `counters`), one
+  `tickets` record per ticket with a unique `source_key`, receipts scoped to the conversation's
+  run, and run bounds, so a second person on the same browser takes none of the first person's
+  turns or photos.
+- Part 3, the worker, in the API's lifespan only: after the reply it sends each record to Desk
+  (contact, ticket, transcript comments, files), adopts the ticket an unanswered create made by
+  the chat reference at the end of its subject, and logs stuck, late and refused records for the
+  alarms in `infra/zoho-alarms.yaml`.
+- Part 4, the conversation: the handover and lock-out tickets, the call-back number gate, safety
+  with no known number, the safety reply while the store is down, and the caps on unverified
+  tickets. Every text is a draft for person step 10. Erasure (spec section 11) is deferred, so
+  ticket records are removed by hand.
+
+The chatbot shares the OMS's Zoho client and refresh token (Sachin's decision, 5 October), so the
+consent and exchange scripts are left out of the setup, and rollback removes
+`EMOTORAD_ZOHO_REFRESH_TOKEN` and never revokes the token, which the OMS's ticketing needs.
+
+The bugs the build surfaced, each fixed with a test:
+
+- **The capture format collided with the suite.** The probe and `test_ticket.py` wrote over the
+  shapes the fake Zoho answers from: `zoho-token.json` lost its `refresh` key, the subjects were
+  masked, and `zoho-attachment.json` became a list. Committing part 1's captures would have
+  turned CI red. The token answer now goes under `refresh`, the chatbot's own subject is kept,
+  and the first upload's own answer is the attachment shape.
+- **"Invalid Redirect Uri" in use.** The person's consent step failed on a redirect address that
+  did not match the client's, and no script showed the address it used. Both now trim it, print
+  it, and say it must match character for character.
+- **The owner's run start after a stranger.** When the run's own person came back after a
+  stranger used the same chat, a ticket recorded for them began at the run's start and took the
+  stranger's turns. The owner now gets a stretch of their own (`owner_started_at`).
+- **A photo on the first message of a new run.** A file is stored before its turn runs, so by
+  when it was stored it fell inside the previous run, whose record could still be outstanding,
+  and it could go on the previous person's Zoho ticket. A file a turn carried is now judged by
+  that turn alone.
+- **A lock-out that promised a hand-over with nothing recorded.** With Zoho on, a lock-out with
+  no number, or whose ticket failed, still said "I'm passing you to our support team". It now
+  says it could not pass this on, with `escalated: false`, and logs `lockout_ticket_not_recorded`.
+
+**The Amiigo support chat v1, 6 to 7 October 2026.** 3,801 tests (one known `test_video` failure). Plan
+`docs/superpowers/plans/2026-10-06-amiigo-support-chat-v1.md`, contract `docs/contracts/amiigo-support-chat.md`,
+set-up `docs/runbooks/config-store.md` §8. Built on `feat/amiigo-history`, not pushed and not on staging yet.
+Seven tasks, the first six each reviewed before the next:
+
+- Token check (`amiigo/auth.py`): PASETO v4.public, checked with Amiigo's public key on the `cryptography`
+  package and against the official test vectors. The switch is `EMOTORAD_AMIIGO_PUBLIC_KEY`. Amiigo's secret
+  key was never read or copied.
+- History (`amiigo/history.py`, `routes.py`): `GET /amiigo/v1/conversations` and `.../messages` for a rider's
+  Amiigo app chats, with cursors that carry positions only.
+- Uploads and deletion requests with the rider's token (`/amiigo/v1/uploads`, `/erasure-requests`).
+- `prepare_turn` (`api.py`): one turn-preparation function for `POST /message` and the socket. The rider's
+  phone becomes a verified identity the way a verified web chat's does, never through the fixture sessions.
+- The chat socket `/amiigo/v1/chat` (`socket.py`, `sockets.py`, `receipts.py`): through `Runtime.handle()`, so
+  the safety branch, the disclosure and the post-checks are unchanged. Receipts make a message sent again
+  answer once.
+- Ticket closure from Zoho Desk (`webhooks.py`, `tickets.py`): `POST /webhooks/zoho/tickets/<secret>` closes the
+  `tickets` record, writes a `system` notice and pushes `ticket_update`.
+- The documents: the contract, the runbook section 8, the rulebook and this entry.
+
+The defects the reviews found, each fixed with a test:
+
+- **Resend fan-out.** A resend bypassed the rate limit and started its own waiter: 30 resends gave 31
+  `ack`/`reply` pairs, unbounded store reads, and could fill the 40 threads the HTTP routes share. Every
+  message frame now counts against 20 a minute, a resend this socket is answering is folded into that answer,
+  and the socket has threads of its own.
+- **Masked live replies.** The live `reply` was the stored bot turn, which is masked, so a contact number the
+  bot gives (customer care's) showed as `[phone]` as it arrived. The live reply now carries the text as sent;
+  history keeps it masked.
+- **The busy claim after a fault.** A fault after the receipt was claimed left the chat `conversation_busy`
+  for the 10-minute lease. Both places now let the claim go, and a failed release is logged.
+- **The safety reply during a full outage.** With the store down, the receipts raised before any reply, so the
+  socket closed 1011 on a rider reporting smoke. The ownership check and the receipts now fail open, and the
+  runtime's outage path gives the safety steps and 112.
+- **The lost-closure alarm.** Zoho documents no retry, but a closure that met a store outage was only a log
+  line, and `zoho_webhook` was listed as not alarmed on the assumption of a retry. A lost closure now logs
+  `zoho_webhook_store_unavailable`, which has its own one-period alarm.
+- **Another person's unverified turns in shared website history.** History decided whose a chat was from
+  summaries only, so turns from a shared browser could be read out to the rider. History now holds Amiigo app
+  chats only, every run must be the rider's, and `POST /message` refuses an app chat's id.
+
+Also found and fixed: a foreign 10-digit number (`+65...`) was read as an Indian mobile and gave the rider
+another person's chats, and `rider_may_use` let a rider write into another person's unrecorded working state.
+
+The rulings that changed behaviour: a missing public key is a 503, not a 401 (our outage, not the rider's
+sign-in); history is app chats only and cursors carry no phone-derived value; `bot_typing` at once and `ack`
+with the `reply` (the stored id exists only after the turn); the reply as sent, with receipts keeping it
+unmasked for 24 hours and erased with the person; a socket lives 60 seconds past its token and a waiting socket
+with an expired token closes 4401; the ownership check and the receipts fail open; a ticket closed from a
+website chat is stored but not pushed; the webhook answers 200 for everything handled, 503 for a store
+failure, and its secret is the path, with Zoho's own JWT left for later; `erasure_admin` counts a notice as a
+change since `show`.
+
+Left open: Zoho's JWT is not verified; `/health` does not show receipts held in memory (the log does); a
+reopened ticket stays closed; website chats return to history once each turn records whether its writer owned
+the run; the token's phone format and time zone are to be confirmed with a real staging token; and
+`tools/verification.py` turns a typed foreign number into an Indian one and sends it a code (spawned as its own
+task).
+
 ## How to work in this repo
 
 1. Read this file and `docs/Emotorad_Platform_Build_Plan.md` before writing code.

@@ -1,5 +1,9 @@
 """The guide pictures the bot may send: only the two the person chose
-(2026-09-30), both in emotorad-ai-stage-media under assets/afs/battery/photos/."""
+(2026-09-30), both in emotorad-ai-stage-media under assets/afs/battery/photos/.
+
+The melt ask's pictures (6 October 2026) sit in the same catalogue marked
+`code_only: true`: code attaches them to its fixed reply, and the model is
+never offered them."""
 
 import pathlib
 import unittest
@@ -7,7 +11,8 @@ import unittest
 import yaml
 
 from emotorad_ai.knowledge import load_records
-from emotorad_ai.media import load_catalogue
+from emotorad_ai.media import code_only, load_catalogue, model_offered
+from emotorad_ai.storage.keys import is_valid_key
 
 CATALOGUE_FILE = pathlib.Path(__file__).resolve().parents[1] / "knowledge" / "_media" / "catalogue.yaml"
 EM_DASH = chr(0x2014)
@@ -15,13 +20,116 @@ EM_DASH = chr(0x2014)
 KEPT = {
     "soc_button": "afs/battery/photos/soc-button-non-doodle.png",
     "battery_onoff_switch": "afs/battery/photos/battery-onoff-switch.png",
+    # 7 October 2026: two battery guides from the reference library.
+    "battery_switch_on_position": "library/battery/photos/switch-on-position.jpg",
+    "battery_revival_steps": "library/battery/videos/revival-steps.mp4",
+    # 8 October 2026: the motor reference clips, AFS §5f.
+    "motor_e07_reference": "afs/motor/videos/motor-e007-reference.mp4",
+    "motor_noise_reference": "afs/motor/videos/motor-noise.mp4",
+    "motor_noise_no_load_reference": "afs/motor/videos/motor-noise-without-load.mp4",
+    "motor_bearing_noise_reference": "afs/motor/videos/motor-bearing-noise-under-load-web.mp4",
+    "motor_threading_reference": "afs/motor/videos/motor-threading.mp4",
+    "freewheel_threading_reference": "afs/motor/videos/freewheel-threading.mp4",
 }
+# Each motor clip and the one knowledge record that sends it.
+MOTOR_CLIPS = {
+    "motor_e07_reference": "motor-e07-malfunction",
+    "motor_noise_reference": "motor-noise",
+    "motor_noise_no_load_reference": "motor-noise",
+    "motor_bearing_noise_reference": "motor-noise",
+    "motor_threading_reference": "motor-disc-threading",
+    "freewheel_threading_reference": "motor-freewheel-threading",
+}
+# AFS: the odometer photo exists, and no case sends it yet.
+HELD = {"display_odometer_reading": "afs/motor/photos/odometer-reading.jpg"}
+# The library entries the model is offered; the rest stay code-only.
+OFFERED_LIBRARY = {"battery_switch_on_position", "battery_revival_steps"}
+# The melt ask's pictures, code-only (the person's brief, 6 October 2026). The
+# battery serial sticker has no photo yet, so it is not here.
+CODE_ONLY = {
+    "melt_battery_serial": ("library/battery/photos/serial-label-downtube.jpg",
+                            "Example: the serial number sticker on the battery"),
+    "melt_controller_label": ("library/controller/photos/serial-label.jpg",
+                              "Example: the controller's label, next to the battery pins on the frame"),
+    "melt_terminals": ("afs/battery/photos/battery-terminals.jpg",
+                       "Example: the battery's metal terminals, to film up close"),
+}
+# The reference library (7 October 2026): assets/library/<domain>/, rebuilt
+# from scratch, one entry per photo. Code-only until the rules for when each is
+# sent (to the customer, or to the checker) are written.
+LIBRARY = {
+    "battery_serial_label": ("library/battery/photos/serial-label-downtube.jpg", "battery", "customer_example"),
+    "battery_serial_label_doodle": ("library/battery/photos/serial-label-doodle.jpg", "battery", "customer_example"),
+    "battery_warranty_seal_intact": ("library/battery/photos/warranty-seal-intact.jpg", "battery", "checker_reference"),
+    "battery_warranty_seal_torn": ("library/battery/photos/warranty-seal-torn.jpg", "battery", "checker_reference"),
+    "controller_serial_label": ("library/controller/photos/serial-label.jpg", "controller", "customer_example"),
+    "motor_serial_number": ("library/motor/photos/serial-number.jpg", "motor", "customer_example"),
+    "display_serial_label": ("library/display/photos/serial-label-back.jpg", "display", "customer_example"),
+    "frame_number_sticker": ("library/frame/photos/frame-number-sticker.jpg", "frame", "customer_example"),
+    # The second batch (7 October 2026): battery help and the melted checks.
+    "battery_onoff_switch_photo": ("library/battery/photos/onoff-switch.jpg", "battery", "customer_guide"),
+    "battery_soc_button_photo": ("library/battery/photos/soc-button.jpg", "battery", "customer_guide"),
+    "battery_soc_button_non_doodle": ("library/battery/photos/soc-button-non-doodle.png", "battery", "customer_guide"),
+    "battery_switch_on_position": ("library/battery/photos/switch-on-position.jpg", "battery", "customer_guide"),
+    "battery_revival_steps": ("library/battery/videos/revival-steps.mp4", "battery", "customer_guide"),
+    "battery_terminals_melted_vs_normal": ("library/battery/photos/terminals-melted-vs-normal.png", "battery",
+                                           "checker_reference"),
+    "controller_connector_not_melted": ("library/controller/photos/connector-not-melted.jpg", "controller",
+                                        "checker_reference"),
+    "controller_connector_melted_vs_normal": ("library/controller/photos/connector-melted-vs-normal.png", "controller",
+                                              "checker_reference"),
+}
+USES = ("customer_guide", "customer_example", "checker_reference")
 
 
 class CatalogueTests(unittest.TestCase):
-    def test_exactly_the_two_pictures(self):
-        catalogue = load_catalogue()
+    def test_the_model_is_offered_exactly_the_two_pictures(self):
+        catalogue = model_offered(load_catalogue())
         self.assertEqual({key: item["id"] for key, item in catalogue.items()}, KEPT)
+
+    def test_the_code_only_pictures_are_the_melt_pictures_and_the_library(self):
+        catalogue = code_only(load_catalogue())
+        self.assertEqual(set(catalogue), set(CODE_ONLY) | (set(LIBRARY) - OFFERED_LIBRARY) | set(HELD))
+        for key, (asset_id, caption) in CODE_ONLY.items():
+            self.assertEqual((catalogue[key]["id"], catalogue[key]["caption"]), (asset_id, caption), key)
+        for key, item in catalogue.items():
+            self.assertIs(item["code_only"], True, key)
+            self.assertEqual(item["kind"], "video" if item["id"].endswith((".mp4", ".mov")) else "image", key)
+
+    def test_every_library_photo_is_catalogued_by_domain_and_use(self):
+        catalogue = load_catalogue()
+        for key, (asset_id, domain, use) in LIBRARY.items():
+            item = catalogue[key]
+            self.assertEqual((item["id"], item["domain"], item["use"]), (asset_id, domain, use), key)
+            self.assertTrue(is_valid_key("assets/" + asset_id), asset_id)
+            self.assertTrue(item["about"].strip(), key)
+            self.assertIn(item["use"], USES, key)
+
+    def test_each_motor_clip_is_a_guide_named_by_its_record_and_the_motor_prompt(self):
+        from emotorad_ai.agents.motor_support import _BASE_PROMPT
+
+        catalogue = load_catalogue()
+        records = {record.id: " ".join(record.steps) for record in load_records()}
+        for key, record_id in MOTOR_CLIPS.items():
+            item = catalogue[key]
+            self.assertEqual((item["kind"], item["domain"], item["use"]), ("video", "motor", "customer_guide"), key)
+            self.assertTrue(item["about"].strip(), key)
+            self.assertEqual([rid for rid, body in records.items() if key in body], [record_id], key)
+            self.assertIn(key, _BASE_PROMPT, key)
+        self.assertEqual(catalogue["display_odometer_reading"]["id"], HELD["display_odometer_reading"])
+        self.assertIs(catalogue["display_odometer_reading"]["code_only"], True)
+
+    def test_only_the_two_battery_guides_of_the_library_are_offered_to_the_model(self):
+        self.assertEqual(set(LIBRARY) & set(model_offered(load_catalogue())), OFFERED_LIBRARY)
+        for key in OFFERED_LIBRARY:
+            self.assertEqual(LIBRARY[key][2], "customer_guide", key)
+
+    def test_the_melt_ask_s_serial_pictures_are_the_library_s(self):
+        # 7 October 2026: the battery serial and the controller's serial come
+        # from the reference library, so the melt ask can be switched on.
+        catalogue = load_catalogue()
+        self.assertEqual(catalogue["melt_battery_serial"]["id"], LIBRARY["battery_serial_label"][0])
+        self.assertEqual(catalogue["melt_controller_label"]["id"], LIBRARY["controller_serial_label"][0])
 
     def test_no_caption_has_an_em_dash(self):
         # Read as UTF-8 here: load_catalogue() uses the platform encoding, which
@@ -43,7 +151,7 @@ class CatalogueTests(unittest.TestCase):
         self.assertTrue(files)
         for path in files:
             text = path.read_text(encoding="utf-8").lower()
-            for promise in ("battery_revival", "comparison picture", "comparison photo", "short clip",
+            for promise in ("comparison picture", "comparison photo", "short clip",
                             "melted_battery_terminal", "melted_controller_connector"):
                 self.assertNotIn(promise, text, "%s: %s" % (path.name, promise))
 

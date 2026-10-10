@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Mapping, Optional, Tuple
 
 # Which models answer. `offline` is a fixed planner, no network; `anthropic` is
 # Claude on Anthropic's own API (what staging runs); `bedrock` is Claude in
@@ -17,6 +18,29 @@ from dataclasses import dataclass, field
 MODES = ("offline", "anthropic", "bedrock", "openrouter")
 # Where conversations live (spec 2026-09-29-mongodb-conversation-store).
 STORES = ("memory", "mongodb")
+
+
+# The Jev kill switch (8 October 2026), set in the config store and read at
+# container start. Unset or "on": Jev routes each turn to a standard reply,
+# the narrow model or the full agent, as before. "off": no Jev call is made
+# and every turn goes to the full agent (Haiku on OpenRouter). Anything else
+# is off too, and /health says why: a switch someone touched but mistyped
+# fails towards the simpler path. Only openrouter mode ever runs Jev.
+JEV_SWITCH_ENV = "EMOTORAD_JEV"
+JEV_ON = "on"
+JEV_OFF = "off"
+JEV_UNRECOGNISED = "off: %s must be on or off" % JEV_SWITCH_ENV
+
+
+def jev_switch(environ: Optional[Mapping[str, str]] = None) -> Tuple[bool, str]:
+    """(whether Jev runs, what /health says)."""
+    env = os.environ if environ is None else environ
+    raw = (env.get(JEV_SWITCH_ENV) or "").strip().lower()
+    if raw in ("", JEV_ON):
+        return True, JEV_ON
+    if raw == JEV_OFF:
+        return False, JEV_OFF
+    return False, JEV_UNRECOGNISED
 
 
 @dataclass(frozen=True)
@@ -53,6 +77,9 @@ class Settings:
     # Jev sits in front of every turn, so it gets a tight budget: a slow answer
     # falls back to the full agent rather than holding the customer up.
     jev_timeout: float = float(os.environ.get("EMOTORAD_JEV_TIMEOUT", "2.0"))
+    # The kill switch (jev_switch above), read per construction like `mode`.
+    jev_enabled: bool = field(default_factory=lambda: jev_switch()[0])
+    jev_status: str = field(default_factory=lambda: jev_switch()[1])
     openrouter_timeout: float = float(os.environ.get("EMOTORAD_OPENROUTER_TIMEOUT", "30"))
     # Zero-data-retention providers only, unless someone deliberately turns it off.
     openrouter_zdr: bool = os.environ.get("EMOTORAD_OPENROUTER_ZDR", "1") == "1"

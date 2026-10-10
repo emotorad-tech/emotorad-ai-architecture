@@ -382,3 +382,24 @@ class PackagingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpeningLineTests(ChatPageTests):
+    """The page's own greeting never says it is an AI (6 October 2026).
+
+    The server adds the AI disclosure to the first reply of every conversation
+    (disclosure.apply_disclosure), which is the one that must never be removed.
+    The page greeted with its own "I'm an AI assistant" line as well, so every
+    customer was told twice."""
+
+    def opening(self):
+        match = re.search(r'var OPENING = "([^"]*)";', self.html)
+        self.assertIsNotNone(match, "the page's OPENING line has moved")
+        return match.group(1)
+
+    def test_the_greeting_makes_no_ai_claim(self):
+        from emotorad_ai.disclosure import has_disclosure
+        self.assertFalse(has_disclosure(self.opening()), self.opening())
+
+    def test_the_greeting_still_offers_help(self):
+        self.assertIn("EMotorad bike", self.opening())

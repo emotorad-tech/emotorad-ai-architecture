@@ -6,8 +6,9 @@ envelope. Three guardrails are enforced here rather than prompted:
 1. Identity arguments (customer_id) are injected from the resolved profile. They
    are not part of the schema the model sees, so the model cannot ask for one
    customer's data while answering another.
-2. Write tools require an idempotency key; a retried call returns the first
-   result instead of creating a second ticket/booking.
+2. Write tools require an idempotency key; a retried call in the same run of
+   the conversation returns the first result instead of creating a second
+   ticket/booking.
 3. Tool failures come back as an error envelope, never an exception that kills
    the turn — the model is told the tool failed and can say so.
 """
@@ -77,6 +78,16 @@ class ToolContext:
     cluster_id: Optional[str] = None
     customer_id: Optional[str] = None
     dealer_id: Optional[str] = None
+    # Who the conversation is with ("customer", "dealer", ...), from identity
+    # resolution. The ticket seam sends customer tickets to Zoho Desk and
+    # every other persona's to the mock, so a dealer's report never becomes a
+    # customer ticket. None for a caller that resolved nobody.
+    persona: Optional[str] = None
+    # When this run of the conversation began (ConversationState.started_at).
+    # One conversation id can hold several runs, a new person's after
+    # restart_for among them: write receipts and tickets are scoped by it.
+    # None for a caller with no run (verify-first, the playground).
+    started_at: Optional[str] = None
     # Facts that can only be known once the turn is under way. Identity is not
     # always settled before the first tool runs: on a surface that verifies
     # inside the conversation, the model proves a phone and looks the customer
@@ -266,7 +277,15 @@ class ToolRegistry:
             key = arguments.get("idempotency_key")
             if not key:
                 return err("missing_idempotency_key", "%s requires an idempotency_key." % name)
-            scoped_key = "%s:%s:%s" % (context.conversation_id, name, key)
+            # Scoped by run when the context knows it. A key the model reuses
+            # in a new run, a new person's after restart_for among them, is a
+            # new write, never the first run's result handed back. A call with
+            # no run (verify-first, the playground) keeps the key as before.
+            started_at = context.value_for("started_at")
+            if started_at is not None:
+                scoped_key = "%s:%s:%s:%s" % (context.conversation_id, started_at, name, key)
+            else:
+                scoped_key = "%s:%s:%s" % (context.conversation_id, name, key)
 
         # Validated before the claim, so a rejected call never holds one.
         missing = [key for key in spec.required if key not in arguments]

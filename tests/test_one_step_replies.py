@@ -87,8 +87,8 @@ class MeasureTests(unittest.TestCase):
         self.assertFalse(is_too_long("Your ticket is EM-00001. Visit on 1.8.2026 at 10.30 a.m. is booked. Anything else?"))
 
     def test_references_are_the_ids_the_tools_mint(self):
-        self.assertEqual(references("Ticket EM-00001, booking BK-00002 and order RO-00003."),
-                         {"EM-00001", "BK-00002", "RO-00003"})
+        self.assertEqual(references("Ticket EM-00001, booking BK-00002 and order RO-1000003."),
+                         {"EM-00001", "BK-00002", "RO-1000003"})
 
     def test_a_reference_past_five_digits_is_still_a_reference(self):
         # The counters do not stop at 99999.
@@ -315,7 +315,7 @@ class PostChecksJudgeTheOriginalFirstTests(unittest.TestCase):
         self.assertEqual(answer.metadata["suppressed_text"], concluded)
 
     def test_an_order_no_tool_placed_blocks_the_original_and_nothing_is_cut(self):
-        invented = "Your replacement battery is on its way, order RO-00042. " + LONG
+        invented = "Your replacement battery is on its way, order RO-1000042. " + LONG
         rt = routed(runtime([say(invented), say(SHORT)]))
         answer = send(rt, "my battery won't charge")
         self.assertEqual(len(rt.llm.requests), 1)

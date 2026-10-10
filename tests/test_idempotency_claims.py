@@ -6,6 +6,7 @@ import mongomock
 from emotorad_ai.stores.mongo import MongoIdempotencyStore, ensure_indexes
 from emotorad_ai.tools.mocks import CREATE_SUPPORT_TICKET, MockTicketSystem, build_registry
 from emotorad_ai.tools.registry import IdempotencyStore, ToolContext, ToolRegistry, is_error, ok
+from tests.clock import mongomock_clock_at
 
 TICKET = {"category": "battery_charging", "severity": "normal", "description": "LED off.", "idempotency_key": "k1"}
 CTX = ToolContext(conversation_id="c1", phone="+919876543210")
@@ -39,6 +40,10 @@ class MongoClaimTests(ClaimContract, unittest.TestCase):
     NOW = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 
     def setUp(self):
+        # Receipts expire NOW + 7 days, so mongomock's TTL clock runs on NOW too.
+        clock = mongomock_clock_at(self.NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.db = mongomock.MongoClient()["emotorad_ai"]
         ensure_indexes(self.db)
 

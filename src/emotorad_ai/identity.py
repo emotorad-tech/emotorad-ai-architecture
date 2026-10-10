@@ -267,6 +267,10 @@ class ResolvedIdentity:
     # single-bike case is just a list of one — never a special shape.
     bikes: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    # Set by the runtime on the agent's view only, with the warranty step on
+    # (spec 2026-10-09): a rider with no bike on record registers in the app,
+    # never in this chat.
+    register_in_app: bool = False
 
     @property
     def single_bike(self) -> Optional[Dict[str, Any]]:

@@ -13,7 +13,9 @@ from emotorad_ai.observability import EventLog
 from emotorad_ai.tools.mocks import (
     BOOK_SERVICE_SLOT,
     CREATE_SUPPORT_TICKET,
+    FIND_NEAREST_DEALERS,
     FIND_SERVICE_SLOTS,
+    GET_RECENT_WEATHER,
     GET_RECENT_TRIPS,
     GET_SERVICE_STATUS,
     LOOKUP_WARRANTY_RECORD,
@@ -69,9 +71,11 @@ class NarrowDefinitionTests(NarrowFixture, unittest.TestCase):
         definition = build_narrow_definition(self.record, ())
         self.assertEqual(definition.name, AGENT_NAME)
         # No diagnostic lookups. The app's two reads answer the customer's own
-        # questions ("when is my next service due?", staging 2026-10-01).
+        # questions ("when is my next service due?", staging 2026-10-01), and
+        # the nearest dealers send them to a store (spec 2026-10-09).
         self.assertEqual(set(definition.tool_names), {SEND_GUIDE_MEDIA, CREATE_SUPPORT_TICKET, FIND_SERVICE_SLOTS,
-                                                      BOOK_SERVICE_SLOT, GET_SERVICE_STATUS, GET_RECENT_TRIPS})
+                                                      BOOK_SERVICE_SLOT, GET_SERVICE_STATUS, GET_RECENT_TRIPS,
+                                                      FIND_NEAREST_DEALERS, GET_RECENT_WEATHER})
         self.assertEqual(tuple(definition.tool_names), TOOL_NAMES)
 
 

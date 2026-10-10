@@ -1,0 +1,29 @@
+id: motor-not-working-under-load
+title: Motor does not work while riding (under load)
+topic: motor
+symptoms: [motor not working while riding, motor not working under load, motor stops when I sit,
+           no power with rider, works on stand but not when riding, motor weak with load,
+           motor not pulling, winding burnt, motor winding burnt, riding pe motor nahi chalta,
+           baithne par motor nahi chalti, बैठने पर मोटर नहीं चलती, चलाते समय मोटर नहीं चलती]
+applies_to: {}
+source: AFS chatbot team, motor diagnosis §5f5 (8 October 2026)
+# There is no reference clip for this case (AFS §5f5).
+media: []
+steps:
+  - >-
+    CONFIRM: the motor does not work while they are riding. This case also covers a burnt
+    motor winding.
+  - >-
+    ASK FOR ONE VIDEO, IN TWO PARTS, with PAS at level 1 and the throttle fully applied:
+    first without load (the bike on its side stand, no rider), then with load (the rider
+    seated). Both parts in the same video, so the difference can be seen. There is no
+    reference clip for this case. If they decline, apply the retry rule.
+  - >-
+    Once the video has arrived, raise create_support_ticket with category motor_under_load,
+    the symptom and what the video showed in each part. It goes straight to the Service team:
+    there is no branching and no Approval team step in this case.
+  - >-
+    Tell them the Service team will look at it and be in touch. Never say a replacement or
+    repair is approved or confirmed.
+escalate_when: >-
+  Once the video has arrived: a motor_under_load ticket to the Service team.
