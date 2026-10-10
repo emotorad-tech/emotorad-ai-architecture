@@ -2169,16 +2169,21 @@ class Runtime:
             return verdict_passed(state.evidence_verdict, state)
         return bool(state.evidence_seen)
 
-    def _verified_fault(self, state: ConversationState) -> Optional[str]:
-        """The fault the evidence proves, for the order gate (spec 2026-10-10
-        replacement orders, section 1): with the evidence check on for this
-        chat, the passing verdict's component ("battery" or "motor"); with it
-        off, "any" once a photo or video reached the agent; otherwise None."""
+    def _verified_fault(self, state: ConversationState) -> Optional[Dict[str, Any]]:
+        """The fault the evidence proves and the bike it was proved on, for the
+        order gate (spec 2026-10-10 replacement orders, section 1; the
+        whole-branch review, finding 1): with the evidence check on for this
+        chat, the passing verdict's component ("battery" or "motor") and its
+        frame (a verdict made before a bike was chosen holds for the chosen
+        one, verdict_belongs); with it off, "any" and the chosen bike once a
+        photo or video reached the agent; otherwise None."""
         if self._evidence_gated(state):
             if verdict_passed(state.evidence_verdict, state):
-                return (state.evidence_verdict or {}).get("component")
+                verdict = state.evidence_verdict or {}
+                return {"component": verdict.get("component"),
+                        "frame": verdict.get("frame") or state.selected_frame}
             return None
-        return "any" if state.evidence_seen else None
+        return {"component": "any", "frame": state.selected_frame} if state.evidence_seen else None
 
     def _step_lookup(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState) -> None:
         """The step's own lookup, with no warranty_ready fact so it is never

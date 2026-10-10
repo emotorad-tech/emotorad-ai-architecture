@@ -561,6 +561,13 @@ def _unlisted_ticket_bike(
             "frame_number_source": UNLISTED_SOURCE if frame else None}
 
 
+def _same_frame(a: Any, b: Any) -> bool:
+    """Two frame numbers are one bike: upper-cased, spaces removed. None is no bike."""
+    if not a or not b:
+        return False
+    return "".join(str(a).split()).upper() == "".join(str(b).split()).upper()
+
+
 def _owned_bike(
     phone: str,
     frame_number: Optional[str],
@@ -1975,7 +1982,7 @@ def build_registry(
             use_record_address: bool = False,
             address: Optional[Dict[str, Any]] = None,
             unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
-            evidence_verified: Optional[str] = None,
+            evidence_verified: Optional[Dict[str, Any]] = None,
             customer_name: Optional[str] = None,
             email: Optional[str] = None,
             mobile: Optional[str] = None,
@@ -2030,9 +2037,14 @@ def build_registry(
             # The gate (spec 2026-10-10 replacement orders, section 1), all in
             # code: the evidence, the registration's date, the part's own cover.
             # A part with no fault component (the display) is never ordered on
-            # a verdict: None must not match a missing verdict.
+            # a verdict: None must not match a missing verdict. The evidence
+            # holds only for the bike it was seen on (the whole-branch review,
+            # finding 1): a passing video for one bike never orders another's.
             fault = PART_FAULT.get(part)
-            if evidence_verified != "any" and (fault is None or evidence_verified != fault):
+            proved = evidence_verified if isinstance(evidence_verified, dict) else {}
+            proved_fault = proved.get("component")
+            on_this_bike = _same_frame(proved.get("frame"), frame)
+            if not on_this_bike or (proved_fault != "any" and (fault is None or proved_fault != fault)):
                 raise ToolError(
                     "evidence_not_verified",
                     "The fault is not yet confirmed by the photos or video for this bike, so nothing can be "
@@ -2083,11 +2095,14 @@ def build_registry(
             typed = set()
             for message in customer_messages:
                 typed |= _name_tokens(message)
-            stray = sorted(name_words - typed)
+            stray = name_words - typed
             if stray:
+                # How many, never which: the message is logged with the tool
+                # call, and the name is never logged (spec section 2).
                 raise ToolError("customer_name_unconfirmed",
-                                "These words of the name were not typed by the customer (%s). Ask for their "
-                                "name and pass exactly what they confirmed." % ", ".join(stray))
+                                "%d word%s of the name %s not typed by the customer. Ask for their name and "
+                                "pass exactly what they confirmed."
+                                % (len(stray), "" if len(stray) == 1 else "s", "was" if len(stray) == 1 else "were"))
             mail = (email or "").strip()
             if not _EMAIL.fullmatch(mail):
                 raise ToolError("email_invalid", "Ask for the customer's email address and pass it as they typed it.")

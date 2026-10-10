@@ -17,8 +17,8 @@ TYPED = ("I'm Test Rider, test.rider@example.com",)
 RIDER = {"customer_name": "Test Rider", "email": "test.rider@example.com"}
 
 
-def registration(bought=date(2026, 6, 1)):
-    return oms_db.to_record({"frame_number": FRAME, "product_name": "EMX Plus", "purchase_date": bought,
+def registration(bought=date(2026, 6, 1), frame=FRAME):
+    return oms_db.to_record({"frame_number": frame, "product_name": "EMX Plus", "purchase_date": bought,
                              "full_address": ADDRESS, "invoice_image": None, "status": None}, TODAY)
 
 
@@ -27,21 +27,28 @@ def order_bike(bought=date(2026, 6, 1)):
                                    "order_source": "End Customer"}, TODAY)
 
 
-def coverage_for(record):
-    registry = build_registry(today=TODAY, warranty_source=lambda phone: [record])
+def coverage_for(*records):
+    registry = build_registry(today=TODAY, warranty_source=lambda phone: list(records))
     return registry.call("lookup_warranty_record", {}, ToolContext(conversation_id="c", phone=PHONE))
 
 
-def place(record, verified="battery", part="battery", messages=TYPED, **extra):
-    registry = build_registry(today=TODAY, warranty_source=lambda phone: [record],
+def fact(component, frame=FRAME):
+    """The evidence fact the runtime injects: the fault proved and the bike it was proved on."""
+    return None if component is None else {"component": component, "frame": frame}
+
+
+def place(record, verified="battery", part="battery", messages=TYPED, records=None, verified_frame=FRAME,
+          frame=FRAME, **extra):
+    records = records or [record]
+    registry = build_registry(today=TODAY, warranty_source=lambda phone: list(records),
                               replacement_orders=ReplacementOrders())
     context = ToolContext(conversation_id="c1", phone=PHONE, late={
         "evidence_seen": lambda: True,
-        "evidence_verified": lambda: verified,
-        "coverage_result": lambda: coverage_for(record),
+        "evidence_verified": lambda: fact(verified, verified_frame),
+        "coverage_result": lambda: coverage_for(*records),
         "customer_messages": lambda: messages,
     })
-    args = dict({"frame_number": FRAME, "part": part, "use_record_address": True, "idempotency_key": "k"}, **RIDER)
+    args = dict({"frame_number": frame, "part": part, "use_record_address": True, "idempotency_key": "k"}, **RIDER)
     args.update(extra)
     return registry.call(PLACE_REPLACEMENT_ORDER, args, context)
 
@@ -67,6 +74,33 @@ class EvidenceTests(unittest.TestCase):
 
     def test_any_is_the_evidence_check_off(self):
         self.assertTrue(placed(place(registration(), verified="any")))
+
+    def test_evidence_for_one_bike_never_orders_another(self):
+        # Finding 1 of the whole-branch review: a passing video for bike A let
+        # bike B's battery be ordered, since any owned frame was accepted.
+        other = "EMXP2025009999"
+        bikes = [registration(), registration(frame=other)]
+        self.assertEqual(code_of(place(None, records=bikes, verified_frame=FRAME, frame=other)),
+                         "evidence_not_verified")
+        self.assertTrue(placed(place(None, records=bikes, verified_frame=FRAME, frame=FRAME)))
+
+    def test_the_evidence_frame_is_compared_upper_cased_without_spaces(self):
+        self.assertTrue(placed(place(registration(), verified_frame="emxp 2025 004417")))
+
+    def test_evidence_with_no_bike_orders_nothing(self):
+        self.assertEqual(code_of(place(registration(), verified_frame=None)), "evidence_not_verified")
+        self.assertEqual(code_of(place(registration(), verified="any", verified_frame=None)),
+                         "evidence_not_verified")
+
+    def test_a_bare_component_string_is_not_evidence(self):
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: [registration()],
+                                  replacement_orders=ReplacementOrders())
+        context = ToolContext(conversation_id="c1", phone=PHONE, late={
+            "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+            "coverage_result": lambda: coverage_for(registration()), "customer_messages": lambda: TYPED})
+        args = dict({"frame_number": FRAME, "part": "battery", "use_record_address": True, "idempotency_key": "k"},
+                    **RIDER)
+        self.assertEqual(code_of(registry.call(PLACE_REPLACEMENT_ORDER, args, context)), "evidence_not_verified")
 
 
     def test_a_part_with_no_fault_is_never_ordered_on_no_verdict(self):
@@ -109,6 +143,39 @@ class PartCoverTests(unittest.TestCase):
         self.assertEqual(code_of(place(registration(bought=date(2025, 1, 1)))), "part_not_in_warranty")
 
 
+class CoverageUndeterminedTests(unittest.TestCase):
+    def test_a_frame_missing_from_the_lookup_is_undetermined(self):
+        # The rider owns the bike, but the lookup the chat holds does not list it.
+        other = "EMXP2025009999"
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: [registration(),
+                                                                              registration(frame=other)],
+                                  replacement_orders=ReplacementOrders())
+        context = ToolContext(conversation_id="c1", phone=PHONE, late={
+            "evidence_seen": lambda: True, "evidence_verified": lambda: fact("battery", other),
+            "coverage_result": lambda: coverage_for(registration()), "customer_messages": lambda: TYPED})
+        envelope = registry.call(PLACE_REPLACEMENT_ORDER, dict(
+            {"frame_number": other, "part": "battery", "use_record_address": True, "idempotency_key": "k"},
+            **RIDER), context)
+        self.assertEqual(code_of(envelope), "coverage_undetermined")
+        self.assertEqual(envelope["error"]["remedy"], "collect_purchase_proof")
+
+    def test_a_part_with_no_component_entry_is_undetermined(self):
+        record = registration()
+        coverage = coverage_for(record)
+        for bike in coverage["data"]["bikes"]:
+            bike["components"] = [c for c in bike.get("components") or [] if c.get("component") != "battery"]
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: [record],
+                                  replacement_orders=ReplacementOrders())
+        context = ToolContext(conversation_id="c1", phone=PHONE, late={
+            "evidence_seen": lambda: True, "evidence_verified": lambda: fact("battery"),
+            "coverage_result": lambda: coverage, "customer_messages": lambda: TYPED})
+        envelope = registry.call(PLACE_REPLACEMENT_ORDER, dict(
+            {"frame_number": FRAME, "part": "battery", "use_record_address": True, "idempotency_key": "k"},
+            **RIDER), context)
+        self.assertEqual(code_of(envelope), "coverage_undetermined")
+        self.assertEqual(envelope["error"]["remedy"], "support_ticket")
+
+
 class OcrTests(unittest.TestCase):
     def test_a_bike_dated_only_by_an_invoice_reading_is_never_ordered(self):
         # OCR writes invoice_readings and a ticket, never the record's date.
@@ -119,6 +186,19 @@ class OcrTests(unittest.TestCase):
 class DetailsTests(unittest.TestCase):
     def test_a_name_the_rider_never_typed_is_refused(self):
         self.assertEqual(code_of(place(registration(), customer_name="Someone Else")), "customer_name_unconfirmed")
+
+    def test_the_refusal_never_repeats_the_words_it_rejected(self):
+        # Finding 8: the message is logged with the tool call, and the name's
+        # values are never logged (spec section 2). It says how many, not which.
+        envelope = place(registration(), customer_name="Test Zanzibar Quixote")
+        self.assertEqual(code_of(envelope), "customer_name_unconfirmed")
+        message = envelope["error"]["message"]
+        for word in ("Zanzibar", "Quixote", "zanzibar", "quixote"):
+            self.assertNotIn(word, message)
+        self.assertIn("2 words", message)
+        one = place(registration(), customer_name="Test Zanzibar")["error"]["message"]
+        self.assertIn("1 word ", one)
+        self.assertNotIn("Zanzibar", one)
 
     def test_no_name_is_refused(self):
         self.assertEqual(code_of(place(registration(), customer_name=" ")), "customer_name_required")
@@ -172,7 +252,7 @@ class LedgerThroughTheToolTests(unittest.TestCase):
         registry = build_registry(today=TODAY, warranty_source=lambda phone: [record], replacement_orders=orders)
         for cid in ("c1", "c2"):
             context = ToolContext(conversation_id=cid, phone=PHONE, late={
-                "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+                "evidence_seen": lambda: True, "evidence_verified": lambda: fact("battery"),
                 "coverage_result": lambda: coverage_for(record), "customer_messages": lambda: TYPED})
             result = registry.call(PLACE_REPLACEMENT_ORDER, dict(
                 {"frame_number": FRAME, "part": "battery", "use_record_address": True,
@@ -187,7 +267,7 @@ class LedgerThroughTheToolTests(unittest.TestCase):
 
         def call(phone, key):
             context = ToolContext(conversation_id="c-" + key, phone=phone, late={
-                "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+                "evidence_seen": lambda: True, "evidence_verified": lambda: fact("battery"),
                 "coverage_result": lambda: coverage_for(record), "customer_messages": lambda: TYPED})
             return registry.call(PLACE_REPLACEMENT_ORDER, dict(
                 {"frame_number": FRAME, "part": "battery", "use_record_address": True,
@@ -217,7 +297,7 @@ class LedgerThroughTheToolTests(unittest.TestCase):
                                   replacement_orders=ReplacementOrders(), orders_live=True,
                                   product_ids=ProductIds({"EMX Plus": {"battery": "uuid-1"}}))
         context = ToolContext(conversation_id="c1", phone=PHONE, late={
-            "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+            "evidence_seen": lambda: True, "evidence_verified": lambda: fact("battery"),
             "coverage_result": lambda: coverage_for(record), "customer_messages": lambda: TYPED})
         result = registry.call(PLACE_REPLACEMENT_ORDER, dict(
             {"frame_number": FRAME, "part": "battery", "use_record_address": True, "idempotency_key": "k"},

@@ -41,7 +41,8 @@ def _context(evidence_seen=True, coverage=COVERED, customer_messages=(), verifie
         conversation_id="c1", phone=PHONE,
         late={
             "evidence_seen": lambda: evidence_seen,
-            "evidence_verified": lambda: verified,
+            "evidence_verified": lambda: None if verified is None else {"component": verified,
+                                                                          "frame": "EMXP2025004417"},
             "coverage_result": lambda: coverage,
             "customer_messages": lambda: ("I'm Test Rider, test.rider@example.com",) + tuple(customer_messages),
         },
