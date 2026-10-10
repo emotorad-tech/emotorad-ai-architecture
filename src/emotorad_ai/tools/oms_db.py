@@ -262,10 +262,14 @@ def order_to_record(row: Dict[str, Any], today: date) -> Dict[str, Any]:
     }
 
 
-def db_warranty_source(reader: OMSDatabase, invoice_state: Optional[Callable[[Optional[str]], str]] = None
+def db_warranty_source(reader: OMSDatabase, invoice_state: Optional[Callable[[Optional[str]], str]] = None,
+                       log: Optional[Callable[[str, Dict[str, Any]], None]] = None
                        ) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
-    """Registered bikes from the OMS database, mapped onto the tool's own
-    outcomes: rows, None for no rows, and oms_unavailable for any failure."""
+    """Registered bikes from the OMS database, then the bikes on the phone's
+    orders that nobody registered (spec 2026-10-10), mapped onto the tool's
+    own outcomes: rows, None for no rows, and oms_unavailable when the
+    registrations cannot be read. An orders failure is logged (its class,
+    never the phone) and the registrations stand alone."""
     from .registry import ToolError  # local: registry imports tools, not the reverse
 
     def source(phone: str) -> Optional[List[Dict[str, Any]]]:
@@ -276,10 +280,16 @@ def db_warranty_source(reader: OMSDatabase, invoice_state: Optional[Callable[[Op
         except OMSDatabaseUnavailable as exc:
             raise ToolError("oms_unavailable", "The warranty system is not responding (%s)." % exc,
                             retryable=True)
-        if not rows:
-            return None
+        try:
+            order_rows = reader.orders(phone)
+        except OMSDatabaseUnavailable as exc:
+            order_rows = []
+            if log is not None:
+                log("oms_orders_unavailable", {"error": str(exc)})
         today = reader.today()
-        return [to_record(row, today, invoice_state) for row in rows]
+        records = ([to_record(row, today, invoice_state) for row in rows]
+                   + [order_to_record(row, today) for row in order_rows])
+        return records or None
 
     return source
 

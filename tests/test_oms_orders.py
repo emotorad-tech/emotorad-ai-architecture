@@ -159,5 +159,52 @@ class SwitchTests(unittest.TestCase):
         self.assertIsNone(oms_db.reader_from_env({"EMOTORAD_OMS_ORDERS": "on"}))
 
 
+from emotorad_ai.tools.registry import ToolError  # noqa: E402
+
+
+class MergeTests(unittest.TestCase):
+    def test_registrations_first_then_order_bikes(self):
+        db, _, _ = reader(registrations=[REG], orders=[ORDER])
+        records = oms_db.db_warranty_source(db)(PHONE)
+        self.assertEqual([r["frame_number"] for r in records], ["EMXP0001", "EMORD0001"])
+        self.assertEqual([r["ownership_source"] for r in records], ["oms_purchase", "oms_order"])
+
+    def test_order_bikes_alone_are_the_riders_bikes(self):
+        db, _, _ = reader(orders=[ORDER])
+        [record] = oms_db.db_warranty_source(db)(PHONE)
+        self.assertEqual(record["purchase_date"], "2026-07-13")
+
+    def test_nothing_anywhere_is_no_record(self):
+        db, _, _ = reader()
+        self.assertIsNone(oms_db.db_warranty_source(db)(PHONE))
+
+    def test_with_the_switch_off_only_registrations(self):
+        db, fake, _ = reader(registrations=[REG], orders=[ORDER], on=False)
+        records = oms_db.db_warranty_source(db)(PHONE)
+        self.assertEqual([r["frame_number"] for r in records], ["EMXP0001"])
+        self.assertEqual(executed(fake, oms_db.ORDERS_SQL), [])
+
+    def test_an_orders_failure_returns_the_registrations_and_logs_the_class(self):
+        logged = []
+        db, _, _ = reader(registrations=[REG], errors={oms_db.ORDERS_SQL: TimeoutError("ro@oms 9876543210")})
+        records = oms_db.db_warranty_source(db, log=lambda event, fields: logged.append((event, fields)))(PHONE)
+        self.assertEqual([r["frame_number"] for r in records], ["EMXP0001"])
+        self.assertEqual(logged, [("oms_orders_unavailable", {"error": "TimeoutError"})])
+
+    def test_an_orders_failure_with_no_registrations_is_no_record(self):
+        db, _, _ = reader(errors={oms_db.ORDERS_SQL: OSError("x")})
+        self.assertIsNone(oms_db.db_warranty_source(db, log=lambda event, fields: None)(PHONE))
+
+    def test_a_registrations_failure_is_an_outage_whatever_the_orders_did(self):
+        db, _, _ = reader(orders=[ORDER], errors={oms_db.REGISTRATIONS_SQL: OSError("x")})
+        with self.assertRaises(ToolError) as caught:
+            oms_db.db_warranty_source(db)(PHONE)
+        self.assertEqual(caught.exception.code, "oms_unavailable")
+
+    def test_a_foreign_number_is_no_record(self):
+        db, fake, _ = reader(orders=[ORDER])
+        self.assertIsNone(oms_db.db_warranty_source(db)("+6591234567"))
+        self.assertEqual(fake.calls, [])
+
 if __name__ == "__main__":
     unittest.main()
