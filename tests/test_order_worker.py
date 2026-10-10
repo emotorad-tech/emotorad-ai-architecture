@@ -12,10 +12,10 @@ from tests.test_oms_afs import FakeOMS, client
 START = datetime(2026, 10, 10, 6, 0, tzinfo=timezone.utc)
 
 
-def queued(ledger, at=START):
+def queued(ledger, at=START, frame="EMXP0001"):
     ref = ledger.next_reference()
     order, _ = ledger.insert({
-        "_id": ref, "open_key": open_key("EMXP0001", "battery"), "frame_number": "EMXP0001", "part": "battery",
+        "_id": ref, "open_key": open_key(frame, "battery"), "frame_number": frame, "part": "battery",
         "product_id": "uuid-1", "product_name": "EMX Plus",
         "customer": {"name": "Test Rider", "email": "t@example.com", "mobile": "9876543210",
                      "address": {"line1": "A1102", "line2": "Sector 49", "pincode": "122018"}},
@@ -102,7 +102,22 @@ class RetryTests(unittest.TestCase):
             now[0] = due
         self.assertEqual(waits, [1, 5, 15, 60, 60, 60])
 
-    def test_after_eight_passes_it_fails_and_says_so(self):
+    def test_after_eight_passes_with_oms_looking_empty_it_fails_and_says_so(self):
+        logged = []
+        ledger, oms, now = ReplacementOrders(), FakeOMS(), [START]
+        order = queued(ledger)
+        afs = OrderWorker(ledger, client(oms), pin_codes=lambda pincode: None,
+                          log=lambda event, fields: logged.append((event, fields)), clock=lambda: now[0])
+        for _ in range(MAX_PASSES):
+            afs.run_once()
+            now[0] = datetime.fromisoformat(ledger.get(order["_id"])["next_attempt_at"]) \
+                if ledger.get(order["_id"])["status"] == "queued" else now[0]
+        saved = ledger.get(order["_id"])
+        self.assertEqual(saved["status"], "failed")
+        self.assertEqual(saved["open_key"], open_key("EMXP0001", "battery"))
+        self.assertIn(("replacement_order_failed", {"reference": order["_id"], "error": "pin_code_unknown"}), logged)
+
+    def test_after_eight_passes_with_oms_down_it_is_look_only_not_failed(self):
         logged = []
         ledger, oms, now = ReplacementOrders(), FakeOMS(down=True), [START]
         order = queued(ledger)
@@ -111,14 +126,14 @@ class RetryTests(unittest.TestCase):
             afs.run_once()
             now[0] = datetime.fromisoformat(ledger.get(order["_id"])["next_attempt_at"])
         saved = ledger.get(order["_id"])
-        self.assertEqual(saved["status"], "failed")
+        self.assertEqual((saved["status"], saved["oms"]["look_only"]), ("queued", True))
         self.assertEqual(saved["open_key"], open_key("EMXP0001", "battery"))
-        self.assertIn(("replacement_order_failed", {"reference": order["_id"], "error": "OMSCallError"}), logged)
+        self.assertEqual([event for event, _ in logged], [])
 
     def test_a_day_old_order_fails_on_its_next_failure(self):
-        ledger, oms, now = ReplacementOrders(), FakeOMS(down=True), [START + timedelta(hours=25)]
+        ledger, oms, now = ReplacementOrders(), FakeOMS(), [START + timedelta(hours=25)]
         order = queued(ledger)
-        worker(ledger, oms, now).run_once()
+        OrderWorker(ledger, client(oms), pin_codes=lambda pincode: None, clock=lambda: now[0]).run_once()
         self.assertEqual(ledger.get(order["_id"])["status"], "failed")
 
     def test_an_unknown_pin_code_waits(self):
@@ -135,6 +150,160 @@ class RetryTests(unittest.TestCase):
         ledger.claim(order["_id"], START.isoformat(), (START + timedelta(minutes=5)).isoformat())
         self.assertEqual(worker(ledger, oms, now).run_once(), 0)
         self.assertEqual(oms.sent, [])
+
+
+class LookFailsAfterSend:
+    """The real client, except that a look answers an error while `looking_fails` is set."""
+
+    def __init__(self, real):
+        self._real = real
+        self.looking_fails = False
+
+    def find(self, reference):
+        if self.looking_fails:
+            raise oms_afs.OMSCallError("look failed")
+        return self._real.find(reference)
+
+    def place(self, request, client_ref):
+        try:
+            return self._real.place(request, client_ref)
+        finally:
+            self.looking_fails = True  # the send is over; the look-again that follows fails
+
+    def sale_type_id(self, name):
+        return self._real.sale_type_id(name)
+
+
+class NeverFailedWhileOMSMayHoldItTests(unittest.TestCase):
+    def test_a_final_pass_whose_look_errors_is_look_only_not_failed(self):
+        ledger, oms, now = ReplacementOrders(), FakeOMS(fail_add_after_create=True), [START]
+        order = queued(ledger)
+        order["oms"]["passes"] = MAX_PASSES - 1
+        ledger.save(order)
+        stub = LookFailsAfterSend(client(oms))
+        afs = OrderWorker(ledger, stub, pin_codes=lambda pincode: "pin-1", clock=lambda: now[0])
+        afs.run_once()
+        saved = ledger.get(order["_id"])
+        self.assertEqual(saved["status"], "queued")
+        self.assertTrue(saved["oms"]["look_only"])
+        self.assertEqual(saved["next_attempt_at"], (START + timedelta(minutes=60)).isoformat())
+        self.assertEqual(len(oms.orders), 1)
+        # OMS is reachable again: a look-only pass finds the order and sends nothing.
+        stub.looking_fails = False
+        now[0] = START + timedelta(minutes=61)
+        afs.run_once()
+        self.assertEqual(ledger.get(order["_id"])["status"], "sent")
+        self.assertEqual(len(oms.sent), 1)
+
+    def test_a_final_pass_whose_first_look_errors_is_look_only(self):
+        ledger, oms, now = ReplacementOrders(), FakeOMS(down=True), [START]
+        order = queued(ledger)
+        order["oms"]["passes"] = MAX_PASSES - 1
+        ledger.save(order)
+        worker(ledger, oms, now).run_once()
+        saved = ledger.get(order["_id"])
+        self.assertEqual(saved["status"], "queued")
+        self.assertTrue(saved["oms"]["look_only"])
+
+    def test_a_look_only_order_is_never_sent(self):
+        ledger, oms, now = ReplacementOrders(), FakeOMS(), [START]
+        order = queued(ledger)
+        order["oms"]["look_only"] = True
+        ledger.save(order)
+        worker(ledger, oms, now).run_once()
+        self.assertEqual(oms.sent, [])
+        self.assertEqual(ledger.get(order["_id"])["status"], "failed")
+
+    def test_a_look_only_order_that_looks_and_errors_waits_an_hour(self):
+        ledger, oms, now = ReplacementOrders(), FakeOMS(down=True), [START]
+        order = queued(ledger)
+        order["oms"]["look_only"] = True
+        ledger.save(order)
+        worker(ledger, oms, now).run_once()
+        saved = ledger.get(order["_id"])
+        self.assertEqual(saved["status"], "queued")
+        self.assertEqual(saved["next_attempt_at"], (START + timedelta(minutes=60)).isoformat())
+
+
+class ClaimLeaseTests(unittest.TestCase):
+    def test_each_claim_has_its_own_lease_from_its_own_time(self):
+        claims = []
+
+        class Recording(ReplacementOrders):
+            def claim(self, reference, now_iso, lease_until_iso):
+                claims.append((now_iso, lease_until_iso))
+                return super().claim(reference, now_iso, lease_until_iso)
+
+        ledger, oms = Recording(), FakeOMS()
+        queued(ledger)
+        queued(ledger, frame="EMXP0002")
+        ticks = [0]
+
+        def clock():
+            ticks[0] += 1
+            return START + timedelta(seconds=200 * ticks[0])
+
+        afs = OrderWorker(ledger, client(oms), pin_codes=lambda pincode: "pin-1", clock=clock)
+        self.assertEqual(afs.run_once(), 2)
+        self.assertEqual(len(claims), 2)
+        for claimed_at, lease_until in claims:
+            self.assertEqual(datetime.fromisoformat(lease_until) - datetime.fromisoformat(claimed_at),
+                             timedelta(seconds=300))
+        self.assertGreater(claims[1][0], claims[0][0])
+
+
+class OneBadOrderTests(unittest.TestCase):
+    def _two(self, ledger):
+        first = queued(ledger, START)
+        first["customer"]["address"]["pincode"] = "000000"
+        ledger.save(first)
+        second = queued(ledger, START + timedelta(seconds=1), frame="EMXP0002")
+        return first, second
+
+    def _worker(self, ledger, oms, now, logged):
+        def pins(pincode):
+            if pincode == "000000":
+                raise RuntimeError("pin service down")
+            return "pin-1"
+
+        return OrderWorker(ledger, client(oms), pin_codes=pins,
+                           log=lambda event, fields: logged.append((event, fields)), clock=lambda: now[0])
+
+    def test_one_bad_order_never_stops_the_pass(self):
+        ledger, oms, now, logged = ReplacementOrders(), FakeOMS(), [START + timedelta(minutes=1)], []
+        first, second = self._two(ledger)
+        self._worker(ledger, oms, now, logged).run_once()
+        self.assertIn(("replacement_order_pass_failed", {"reference": first["_id"], "error": "RuntimeError"}), logged)
+        self.assertEqual(ledger.get(second["_id"])["status"], "sent")
+        saved = ledger.get(first["_id"])
+        self.assertEqual((saved["status"], saved["oms"]["passes"]), ("queued", 1))
+        self.assertIsNone(saved["lease_until"])
+
+    def test_an_order_that_always_raises_does_not_stay_queued_forever(self):
+        ledger, oms, now, logged = ReplacementOrders(), FakeOMS(), [START + timedelta(minutes=1)], []
+        first, _ = self._two(ledger)
+        afs = self._worker(ledger, oms, now, logged)
+        for _ in range(MAX_PASSES):
+            afs.run_once()
+            now[0] = datetime.fromisoformat(ledger.get(first["_id"])["next_attempt_at"])
+        saved = ledger.get(first["_id"])
+        self.assertTrue(saved["status"] == "failed" or saved["oms"].get("look_only"))
+        afs.run_once()
+        self.assertEqual(ledger.get(first["_id"])["status"], "failed")
+        self.assertNotIn(first["_id"], [sent["ticket_number"] for sent in oms.sent])
+
+
+class IntentTests(unittest.TestCase):
+    def test_nothing_is_sent_when_the_intent_cannot_be_saved(self):
+        class Unsaving(ReplacementOrders):
+            def save(self, order):
+                raise OSError("store down")
+
+        ledger, oms, now, logged = Unsaving(), FakeOMS(), [START], []
+        order = queued(ledger)
+        worker(ledger, oms, now, logged).run_once()
+        self.assertEqual(oms.sent, [])
+        self.assertIn(("replacement_order_intent_unsaved", {"reference": order["_id"], "error": "OSError"}), logged)
 
 
 if __name__ == "__main__":

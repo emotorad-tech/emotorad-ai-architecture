@@ -10,6 +10,11 @@ finds is never sent again. It records its intent before sending and sends
 nothing if that record fails. Retries after 1, 5, 15 and 60 minutes, then
 hourly; after 8 passes or 24 hours the order is `failed` and left to a person,
 still holding its bike and part, so the bot never orders it again by itself.
+
+An order is `failed` only when the most recent look answered "not found". When
+the give-up limit is reached but the last look errored, OMS may hold the order,
+so it stays `queued` as `look_only`: it is never sent again, and each pass
+(hourly) only looks: found is `sent`, not found is `failed`, an error waits.
 """
 
 from __future__ import annotations
@@ -71,13 +76,29 @@ class OrderWorker:
         self.status["last_pass"] = now.isoformat()
         done = 0
         for order in self._ledger.due(now.isoformat()):
-            claimed = self._ledger.claim(order["_id"], now.isoformat(),
-                                         (now + timedelta(seconds=LEASE_SECONDS)).isoformat())
+            claimed_at = self._clock()  # a lease per claim: a long pass never hands out an expired one
+            claimed = self._ledger.claim(order["_id"], claimed_at.isoformat(),
+                                         (claimed_at + timedelta(seconds=LEASE_SECONDS)).isoformat())
             if claimed is None:
                 continue
-            self.process(claimed)
+            try:
+                self.process(claimed)
+            except Exception as exc:  # one bad order never stops the pass
+                self._log("replacement_order_pass_failed", {"reference": order["_id"], "error": type(exc).__name__})
+                self._count_failed_pass(claimed, type(exc).__name__)
             done += 1
         return done
+
+    def _count_failed_pass(self, order: Dict[str, Any], error: str) -> None:
+        """A pass that raised still counts toward the give-up limit. If this save fails too,
+        the lease runs out and a later pass tries again."""
+        try:
+            if order.get("status") == "queued":
+                self._retry(order, error, looked_not_found=False)
+            else:
+                self._finish(order)
+        except Exception:
+            return None
 
     # -- one order --------------------------------------------------------------
 
@@ -87,16 +108,18 @@ class OrderWorker:
         try:
             found = self._client.find(reference)
         except _OMS_ERRORS as exc:
-            return self._retry(order, type(exc).__name__)
+            return self._retry(order, type(exc).__name__, looked_not_found=False)
         if found:
             return self._sent(order, found)
+        if order["oms"].get("look_only"):
+            return self._fail(order, order["oms"].get("last_error") or "not_found")
         pin_code_id = self._pin_codes(((order.get("customer") or {}).get("address") or {}).get("pincode") or "")
         if not pin_code_id:
-            return self._retry(order, "pin_code_unknown")
+            return self._retry(order, "pin_code_unknown", looked_not_found=True)
         try:
             sale_type_id = self._client.sale_type_id(SALE_TYPE)
         except _OMS_ERRORS as exc:
-            return self._retry(order, type(exc).__name__)
+            return self._retry(order, type(exc).__name__, looked_not_found=True)
         order["oms"]["intent_at"] = self._clock().isoformat()
         try:
             self._ledger.save(order)
@@ -113,10 +136,10 @@ class OrderWorker:
         try:
             found = self._client.find(reference)
         except _OMS_ERRORS:
-            found = None
+            return self._retry(order, error, looked_not_found=False)  # OMS may hold it: not "no order"
         if found:
             return self._sent(order, found)
-        return self._retry(order, error)
+        return self._retry(order, error, looked_not_found=True)
 
     def _sent(self, order: Dict[str, Any], found: Dict[str, str]) -> None:
         order["status"] = "sent"
@@ -125,17 +148,26 @@ class OrderWorker:
         self._finish(order)
         self._log("replacement_order_sent", {"reference": order["_id"]})
 
-    def _retry(self, order: Dict[str, Any], error: str) -> None:
+    def _fail(self, order: Dict[str, Any], error: str) -> None:
+        order["status"] = "failed"
+        self._finish(order)
+        self._log("replacement_order_failed", {"reference": order["_id"], "error": error})
+
+    def _retry(self, order: Dict[str, Any], error: str, looked_not_found: bool) -> None:
+        """`looked_not_found`: the most recent look answered "not found". Only then may the
+        order be failed; otherwise OMS may hold it, and it waits an hour as look-only."""
         now = self._clock()
         order["oms"]["last_error"] = error
         passes = int(order["oms"]["passes"])
         created = datetime.fromisoformat(order["created_at"])
-        if passes >= MAX_PASSES or now - created >= timedelta(hours=GIVE_UP_HOURS):
-            order["status"] = "failed"
-            self._finish(order)
-            self._log("replacement_order_failed", {"reference": order["_id"], "error": error})
-            return
-        minutes = RETRY_MINUTES[passes - 1] if passes - 1 < len(RETRY_MINUTES) else 60
+        look_only = bool(order["oms"].get("look_only"))
+        if passes >= MAX_PASSES or now - created >= timedelta(hours=GIVE_UP_HOURS) or look_only:
+            if looked_not_found:
+                return self._fail(order, error)
+            order["oms"]["look_only"] = True
+            minutes = 60
+        else:
+            minutes = RETRY_MINUTES[passes - 1] if passes - 1 < len(RETRY_MINUTES) else 60
         order["next_attempt_at"] = (now + timedelta(minutes=minutes)).isoformat()
         self._finish(order)
 
