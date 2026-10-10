@@ -16,6 +16,7 @@ class FakeOMS:
     def __init__(self, valid=("tok-old",), orders=(), fail_add_after_create=False, down=False):
         self.valid, self.orders, self.sent = set(valid), list(orders), []
         self.fail_add_after_create, self.down, self.logins = fail_add_after_create, down, 0
+        self.frames = []  # the url of every frame that reached OMS, accepted or not
 
     def connect(self, url, **kwargs):
         if self.down:
@@ -29,6 +30,7 @@ class FakeOMS:
         return FakeResponse(200, {"msg": "ok", "data": {"access_token": token}})
 
     def answer(self, token, frame):
+        self.frames.append(frame["url"])
         if token not in self.valid:
             return {"transmit": "single", "url": "unauthorized"}
         url, request = frame["url"], frame.get("request") or {}
@@ -162,6 +164,28 @@ class CallTests(unittest.TestCase):
         self.assertEqual(oms.logins, 1)
         self.assertIsNone(afs.find("RO-1000001"))
         self.assertEqual(oms.logins, 1)
+
+    def test_a_token_refused_on_place_is_never_resent_in_the_same_call(self):
+        # Finding 2 of the whole-branch review: OMS can still act on a frame
+        # sent on an inactive token, so place logs in for the next call and
+        # raises; the worker looks before any resend.
+        oms = FakeOMS(valid=())
+        afs = client(oms)
+        with self.assertRaises(oms_afs.OMSAuthError):
+            afs.place({"ticket_number": "RO-1000001"}, "RO-1000001:1")
+        self.assertEqual(oms.frames.count("afs_order_add"), 1)
+        self.assertEqual(oms.logins, 1)
+        # The next call uses the fresh token without logging in again.
+        self.assertIsNone(afs.find("RO-1000001"))
+        self.assertEqual(oms.logins, 1)
+
+    def test_find_and_the_sale_type_still_retry_once_after_a_login(self):
+        oms = FakeOMS(valid=())
+        self.assertEqual(client(oms).sale_type_id("Warranty"), "st-2")
+        self.assertEqual(oms.frames.count("sale_type_list"), 2)
+        oms = FakeOMS(valid=())
+        self.assertIsNone(client(oms).find("RO-1000001"))
+        self.assertEqual(oms.frames.count("afs_order_list"), 2)
 
     def test_a_dead_oms_is_a_call_error(self):
         with self.assertRaises(oms_afs.OMSCallError):

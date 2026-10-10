@@ -5,7 +5,10 @@ orders, section 5).
 order/afs_order.py), reached at `<ws_url><token>/` as the OMS admin user whose
 email, password and token a person keeps in Secrets Manager. The stored token
 is used first; when OMS refuses it, the client logs in once with the email and
-password and keeps the new token in memory. One call opens one socket, sends
+password and keeps the new token in memory. A look-up (`afs_order_list`,
+`sale_type_list`) is then sent again at once; `afs_order_add` never is, since
+OMS can still act on a frame sent on a token it refuses: the send raises and
+the worker looks before any resend (the whole-branch review, finding 2). One call opens one socket, sends
 one frame, waits for the frame OMS echoes back with the same `url` and
 `client_ref`, and closes. No setting value is ever logged or put in an error:
 errors carry an HTTP status or an exception's class.
@@ -143,7 +146,9 @@ class AFSClient:
         raise OMSCallError("find status %s" % response.get("status"))
 
     def place(self, request: Dict[str, Any], client_ref: str) -> Dict[str, str]:
-        response = self._call("afs_order_add", request, client_ref)
+        """One send, never repeated here: a refused token logs in for the next
+        call and raises OMSAuthError, and the worker looks before sending again."""
+        response = self._call("afs_order_add", request, client_ref, resend=False)
         if response.get("status") == OK_CODE:
             data = response.get("data") or {}
             return {"order_code": str(data.get("order_code")), "order_id": str(data.get("id"))}
@@ -164,12 +169,15 @@ class AFSClient:
 
     # -- the socket ------------------------------------------------------------
 
-    def _call(self, url: str, request: Dict[str, Any], client_ref: str) -> Dict[str, Any]:
+    def _call(self, url: str, request: Dict[str, Any], client_ref: str, resend: bool = True) -> Dict[str, Any]:
         token = self._token or self._login()
         try:
             return self._once(token, url, request, client_ref)
         except OMSAuthError:
-            return self._once(self._login(), url, request, client_ref)
+            fresh = self._login()
+            if not resend:
+                raise
+            return self._once(fresh, url, request, client_ref)
 
     def _once(self, token: str, url: str, request: Dict[str, Any], client_ref: str) -> Dict[str, Any]:
         frame = {"transmit": "single", "url": url, "client_ref": client_ref, "request": request}

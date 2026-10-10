@@ -293,6 +293,57 @@ class OneBadOrderTests(unittest.TestCase):
         self.assertNotIn(first["_id"], [sent["ticket_number"] for sent in oms.sent])
 
 
+class ProcessesThenRefuses(FakeOMS):
+    """OMS acts on afs_order_add sent on the old token, then answers unauthorized."""
+
+    def answer(self, token, frame):
+        if frame["url"] == "afs_order_add" and token == "tok-old":
+            self.frames.append(frame["url"])
+            request = frame.get("request") or {}
+            self.sent.append(request)
+            self.orders.append({"id": "o-%d" % (len(self.orders) + 1), "order_code": "AFS/X/%d" % (len(self.orders) + 1),
+                                "ticket_id": request.get("ticket_number")})
+            return {"transmit": "single", "url": "unauthorized"}
+        return super().answer(token, frame)
+
+
+class RefusesAddOnOldToken(FakeOMS):
+    """afs_order_add refuses the old token and makes nothing; the other calls accept it."""
+
+    def answer(self, token, frame):
+        if frame["url"] == "afs_order_add" and token == "tok-old":
+            self.frames.append(frame["url"])
+            return {"transmit": "single", "url": "unauthorized"}
+        return super().answer(token, frame)
+
+
+class RefusedTokenOnSendTests(unittest.TestCase):
+    """Finding 2: a token refused on the send never resends in the same pass."""
+
+    def test_an_order_made_on_a_refused_token_is_found_not_sent_again(self):
+        ledger, oms, now = ReplacementOrders(), ProcessesThenRefuses(), [START]
+        order = queued(ledger)
+        worker(ledger, oms, now).run_once()
+        self.assertEqual(oms.frames.count("afs_order_add"), 1)
+        self.assertEqual(len(oms.orders), 1)
+        self.assertEqual(oms.logins, 1)
+        self.assertEqual(ledger.get(order["_id"])["status"], "sent")
+
+    def test_a_refused_send_that_made_nothing_waits_for_a_later_pass(self):
+        ledger, oms, now = ReplacementOrders(), RefusesAddOnOldToken(), [START]
+        order = queued(ledger)
+        afs = worker(ledger, oms, now)
+        afs.run_once()
+        self.assertEqual(oms.frames.count("afs_order_add"), 1)
+        saved = ledger.get(order["_id"])
+        self.assertEqual((saved["status"], saved["oms"]["last_error"]), ("queued", "OMSAuthError"))
+        now[0] = datetime.fromisoformat(saved["next_attempt_at"])
+        afs.run_once()
+        self.assertEqual(oms.frames.count("afs_order_add"), 2)
+        self.assertEqual(len(oms.orders), 1)
+        self.assertEqual(ledger.get(order["_id"])["status"], "sent")
+
+
 class IntentTests(unittest.TestCase):
     def test_nothing_is_sent_when_the_intent_cannot_be_saved(self):
         class Unsaving(ReplacementOrders):
