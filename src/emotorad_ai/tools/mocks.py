@@ -731,6 +731,17 @@ class MockBookingSystem:
         return booking
 
 
+def _same_phone(placed_from: Optional[str], caller: Optional[str]) -> bool:
+    """Whether two phone strings are one number: by their last ten digits when
+    both parse as Indian mobiles, else exactly."""
+    from .oms_db import last_ten
+
+    try:
+        return last_ten(placed_from or "") == last_ten(caller or "")
+    except ValueError:
+        return bool(placed_from) and placed_from == caller
+
+
 def build_registry(
     knowledge_base: Optional[BatteryKnowledgeBase] = None,
     # A MockTicketSystem, or the TicketRouter (tickets/seam.py) when Zoho is on.
@@ -2197,14 +2208,23 @@ def build_registry(
                 if created:
                     return ok({"order_id": existing["_id"], "status": existing["status"], "part": part,
                                "delivery_address": existing["delivery_address"], "already_placed": False})
+            # The earlier order's address and time go only to the phone it was
+            # placed from: another number that lists the same frame is told
+            # that an order exists and nothing more.
+            if _same_phone(existing.get("phone"), phone):
+                return ok({
+                    "order_id": existing["_id"], "status": existing["status"], "part": part,
+                    "delivery_address": existing.get("delivery_address"), "already_placed": True,
+                    "placed_at_utc": existing.get("created_at"),
+                    "note": ("Nothing new was placed. A replacement for this bike and part was placed earlier, at "
+                             "the time and to the address above. Tell the customer it already exists, quote the "
+                             "order id and that address, and if they want the address changed, hand over to the "
+                             "support team."),
+                })
             return ok({
-                "order_id": existing["_id"], "status": existing["status"], "part": part,
-                "delivery_address": existing.get("delivery_address"), "already_placed": True,
-                "placed_at_utc": existing.get("created_at"),
-                "note": ("Nothing new was placed. A replacement for this bike and part was placed earlier, at "
-                         "the time and to the address above. Tell the customer it already exists, quote the "
-                         "order id and that address, and if they want the address changed, hand over to the "
-                         "support team."),
+                "order_id": existing["_id"], "status": existing["status"], "part": part, "already_placed": True,
+                "note": ("A replacement for this bike and part was already placed from another number. Do not "
+                         "share its details; hand the conversation to the support team."),
             })
 
     return registry

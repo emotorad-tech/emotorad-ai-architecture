@@ -32,6 +32,17 @@ class OrderClaimTests(unittest.TestCase):
         self.assertTrue(check.blocked)
         self.assertEqual(check.claimed, "RO-1000042")
 
+    def test_an_invented_id_of_any_length_is_blocked(self):
+        for invented in ("RO-00042", "RO-123456", "RO-12345678"):
+            with self.subTest(invented=invented):
+                check = check_order_claim("Done. Order %s is on its way." % invented, NOTHING)
+                self.assertTrue(check.blocked)
+                self.assertEqual(check.claimed, invented)
+
+    def test_a_tool_returned_seven_digit_id_still_passes(self):
+        placed = [{"data": {"order_id": "RO-1000001", "status": "recorded"}}]
+        self.assertFalse(check_order_claim("Done. Order RO-1000001 is on its way.", placed).blocked)
+
     def test_ticket_ids_are_not_order_ids(self):
         """EM- is a ticket. The coverage of this check is RO- alone."""
         self.assertFalse(check_order_claim("Ticket EM-00001 is open.", NOTHING).blocked)

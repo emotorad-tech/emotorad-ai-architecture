@@ -180,6 +180,32 @@ class LedgerThroughTheToolTests(unittest.TestCase):
         self.assertTrue(result["data"]["already_placed"])
         self.assertEqual(result["data"]["order_id"], "RO-1000001")
 
+    def test_the_address_of_an_existing_order_is_told_only_to_its_own_phone(self):
+        orders = ReplacementOrders()
+        record = registration()
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: [record], replacement_orders=orders)
+
+        def call(phone, key):
+            context = ToolContext(conversation_id="c-" + key, phone=phone, late={
+                "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+                "coverage_result": lambda: coverage_for(record), "customer_messages": lambda: TYPED})
+            return registry.call(PLACE_REPLACEMENT_ORDER, dict(
+                {"frame_number": FRAME, "part": "battery", "use_record_address": True,
+                 "idempotency_key": key}, **RIDER), context)
+
+        first = call(PHONE, "k1")["data"]
+        self.assertFalse(first["already_placed"])
+        same = call("+91 98765 43210", "k2")["data"]
+        self.assertTrue(same["already_placed"])
+        self.assertEqual(same["delivery_address"], ADDRESS)
+        self.assertIn("placed_at_utc", same)
+        other = call("+919123456789", "k3")["data"]
+        self.assertTrue(other["already_placed"])
+        self.assertEqual(other["order_id"], first["order_id"])
+        self.assertNotIn("delivery_address", other)
+        self.assertNotIn("placed_at_utc", other)
+        self.assertIn("already placed from another number", other["note"])
+
     def test_with_the_switch_off_or_no_product_id_the_order_is_recorded_not_queued(self):
         self.assertEqual(place(registration())["data"]["status"], "recorded")
 

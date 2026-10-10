@@ -573,7 +573,7 @@ def check_evidence(reply: str, evidence_seen: bool, safety_triggered: bool = Fal
 # --- order post-check -------------------------------------------------------
 # Replacement order ids as place_replacement_order issues them. Tickets are
 # EM- and dealer orders SO-; only RO- is a claim this check owns.
-_ORDER_ID = re.compile(r"\bRO-\d{7}\b")
+_ORDER_ID = re.compile(r"\bRO-\d+\b")
 
 ORDER_BLOCKED_MESSAGE = (
     "Let me get this confirmed for you properly. I am passing this to our support team so "
