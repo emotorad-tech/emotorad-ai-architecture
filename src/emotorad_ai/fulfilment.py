@@ -69,6 +69,14 @@ def load_parts_table(directory: Optional[Any] = None) -> Dict[str, PartRule]:
 # check. Given once by the owner on 2026-09-20 and applied to both.
 IN_FLIGHT_SECONDS = 48 * 60 * 60
 
+# The warranty_terms component each orderable part is judged by (spec
+# 2026-10-10 replacement orders, section 1, step 4): a charger by its own six
+# months, never by the battery's twelve.
+PART_COMPONENTS: Dict[str, str] = {"battery": "battery", "charger": "charger", "display": "display",
+                                   "controller": "controller", "motor": "motor"}
+# The evidence check's fault component each part belongs to (section 1, step 2).
+PART_FAULT: Dict[str, str] = {"battery": "battery", "charger": "battery", "controller": "motor", "motor": "motor"}
+
 
 def _model_name(product_name: str) -> str:
     """'X1 C Red-XX01EB0007/EM01AV01C19' -> 'X1 C'.

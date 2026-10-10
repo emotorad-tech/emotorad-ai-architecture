@@ -16,9 +16,16 @@ from emotorad_ai.tools.registry import ToolContext
 
 PHONE = "+919876543210"  # fixture: one EMX Plus, in warranty on 2026-07-28
 COVERED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": True,
+                               "ownership_source": "oms_purchase", "purchase_date": "2026-03-01",
+                               "components": [{"component": "battery", "active": True},
+                                              {"component": "charger", "active": True}],
                                "delivery_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006"}]}}
-NOT_COVERED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": False}]}}
-UNDETERMINED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": None}]}}
+NOT_COVERED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": False,
+                                   "ownership_source": "oms_purchase", "purchase_date": "2026-03-01",
+                                   "components": [{"component": "battery", "active": False},
+                                                  {"component": "charger", "active": False}]}]}}
+UNDETERMINED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_name": "EMX Plus", "in_warranty": None,
+                                    "ownership_source": "oms_purchase", "purchase_date": None}]}}
 
 
 def _registry(approval_mode="reasonable", orders=None, warranty_source=None):
@@ -31,11 +38,12 @@ def _registry(approval_mode="reasonable", orders=None, warranty_source=None):
     )
 
 
-def _context(evidence_seen=True, coverage=COVERED, customer_messages=()):
+def _context(evidence_seen=True, coverage=COVERED, customer_messages=(), verified="any"):
     return ToolContext(
         conversation_id="c1", phone=PHONE,
         late={
             "evidence_seen": lambda: evidence_seen,
+            "evidence_verified": lambda: verified,
             "coverage_result": lambda: coverage,
             "customer_messages": lambda: customer_messages,
         },
@@ -123,7 +131,9 @@ class ItemCodeMissingTests(unittest.TestCase):
 
     def test_a_part_with_no_item_code_is_placed_pending_in_every_mode(self):
         coverage = {"data": {"bikes": [
-            {"frame_number": "EMXP2025004417", "product_name": "Unknown Model", "in_warranty": True},
+            {"frame_number": "EMXP2025004417", "product_name": "Unknown Model", "in_warranty": True,
+             "ownership_source": "oms_purchase", "purchase_date": "2026-03-01",
+             "components": [{"component": "battery", "active": True}]},
         ]}}
         for mode in ("bot", "reasonable", "human"):
             with self.subTest(mode=mode):
@@ -140,14 +150,14 @@ class ApprovalModeTests(unittest.TestCase):
     def test_human_mode_leaves_it_pending(self):
         self.assertEqual(_place(_registry("human"), _context())["data"]["status"], "pending_approval")
 
-    def test_bot_mode_approves_even_without_a_photo(self):
-        self.assertEqual(_place(_registry("bot"), _context(evidence_seen=False))["data"]["status"], "approved")
+    def test_bot_mode_refuses_an_unverified_fault(self):
+        """An unverified fault is never ordered, whatever the mode."""
+        result = _place(_registry("bot"), _context(verified=None))
+        self.assertEqual(result["error"]["code"], "evidence_not_verified")
 
-    def test_reasonable_mode_holds_a_case_with_no_photo(self):
-        """Not sure: no evidence. The order still exists, pending a human."""
-        result = _place(_registry("reasonable"), _context(evidence_seen=False))
-        self.assertNotIn("error", result)
-        self.assertEqual(result["data"]["status"], "pending_approval")
+    def test_reasonable_mode_refuses_an_unverified_fault(self):
+        result = _place(_registry("reasonable"), _context(verified=None))
+        self.assertEqual(result["error"]["code"], "evidence_not_verified")
 
 
 class RefusalTests(unittest.TestCase):
@@ -165,13 +175,13 @@ class RefusalTests(unittest.TestCase):
 
     def test_out_of_warranty_is_refused_in_this_build(self):
         result = _place(_registry(), _context(coverage=NOT_COVERED))
-        self.assertEqual(result["error"]["code"], "chargeable_not_supported")
+        self.assertEqual(result["error"]["code"], "part_not_in_warranty")
         self.assertEqual(result["error"]["remedy"], "human_handoff")
 
-    def test_undetermined_coverage_is_refused_with_the_invoice_remedy(self):
+    def test_undetermined_coverage_is_refused(self):
+        # The undated bike now fails the registration check first.
         result = _place(_registry(), _context(coverage=UNDETERMINED))
-        self.assertEqual(result["error"]["code"], "coverage_undetermined")
-        self.assertEqual(result["error"]["remedy"], "collect_purchase_proof")
+        self.assertEqual(result["error"]["code"], "warranty_not_from_registration")
 
     def test_no_coverage_lookup_at_all_is_refused(self):
         """The registry refuses before the tool runs: coverage_result is a

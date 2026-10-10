@@ -19,7 +19,8 @@ from ..contract import ASSERTED, VERIFIED
 from ..conversation import StoreUnavailable, address_tokens, utc_now_iso
 from ..digits import ascii_digits
 from ..evidence_check import DEFAULT_MISSING
-from ..fulfilment import ItemCodes, ReplacementOrders, decide, is_sure, load_parts_table
+from ..fulfilment import (PART_COMPONENTS, PART_FAULT, ItemCodes, ReplacementOrders, decide, is_sure,
+                          load_parts_table)
 from ..guardrails import check_safety_in_description
 from ..knowledge import BatteryKnowledgeBase
 from ..tickets.caps import CAP_TEXTS, cap_reached
@@ -245,6 +246,9 @@ def _coverage(record: Dict[str, Any], today: Optional[date]) -> Dict[str, Any]:
         # the VIN, and never shown to the rider.
         "bike_ref": record.get("bike_ref") or record.get("frame_number"),
         "frame_on_record": record.get("frame_on_record", True),
+        # Where the purchase date came from (spec 2026-10-10): only
+        # "oms_purchase" (em_purchase) may lead to a replacement order.
+        "ownership_source": record.get("ownership_source"),
         "in_app": bool(record.get("in_app")),
         "product_name": _clean(record.get("product_name")),
         "product_color": _clean(record.get("product_color")),
@@ -1925,7 +1929,7 @@ def build_registry(
             },
             required=("part", "idempotency_key"),
             injects=("phone", "conversation_id", "evidence_seen", "coverage_result", "customer_messages"),
-            optional_injects=("unlisted_bike",),
+            optional_injects=("unlisted_bike", "evidence_verified"),
             write=True,
         )
         def place_replacement_order(
@@ -1940,6 +1944,7 @@ def build_registry(
             use_record_address: bool = False,
             address: Optional[Dict[str, Any]] = None,
             unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
+            evidence_verified: Optional[str] = None,
         ) -> Dict[str, Any]:
             if unlisted_bike:
                 # The customer's bike is not registered on this number (the
@@ -1987,6 +1992,49 @@ def build_registry(
                     "Ask the customer to read the frame number off the sticker and raise a support ticket instead.",
                 )
             frame = bike["frame_number"]
+
+            # The gate (spec 2026-10-10 replacement orders, section 1), all in
+            # code: the evidence, the registration's date, the part's own cover.
+            if evidence_verified not in ("any", PART_FAULT.get(part)):
+                raise ToolError(
+                    "evidence_not_verified",
+                    "The fault is not yet confirmed by the photos or video for this bike, so nothing can be "
+                    "ordered. Ask for a short video that shows the fault, or raise a support ticket.",
+                    remedy="collect_evidence",
+                )
+            entry = next((e for e in (coverage_result.get("data") or {}).get("bikes", [])
+                          if e.get("frame_number") == frame), None)
+            if entry is None:
+                raise ToolError(
+                    "coverage_undetermined",
+                    "Coverage for this bike is not settled. Ask for the invoice before ordering.",
+                    remedy="collect_purchase_proof",
+                )
+            if entry.get("ownership_source") != "oms_purchase" or not entry.get("purchase_date"):
+                raise ToolError(
+                    "warranty_not_from_registration",
+                    "A replacement is ordered only for a bike whose purchase date is on its warranty "
+                    "registration. Raise a support ticket with the evidence instead; the support team "
+                    "will confirm the warranty.",
+                    remedy="support_ticket",
+                )
+            component = PART_COMPONENTS.get(part)
+            cover = next((c for c in entry.get("components") or [] if c.get("component") == component), None)
+            if cover is None:
+                raise ToolError(
+                    "coverage_undetermined",
+                    "The %s's cover is not on record. Raise a support ticket instead." % part,
+                    remedy="support_ticket",
+                )
+            if cover.get("active") is not True:
+                raise ToolError(
+                    "part_not_in_warranty",
+                    "The %s's warranty has ended, so this replacement is chargeable. Chargeable "
+                    "replacements are handled by a person: raise a support ticket and hand over rather "
+                    "than quote." % part,
+                    remedy="human_handoff",
+                )
+            covered = True
 
             # The address backstop. Two ways in, both decided here.
             #
@@ -2061,27 +2109,6 @@ def build_registry(
                 else:
                     place = places[0]
                 delivery_address = assemble(parsed, place)
-
-            # Coverage, from the lookup the runtime remembered. Chargeable is a
-            # later build; refusing it here keeps the model from improvising a
-            # payment it cannot take.
-            covered = None
-            for entry in (coverage_result.get("data") or {}).get("bikes", []):
-                if entry.get("frame_number") == frame:
-                    covered = entry.get("in_warranty")
-            if covered is None:
-                raise ToolError(
-                    "coverage_undetermined",
-                    "Coverage for this bike is not settled. Ask for the invoice before ordering.",
-                    remedy="collect_purchase_proof",
-                )
-            if covered is False:
-                raise ToolError(
-                    "chargeable_not_supported",
-                    "This bike is out of warranty, so the part is chargeable. Chargeable "
-                    "replacements are handled by a person for now; hand over rather than quote.",
-                    remedy="human_handoff",
-                )
 
             existing = replacement_orders.in_flight(frame, part)
             if existing is not None:

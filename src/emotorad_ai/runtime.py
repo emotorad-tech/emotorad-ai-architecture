@@ -2169,6 +2169,17 @@ class Runtime:
             return verdict_passed(state.evidence_verdict, state)
         return bool(state.evidence_seen)
 
+    def _verified_fault(self, state: ConversationState) -> Optional[str]:
+        """The fault the evidence proves, for the order gate (spec 2026-10-10
+        replacement orders, section 1): with the evidence check on for this
+        chat, the passing verdict's component ("battery" or "motor"); with it
+        off, "any" once a photo or video reached the agent; otherwise None."""
+        if self._evidence_gated(state):
+            if verdict_passed(state.evidence_verdict, state):
+                return (state.evidence_verdict or {}).get("component")
+            return None
+        return "any" if state.evidence_seen else None
+
     def _step_lookup(self, message: InboundMessage, resolved: ResolvedIdentity, state: ConversationState) -> None:
         """The step's own lookup, with no warranty_ready fact so it is never
         held back; its answer becomes the chat's coverage result."""
@@ -2611,6 +2622,9 @@ class Runtime:
                 # by it (tools/registry.py), read when the tool runs.
                 "started_at": lambda: self._ticket_run_start(message, state, resolved),
                 "evidence_seen": lambda: state.evidence_seen,
+                # The fault the evidence proves, for the replacement order's
+                # gate (spec 2026-10-10 replacement orders).
+                "evidence_verified": lambda: self._verified_fault(state),
                 "coverage_result": lambda: state.coverage_result,
                 # Whether the warranty step has run for the chosen bike (spec
                 # 2026-10-09): until then the lookup tool holds the cover back.

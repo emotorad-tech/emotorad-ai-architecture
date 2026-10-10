@@ -11,23 +11,29 @@ from datetime import date
 from emotorad_ai.adapters import WebsiteChatAdapter
 from emotorad_ai.agents.battery_support import AGENT_NAME, TOOL_NAMES
 from emotorad_ai.config import Settings
-from emotorad_ai.contract import ANONYMOUS, Identity, InboundMessage
+from emotorad_ai.contract import ANONYMOUS, Attachment, Identity, InboundMessage
 from emotorad_ai.fulfilment import ItemCodes, ReplacementOrders
 from emotorad_ai.identity import IdentityResolver
 from emotorad_ai.llm import ScriptedClaude, call_tool, say
 from emotorad_ai.observability import EventLog
 from emotorad_ai.runtime import Runtime
+from emotorad_ai.tools import oms_db
 from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER, build_registry
 from emotorad_ai.tools.verification import VerificationStore
 
 _JPEG = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
 ADDRESS = "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006"
+# The order gate wants a bike dated by its warranty registration (em_purchase).
+REGISTERED = oms_db.to_record({"frame_number": "EMXP2025004417", "product_name": "EMX Plus",
+                               "purchase_date": date(2026, 3, 1), "full_address": ADDRESS,
+                               "invoice_image": None, "status": None}, date(2026, 7, 28))
 
 
 def _runtime(responses, approval_mode="reasonable"):
     orders = ReplacementOrders()
     registry = build_registry(
         today=date(2026, 7, 28), replacement_orders=orders, item_codes=ItemCodes(), approval_mode=approval_mode,
+        warranty_source=lambda phone: [REGISTERED],
     )
     runtime = Runtime(
         settings=Settings(log_path="", log_to_stdout=False, approval_mode=approval_mode),
@@ -69,17 +75,21 @@ class KrishnaTests(unittest.TestCase):
         self.assertEqual(placed["status"], "approved")
         self.assertEqual(placed["delivery_address"], ADDRESS)
 
-    def test_without_a_photo_the_order_waits_for_a_human(self):
+    def test_without_a_photo_nothing_is_ordered(self):
+        """An unverified fault is never ordered, whatever the approval mode
+        (spec 2026-10-10 replacement orders, section 1)."""
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it."),
             call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "k"}),
-            say("I have raised order RO-00001; someone will confirm it."),
+            say("I cannot order it until I have seen the fault. Could you send a short video?"),
         ])
         _send(runtime, adapter, "my battery is dead, just replace it")
         reply = _send(runtime, adapter, "ok")
         self.assertFalse(reply.escalated, reply.text)
-        self.assertEqual(orders.in_flight("EMXP2025004417", "battery")["status"], "pending_approval")
+        self.assertIsNone(orders.in_flight("EMXP2025004417", "battery"))
+        refused = [e for e in runtime.log.events if e["event"] == "tool_call" and e["tool"] == PLACE_REPLACEMENT_ORDER]
+        self.assertEqual(refused[0]["result"]["error"]["code"], "evidence_not_verified")
 
     def test_an_invented_order_id_is_blocked(self):
         runtime, adapter, _ = _runtime([
@@ -130,6 +140,7 @@ class KrishnaTests(unittest.TestCase):
         orders = ReplacementOrders()
         registry = build_registry(
             today=date(2026, 7, 28), replacement_orders=orders, item_codes=ItemCodes(), approval_mode="reasonable",
+            warranty_source=lambda phone: [REGISTERED],
         )
         runtime = Runtime(
             settings=Settings(log_path="", log_to_stdout=False, approval_mode="reasonable"),
@@ -197,7 +208,7 @@ class AddressFromTheConversationTests(unittest.TestCase):
         store = VerificationStore()
         registry = build_registry(
             today=date(2026, 7, 28), replacement_orders=orders, item_codes=ItemCodes(),
-            verification=store,
+            verification=store, warranty_source=lambda phone: [REGISTERED],
         )
         runtime = Runtime(
             settings=Settings(log_path="", log_to_stdout=False),
@@ -209,7 +220,7 @@ class AddressFromTheConversationTests(unittest.TestCase):
         return runtime, store, orders
 
     @staticmethod
-    def _send_anonymous(runtime, conversation_id, text):
+    def _send_anonymous(runtime, conversation_id, text, photo=False):
         runtime.conversations.get(conversation_id).route_to(AGENT_NAME)
         message = InboundMessage(
             conversation_id=conversation_id,
@@ -217,6 +228,7 @@ class AddressFromTheConversationTests(unittest.TestCase):
             identity=Identity(strength=ANONYMOUS, em_aid="aid-1"),
             channel="website_chat",
             message_text=text,
+            attachments=[Attachment(kind="image", url=_JPEG)] if photo else [],
         )
         return runtime.handle(message)
 
@@ -250,7 +262,8 @@ class AddressFromTheConversationTests(unittest.TestCase):
         store.issue("conv-1", "+919876543210", "482913")
 
         self._send_anonymous(runtime, "conv-1", "482913")
-        self._send_anonymous(runtime, "conv-1", "It's A1102 Park view city 1")
+        # A photo, so the evidence gate (which runs before the address check) passes.
+        self._send_anonymous(runtime, "conv-1", "It's A1102 Park view city 1", photo=True)
 
         order_calls = [
             event
