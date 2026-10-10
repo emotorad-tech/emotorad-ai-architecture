@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from ..contract import InboundMessage
+from ..fulfilment import ProductIds, load_parts_table, motor_orderable
 from ..identity import ResolvedIdentity
 from ..tools.mocks import (
     BOOK_SERVICE_SLOT,
@@ -28,6 +29,7 @@ from ..tools.mocks import (
     GET_RECENT_TRIPS,
     GET_SERVICE_STATUS,
     LOOKUP_WARRANTY_RECORD,
+    PLACE_REPLACEMENT_ORDER,
     SEARCH_KNOWLEDGE,
     SEND_GUIDE_MEDIA,
 )
@@ -54,6 +56,11 @@ TOOL_NAMES = (
     GET_RECENT_TRIPS,
     FIND_NEAREST_DEALERS,
 )
+
+# Replacement orders (spec 2026-10-10): offered once a motor-side part may be
+# ordered; with none today, the motor agent keeps raising tickets.
+if motor_orderable(load_parts_table(), ProductIds()):
+    TOOL_NAMES = TOOL_NAMES + (PLACE_REPLACEMENT_ORDER,)
 
 _BASE_PROMPT = """\
 You are the motor and drive system support assistant for EMotorad, an Indian e-cycle \

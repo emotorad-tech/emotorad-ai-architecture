@@ -69,6 +69,9 @@ from . import invoice_ocr
 from . import serial_read
 from . import photo_check
 from . import erasure as erasure_rules
+from . import oms_afs
+from .fulfilment import ProductIds
+from .order_worker import OrderWorker
 from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_attachments
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
@@ -279,6 +282,11 @@ sent_media: dict = {}
 # Bikes from OMS production (tools/oms_db.py, spec 2026-10-08): first among the
 # sources when its connection string is set. Nothing connects at import.
 OMS_DB = oms_db_tools.reader_from_env()
+# Replacement orders to OMS (spec 2026-10-10 replacement orders): sent only
+# with EMOTORAD_OMS_AFS_ORDERS=on and the OMS admin settings, by a worker the
+# lifespan starts. Off: orders are recorded and ticketed, nothing is sent.
+OMS_AFS_SETTINGS, OMS_AFS_HEALTH = oms_afs.settings_from_env()
+PRODUCT_IDS = ProductIds()
 # Every pin code's centre (geo.py, spec 2026-10-09): the shared-location
 # geocoder below and the dealer stores both place things by it.
 PINCODE_CENTRES = PincodeCentres.load()
@@ -361,8 +369,10 @@ def _build_registry():
         guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
         # The order ledger (spec 2026-10-10 replacement orders), shared across
-        # conversations; nothing reaches the OMS from here until Task 6.
+        # conversations; the worker below sends queued orders to OMS.
         replacement_orders=stores.replacement_orders,
+        product_ids=PRODUCT_IDS,
+        orders_live=OMS_AFS_SETTINGS is not None,
         location_sharing=True,
         idempotency=stores.idempotency,
         ticket_system=ZOHO.router,
@@ -373,6 +383,32 @@ def _build_registry():
 
 
 registry = _build_registry()
+
+# Failures the worker and the OMS client log are errors: an order that did not
+# reach OMS, a pass that crashed, a login that was refused.
+_ERROR_EVENTS = frozenset({"replacement_order_failed", "replacement_order_pass_failed",
+                           "replacement_order_intent_unsaved", "order_worker_pass_failed"})
+
+
+def _order_worker_log(event: str, fields: dict) -> None:
+    if event in _ERROR_EVENTS:
+        log.emit(event, "replacement_orders", level="error", **fields)
+    else:
+        log.emit(event, "replacement_orders", **fields)
+
+
+def _oms_afs_log(event: str, fields: dict) -> None:
+    if event == "oms_login_failed":
+        log.emit(event, "oms_afs", level="error", **fields)
+    else:
+        log.emit(event, "oms_afs", **fields)
+
+
+ORDER_WORKER = (OrderWorker(
+    stores.replacement_orders,
+    oms_afs.AFSClient(OMS_AFS_SETTINGS, log=_oms_afs_log),
+    pin_codes=(OMS_DB.pin_code_id if OMS_DB is not None else (lambda pincode: None)),
+    log=_order_worker_log) if OMS_AFS_SETTINGS is not None else None)
 # Read once, with the registry, so /health names the source actually in use.
 WARRANTY_SOURCE = _warranty_source_label()
 
@@ -456,7 +492,11 @@ async def _lifespan(_: FastAPI):
     # never at import, so the tests, a reload and the playground start nothing.
     if ZOHO.worker is not None:
         ZOHO.worker.start()
+    if ORDER_WORKER is not None:
+        ORDER_WORKER.start()
     yield
+    if ORDER_WORKER is not None:
+        ORDER_WORKER.stop()
     if ZOHO.worker is not None:
         ZOHO.worker.stop()
     # The SDK batches in a background thread; a container stopped mid-batch
@@ -653,6 +693,8 @@ def health() -> dict:
         # Where bikes and coverage come from; the warranty API's host, never its key.
         "warranty_source": WARRANTY_SOURCE,
         "oms_orders": "on" if OMS_DB is not None and OMS_DB.orders_on else "off",
+        "oms_afs_orders": OMS_AFS_HEALTH,
+        "replacement_orders": stores.replacement_orders_status,
         "dealer_stores": DEALER_SOURCE,
         "weather": "open-meteo" if WEATHER is not None else "not configured",
         "warranty_step": "on" if WARRANTY_STEP else "off",

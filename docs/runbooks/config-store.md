@@ -526,3 +526,33 @@ Spec: `docs/superpowers/specs/2026-10-09-recent-weather-design.md`. Off until th
 
 Only a pin-code centre (about 1 km) is sent to Open-Meteo, never the rider's position or anything
 that names them. Rollback: remove the key and redeploy; the agents go back to asking the rider.
+
+## 11. Replacement orders to OMS
+
+Spec: `docs/superpowers/specs/2026-10-10-oms-replacement-orders-design.md`. Off until
+`EMOTORAD_OMS_AFS_ORDERS=on`; it stays off until the OMS product ids are agreed and Sachin says yes.
+
+1. **The ledger (a person).** Run `python scripts/mongo_setup.py` once: it makes `replacement_orders` and its
+   one-open-order index. Until it has, `/health` shows `"replacement_orders":"memory: index missing, run
+   scripts/mongo_setup.py"` and orders are lost on a restart.
+2. **The OMS admin settings (a person, in AWS CloudShell).** Add `EMOTORAD_OMS_WS_URL` (for example
+   `wss://omsapi.emotorad.com/ws/`), `EMOTORAD_OMS_LOGIN_URL` (for example
+   `https://omsrest.emotorad.com/user/login`), `EMOTORAD_OMS_ADMIN_EMAIL`, `EMOTORAD_OMS_ADMIN_PASSWORD` and,
+   optionally, `EMOTORAD_OMS_ADMIN_TOKEN` to `/emotorad/stage/ai/app` with section 9's `getpass`
+   script (put these names in its first loop). Type the command as shown, then paste each value only at its
+   prompt. A Claude session never reads, prints or writes these values.
+   The OMS admin user must be `super_admin`, or an `admin` whose permissions include `afs_order_list`,
+   `afs_order_add` and `sale_type_list`. A user whose order list is narrowed (regional or warehouse users) finds
+   nothing, so the worker would send the order again.
+   OMS refuses an address longer than 100 characters; such an order retries until it is `failed`. A person
+   places it by hand.
+3. **Turn it on.** Add `-e EMOTORAD_OMS_AFS_ORDERS=on` to `deploy-staging.yml`'s `docker run` and deploy.
+   `/health` shows `"oms_afs_orders":"on"`, or `misconfigured:` and the names missing.
+4. **Check.** Place an order in a test chat with a registered, covered test bike and a passing evidence check;
+   within a minute the order shows in the OMS admin under AFS Order Management with our `RO-` reference as its
+   ticket, rate 0 and sale type Warranty.
+5. **A failed order.** `replacement_order_failed` is logged at error level with the reference. The order keeps
+   its bike and part, so the bot will not order it again: a person places it by hand in the OMS admin or
+   cancels it. Cancelling in OMS does not cancel the ERP sales order.
+
+Rollback: remove `-e EMOTORAD_OMS_AFS_ORDERS=on` and redeploy. Orders already sent stay in OMS.

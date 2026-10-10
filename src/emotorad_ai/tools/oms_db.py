@@ -90,6 +90,8 @@ ORDERS_SQL = (
     " AND upper(trim(p.frame_number)) = l.fr)"
     " ORDER BY l.frame_number"
 )
+# OMS's id for a pin code, for afs_order_add (spec 2026-10-10 replacement orders).
+PIN_CODE_SQL = "SELECT id FROM em_pin_code WHERE pin_code::text = %(pin)s LIMIT 1"
 _NOT_DIGITS = re.compile(r"[^0-9]")
 _MOBILE = re.compile(r"[6-9][0-9]{9}")
 
@@ -190,6 +192,21 @@ class OMSDatabase:
             self._failed_at[name] = None
             self._cache[name][m10] = (now, rows)
         return [dict(row) for row in rows]
+
+    def pin_code_id(self, pincode: str) -> Optional[str]:
+        """OMS's em_pin_code id for a six-digit pin code, or None (never raises)."""
+        pin = (pincode or "").strip()
+        if len(pin) != 6 or not pin.isdigit():
+            return None
+        try:
+            with self._connect(self._dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS,
+                               application_name=APPLICATION_NAME,
+                               options="-c statement_timeout=%d -c default_transaction_read_only=on"
+                                       % STATEMENT_TIMEOUT_MS) as conn:
+                rows = conn.execute(PIN_CODE_SQL, {"pin": pin}).fetchall()
+        except Exception:
+            return None
+        return str(rows[0]["id"]) if rows else None
 
     def invoice_file(self, phone: str, frame_number: str) -> Optional[str]:
         """The OMS file id of the frame's invoice, or None."""

@@ -119,6 +119,18 @@ class ProductIds:
         return any(wanted & set(entries) for entries in self._table.values())
 
 
+MOTOR_PARTS = ("motor", "controller")
+
+
+def motor_orderable(parts_table: Dict[str, PartRule], product_ids: ProductIds) -> bool:
+    """Whether the motor agent may be offered place_replacement_order (spec
+    2026-10-10 replacement orders, section 6): a motor-side part the customer
+    can fit (no technician, no ask) with an OMS product id. None today."""
+    fitted = [part for part in MOTOR_PARTS
+              if part in parts_table and not parts_table[part].technician and not parts_table[part].ask]
+    return bool(fitted) and product_ids.has_part(fitted)
+
+
 class ReplacementOrders:
     """The order ledger in this process's memory: tests, offline, and until
     mongo_setup.py has made the index (stores.mongo.MongoOrderLedger is the
