@@ -547,12 +547,24 @@ Spec: `docs/superpowers/specs/2026-10-10-oms-replacement-orders-design.md`. Off 
    OMS refuses an address longer than 100 characters; such an order retries until it is `failed`. A person
    places it by hand.
 3. **Turn it on.** Add `-e EMOTORAD_OMS_AFS_ORDERS=on` to `deploy-staging.yml`'s `docker run` and deploy.
-   `/health` shows `"oms_afs_orders":"on"`, or `misconfigured:` and the names missing.
+   `/health` shows `"oms_afs_orders":"on"`, or `misconfigured:` and the names missing. Orders are sent only
+   from the MongoDB ledger: with `EMOTORAD_STORE=memory`, or step 1 not done, it shows
+   `misconfigured: replacement orders need MongoDB (...)` and orders are only recorded, because a memory
+   ledger starts its references again at `RO-1000001` on every restart.
 4. **Check.** Place an order in a test chat with a registered, covered test bike and a passing evidence check;
-   within a minute the order shows in the OMS admin under AFS Order Management with our `RO-` reference as its
-   ticket, rate 0 and sale type Warranty.
-5. **A failed order.** `replacement_order_failed` is logged at error level with the reference. The order keeps
-   its bike and part, so the bot will not order it again: a person places it by hand in the OMS admin or
-   cancels it. Cancelling in OMS does not cancel the ERP sales order.
+   within a minute the order shows in the OMS admin under AFS Order Management with its ticket number, rate 0
+   and sale type Warranty. The ticket number is our `RO-` reference and the deployment's `EMOTORAD_AI_ENV`
+   (`RO-1000001/stage` on staging; the bare reference where it is not set), so two deployments' references
+   never match each other's orders.
+5. **A failed order.** The worker retries after 1, 5, 15 and 60 minutes, then hourly. After 8 passes or 24
+   hours an order whose last look in OMS answered "not found" is `failed`; that includes an order waiting on
+   `pin_code_unknown` (a pin code OMS does not know, or no OMS database). `replacement_order_failed` is logged
+   at error level with the reference. The order keeps its bike and part, so the bot will not order it again:
+   a person places it by hand in the OMS admin or cancels it. Cancelling in OMS does not cancel the ERP sales
+   order.
+6. **A look-only order.** If the last look errored instead, OMS may hold the order, so it is not failed: it
+   goes look-only, `replacement_order_look_only` is logged once at error level, and it is looked up hourly and
+   never sent again (found is `sent`, not found is `failed`). If OMS stays unreachable, a person searches the
+   OMS admin for its ticket number.
 
 Rollback: remove `-e EMOTORAD_OMS_AFS_ORDERS=on` and redeploy. Orders already sent stay in OMS.

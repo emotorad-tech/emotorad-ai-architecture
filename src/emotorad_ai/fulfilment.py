@@ -2,11 +2,15 @@
 
 Spec: docs/superpowers/specs/2026-09-20-replacement-fulfilment-design.md.
 
-When the bot is sure a part needs replacing, this module decides whether a
-technician is needed, what the item code is, whether an order is already in
-flight, whether the bot is "sure" in the code-checkable sense, and whether the
-configured approval mode lets the bot approve. The model reaches all of it
-through one tool and may only confirm the address with the customer.
+When a part needs replacing, this module decides whether a technician is
+needed or the customer must choose (the parts table), which OMS product id the
+part is for that bike (`ProductIds`, empty until agreed), which warranty
+component judges the part's cover (`PART_COMPONENTS`) and which fault the
+evidence must show (`PART_FAULT`), and whether an order for that bike and part
+is already open (the ledger). The gate itself (evidence on this bike, a
+registration date, the part's own cover) and the rider's details are checked
+by `place_replacement_order` (tools/mocks.py); the model reaches all of it
+through that one tool and may only confirm the details and the address.
 
 Orders are recorded in a ledger (spec 2026-10-10 replacement orders) and sent to OMS by order_worker.py when the switch is on.
 """
