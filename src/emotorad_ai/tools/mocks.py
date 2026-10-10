@@ -199,6 +199,18 @@ _TEN_DIGIT_MOBILE = re.compile(r"[6-9][0-9]{9}")
 # An email the rider typed: one @, a dot in the domain, no spaces (spec
 # 2026-10-10 replacement orders, section 2). OMS requires one on a customer order.
 _EMAIL = re.compile(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+")
+# The email-shaped words inside a typed message. The guards stop a match that
+# starts or ends inside a longer address, so "x@b.com" is not found in
+# "xx@b.com" and "a@b.co" is not found in "a@b.com".
+_EMAIL_IN_TEXT = re.compile(
+    r"(?<![A-Za-z0-9._%+\-@])[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+(?![A-Za-z0-9\-@])")
+# The words of a name, in any script. `\w` alone drops Devanagari vowel signs,
+# so the explicit Devanagari block is added (CLAUDE.md, rules from the build log).
+_NAME_WORD = re.compile(r"[\wऀ-ॿ]+")
+
+
+def _name_tokens(text: str) -> set:
+    return set(_NAME_WORD.findall((text or "").casefold()))
 
 
 def _clean(value: Any) -> Any:
@@ -2054,13 +2066,14 @@ def build_registry(
             from .oms_db import last_ten
 
             name = " ".join((customer_name or "").split())
-            if not name:
+            name_words = _name_tokens(name)
+            if not name_words:
                 raise ToolError("customer_name_required",
                                 "Ask for the customer's full name, read it back, and pass it as customer_name.")
             typed = set()
             for message in customer_messages:
-                typed |= address_tokens(message)
-            stray = sorted(address_tokens(name) - typed)
+                typed |= _name_tokens(message)
+            stray = sorted(name_words - typed)
             if stray:
                 raise ToolError("customer_name_unconfirmed",
                                 "These words of the name were not typed by the customer (%s). Ask for their "
@@ -2068,7 +2081,9 @@ def build_registry(
             mail = (email or "").strip()
             if not _EMAIL.fullmatch(mail):
                 raise ToolError("email_invalid", "Ask for the customer's email address and pass it as they typed it.")
-            if not any(mail.lower() in message.lower() for message in customer_messages):
+            typed_emails = {found.lower() for message in customer_messages
+                            for found in _EMAIL_IN_TEXT.findall(message or "")}
+            if mail.lower() not in typed_emails:
                 raise ToolError("email_unconfirmed",
                                 "That email was not typed by the customer. Ask for it and pass it as they typed it.")
             try:

@@ -137,6 +137,33 @@ class DetailsTests(unittest.TestCase):
         typed = TYPED + ("call me on 91234 56780",)
         self.assertTrue(placed(place(registration(), messages=typed, mobile="9123456780")))
 
+    def test_an_email_that_only_starts_or_ends_inside_the_typed_one_is_refused(self):
+        for email in ("test.rider@example.co", "rider@example.com", "est.rider@example.com", "test.rider@example.comm"):
+            with self.subTest(email=email):
+                self.assertEqual(code_of(place(registration(), email=email)), "email_unconfirmed")
+
+    def test_a_typed_email_in_another_case_passes(self):
+        self.assertTrue(placed(place(registration(), email="Test.Rider@Example.COM")))
+
+    def test_a_longer_typed_address_does_not_confirm_a_shorter_one(self):
+        typed = ("I'm Test Rider, xx@b.com",)
+        self.assertEqual(code_of(place(registration(), messages=typed, email="x@b.com")), "email_unconfirmed")
+        self.assertTrue(placed(place(registration(), messages=typed, email="xx@b.com")))
+
+    def test_a_typed_devanagari_name_passes(self):
+        typed = ("मैं राहुल शर्मा हूँ, test.rider@example.com",)
+        self.assertTrue(placed(place(registration(), messages=typed, customer_name="राहुल शर्मा")))
+
+    def test_a_devanagari_name_never_typed_is_refused(self):
+        typed = ("मैं राहुल शर्मा हूँ, test.rider@example.com",)
+        self.assertEqual(code_of(place(registration(), messages=typed, customer_name="अमित वर्मा")),
+                         "customer_name_unconfirmed")
+
+    def test_a_name_with_no_letters_is_no_name(self):
+        for name in ("...", "- -", "@"):
+            with self.subTest(name=name):
+                self.assertEqual(code_of(place(registration(), customer_name=name)), "customer_name_required")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,7 +88,7 @@ _OTP_ALONE = re.compile(r"^\s*\d{4,8}\s*$")
 # secret logged once stays a credential in CloudWatch for as long as the log
 # is kept. `authorization` is the header that carries the access token.
 _SENSITIVE_KEYS = frozenset({
-    "code", "otp", "phone", "mobile", "stated_contact",
+    "code", "otp", "phone", "mobile", "stated_contact", "customer_name",
     "access_token", "refresh_token", "client_secret", "authorization",
 })
 

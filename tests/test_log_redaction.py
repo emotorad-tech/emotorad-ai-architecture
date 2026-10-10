@@ -102,6 +102,13 @@ class ToolArgumentsAreRedactedTests(unittest.TestCase):
         self.assertEqual(event["tool"], "verify_identity")
         self.assertFalse(event["ok"])
 
+    def test_a_riders_name_in_an_order_call_is_redacted(self):
+        self.log.tool_call("c1", "place_replacement_order",
+                           {"part": "battery", "customer_name": "Test Rider", "email": "test.rider@example.com"},
+                           {"data": {}})
+        self.assertNotIn("Test Rider", str(self.log.events[-1]))
+        self.assertEqual(self.log.events[-1]["arguments"]["customer_name"], "[redacted]")
+
     def test_nested_values_are_reached(self):
         self.log.tool_call("c1", "lookup_warranty_record", {}, {"data": {"bikes": [{"mobile": "9876500000"}]}})
         self.assertNotIn("9876500000", str(self.log.events[-1]))
