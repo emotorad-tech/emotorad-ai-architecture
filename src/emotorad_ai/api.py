@@ -341,7 +341,10 @@ def _build_registry():
         # (defined below, read when a lookup runs); without it, none can.
         source = oms_db_tools.db_warranty_source(
             OMS_DB, invoice_state=lambda file_id: (INVOICE.invoice_state(file_id) if INVOICE is not None
-                                                   else invoice_ocr.InvoiceService.UNREADABLE))
+                                                   else invoice_ocr.InvoiceService.UNREADABLE),
+            # Bikes from OMS orders (spec 2026-10-10): a failing orders query
+            # is logged by its class and the registrations stand alone.
+            log=lambda event, fields: log.emit(event, "oms_orders", **fields))
     elif warranty_api_tools.configured():
         source = warranty_api_tools.api_warranty_source(warranty_api_tools.WarrantyAPIClient())
     elif oms is not None:
@@ -655,6 +658,7 @@ def health() -> dict:
         "amigo": "configured" if AMIGO is not None else "not configured",
         # Where bikes and coverage come from; the warranty API's host, never its key.
         "warranty_source": WARRANTY_SOURCE,
+        "oms_orders": "on" if OMS_DB is not None and OMS_DB.orders_on else "off",
         "dealer_stores": DEALER_SOURCE,
         "weather": "open-meteo" if WEATHER is not None else "not configured",
         "warranty_step": "on" if WARRANTY_STEP else "off",

@@ -150,6 +150,18 @@ Found in the reviews of the Zoho Desk work (Tasks 10 and 11) and left alone on p
 
 ---
 
+## 9. Bikes from OMS orders (2026-10-10)
+
+Spec 2026-10-10: the phone on an `em_orders` row is taken as the rider's. Where that is wrong, a rider sees a bike that is not theirs, or misses their own.
+
+| # | Case | Disposition | Notes |
+|---|---|---|---|
+| 9.1 | The phone on the order is the buyer's, not the rider's: a gift, a company purchase, a family member | **CAPTURE** | The rider who bought it sees the bike; the one who rides it does not until it is registered |
+| 9.2 | A dealer's number missing from `em_franchise` and `em_users` | **CAPTURE** | That dealer, verifying on it, sees the bikes on their orders as their own |
+| 9.3 | A marketplace order whose phone is masked or a relay number | **CAPTURE** | Nobody's verified phone matches it, so the bike is found by nobody |
+| 9.4 | A frame swapped out in a replacement (`em_order_rr`) still shows on the original order | **CAPTURE** | The rider may see the old frame beside the new one |
+| 9.5 | For a dealer order, `invoice_at` is when the dealer bought the bike | **CAPTURE** | The cover shown may end before the real one; a rider who disagrees sends their invoice |
+
 ## What to do with CAPTURE items
 
 Nothing, until shadow mode runs. Then the register becomes useful in the way it is meant to be:

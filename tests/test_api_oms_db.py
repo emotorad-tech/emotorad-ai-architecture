@@ -17,7 +17,8 @@ def never_connect(*args, **kwargs):
 class SourceTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(lambda: fresh_api({"EMOTORAD_OMS_PG_DSN": "", "EMOTORAD_OMS_API_KEY": "",
-                                           "EMOTORAD_AI_DEV_CODES": "", "EMOTORAD_WARRANTY_API_KEY": ""}))
+                                           "EMOTORAD_AI_DEV_CODES": "", "EMOTORAD_WARRANTY_API_KEY": "",
+                                           "EMOTORAD_OMS_ORDERS": ""}))
 
     def test_the_oms_database_is_the_source_when_its_dsn_is_set(self):
         with mock.patch.object(oms_db, "_psycopg_connect", never_connect):
@@ -36,6 +37,21 @@ class SourceTests(unittest.TestCase):
         self.assertIsNone(api.OMS_DB)
         self.assertEqual(api.WARRANTY_SOURCE, "fixtures")
 
+    def test_orders_are_on_with_the_switch_and_the_database(self):
+        with mock.patch.object(oms_db, "_psycopg_connect", never_connect):
+            api = fresh_api(dict(DSN, EMOTORAD_OMS_ORDERS="on"))
+        self.assertTrue(api.OMS_DB.orders_on)
+        self.assertEqual(api.health()["oms_orders"], "on")
+
+    def test_orders_are_off_without_the_switch(self):
+        with mock.patch.object(oms_db, "_psycopg_connect", never_connect):
+            api = fresh_api(dict(DSN, EMOTORAD_OMS_ORDERS=""))
+        self.assertEqual(api.health()["oms_orders"], "off")
+
+    def test_orders_are_off_without_the_database(self):
+        api = fresh_api({"EMOTORAD_OMS_PG_DSN": "", "EMOTORAD_OMS_ORDERS": "on", "EMOTORAD_OMS_API_KEY": "",
+                         "EMOTORAD_WARRANTY_API_KEY": ""})
+        self.assertEqual(api.health()["oms_orders"], "off")
 
 class AccountFinderTests(unittest.TestCase):
     def setUp(self):

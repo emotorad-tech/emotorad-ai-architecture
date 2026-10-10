@@ -465,6 +465,17 @@ Spec: `docs/superpowers/specs/2026-10-08-oms-warranty-source-design.md`. Off unt
    `/health` shows `"dealer_stores":"oms_db"` once the setting is in; without it `"not configured"`, and the
    tool is not offered (offline mode alone uses three made-up stores, `"fixtures"`).
    Before real customers: Sachin's yes to giving riders the dealer managers' mobile numbers.
+   Bikes from OMS orders (spec 2026-10-10, `EMOTORAD_OMS_ORDERS=on`, set by `deploy-staging.yml`)
+   read the phone on each order, so the role also needs:
+   ```sql
+   GRANT SELECT (order_code, mobile, order_source, invoice_at, cancel_at, is_return, deleted_at) ON em_orders TO <role>;
+   GRANT SELECT (frame_number, frame_status, order_code, product_name, created_at) ON em_stock_transactions TO <role>;
+   ```
+   If a column name is wrong the `GRANT` fails: tell the server team the right name before going on.
+   Without these grants every orders read fails on permission, `oms_orders_unavailable` is logged
+   (`error` `InsufficientPrivilege`, then `breaker_open` for a minute), and riders get their registered
+   bikes only. `/health` shows `"oms_orders":"on"`. Before real riders: Sachin's yes to taking the
+   phone on an order as the rider's. Rollback: remove `-e EMOTORAD_OMS_ORDERS=on` and redeploy.
 2. **The network path (Sachin).** From the staging EC2 instance to the OMS database on port
    5432 (its security group).
 3. **The config store (a person, in AWS CloudShell, region `ap-south-1`).** Add

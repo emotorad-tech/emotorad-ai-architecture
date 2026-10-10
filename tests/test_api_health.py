@@ -36,7 +36,7 @@ class HealthTests(unittest.TestCase):
                               "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": "", "EMOTORAD_AMIGO_PG_DSN": "",
                               "EMOTORAD_AI_BUILD": "", "EMOTORAD_GEO_DB": "C:/nowhere/none.mmdb",
                               "EMOTORAD_AMIIGO_PUBLIC_KEY": "", "EMOTORAD_OMS_API_KEY": "",
-                              "EMOTORAD_WARRANTY_API_KEY": "", "EMOTORAD_MELT_ASK": "",
+                              "EMOTORAD_WARRANTY_API_KEY": "", "EMOTORAD_OMS_ORDERS": "", "EMOTORAD_MELT_ASK": "",
                               "EMOTORAD_SERIAL_ASK": "", "EMOTORAD_OPEN_METEO_API_KEY": "",
                               "EMOTORAD_WARRANTY_STEP": ""}, **zoho_blank()))
         self.assertEqual(
@@ -46,7 +46,7 @@ class HealthTests(unittest.TestCase):
              "amigo": "not configured", "build": "unknown", "ip_location": "not configured",
              "photo_check": "off", "zoho": "not configured", "verification_sessions": "memory",
              "amiigo_receipts": "memory", "amiigo_tokens": "not configured", "zoho_webhook": "not configured",
-             "warranty_source": "fixtures", "dealer_stores": "fixtures", "weather": "not configured", "warranty_step": "off", "melt_ask": "off", "serial_ask": "off",
+             "warranty_source": "fixtures", "oms_orders": "off", "dealer_stores": "fixtures", "weather": "not configured", "warranty_step": "off", "melt_ask": "off", "serial_ask": "off",
              "serial_read": "off", "jev": "off: mode offline",
              "invoice_ocr": "off"},
         )
