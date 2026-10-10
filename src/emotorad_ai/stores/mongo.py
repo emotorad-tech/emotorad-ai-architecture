@@ -117,6 +117,11 @@ TICKETS = "tickets"
 COUNTERS = "counters"
 # The counters document behind EM-1000001, EM-1000002, ...
 TICKET_COUNTER = "ticket_reference"
+# The replacement order ledger (fulfilment.py, spec 2026-10-10 replacement
+# orders), permanent like the tickets, erased with the conversation it came
+# from; its counter numbers RO-1000001, RO-1000002, ...
+REPLACEMENT_ORDERS = "replacement_orders"
+ORDER_COUNTER = "replacement_orders"
 # Which number each web chat has proved (tools/verification.py), so a restart
 # of the one process does not make a verified chat anonymous. Not enough for
 # several servers: codes stay in each process's memory, which answers first.
@@ -197,6 +202,15 @@ INDEXES: Dict[str, List[Tuple[List[Tuple[str, int]], Dict[str, Any]]]] = {
     ],
     # One small document per sequence, found by its _id: no index of its own.
     COUNTERS: [],
+    REPLACEMENT_ORDERS: [
+        # One open order per bike and part (spec 2026-10-10 replacement
+        # orders, section 3): a cancelled order unsets open_key, and sparse
+        # lets any number of them sit without one.
+        ([("open_key", 1)], {"name": "one_open_per_bike_part", "unique": True, "sparse": True}),
+        # The worker's due query.
+        ([("status", 1), ("next_attempt_at", 1)], {"name": "due"}),
+        ([("conversation_id", 1)], {"name": "conversation"}),
+    ],
     VERIFICATION_SESSIONS: [
         ([("expires_at", 1)], {"name": "expires_at_ttl", "expireAfterSeconds": 0}),
         ([("user_key", 1)], {"name": "user_key"}),
@@ -680,7 +694,7 @@ class MongoConversationStore:
         """
         counts = {name: 0 for name in (CONVERSATIONS, TRANSCRIPT_TURNS, CONVERSATION_SUMMARIES, IDEMPOTENCY_KEYS, MEDIA,
                                        CONVERSATION_ORIGINS, VERIFICATION_SESSIONS, CONVERSATION_NOTICES,
-                                       SERIAL_READINGS, INVOICE_READINGS, AMIIGO_RECEIPTS)}
+                                       SERIAL_READINGS, INVOICE_READINGS, AMIIGO_RECEIPTS, REPLACEMENT_ORDERS)}
         for conversation_id in self.conversations_of(user_key):
             for name, count in self.delete_conversation(conversation_id, dry_run=dry_run).items():
                 counts[name] += count
@@ -702,6 +716,8 @@ class MongoConversationStore:
             INVOICE_READINGS: self._remove(INVOICE_READINGS, {"conversation_id": conversation_id}, dry_run),
             # The chat socket's receipts (Ruling 14): their ids name the phone.
             AMIIGO_RECEIPTS: self._remove(AMIIGO_RECEIPTS, {"conversation_id": conversation_id}, dry_run),
+            # Replacement orders (spec 2026-10-10): the rider's details are on them.
+            REPLACEMENT_ORDERS: self._remove(REPLACEMENT_ORDERS, {"conversation_id": conversation_id}, dry_run),
         }
 
     def _remove(self, name: str, query: Dict[str, Any], dry_run: bool) -> int:
@@ -1144,3 +1160,79 @@ class MongoTicketStore:
         info = self._guard("index_information", lambda: self._tickets.index_information())
         return any([name for name, _ in spec.get("key", [])] == ["source_key"] and bool(spec.get("unique"))
                    for spec in info.values())
+
+
+class MongoOrderLedger:
+    """The replacement order ledger for every server (spec 2026-10-10
+    replacement orders, section 3), held to fulfilment.ReplacementOrders'
+    contract. The unique sparse index on open_key decides a race."""
+
+    mode = "mongodb"
+
+    def __init__(self, db: Any) -> None:
+        self._orders = db[REPLACEMENT_ORDERS]
+        self._counters = db[COUNTERS]
+
+    def _guard(self, operation: str, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except DuplicateKeyError:
+            raise
+        except PyMongoError as exc:
+            raise StoreUnavailable("MongoDB %s failed (%s)" % (operation, type(exc).__name__)) from None
+
+    def index_ready(self) -> bool:
+        try:
+            info = self._orders.index_information()
+        except PyMongoError:
+            return False
+        return any(spec.get("unique") and [name for name, _ in spec.get("key", [])] == ["open_key"]
+                   for spec in info.values())
+
+    def next_reference(self) -> str:
+        from ..fulfilment import FIRST_ORDER_NUMBER, order_reference
+
+        for attempt in (1, 2):
+            try:
+                doc = self._guard("find_one_and_update", lambda: self._counters.find_one_and_update(
+                    {"_id": ORDER_COUNTER}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER))
+                break
+            except DuplicateKeyError:
+                if attempt == 2:
+                    raise StoreUnavailable("MongoDB find_one_and_update failed (DuplicateKeyError)") from None
+        return order_reference(FIRST_ORDER_NUMBER - 1 + int(doc["seq"]))
+
+    def insert(self, order: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        try:
+            self._guard("insert_one", lambda: self._orders.insert_one(copy.deepcopy(order)))
+        except DuplicateKeyError:
+            existing = self._guard("find_one", lambda: self._orders.find_one({"open_key": order.get("open_key")}))
+            if existing is None:
+                raise StoreUnavailable("MongoDB insert_one failed (DuplicateKeyError)") from None
+            return existing, False
+        return copy.deepcopy(order), True
+
+    def open_order(self, frame_number: str, part: str) -> Optional[Dict[str, Any]]:
+        from ..fulfilment import open_key
+
+        return self._guard("find_one", lambda: self._orders.find_one({"open_key": open_key(frame_number, part)}))
+
+    def get(self, reference: str) -> Optional[Dict[str, Any]]:
+        return self._guard("find_one", lambda: self._orders.find_one({"_id": reference}))
+
+    def due(self, now_iso: str, limit: int = 20) -> List[Dict[str, Any]]:
+        return self._guard("find", lambda: list(self._orders.find(
+            {"status": "queued", "next_attempt_at": {"$lte": now_iso}}).sort("next_attempt_at", 1).limit(limit)))
+
+    def claim(self, reference: str, now_iso: str, lease_until_iso: str) -> Optional[Dict[str, Any]]:
+        return self._guard("find_one_and_update", lambda: self._orders.find_one_and_update(
+            {"_id": reference, "status": "queued",
+             "$or": [{"lease_until": None}, {"lease_until": {"$lte": now_iso}}]},
+            {"$set": {"lease_until": lease_until_iso}}, return_document=ReturnDocument.AFTER))
+
+    def save(self, order: Dict[str, Any]) -> None:
+        self._guard("replace_one", lambda: self._orders.replace_one({"_id": order["_id"]}, copy.deepcopy(order)))
+
+    def cancel(self, reference: str) -> None:
+        self._guard("update_one", lambda: self._orders.update_one(
+            {"_id": reference}, {"$set": {"status": "cancelled"}, "$unset": {"open_key": ""}}))

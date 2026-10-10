@@ -10,7 +10,7 @@ mode. Spec: docs/superpowers/specs/2026-09-20-replacement-fulfilment-design.md
 import unittest
 from datetime import date
 
-from emotorad_ai.fulfilment import ItemCodes, ReplacementOrders
+from emotorad_ai.fulfilment import ReplacementOrders
 from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER, build_registry
 from emotorad_ai.tools.registry import ToolContext
 
@@ -28,12 +28,10 @@ UNDETERMINED = {"data": {"bikes": [{"frame_number": "EMXP2025004417", "product_n
                                     "ownership_source": "oms_purchase", "purchase_date": None}]}}
 
 
-def _registry(approval_mode="reasonable", orders=None, warranty_source=None):
+def _registry(orders=None, warranty_source=None):
     return build_registry(
         today=date(2026, 7, 28),
         replacement_orders=orders or ReplacementOrders(),
-        item_codes=ItemCodes(),
-        approval_mode=approval_mode,
         warranty_source=warranty_source,
     )
 
@@ -88,20 +86,20 @@ class RegistrationTests(unittest.TestCase):
 
 
 class HappyPathTests(unittest.TestCase):
-    def test_a_sure_in_warranty_battery_is_approved_in_reasonable_mode(self):
+    def test_a_verified_in_warranty_battery_is_recorded_while_the_switch_is_off(self):
         result = _place(_registry(), _context())
         self.assertNotIn("error", result, result)
         data = result["data"]
-        self.assertRegex(data["order_id"], r"^RO-\d{5}$")
-        self.assertEqual(data["status"], "approved")
-        self.assertEqual(data["item_code"], "BAT-EMX-48V")
+        self.assertRegex(data["order_id"], r"^RO-\d{7}$")
+        self.assertEqual(data["status"], "recorded")
+        self.assertNotIn("item_code", data)
         self.assertEqual(data["delivery_address"], RECORD_ADDRESS)
         self.assertFalse(data["already_placed"])
 
     def test_the_order_is_recorded(self):
         orders = ReplacementOrders()
         _place(_registry(orders=orders), _context())
-        self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
+        self.assertIsNotNone(orders.open_order("EMXP2025004417", "battery"))
 
     def test_a_new_address_the_customer_gave_is_assembled_with_city_and_state(self):
         result = _place(_registry(), _context(customer_messages=GURUGRAM_TYPED), address=GURUGRAM)
@@ -109,55 +107,9 @@ class HappyPathTests(unittest.TestCase):
         self.assertEqual(result["data"]["delivery_address"], GURUGRAM_LINE)
 
 
-class ItemCodeMissingTests(unittest.TestCase):
-    """The spec says a not-sure case is still placed as pending_approval and
-    nothing is dropped. A missing item code is one such case in every mode: it
-    never refuses and never approves."""
-
-    def _unknown_model_registry(self, approval_mode, orders=None):
-        return build_registry(
-            today=date(2026, 7, 28),
-            replacement_orders=orders or ReplacementOrders(),
-            item_codes=ItemCodes(),
-            approval_mode=approval_mode,
-            warranty_source=lambda phone: [
-                {
-                    "frame_number": "EMXP2025004417",
-                    "product_name": "Unknown Model",
-                    "purchase_date": "2025-03-14",
-                    "full_address": "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006",
-                }
-            ],
-        )
-
-    def test_a_part_with_no_item_code_is_placed_pending_in_every_mode(self):
-        coverage = {"data": {"bikes": [
-            {"frame_number": "EMXP2025004417", "product_name": "Unknown Model", "in_warranty": True,
-             "ownership_source": "oms_purchase", "purchase_date": "2026-03-01",
-             "components": [{"component": "battery", "active": True}]},
-        ]}}
-        for mode in ("bot", "reasonable", "human"):
-            with self.subTest(mode=mode):
-                orders = ReplacementOrders()
-                registry = self._unknown_model_registry(mode, orders=orders)
-                result = _place(registry, _context(coverage=coverage))
-                self.assertNotIn("error", result, result)
-                self.assertEqual(result["data"]["status"], "pending_approval")
-                self.assertIsNone(result["data"]["item_code"])
-                self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
-
-
-class ApprovalModeTests(unittest.TestCase):
-    def test_human_mode_leaves_it_pending(self):
-        self.assertEqual(_place(_registry("human"), _context())["data"]["status"], "pending_approval")
-
-    def test_bot_mode_refuses_an_unverified_fault(self):
-        """An unverified fault is never ordered, whatever the mode."""
-        result = _place(_registry("bot"), _context(verified=None))
-        self.assertEqual(result["error"]["code"], "evidence_not_verified")
-
-    def test_reasonable_mode_refuses_an_unverified_fault(self):
-        result = _place(_registry("reasonable"), _context(verified=None))
+class EvidenceGateTests(unittest.TestCase):
+    def test_an_unverified_fault_is_never_ordered(self):
+        result = _place(_registry(), _context(verified=None))
         self.assertEqual(result["error"]["code"], "evidence_not_verified")
 
 
@@ -319,12 +271,12 @@ class InFlightTests(unittest.TestCase):
 
     def test_an_in_flight_report_says_when_it_was_placed(self):
         """The model has to tell the customer the order already exists, and
-        "earlier today" needs a wall-clock time; placed_at is monotonic."""
-        orders = ReplacementOrders(wall_clock=lambda: "2026-09-21T03:57:11+00:00")
+        "earlier today" needs the wall-clock time the order was recorded."""
+        orders = ReplacementOrders()
         registry = _registry(orders=orders)
-        _place(registry, _context())
+        first = _place(registry, _context())["data"]
         second = _place(registry, _context(), idempotency_key="k-2")["data"]
-        self.assertEqual(second["placed_at_utc"], "2026-09-21T03:57:11+00:00")
+        self.assertEqual(second["placed_at_utc"], orders.get(first["order_id"])["created_at"])
         self.assertEqual(second["delivery_address"], RECORD_ADDRESS)
 
     def test_the_same_idempotency_key_returns_the_same_envelope(self):

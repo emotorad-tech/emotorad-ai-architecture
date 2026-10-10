@@ -8,19 +8,18 @@ flight, whether the bot is "sure" in the code-checkable sense, and whether the
 configured approval mode lets the bot approve. The model reaches all of it
 through one tool and may only confirm the address with the customer.
 
-Every write here is a mock. The OMS, the ERP and Razorpay are not called.
+Orders are recorded in a ledger (spec 2026-10-10 replacement orders) and sent to OMS by order_worker.py when the switch is on.
 """
 
 from __future__ import annotations
 
-import itertools
+import copy
 import pathlib
+import re
 import threading
-import time
-from datetime import datetime, timezone
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 PARTS_TABLE_PATH = "_replacement/parts.yaml"
 
@@ -65,10 +64,6 @@ def load_parts_table(directory: Optional[Any] = None) -> Dict[str, PartRule]:
     return table
 
 
-# How long an order or an unpaid link counts as "in flight" for the duplicate
-# check. Given once by the owner on 2026-09-20 and applied to both.
-IN_FLIGHT_SECONDS = 48 * 60 * 60
-
 # The warranty_terms component each orderable part is judged by (spec
 # 2026-10-10 replacement orders, section 1, step 4): a charger by its own six
 # months, never by the battery's twelve.
@@ -92,111 +87,99 @@ def _model_name(product_name: str) -> str:
     return " ".join(words)
 
 
-class ItemCodes:
-    """Bike model and part -> replacement item code.
+# Replacement orders (spec 2026-10-10 replacement orders, section 3).
+FIRST_ORDER_NUMBER = 1000001
+OPEN_STATUSES = ("recorded", "queued", "sent", "failed")
 
-    A mock in the exact shape the ERP read will have. The real one takes the
-    record's product_id to the ERP Item, its BOM, and the component's item code,
-    and is 8848's to expose. Until then this dictionary is the whole world, and
-    a part it cannot resolve makes the bot "not sure" by definition.
-    """
 
-    _TABLE: Dict[str, Dict[str, str]] = {
-        "EMX Plus": {"battery": "BAT-EMX-48V", "charger": "CHG-EMX-2A", "display": "DSP-EMX-LCD"},
-        "X1 C": {"battery": "BAT-X1C-36V", "charger": "CHG-X1-2A", "display": "DSP-X1-LED"},
-        "Doodle V3": {"battery": "BAT-DDL-36V", "charger": "CHG-DDL-2A"},
-    }
+def order_reference(number: int) -> str:
+    return "RO-%07d" % number
+
+
+def open_key(frame_number: str, part: str) -> str:
+    """One open order per bike and part: the frame upper-cased, no spaces."""
+    return "%s|%s" % (re.sub(r"\s+", "", frame_number or "").upper(), part)
+
+
+class ProductIds:
+    """(bike model, part) -> OMS product id (em_product.id) for afs_order_add.
+    Empty until the product ids are agreed (spec section 6); an order with no
+    product id is recorded and never sent."""
+
+    def __init__(self, table: Optional[Dict[str, Dict[str, str]]] = None) -> None:
+        self._table = {model: dict(parts) for model, parts in (table or {}).items()}
 
     def resolve(self, product_name: Optional[str], part: str) -> Optional[str]:
         if not product_name:
             return None
-        return self._TABLE.get(_model_name(product_name), {}).get(part)
+        return self._table.get(_model_name(product_name), {}).get(part)
+
+    def has_part(self, parts: Iterable[str]) -> bool:
+        wanted = set(parts)
+        return any(wanted & set(entries) for entries in self._table.values())
 
 
-@dataclass
 class ReplacementOrders:
-    """Stands in for the OMS order the bot will place on the customer's behalf.
+    """The order ledger in this process's memory: tests, offline, and until
+    mongo_setup.py has made the index (stores.mongo.MongoOrderLedger is the
+    same contract). One open order per bike and part."""
 
-    In-memory, like every other store here. Its one piece of logic is the
-    duplicate check: an order for the same frame and part inside the window is
-    reported back rather than placed again. That is idempotency, not suspicion.
-    The chat page loses its conversation on reload, requests retry, and a
-    customer asking "did that go through?" tomorrow must not get two batteries.
-    """
+    mode = "memory"
 
-    clock: Callable[[], float] = time.monotonic
-    # Wall-clock time of placement, for telling a customer *when* an order they
-    # are hearing about again was placed. `placed_at` is monotonic and drives
-    # the in-flight window; it means nothing to a person.
-    wall_clock: Callable[[], str] = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
-    _orders: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    _counter: Any = field(default_factory=lambda: itertools.count(1))
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    def __init__(self) -> None:
+        self._orders: Dict[str, Dict[str, Any]] = {}
+        self._seq = 0
+        self._lock = threading.Lock()
 
-    def create(self, **payload: Any) -> Dict[str, Any]:
+    def next_reference(self) -> str:
         with self._lock:
-            order_id = "RO-%05d" % next(self._counter)
-            order = dict(
-                payload, order_id=order_id, placed_at=self.clock(), placed_at_utc=self.wall_clock()
-            )
-            order.setdefault("status", "pending_approval")
-            self._orders[order_id] = order
-            return dict(order)
+            self._seq += 1
+            return order_reference(FIRST_ORDER_NUMBER - 1 + self._seq)
 
-    def approve(self, order_id: str) -> Dict[str, Any]:
+    def insert(self, order: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
         with self._lock:
-            self._orders[order_id]["status"] = "approved"
-            return dict(self._orders[order_id])
+            key = order.get("open_key")
+            for existing in self._orders.values():
+                if key and existing.get("open_key") == key:
+                    return copy.deepcopy(existing), False
+            self._orders[order["_id"]] = copy.deepcopy(order)
+            return copy.deepcopy(order), True
 
-    def in_flight(self, frame_number: str, part: str) -> Optional[Dict[str, Any]]:
-        cutoff = self.clock() - IN_FLIGHT_SECONDS
+    def open_order(self, frame_number: str, part: str) -> Optional[Dict[str, Any]]:
+        key = open_key(frame_number, part)
         with self._lock:
-            for order in self._orders.values():
-                if (
-                    order.get("frame_number") == frame_number
-                    and order.get("part") == part
-                    and order.get("placed_at", 0) > cutoff
-                    and order.get("status") in ("pending_approval", "approved")
-                ):
-                    return dict(order)
-        return None
+            found = next((o for o in self._orders.values() if o.get("open_key") == key), None)
+            return copy.deepcopy(found) if found else None
 
+    def get(self, reference: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            found = self._orders.get(reference)
+            return copy.deepcopy(found) if found else None
 
-def is_sure(
-    evidence_seen: bool,
-    in_warranty: Optional[bool],
-    item_code: Optional[str],
-    rule: Optional[PartRule],
-) -> bool:
-    """Whether the bot is sure, in the only sense the approval modes accept.
+    def due(self, now_iso: str, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._lock:
+            ready = [o for o in self._orders.values()
+                     if o.get("status") == "queued" and (o.get("next_attempt_at") or "") <= now_iso]
+            ready.sort(key=lambda o: o.get("next_attempt_at") or "")
+            return [copy.deepcopy(o) for o in ready[:limit]]
 
-    Four facts, every one of them something the runtime already holds:
+    def claim(self, reference: str, now_iso: str, lease_until_iso: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            found = self._orders.get(reference)
+            if found is None or found.get("status") != "queued":
+                return None
+            if found.get("lease_until") and found["lease_until"] > now_iso:
+                return None
+            found["lease_until"] = lease_until_iso
+            return copy.deepcopy(found)
 
-    * evidence arrived in the conversation (a photo or clip);
-    * coverage was looked up and is in warranty. Chargeable is not built yet,
-      so out of warranty is not a case the bot may act on alone;
-    * the part resolved to an item code;
-    * the part is in the table.
+    def save(self, order: Dict[str, Any]) -> None:
+        with self._lock:
+            self._orders[order["_id"]] = copy.deepcopy(order)
 
-    The spec's fourth fact, that the knowledge record's flow reached its
-    concluding step, is not implemented; the runtime does not yet record which
-    step a flow reached. Until it does, a photo of anything plus an in-warranty
-    record plus a known part is sure. That is weaker than the spec and is the
-    first thing to tighten before approval_mode leaves human in production.
-
-    The model's own confidence is never consulted. That is the point.
-    """
-    return bool(evidence_seen) and in_warranty is True and bool(item_code) and rule is not None
-
-
-def decide(sure: bool, approval_mode: str) -> str:
-    """The order's status at placement, from the configured mode.
-
-    Fails closed: a mode this function does not know approves nothing, even
-    though Settings refuses unknown modes at startup.
-    """
-    if approval_mode == "bot":
-        return "approved"
-    if approval_mode == "reasonable":
-        return "approved" if sure else "pending_approval"
-    return "pending_approval"
+    def cancel(self, reference: str) -> None:
+        with self._lock:
+            found = self._orders.get(reference)
+            if found is not None:
+                found["status"] = "cancelled"
+                found.pop("open_key", None)

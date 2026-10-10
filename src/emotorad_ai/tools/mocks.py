@@ -19,8 +19,7 @@ from ..contract import ASSERTED, VERIFIED
 from ..conversation import StoreUnavailable, address_tokens, utc_now_iso
 from ..digits import ascii_digits
 from ..evidence_check import DEFAULT_MISSING
-from ..fulfilment import (PART_COMPONENTS, PART_FAULT, ItemCodes, ReplacementOrders, decide, is_sure,
-                          load_parts_table)
+from ..fulfilment import PART_COMPONENTS, PART_FAULT, ProductIds, ReplacementOrders, load_parts_table, open_key
 from ..guardrails import check_safety_in_description
 from ..knowledge import BatteryKnowledgeBase
 from ..tickets.caps import CAP_TEXTS, cap_reached
@@ -778,10 +777,11 @@ def build_registry(
     amigo: Optional[Any] = None,
     # The replacement order the bot places on the customer's behalf. Absent
     # unless a store is supplied, so an agent that cannot place one is never
-    # told it can. Item codes default to the mock resolver.
+    # told it can. Product ids default to none (an order is recorded, not
+    # sent); orders_live is the OMS switch (spec 2026-10-10 replacement orders).
     replacement_orders: Optional["ReplacementOrders"] = None,
-    item_codes: Optional["ItemCodes"] = None,
-    approval_mode: str = "reasonable",
+    product_ids: Optional["ProductIds"] = None,
+    orders_live: bool = False,
     # True only on a surface with a location button (the website chat).
     # WhatsApp shares location natively and IVR cannot; neither is offered a
     # button that does not exist there.
@@ -1879,7 +1879,7 @@ def build_registry(
 
     if replacement_orders is not None:
         parts_table = load_parts_table()
-        codes = item_codes or ItemCodes()
+        codes = product_ids or ProductIds()
         # Loaded once per process and shared; 19,584 rows, under a megabyte.
         pincodes = PincodeDirectory.load()
 
@@ -1889,7 +1889,7 @@ def build_registry(
             "concluded that a part needs replacing and the customer has confirmed where to "
             "send it. Pass the address exactly as they confirmed it. This decides on its own "
             "whether the part needs a technician, whether an order is already on its way, "
-            "and whether it can be approved now; read the result and say what it says. It "
+            "and whether one is already placed; read the result and say what it says. It "
             "handles in-warranty only: anything chargeable is refused and goes to a person.",
             parameters={
                 "frame_number": {
@@ -2060,7 +2060,6 @@ def build_registry(
                     "than quote." % part,
                     remedy="human_handoff",
                 )
-            covered = True
 
             # The rider's details (section 2): each typed by the rider in this chat.
             from .oms_db import last_ten
@@ -2169,55 +2168,43 @@ def build_registry(
                     place = places[0]
                 delivery_address = assemble(parsed, place)
 
-            existing = replacement_orders.in_flight(frame, part)
-            if existing is not None:
-                return ok(
-                    {
-                        "order_id": existing["order_id"],
-                        "status": existing["status"],
-                        "part": part,
-                        "item_code": existing.get("item_code"),
-                        "delivery_address": existing.get("delivery_address"),
-                        "already_placed": True,
-                        "placed_at_utc": existing.get("placed_at_utc"),
-                        "note": (
-                            "Nothing new was placed. A replacement for this bike and part was "
-                            "placed earlier, at the time and to the address above. Tell the "
-                            "customer it already exists, quote the order id and that address, "
-                            "and if they want the address changed, hand over to the support team."
-                        ),
+            existing = replacement_orders.open_order(frame, part)
+            if existing is None:
+                record_line = delivery_address
+                if use_record_address:
+                    pins = re.findall(r"(?<![0-9])[1-9][0-9]{5}(?![0-9])", record_line)
+                    oms_address = {"line1": record_line, "line2": "", "pincode": pins[-1] if pins else ""}
+                else:
+                    fields = parsed.customer_fields()
+                    oms_address = {
+                        "line1": ", ".join(v for v in (fields.get("house_or_flat"), fields.get("building_or_street")) if v),
+                        "line2": ", ".join(v for v in (fields.get("area"), fields.get("landmark"),
+                                                       place.district, place.state) if v),
+                        "pincode": parsed.pincode,
                     }
-                )
-
-            item_code = codes.resolve(bike.get("product_name"), part)
-            sure = is_sure(evidence_seen, covered, item_code, rule)
-            # A missing item code is never a refusal and never an approval: the
-            # spec has a not-sure case still placed as pending_approval, with
-            # nothing dropped, and a human resolving the code. Approving it
-            # would hand the OMS an order it cannot fulfil; refusing it drops a
-            # customer's correct claim for 48 hours behind the in-flight check.
-            status = decide(sure, approval_mode)
-            if item_code is None:
-                status = "pending_approval"
-            order = replacement_orders.create(
-                frame_number=frame,
-                part=part,
-                item_code=item_code,
-                delivery_address=delivery_address,
-                phone=phone,
-                conversation_id=conversation_id,
-                sure=sure,
-                status=status,
-            )
-            return ok(
-                {
-                    "order_id": order["order_id"],
-                    "status": order["status"],
-                    "part": part,
-                    "item_code": item_code,
-                    "delivery_address": order["delivery_address"],
-                    "already_placed": False,
-                }
-            )
+                product_id = codes.resolve(bike.get("product_name"), part)
+                now = utc_now_iso()
+                reference = replacement_orders.next_reference()
+                existing, created = replacement_orders.insert({
+                    "_id": reference, "open_key": open_key(frame, part), "frame_number": frame, "part": part,
+                    "product_id": product_id, "product_name": bike.get("product_name"),
+                    "customer": dict(rider, address=oms_address), "delivery_address": delivery_address,
+                    "phone": phone, "conversation_id": conversation_id, "ticket_reference": None,
+                    "status": "queued" if (orders_live and product_id) else "recorded",
+                    "oms": {"intent_at": None, "order_code": None, "order_id": None, "passes": 0, "last_error": None},
+                    "next_attempt_at": now, "lease_until": None, "created_at": now, "updated_at": now,
+                })
+                if created:
+                    return ok({"order_id": existing["_id"], "status": existing["status"], "part": part,
+                               "delivery_address": existing["delivery_address"], "already_placed": False})
+            return ok({
+                "order_id": existing["_id"], "status": existing["status"], "part": part,
+                "delivery_address": existing.get("delivery_address"), "already_placed": True,
+                "placed_at_utc": existing.get("created_at"),
+                "note": ("Nothing new was placed. A replacement for this bike and part was placed earlier, at "
+                         "the time and to the address above. Tell the customer it already exists, quote the "
+                         "order id and that address, and if they want the address changed, hand over to the "
+                         "support team."),
+            })
 
     return registry

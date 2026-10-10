@@ -165,5 +165,39 @@ class DetailsTests(unittest.TestCase):
                 self.assertEqual(code_of(place(registration(), customer_name=name)), "customer_name_required")
 
 
+class LedgerThroughTheToolTests(unittest.TestCase):
+    def test_the_same_bike_and_part_twice_is_one_order(self):
+        orders = ReplacementOrders()
+        record = registration()
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: [record], replacement_orders=orders)
+        for cid in ("c1", "c2"):
+            context = ToolContext(conversation_id=cid, phone=PHONE, late={
+                "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+                "coverage_result": lambda: coverage_for(record), "customer_messages": lambda: TYPED})
+            result = registry.call(PLACE_REPLACEMENT_ORDER, dict(
+                {"frame_number": FRAME, "part": "battery", "use_record_address": True,
+                 "idempotency_key": "k-" + cid}, **RIDER), context)
+        self.assertTrue(result["data"]["already_placed"])
+        self.assertEqual(result["data"]["order_id"], "RO-1000001")
+
+    def test_with_the_switch_off_or_no_product_id_the_order_is_recorded_not_queued(self):
+        self.assertEqual(place(registration())["data"]["status"], "recorded")
+
+    def test_with_the_switch_on_and_a_product_id_the_order_is_queued(self):
+        from emotorad_ai.fulfilment import ProductIds
+
+        record = registration()
+        registry = build_registry(today=TODAY, warranty_source=lambda phone: [record],
+                                  replacement_orders=ReplacementOrders(), orders_live=True,
+                                  product_ids=ProductIds({"EMX Plus": {"battery": "uuid-1"}}))
+        context = ToolContext(conversation_id="c1", phone=PHONE, late={
+            "evidence_seen": lambda: True, "evidence_verified": lambda: "battery",
+            "coverage_result": lambda: coverage_for(record), "customer_messages": lambda: TYPED})
+        result = registry.call(PLACE_REPLACEMENT_ORDER, dict(
+            {"frame_number": FRAME, "part": "battery", "use_record_address": True, "idempotency_key": "k"},
+            **RIDER), context)
+        self.assertEqual(result["data"]["status"], "queued")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -144,7 +144,7 @@ class ConversationState:
     coverage_result: Optional[Dict[str, Any]] = None
     # Every order this conversation has placed, kept for the same reason
     # `coverage_result` is. The order post-check only ever saw this turn's tool
-    # results, so a correct "it was RO-00001" a turn after the order was placed
+    # results, so a correct "it was RO-1000001" a turn after the order was placed
     # was blocked as unsupported and the customer escalated to check an order
     # that had already gone through. The check itself is unchanged — a claimed
     # order id must still be one a tool actually placed, in this conversation.

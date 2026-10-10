@@ -83,11 +83,10 @@ class FinalReviewRuntimeTests(unittest.TestCase):
     """The final review (2026-10-01)."""
 
     def test_no_replacement_is_ordered_for_the_unlisted_bike(self):
-        from emotorad_ai.fulfilment import ItemCodes, ReplacementOrders, load_parts_table
+        from emotorad_ai.fulfilment import ReplacementOrders, load_parts_table
         from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER
 
-        registry = build_registry(today=date(2026, 10, 1), replacement_orders=ReplacementOrders(),
-                                  item_codes=ItemCodes(), approval_mode="reasonable")
+        registry = build_registry(today=date(2026, 10, 1), replacement_orders=ReplacementOrders())
         part = next(p for p, r in load_parts_table().items() if not r.technician and not r.ask)
         envelope = registry.call(
             PLACE_REPLACEMENT_ORDER, {"part": part, "use_record_address": True, "idempotency_key": "o1"},

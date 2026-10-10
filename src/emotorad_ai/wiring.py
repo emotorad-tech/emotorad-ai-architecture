@@ -78,6 +78,9 @@ class Stores:
     amiigo_receipts: Any = None
     # Where they are kept, for /health (RECEIPTS_*).
     amiigo_receipts_status: str = RECEIPTS_MEMORY
+    # The replacement order ledger (spec 2026-10-10 replacement orders).
+    replacement_orders: Any = None
+    replacement_orders_status: str = "memory"
 
 
 def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Stores:
@@ -94,18 +97,29 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
 
         from .tickets.store import InMemoryTicketStore
 
+        from .fulfilment import ReplacementOrders
+
         receipts = InMemoryAmiigoReceipts()
         return Stores(conversations=InMemoryConversationStore(receipts=receipts), idempotency=IdempotencyStore(),
                       tickets=InMemoryTicketStore(), verified_sessions=InMemoryVerifiedSessions(),
-                      amiigo_receipts=receipts)
+                      amiigo_receipts=receipts, replacement_orders=ReplacementOrders())
     from .stores.mongo import (
-        MongoAmiigoReceipts, MongoConversationStore, MongoIdempotencyStore, MongoTicketStore, MongoVerifiedSessions,
-        connect,
+        MongoAmiigoReceipts, MongoConversationStore, MongoIdempotencyStore, MongoOrderLedger, MongoTicketStore,
+        MongoVerifiedSessions, connect,
     )
 
     db = connect(db_name=settings.mongo_db, client=client)
     sessions, sessions_status = _verified_sessions(MongoVerifiedSessions(db), log)
     receipts, receipts_status = _amiigo_receipts(MongoAmiigoReceipts(db), log)
+    ledger = MongoOrderLedger(db)
+    if ledger.index_ready():
+        orders, orders_status = ledger, "mongodb"
+    else:
+        from .fulfilment import ReplacementOrders
+
+        orders, orders_status = ReplacementOrders(), "memory: index missing, run scripts/mongo_setup.py"
+        if log is not None:
+            log.emit("replacement_orders_index_missing", "replacement_orders", level="error")
     return Stores(
         conversations=MongoConversationStore(db, state_ttl_hours=settings.state_ttl_hours, log=log),
         idempotency=MongoIdempotencyStore(db, ttl_days=settings.idempotency_ttl_days),
@@ -114,6 +128,8 @@ def build_stores(settings: Settings, log: Any = None, client: Any = None) -> Sto
         verified_sessions_status=sessions_status,
         amiigo_receipts=receipts,
         amiigo_receipts_status=receipts_status,
+        replacement_orders=orders,
+        replacement_orders_status=orders_status,
     )
 
 

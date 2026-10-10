@@ -102,7 +102,7 @@ class StateTests(unittest.TestCase):
         state.sub_category = "battery-wont-charge"
         state.coverage_result = {"covered": True}
         state.evidence_seen, state.evidence_asks, state.video_declined = True, 2, True
-        state.placed_order_ids = ["RO-00001"]
+        state.placed_order_ids = ["RO-1000001"]
         state.pending_topic = "battery"
         state.forget_bike()
         self.assertEqual(
@@ -112,7 +112,7 @@ class StateTests(unittest.TestCase):
             (None, None, None, 0, None, None, None, None, False, 0, False))
         # An order placed is real whichever bike comes next; the topic is the
         # caller's to keep or clear.
-        self.assertEqual(state.placed_order_ids, ["RO-00001"])
+        self.assertEqual(state.placed_order_ids, ["RO-1000001"])
         self.assertEqual(state.pending_topic, "battery")
 
 

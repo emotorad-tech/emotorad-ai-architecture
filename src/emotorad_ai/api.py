@@ -73,7 +73,6 @@ from .attachments import MAX_ATTACHMENTS, AttachmentError, validate as validate_
 from .config import load_settings
 from .config_store import SECRET_ID_ENV
 from .contract import VERIFIED, Attachment, Identity, InboundMessage, Reply, new_conversation_id
-from .fulfilment import ItemCodes, ReplacementOrders
 from .media import load_catalogue, model_offered
 from .media import sendable as media_sendable
 from .guardrails import check_safety, check_safety_in_description
@@ -277,11 +276,6 @@ EVIDENCE_REFERENCES = (evidence_check.References(CATALOGUE, MEDIA_STORE)
 # the agent send the same photo every turn.
 sent_media: dict = {}
 
-# The replacement orders the bot places. Mocked: nothing reaches the OMS from
-# here yet. Module-level so "already on its way" holds across conversations.
-replacement_orders = ReplacementOrders()
-
-
 # Bikes from OMS production (tools/oms_db.py, spec 2026-10-08): first among the
 # sources when its connection string is set. Nothing connects at import.
 OMS_DB = oms_db_tools.reader_from_env()
@@ -366,9 +360,9 @@ def _build_registry():
         account_finder=ACCOUNT_FINDER,
         guide_media=SENDABLE_MEDIA,
         sent_media=sent_media,
-        replacement_orders=replacement_orders,
-        item_codes=ItemCodes(),
-        approval_mode=settings.approval_mode,
+        # The order ledger (spec 2026-10-10 replacement orders), shared across
+        # conversations; nothing reaches the OMS from here until Task 6.
+        replacement_orders=stores.replacement_orders,
         location_sharing=True,
         idempotency=stores.idempotency,
         ticket_system=ZOHO.router,

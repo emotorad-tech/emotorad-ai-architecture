@@ -160,13 +160,13 @@ class ConflictMergeTests(unittest.TestCase):
         store = InMemoryConversationStore()
         rt = runtime(store)
         fresh = store.get("c1")
-        fresh.placed_order_ids, fresh.consumed_codes = ["RO-00001"], ["123456"]
-        ours = replace(fresh, placed_order_ids=["RO-00002"], consumed_codes=["654321"],
+        fresh.placed_order_ids, fresh.consumed_codes = ["RO-1000001"], ["123456"]
+        ours = replace(fresh, placed_order_ids=["RO-1000002"], consumed_codes=["654321"],
                        coverage_result={"data": {"in_warranty": True}}, cluster_id="cl-1", history=[], transitions=[])
         # This turn made its own lookup, so it is the newer one; the stale
         # case is in tests/test_edge_cases_after_merge.py.
         merged = rt._merge_onto_fresh(ours, [], reply("Placed.", ticket_id=None), looked_up=True)
-        self.assertEqual(merged.placed_order_ids, ["RO-00001", "RO-00002"])
+        self.assertEqual(merged.placed_order_ids, ["RO-1000001", "RO-1000002"])
         self.assertEqual(merged.consumed_codes, ["123456", "654321"])
         self.assertEqual(merged.coverage_result, {"data": {"in_warranty": True}})
         self.assertEqual(merged.cluster_id, "cl-1")

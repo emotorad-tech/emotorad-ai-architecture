@@ -134,7 +134,7 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(set(report), {"conversations", "transcript_turns", "conversation_summaries", "idempotency_keys", "media",
                                        "conversation_origins", "erasure_requests", "tickets", "counters",
                                        "verification_sessions", "conversation_notices", "serial_readings",
-                                       "invoice_readings", "amiigo_receipts"})
+                                       "invoice_readings", "amiigo_receipts", "replacement_orders"})
         ttl = {}
         for collection in report:
             for index, info in db[collection].index_information().items():
@@ -152,7 +152,7 @@ class IndexTests(unittest.TestCase):
     def test_the_index_table_has_no_ttl_on_the_permanent_record(self):
         for collection in ("transcript_turns", "conversation_summaries", "conversation_origins",
                            "erasure_requests", "tickets", "counters", "conversation_notices", "serial_readings",
-                           "invoice_readings"):
+                           "invoice_readings", "replacement_orders"):
             for _, options in INDEXES[collection]:
                 self.assertNotIn("expireAfterSeconds", options)
 
