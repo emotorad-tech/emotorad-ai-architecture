@@ -394,7 +394,11 @@ registry = _build_registry()
 # Failures the worker and the OMS client log are errors: an order that did not
 # reach OMS, a pass that crashed, a login that was refused.
 _ERROR_EVENTS = frozenset({"replacement_order_failed", "replacement_order_pass_failed",
-                           "replacement_order_intent_unsaved", "order_worker_pass_failed"})
+                           "replacement_order_intent_unsaved", "order_worker_pass_failed",
+                           # An order a person may need to look for in OMS, a ledger
+                           # write lost, a pin code OMS could not be asked for.
+                           "replacement_order_look_only", "replacement_order_save_failed",
+                           "oms_pin_code_lookup_failed"})
 
 
 def _order_worker_log(event: str, fields: dict) -> None:
@@ -411,11 +415,19 @@ def _oms_afs_log(event: str, fields: dict) -> None:
         log.emit(event, "oms_afs", **fields)
 
 
+def _pin_code_id(pincode: str) -> Optional[str]:
+    """OMS's pin code id for the worker; None without the OMS database (the
+    order waits as pin_code_unknown), and a failed read is logged."""
+    if OMS_DB is None:
+        return None
+    return OMS_DB.pin_code_id(pincode, log=_order_worker_log)
+
+
 ORDER_WORKER = (OrderWorker(
     stores.replacement_orders,
     # The environment is part of every ticket number (oms_afs.ticket_number).
     oms_afs.AFSClient(OMS_AFS_SETTINGS, log=_oms_afs_log, env=os.environ.get("EMOTORAD_AI_ENV")),
-    pin_codes=(OMS_DB.pin_code_id if OMS_DB is not None else (lambda pincode: None)),
+    pin_codes=_pin_code_id,
     log=_order_worker_log) if ORDERS_LIVE else None)
 # Read once, with the registry, so /health names the source actually in use.
 WARRANTY_SOURCE = _warranty_source_label()

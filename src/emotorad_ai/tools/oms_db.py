@@ -193,8 +193,11 @@ class OMSDatabase:
             self._cache[name][m10] = (now, rows)
         return [dict(row) for row in rows]
 
-    def pin_code_id(self, pincode: str) -> Optional[str]:
-        """OMS's em_pin_code id for a six-digit pin code, or None (never raises)."""
+    def pin_code_id(self, pincode: str,
+                    log: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Optional[str]:
+        """OMS's em_pin_code id for a six-digit pin code, or None (never raises).
+        A failed read is given to `log` as `oms_pin_code_lookup_failed` with
+        the error's class only."""
         pin = (pincode or "").strip()
         if len(pin) != 6 or not pin.isdigit():
             return None
@@ -204,7 +207,9 @@ class OMSDatabase:
                                options="-c statement_timeout=%d -c default_transaction_read_only=on"
                                        % STATEMENT_TIMEOUT_MS) as conn:
                 rows = conn.execute(PIN_CODE_SQL, {"pin": pin}).fetchall()
-        except Exception:
+        except Exception as exc:
+            if log is not None:
+                log("oms_pin_code_lookup_failed", {"error": type(exc).__name__})
             return None
         return str(rows[0]["id"]) if rows else None
 

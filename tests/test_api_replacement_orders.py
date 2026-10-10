@@ -115,7 +115,9 @@ class WorkerLogTests(unittest.TestCase):
     def test_a_failed_order_reaches_the_event_log_at_error_level(self):
         api = fresh_api_on_mongodb(ON)
         for event in ("replacement_order_failed", "replacement_order_pass_failed",
-                      "replacement_order_intent_unsaved", "order_worker_pass_failed"):
+                      "replacement_order_intent_unsaved", "order_worker_pass_failed",
+                      "replacement_order_look_only", "replacement_order_save_failed",
+                      "oms_pin_code_lookup_failed"):
             api._order_worker_log(event, {"reference": "RO-0000001"})
             found = [e for e in api.log.events if e["event"] == event][-1]
             self.assertEqual(found["level"], "error", event)
@@ -161,6 +163,28 @@ class PinCodeTests(unittest.TestCase):
         db = oms_db.OMSDatabase("postgresql://ro@oms/x", connect=fake)
         self.assertEqual(db.pin_code_id("122018"), "pin-1")
         self.assertIsNone(db.pin_code_id("12201"))
+
+    def test_a_failed_pin_code_lookup_is_logged_by_its_class(self):
+        # Finding 6b: still None, but never silent.
+        def down(*args, **kwargs):
+            raise OSError("connection refused to oms host")
+
+        logged = []
+        db = oms_db.OMSDatabase("postgresql://ro@oms/x", connect=down)
+        self.assertIsNone(db.pin_code_id("122018", log=lambda event, fields: logged.append((event, fields))))
+        self.assertEqual(logged, [("oms_pin_code_lookup_failed", {"error": "OSError"})])
+        self.assertIsNone(db.pin_code_id("122018"))  # no log given: still None, still no raise
+
+    def test_the_worker_logs_a_failed_pin_code_lookup_as_an_error(self):
+        def down(*args, **kwargs):
+            raise OSError("connection refused")
+
+        self.addCleanup(lambda: fresh_api(OFF))
+        api = fresh_api_on_mongodb(ON)
+        api.OMS_DB = oms_db.OMSDatabase("postgresql://ro@oms/x", connect=down)
+        self.assertIsNone(api.ORDER_WORKER._pin_codes("122018"))
+        found = [e for e in api.log.events if e["event"] == "oms_pin_code_lookup_failed"][-1]
+        self.assertEqual((found["level"], found["error"]), ("error", "OSError"))
 
 
 if __name__ == "__main__":

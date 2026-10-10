@@ -91,14 +91,14 @@ class OrderWorker:
 
     def _count_failed_pass(self, order: Dict[str, Any], error: str) -> None:
         """A pass that raised still counts toward the give-up limit. If this save fails too,
-        the lease runs out and a later pass tries again."""
+        it is logged, the lease runs out and a later pass tries again (it looks first)."""
         try:
             if order.get("status") == "queued":
                 self._retry(order, error, looked_not_found=False)
             else:
                 self._finish(order)
-        except Exception:
-            return None
+        except Exception as exc:
+            self._log("replacement_order_save_failed", {"reference": order["_id"], "error": type(exc).__name__})
 
     # -- one order --------------------------------------------------------------
 
@@ -168,6 +168,9 @@ class OrderWorker:
                 return self._fail(order, error)
             order["oms"]["look_only"] = True
             minutes = 60
+            if not look_only:
+                # Said once, at the change: a person may need to look in OMS.
+                self._log("replacement_order_look_only", {"reference": order["_id"], "error": error})
         else:
             minutes = RETRY_MINUTES[passes - 1] if passes - 1 < len(RETRY_MINUTES) else 60
         order["next_attempt_at"] = (now + timedelta(minutes=minutes)).isoformat()

@@ -156,7 +156,11 @@ class RetryTests(unittest.TestCase):
         saved = ledger.get(order["_id"])
         self.assertEqual((saved["status"], saved["oms"]["look_only"]), ("queued", True))
         self.assertEqual(saved["open_key"], open_key("EMXP0001", "battery"))
-        self.assertEqual([event for event, _ in logged], [])
+        # Finding 7: said once, at the change, with the error's class.
+        self.assertEqual(logged, [("replacement_order_look_only", {"reference": order["_id"],
+                                                                   "error": "OMSCallError"})])
+        afs.run_once()
+        self.assertEqual([event for event, _ in logged], ["replacement_order_look_only"])
 
     def test_a_day_old_order_fails_on_its_next_failure(self):
         ledger, oms, now = ReplacementOrders(), FakeOMS(), [START + timedelta(hours=25)]
@@ -370,6 +374,52 @@ class RefusedTokenOnSendTests(unittest.TestCase):
         self.assertEqual(oms.frames.count("afs_order_add"), 2)
         self.assertEqual(len(oms.orders), 1)
         self.assertEqual(ledger.get(order["_id"])["status"], "sent")
+
+
+class SaveFailureTests(unittest.TestCase):
+    def test_a_failed_save_after_a_failed_pass_is_logged(self):
+        # Finding 6a: never swallowed silently.
+        class Unsaving(ReplacementOrders):
+            failing = False
+
+            def save(self, order):
+                if self.failing:
+                    raise OSError("store down")
+                return super().save(order)
+
+        def pins(pincode):
+            raise RuntimeError("pin service down")
+
+        ledger, oms, now, logged = Unsaving(), FakeOMS(), [START], []
+        order = queued(ledger)
+        ledger.failing = True
+        OrderWorker(ledger, client(oms), pin_codes=pins, log=lambda event, fields: logged.append((event, fields)),
+                    clock=lambda: now[0]).run_once()
+        self.assertIn(("replacement_order_save_failed", {"reference": order["_id"], "error": "OSError"}), logged)
+
+    def test_a_failed_save_after_a_good_send_is_found_next_pass_and_never_resent(self):
+        # Finding 9: OMS has the order, the ledger still says queued.
+        class LosesTheSent(ReplacementOrders):
+            failing = True
+
+            def save(self, order):
+                if self.failing and order.get("status") == "sent":
+                    raise OSError("store down")
+                return super().save(order)
+
+        ledger, oms, now, logged = LosesTheSent(), FakeOMS(), [START], []
+        order = queued(ledger)
+        afs = worker(ledger, oms, now, logged)
+        afs.run_once()
+        self.assertEqual(len(oms.sent), 1)
+        self.assertEqual(ledger.get(order["_id"])["status"], "queued")
+        self.assertIn(("replacement_order_save_failed", {"reference": order["_id"], "error": "OSError"}), logged)
+        ledger.failing = False
+        now[0] = START + timedelta(minutes=10)  # past the lease
+        afs.run_once()
+        self.assertEqual(len(oms.sent), 1)
+        saved = ledger.get(order["_id"])
+        self.assertEqual((saved["status"], saved["oms"]["order_code"]), ("sent", "AFS/26-27/EC/1"))
 
 
 class IntentTests(unittest.TestCase):
