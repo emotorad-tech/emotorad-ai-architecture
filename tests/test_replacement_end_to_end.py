@@ -22,6 +22,9 @@ from emotorad_ai.tools.mocks import PLACE_REPLACEMENT_ORDER, build_registry
 from emotorad_ai.tools.verification import VerificationStore
 
 _JPEG = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+# The order needs the rider's name and email, typed in the chat (spec 2026-10-10, section 2).
+RIDER = {"customer_name": "Test Rider", "email": "test.rider@example.com"}
+DETAILS = " I'm Test Rider, test.rider@example.com."
 ADDRESS = "Flat 4B, Kalyani Nagar, Pune, Maharashtra 411006"
 # The order gate wants a bike dated by its warranty registration (em_purchase).
 REGISTERED = oms_db.to_record({"frame_number": "EMXP2025004417", "product_name": "EMX Plus",
@@ -43,7 +46,9 @@ def _runtime(responses, approval_mode="reasonable"):
     return runtime, WebsiteChatAdapter(runtime.resolver), orders
 
 
-def _send(runtime, adapter, text, photo=False):
+def _send(runtime, adapter, text, photo=False, details=False):
+    if details:
+        text += DETAILS
     runtime.conversations.get("conv-1").route_to(AGENT_NAME)
     event = {"conversation_id": "conv-1", "session_token": "sess-ananya", "text": text}
     if photo:
@@ -62,12 +67,12 @@ class KrishnaTests(unittest.TestCase):
             call_tool("lookup_warranty_record", {}),
             say("Found your EMX Plus. Could you send a photo of the battery terminal?"),
             say("That terminal is heat damaged, which is a defect and is covered. Is this still the right address: " + ADDRESS + "?"),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "conv-1-battery"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, dict({"part": "battery", "use_record_address": True, "idempotency_key": "conv-1-battery"}, **RIDER)),
             say("Done. Order RO-00001 is on its way to " + ADDRESS + ". Keep the old battery off the bike."),
         ])
         _send(runtime, adapter, "my battery terminal has melted")
         _send(runtime, adapter, "here is the photo", photo=True)
-        reply = _send(runtime, adapter, "yes that address is right")
+        reply = _send(runtime, adapter, "yes that address is right", details=True)
         self.assertFalse(reply.escalated, reply.text)
         self.assertIn("RO-00001", reply.text)
         placed = orders.in_flight("EMXP2025004417", "battery")
@@ -81,11 +86,11 @@ class KrishnaTests(unittest.TestCase):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it."),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "k"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, dict({"part": "battery", "use_record_address": True, "idempotency_key": "k"}, **RIDER)),
             say("I cannot order it until I have seen the fault. Could you send a short video?"),
         ])
         _send(runtime, adapter, "my battery is dead, just replace it")
-        reply = _send(runtime, adapter, "ok")
+        reply = _send(runtime, adapter, "ok", details=True)
         self.assertFalse(reply.escalated, reply.text)
         self.assertIsNone(orders.in_flight("EMXP2025004417", "battery"))
         refused = [e for e in runtime.log.events if e["event"] == "tool_call" and e["tool"] == PLACE_REPLACEMENT_ORDER]
@@ -111,11 +116,11 @@ class KrishnaTests(unittest.TestCase):
             call_tool("lookup_warranty_record", {}),
             call_tool(
                 PLACE_REPLACEMENT_ORDER,
-                {"part": "battery", "use_record_address": True, "idempotency_key": "one-turn"},
+                dict({"part": "battery", "use_record_address": True, "idempotency_key": "one-turn"}, **RIDER),
             ),
             say("Done. Order RO-00001 is on its way."),
         ])
-        reply = _send(runtime, adapter, "please replace my battery, here is the photo", photo=True)
+        reply = _send(runtime, adapter, "please replace my battery, here is the photo", photo=True, details=True)
         self.assertFalse(reply.escalated, reply.text)
         self.assertIn("RO-00001", reply.text)
         self.assertIsNotNone(orders.in_flight("EMXP2025004417", "battery"))
@@ -126,12 +131,12 @@ class KrishnaTests(unittest.TestCase):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it. Address still right: " + ADDRESS + "?"),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "a"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, dict({"part": "battery", "use_record_address": True, "idempotency_key": "a"}, **RIDER)),
             say("Order RO-00001 placed."),
             say("It was RO-00001."),
         ])
         _send(runtime, adapter, "melted terminal", photo=True)
-        _send(runtime, adapter, "yes")
+        _send(runtime, adapter, "yes", details=True)
         reply = _send(runtime, adapter, "It was RO-00001.")
         self.assertFalse(reply.escalated, reply.text)
         self.assertIn("RO-00001", reply.text)
@@ -148,7 +153,7 @@ class KrishnaTests(unittest.TestCase):
             llm=ScriptedClaude([
                 call_tool("lookup_warranty_record", {}),
                 say("Found it. Address still right: " + ADDRESS + "?"),
-                call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "a"}),
+                call_tool(PLACE_REPLACEMENT_ORDER, dict({"part": "battery", "use_record_address": True, "idempotency_key": "a"}, **RIDER)),
                 say("Order RO-00001 placed."),
                 say("Your order RO-00001 is on its way."),
             ]),
@@ -165,7 +170,7 @@ class KrishnaTests(unittest.TestCase):
             return runtime.handle(adapter.to_message(event))
 
         send("conv-a", "melted terminal", photo=True)
-        send("conv-a", "yes")
+        send("conv-a", "yes" + DETAILS)
 
         reply = send("conv-b", "Your order RO-00001 is on its way.")
         self.assertTrue(reply.escalated)
@@ -175,14 +180,14 @@ class KrishnaTests(unittest.TestCase):
         runtime, adapter, orders = _runtime([
             call_tool("lookup_warranty_record", {}),
             say("Found it. Address still right: " + ADDRESS + "?"),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "a"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, dict({"part": "battery", "use_record_address": True, "idempotency_key": "a"}, **RIDER)),
             say("Order RO-00001 placed."),
-            call_tool(PLACE_REPLACEMENT_ORDER, {"part": "battery", "use_record_address": True, "idempotency_key": "b"}),
+            call_tool(PLACE_REPLACEMENT_ORDER, dict({"part": "battery", "use_record_address": True, "idempotency_key": "b"}, **RIDER)),
             say("That is already on its way as RO-00001."),
         ])
         _send(runtime, adapter, "melted terminal", photo=True)
-        _send(runtime, adapter, "yes")
-        reply = _send(runtime, adapter, "did that go through? send me a battery")
+        _send(runtime, adapter, "yes", details=True)
+        reply = _send(runtime, adapter, "did that go through? send me a battery", details=True)
         self.assertFalse(reply.escalated, reply.text)
         self.assertIn("RO-00001", reply.text)
         self.assertEqual(len(orders._orders), 1)
@@ -249,12 +254,12 @@ class AddressFromTheConversationTests(unittest.TestCase):
                 say("Verified. What's the address?"),
                 call_tool(
                     PLACE_REPLACEMENT_ORDER,
-                    {
+                    dict({
                         "part": "battery",
                         "address": {"house_or_flat": "A1102", "building_or_street": "Park view city 1",
                                     "area": "Sector 49", "pincode": "482913"},
                         "idempotency_key": "c1",
-                    },
+                    }, **RIDER),
                 ),
                 say("Done, order RO-00001."),
             ]
@@ -263,7 +268,7 @@ class AddressFromTheConversationTests(unittest.TestCase):
 
         self._send_anonymous(runtime, "conv-1", "482913")
         # A photo, so the evidence gate (which runs before the address check) passes.
-        self._send_anonymous(runtime, "conv-1", "It's A1102 Park view city 1", photo=True)
+        self._send_anonymous(runtime, "conv-1", "It's A1102 Park view city 1" + DETAILS, photo=True)
 
         order_calls = [
             event
@@ -287,19 +292,19 @@ class AddressFromTheConversationTests(unittest.TestCase):
                 say("So that's A1102 Park view city 1, 122018, is that right?"),
                 call_tool(
                     PLACE_REPLACEMENT_ORDER,
-                    {
+                    dict({
                         "part": "battery",
                         "address": {"house_or_flat": "A1102", "building_or_street": "Park view city 1",
                                     "area": "Sector 49", "pincode": "122018"},
                         "idempotency_key": "EMXP2025004417-battery",
-                    },
+                    }, **RIDER),
                 ),
                 say("Done. Order RO-00001 is on its way."),
             ]
         )
         _send(runtime, adapter, "It's A1102 Park view city 1, Sector 49", photo=True)
         _send(runtime, adapter, "122018")
-        reply = _send(runtime, adapter, "Yes")
+        reply = _send(runtime, adapter, "Yes", details=True)
 
         self.assertFalse(reply.escalated, reply.text)
         self.assertIn("RO-00001", reply.text)

@@ -45,7 +45,7 @@ def _context(evidence_seen=True, coverage=COVERED, customer_messages=(), verifie
             "evidence_seen": lambda: evidence_seen,
             "evidence_verified": lambda: verified,
             "coverage_result": lambda: coverage,
-            "customer_messages": lambda: customer_messages,
+            "customer_messages": lambda: ("I'm Test Rider, test.rider@example.com",) + tuple(customer_messages),
         },
     )
 
@@ -59,7 +59,8 @@ GURUGRAM_LINE = "A1102, Park View City 1, Sector 49, Gurugram, Haryana, 122018"
 
 def _place(registry, context, **overrides):
     """Ships to the record's address unless an `address` is given."""
-    args = {"frame_number": "EMXP2025004417", "part": "battery", "idempotency_key": "k-1"}
+    args = {"frame_number": "EMXP2025004417", "part": "battery", "idempotency_key": "k-1",
+            "customer_name": "Test Rider", "email": "test.rider@example.com"}
     if "address" not in overrides:
         args["use_record_address"] = True
     args.update(overrides)

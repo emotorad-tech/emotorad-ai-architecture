@@ -196,6 +196,9 @@ _PINCODE = re.compile(r"\b[1-9]\d{5}\b")
 # whole with fullmatch, so no word boundary is needed, and [0-9] rather than \d
 # so a Devanagari digit is never a number to call.
 _TEN_DIGIT_MOBILE = re.compile(r"[6-9][0-9]{9}")
+# An email the rider typed: one @, a dot in the domain, no spaces (spec
+# 2026-10-10 replacement orders, section 2). OMS requires one on a customer order.
+_EMAIL = re.compile(r"[^@\s]+@[^@\s.]+(\.[^@\s.]+)+")
 
 
 def _clean(value: Any) -> Any:
@@ -1922,6 +1925,11 @@ def build_registry(
                     },
                     "required": ["house_or_flat", "building_or_street", "area", "pincode"],
                 },
+                "customer_name": {"type": "string",
+                                  "description": "The customer's full name, as they typed it and confirmed."},
+                "email": {"type": "string", "description": "The customer's email, as they typed it and confirmed."},
+                "mobile": {"type": "string",
+                           "description": "Only if they gave a number other than the one they are chatting from."},
                 "idempotency_key": {
                     "type": "string",
                     "description": "Stable key for this order, so a retry does not place it twice.",
@@ -1945,6 +1953,9 @@ def build_registry(
             address: Optional[Dict[str, Any]] = None,
             unlisted_bike: Optional[Dict[str, Optional[str]]] = None,
             evidence_verified: Optional[str] = None,
+            customer_name: Optional[str] = None,
+            email: Optional[str] = None,
+            mobile: Optional[str] = None,
         ) -> Dict[str, Any]:
             if unlisted_bike:
                 # The customer's bike is not registered on this number (the
@@ -2038,6 +2049,36 @@ def build_registry(
                     remedy="human_handoff",
                 )
             covered = True
+
+            # The rider's details (section 2): each typed by the rider in this chat.
+            from .oms_db import last_ten
+
+            name = " ".join((customer_name or "").split())
+            if not name:
+                raise ToolError("customer_name_required",
+                                "Ask for the customer's full name, read it back, and pass it as customer_name.")
+            typed = set()
+            for message in customer_messages:
+                typed |= address_tokens(message)
+            stray = sorted(address_tokens(name) - typed)
+            if stray:
+                raise ToolError("customer_name_unconfirmed",
+                                "These words of the name were not typed by the customer (%s). Ask for their "
+                                "name and pass exactly what they confirmed." % ", ".join(stray))
+            mail = (email or "").strip()
+            if not _EMAIL.fullmatch(mail):
+                raise ToolError("email_invalid", "Ask for the customer's email address and pass it as they typed it.")
+            if not any(mail.lower() in message.lower() for message in customer_messages):
+                raise ToolError("email_unconfirmed",
+                                "That email was not typed by the customer. Ask for it and pass it as they typed it.")
+            try:
+                mobile_ten = last_ten(mobile) if mobile else last_ten(phone)
+            except ValueError:
+                raise ToolError("mobile_invalid", "Ask for an Indian mobile number the order can be delivered to.")
+            if mobile and not any(mobile_ten in re.sub(r"[^0-9]", "", message) for message in customer_messages):
+                raise ToolError("mobile_invalid",
+                                "That mobile number was not typed by the customer. Ask for it and pass it as typed.")
+            rider = {"name": name, "email": mail, "mobile": mobile_ten}
 
             # The address backstop. Two ways in, both decided here.
             #

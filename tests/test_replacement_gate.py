@@ -41,8 +41,7 @@ def place(record, verified="battery", part="battery", messages=TYPED, **extra):
         "coverage_result": lambda: coverage_for(record),
         "customer_messages": lambda: messages,
     })
-    # Task 2 adds the rider's details here: dict(..., **RIDER).
-    args = {"frame_number": FRAME, "part": part, "use_record_address": True, "idempotency_key": "k"}
+    args = dict({"frame_number": FRAME, "part": part, "use_record_address": True, "idempotency_key": "k"}, **RIDER)
     args.update(extra)
     return registry.call(PLACE_REPLACEMENT_ORDER, args, context)
 
@@ -115,6 +114,28 @@ class OcrTests(unittest.TestCase):
         # OCR writes invoice_readings and a ticket, never the record's date.
         self.assertIn(code_of(place(registration(bought=None))),
                       ("warranty_not_from_registration", "coverage_undetermined"))
+
+
+class DetailsTests(unittest.TestCase):
+    def test_a_name_the_rider_never_typed_is_refused(self):
+        self.assertEqual(code_of(place(registration(), customer_name="Someone Else")), "customer_name_unconfirmed")
+
+    def test_no_name_is_refused(self):
+        self.assertEqual(code_of(place(registration(), customer_name=" ")), "customer_name_required")
+
+    def test_a_malformed_email_is_refused(self):
+        for email in ("test.rider", "test rider@example.com", "a@b", "@example.com"):
+            with self.subTest(email=email):
+                self.assertEqual(code_of(place(registration(), email=email)), "email_invalid")
+
+    def test_an_email_the_rider_never_typed_is_refused(self):
+        self.assertEqual(code_of(place(registration(), email="other@example.com")), "email_unconfirmed")
+
+    def test_a_mobile_must_be_indian_and_typed(self):
+        self.assertEqual(code_of(place(registration(), mobile="+6591234567")), "mobile_invalid")
+        self.assertEqual(code_of(place(registration(), mobile="9123456780")), "mobile_invalid")
+        typed = TYPED + ("call me on 91234 56780",)
+        self.assertTrue(placed(place(registration(), messages=typed, mobile="9123456780")))
 
 
 if __name__ == "__main__":
