@@ -58,10 +58,10 @@ So a dated order bike is warranty case 1 and its cover is worked out from the in
 - `OMSDatabase(..., orders=False)`; `orders=True` from `reader_from_env` when the switch is on.
 - `OMSDatabase.orders(phone)` runs `ORDERS_SQL` with the same last-ten rule (`last_ten` refuses a foreign number), cache (60 seconds per phone) and connection settings as `registrations`. It has **its own breaker**, so a failing orders query never stops registrations, and registrations' breaker never stops orders.
 - `db_warranty_source` returns registrations first, then order bikes:
-  - the orders query fails: logged as `oms_orders_unavailable` with the exception's class only, and the registrations are returned alone;
+  - the orders query fails: logged as `oms_orders_unavailable` with the exception's class only, and the registrations are returned alone; with no registrations it is `oms_unavailable`, never "no record" (the final review);
   - the registrations query fails: `oms_unavailable`, as today, whatever the orders query did;
   - both empty: `None`, so `no_warranty_record` and warranty case 4.
-- `OMSDatabase.row(phone, frame)` and `invoice_file` keep reading registrations only. An order bike has no OMS invoice file.
+- `OMSDatabase.row(phone, frame)` falls back to the order bike (the final review), so a rider's uploaded invoice for an undated order bike is read by code; `invoice_file` reads registrations only, since an order bike has no OMS invoice file. The lookup's note for such a bike does not call it registered.
 
 Nothing else changes: the verify-first bike list, the merged sources, the warranty step, the date post-check, the coverage post-check and tickets all read the merged list.
 

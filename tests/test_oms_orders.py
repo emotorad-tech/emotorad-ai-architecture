@@ -191,9 +191,37 @@ class MergeTests(unittest.TestCase):
         self.assertEqual([r["frame_number"] for r in records], ["EMXP0001"])
         self.assertEqual(logged, [("oms_orders_unavailable", {"error": "TimeoutError"})])
 
-    def test_an_orders_failure_with_no_registrations_is_no_record(self):
+    def test_an_orders_failure_with_no_registrations_is_an_outage_never_no_record(self):
+        """The final review, Important 1: an orders-only rider must not be
+        told their bike is unregistered because the orders query failed."""
+        logged = []
         db, _, _ = reader(errors={oms_db.ORDERS_SQL: OSError("x")})
-        self.assertIsNone(oms_db.db_warranty_source(db, log=lambda event, fields: None)(PHONE))
+        with self.assertRaises(ToolError) as caught:
+            oms_db.db_warranty_source(db, log=lambda event, fields: logged.append(event))(PHONE)
+        self.assertEqual(caught.exception.code, "oms_unavailable")
+        self.assertEqual(logged, ["oms_orders_unavailable"])
+
+    def test_the_bike_row_falls_back_to_an_order_bike(self):
+        """The final review, Important 2: the invoice reader finds an order
+        bike, so the rider's uploaded invoice is read by code."""
+        undated = dict(ORDER, purchase_date=None)
+        db, _, _ = reader(registrations=[REG], orders=[undated])
+        self.assertEqual(db.row(PHONE, "EMXP0001")["id"], "p1")
+        self.assertEqual(db.row(PHONE, "EMORD0001"), undated)
+        self.assertIsNone(db.row(PHONE, "OTHER"))
+        self.assertIsNone(db.invoice_file(PHONE, "EMORD0001"))
+
+    def test_an_undated_order_bike_is_never_called_registered(self):
+        from emotorad_ai.tools.mocks import LOOKUP_WARRANTY_RECORD, build_registry
+        from emotorad_ai.tools.registry import ToolContext
+
+        record = oms_db.order_to_record(dict(ORDER, purchase_date=None), date(2026, 10, 10))
+        registry = build_registry(today=date(2026, 10, 10), warranty_source=lambda phone: [record])
+        envelope = registry.call(LOOKUP_WARRANTY_RECORD, {}, ToolContext(conversation_id="c", phone=PHONE))
+        [bike] = envelope["data"]["bikes"]
+        self.assertEqual(bike["coverage_status"], "purchase_date_missing")
+        self.assertNotIn("registered", bike["note"])
+        self.assertIn("Ask for the invoice", bike["note"])
 
     def test_a_registrations_failure_is_an_outage_whatever_the_orders_did(self):
         db, _, _ = reader(orders=[ORDER], errors={oms_db.REGISTRATIONS_SQL: OSError("x")})

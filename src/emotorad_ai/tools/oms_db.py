@@ -199,8 +199,13 @@ class OMSDatabase:
         return None
 
     def row(self, phone: str, frame_number: str) -> Optional[Dict[str, Any]]:
-        """The frame's registration for this phone, or None."""
-        return next((row for row in self.registrations(phone) if row.get("frame_number") == frame_number), None)
+        """The frame's registration for this phone, else its order bike (spec
+        2026-10-10; it has no invoice file, so an uploaded invoice is read),
+        or None."""
+        found = next((row for row in self.registrations(phone) if row.get("frame_number") == frame_number), None)
+        if found is None:
+            found = next((row for row in self.orders(phone) if row.get("frame_number") == frame_number), None)
+        return found
 
 
 def _day(value: Any) -> Optional[date]:
@@ -283,9 +288,14 @@ def db_warranty_source(reader: OMSDatabase, invoice_state: Optional[Callable[[Op
         try:
             order_rows = reader.orders(phone)
         except OMSDatabaseUnavailable as exc:
-            order_rows = []
             if log is not None:
                 log("oms_orders_unavailable", {"error": str(exc)})
+            if not rows:
+                # An orders-only rider is never told "not registered" because
+                # the orders query failed (the final review, 10 October 2026).
+                raise ToolError("oms_unavailable", "The warranty system is not responding (%s)." % exc,
+                                retryable=True)
+            order_rows = []
         today = reader.today()
         records = ([to_record(row, today, invoice_state) for row in rows]
                    + [order_to_record(row, today) for row in order_rows])

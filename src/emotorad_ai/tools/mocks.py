@@ -396,7 +396,9 @@ def _api_coverage(bike: Dict[str, Any], record: Dict[str, Any], today: Optional[
                 "not ask for the invoice and do not raise another ticket. Do not state or estimate a "
                 "coverage date."
                 if with_support else
-                "This bike is registered but its purchase date is not on record, so coverage cannot be "
+                ("This bike's purchase date is not on record" if record.get("ownership_source") == "oms_order"
+                 else "This bike is registered but its purchase date is not on record")
+                + ", so coverage cannot be "
                 "known. Ask for the invoice or any proof of purchase showing the date it was bought. Do "
                 "not state or estimate a coverage date."
             ),
