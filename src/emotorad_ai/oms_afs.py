@@ -29,6 +29,7 @@ SALE_TYPE = "Warranty"
 REMARK = "Warranty replacement placed by the EMotorad support chatbot."
 AUTH_CODE = 403
 OK_CODE = 200
+NO_ORDER_MSG = "Order Not Found"  # OMS's ORDER_NOT_FOUND; any other 400 is an internal error
 
 
 class OMSAuthError(Exception):
@@ -104,7 +105,7 @@ def afs_request(order: Dict[str, Any], pin_code_id: str, sale_type_id: str) -> D
         "sale_type_id": sale_type_id,
         "frame_number": order.get("frame_number"),
         "ticket_number": order["_id"],
-        "remark": REMARK,
+        "remark": REMARK + (" Ticket %s." % order["ticket_reference"] if order.get("ticket_reference") else ""),
     })
     return request
 
@@ -132,9 +133,12 @@ class AFSClient:
         response = self._call("afs_order_list", {"search": reference, "limit": 5, "page_no": 1}, reference + ":find")
         if response.get("status") == OK_CODE:
             rows = (response.get("data") or {}).get("data") or []
-            row = next((r for r in rows if r.get("ticket_id") == reference), None)
+            matches = [r for r in rows if r.get("ticket_id") == reference]
+            # OMS splits an order when stock is short and copies ticket_id onto the
+            # child; the list is newest first, so prefer the one with no parent.
+            row = next((r for r in matches if not r.get("parent_code")), matches[0] if matches else None)
             return {"order_code": str(row.get("order_code")), "order_id": str(row.get("id"))} if row else None
-        if "not found" in str(response.get("msg") or "").lower():
+        if response.get("status") == 400 and str(response.get("msg") or "").strip() == NO_ORDER_MSG:
             return None
         raise OMSCallError("find status %s" % response.get("status"))
 

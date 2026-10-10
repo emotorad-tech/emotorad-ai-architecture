@@ -117,6 +117,27 @@ class CallTests(unittest.TestCase):
     def test_find_with_no_order_is_none(self):
         self.assertIsNone(client(FakeOMS()).find("RO-1000001"))
 
+    def test_an_internal_error_that_says_not_found_is_not_no_order(self):
+        class Broken(FakeOMS):
+            def answer(self, token, frame):
+                answered = dict(frame)
+                answered["response"] = {"status": 400, "msg": "Region matching query not found: x", "data": {}}
+                return answered
+
+        with self.assertRaises(oms_afs.OMSCallError):
+            client(Broken()).find("RO-1000001")
+
+    def test_find_prefers_the_parent_of_a_split_order(self):
+        oms = FakeOMS(orders=[
+            {"id": "o-2", "order_code": "AFS/X/1/1", "ticket_id": "RO-1000001", "parent_code": "AFS/X/1"},
+            {"id": "o-1", "order_code": "AFS/X/1", "ticket_id": "RO-1000001", "parent_code": None}])
+        self.assertEqual(client(oms).find("RO-1000001"), {"order_code": "AFS/X/1", "order_id": "o-1"})
+
+    def test_find_falls_back_to_the_first_match_when_none_is_a_parent(self):
+        oms = FakeOMS(orders=[
+            {"id": "o-2", "order_code": "AFS/X/1/1", "ticket_id": "RO-1000001", "parent_code": "AFS/X/1"}])
+        self.assertEqual(client(oms).find("RO-1000001"), {"order_code": "AFS/X/1/1", "order_id": "o-2"})
+
     def test_place_returns_the_order(self):
         oms = FakeOMS()
         placed = client(oms).place({"ticket_number": "RO-1000001"}, "RO-1000001:1")
@@ -182,6 +203,12 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(request["%s_address" % side], "A1102, Park View")
             self.assertEqual(request["%s_address2" % side], "Sector 49, Gurugram, Haryana")
         self.assertEqual(request["remark"], "Warranty replacement placed by the EMotorad support chatbot.")
+
+    def test_the_remark_names_our_ticket_when_there_is_one(self):
+        base = {"_id": "RO-1000001", "customer": {}}
+        self.assertEqual(oms_afs.afs_request(base, "p", "s")["remark"], oms_afs.REMARK)
+        with_ticket = dict(base, ticket_reference="EM-1234567")
+        self.assertEqual(oms_afs.afs_request(with_ticket, "p", "s")["remark"], oms_afs.REMARK + " Ticket EM-1234567.")
 
 
 if __name__ == "__main__":

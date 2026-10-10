@@ -97,7 +97,7 @@ An order that the look finds was split by OMS (a child `<code>/n` when stock is 
 | `EMOTORAD_OMS_ADMIN_EMAIL`, `EMOTORAD_OMS_ADMIN_PASSWORD` | The admin user |
 | `EMOTORAD_OMS_ADMIN_TOKEN` | The admin's token (optional) |
 
-**The token.** The stored token is used first. If OMS refuses it (the connection answers `url: unauthorized`, the response's status is 403, OMS's `AUTH_CODE`, or the socket closes at once), the client logs in with the email and password (`POST user/login`, `device_type: "web"`, `device_id: "emotorad-ai-chatbot"`), keeps the new token in memory, and tries once more. OMS's own code ends a non-dealer token at the next midnight India time (`user/auth.py`), so this re-login is expected; a login does not end other sessions of the same user. A failed login is logged as `oms_login_failed` with the HTTP status only.
+**The token.** The stored token is used first. If OMS refuses it (the connection answers `url: unauthorized`, or the response's status is 403, OMS's `AUTH_CODE`), the client logs in with the email and password (`POST user/login`, `device_type: "web"`, `device_id: "emotorad-ai-chatbot"`), keeps the new token in memory, and tries once more. OMS's own code ends a non-dealer token at the next midnight India time (`user/auth.py`), so this re-login is expected. A socket that closes before answering is a call error, never a refusal: OMS can still process a frame on a closing socket, so the client neither logs in again nor resends. A login does not end other sessions of the same user. A failed login is logged as `oms_login_failed` with the HTTP status only.
 
 **One call, one socket.** Each call opens `<ws_url><token>/`, sends one frame and waits up to 20 seconds for the answer, then closes:
 
